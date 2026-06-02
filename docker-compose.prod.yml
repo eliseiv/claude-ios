@@ -1,0 +1,154 @@
+# Production stack — shared server behind an EXTERNAL Traefik edge-proxy
+# (docs/07-deployment.md §Топология MVP, ADR-017). Standalone prod file: it does NOT
+# extend / override the base docker-compose.yml or docker-compose.e2e.yml (those are
+# local/e2e artifacts and stay intact).
+#
+# Topology (ADR-017): the shared server's Traefik in /opt/edge owns ports 80/443, terminates
+# TLS, issues Let's Encrypt certs and routes by Host. Our stack DOES NOT contain a reverse
+# proxy and DOES NOT publish 80/443. `api` is reached ONLY through Traefik over the EXTERNAL
+# docker network `web` (created once on the server: `docker network create web`). postgres /
+# redis live ONLY on the internal `default` network with NO published ports.
+#
+# Image is BUILT ON THE SERVER from sources in /opt/claude-ios (`docker compose up -d --build`),
+# NOT pulled from a registry (ADR-017 — no immutable registry tag; rollback = git checkout
+# <prev-commit> + rebuild, see infra/deploy/README.md).
+#
+# Bring-up (on the server, in /opt/claude-ios, after `git pull`):
+#   docker compose -f docker-compose.prod.yml --env-file .env run --rm migrate
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+#
+# Secrets come from `.env` on the server (provisioned from the secret manager), loaded via
+# env_file — never baked into the image (docs/05-security.md). `.env` is gitignored;
+# `.env.prod.example` is the placeholder template (copy to `.env` on the server).
+
+services:
+  postgres:
+    image: postgres:16.4-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No host port published and NOT on `web`: postgres is reachable only on the internal
+    # `default` network by service name (ADR-017 req. 4).
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    # Container default max_connections=100; keep (DB_POOL_SIZE+DB_MAX_OVERFLOW)*workers below
+    # it (docs/07-deployment.md §Sizing). Raise here only after recomputing.
+    # command: ["postgres", "-c", "max_connections=100"]
+
+  redis:
+    image: redis:7.4-bookworm
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    volumes:
+      - redisdata:/data
+    # No host port published and NOT on `web`: redis is reachable only on the internal
+    # `default` network by service name (ADR-017 req. 4).
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # One-shot migration job: `alembic upgrade head` (chain 0001->0002->0003->0004).
+  # Runs to completion BEFORE api starts (service_completed_successfully below) and is also
+  # invoked explicitly in the deploy workflow (`docker compose run --rm migrate`).
+  # Expand/contract migrations are backward-compatible, so the old api keeps serving
+  # while this runs during a rolling redeploy (docs/07-deployment.md §Миграции).
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: claude-ios-backend:prod
+    restart: "no"
+    env_file:
+      - .env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # migrate only needs DB access -> internal network only.
+    networks:
+      - default
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: claude-ios-backend:prod
+    restart: unless-stopped
+    env_file:
+      - .env
+    # api binds inside the container to 0.0.0.0:8000 (Dockerfile CMD / Gunicorn).
+    # NO `ports:` mapping — we MUST NOT publish 80/443 or any host port (ADR-017 req. 1:
+    # conflict with Traefik). Only `expose` the internal 8000 so Traefik can reach it over
+    # the `web` network. Direct internet access to api is closed (no published ports).
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      # `web` — external, shared with Traefik (inbound proxying to api:8000).
+      # `default` — internal, for api <-> postgres/redis.
+      - web
+      - default
+    # App-level readiness (docs/07-deployment.md: GET /ready checks DB + Redis). This is the
+    # in-container probe; Traefik's own health check (if configured by the server owner) hits
+    # /healthz over the `web` network.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    # --- Traefik routing via docker-labels (ADR-017 req. 3; the external Traefik discovers
+    #     this service by these labels). NO TLS/ACME/nginx/Caddy is configured by us — TLS is
+    #     entirely Traefik's responsibility (ADR-017 req. 4).
+    labels:
+      - "traefik.enable=true"
+      # The network Traefik uses to reach this container (must be the shared `web` network).
+      - "traefik.docker.network=web"
+      # Host router. SERVICE_DOMAIN comes from .env (Q-017-1 resolved -> broadnova.shop; A-record
+      # broadnova.shop -> 87.239.135.154 must exist before launch for Traefik's ACME challenge).
+      # Backticks are required by Traefik's rule syntax.
+      - "traefik.http.routers.claude-ios.rule=Host(`${SERVICE_DOMAIN:?set SERVICE_DOMAIN in .env}`)"
+      # TLS via the websecure entrypoint (443), terminated by the external Traefik.
+      - "traefik.http.routers.claude-ios.entrypoints=websecure"
+      - "traefik.http.routers.claude-ios.tls=true"
+      # ACME cert resolver name: the resolver configured in the shared Traefik (/opt/edge) by the
+      # server owner. Q-017-2 resolved -> `le` (it is the default resolver on the websecure
+      # entrypoint, so this label is technically optional, but we set it EXPLICITLY for
+      # robustness/clarity). Parameterised via TRAEFIK_CERTRESOLVER in .env (value `le`).
+      # See .env.prod.example and infra/deploy/README.md.
+      - "traefik.http.routers.claude-ios.tls.certresolver=${TRAEFIK_CERTRESOLVER:?set TRAEFIK_CERTRESOLVER in .env (ACME resolver name from /opt/edge, resolved: le)}"
+      # Traefik proxies inbound traffic to the container's internal port 8000 over `web`.
+      - "traefik.http.services.claude-ios.loadbalancer.server.port=8000"
+
+networks:
+  # External network shared with the Traefik edge-proxy. Created once on the server:
+  #   docker network create web   (ADR-017 — already created on 87.239.135.154).
+  web:
+    external: true
+  # Internal stack network for api <-> postgres/redis (created/managed by this compose file).
+  default:
+
+volumes:
+  pgdata:
+  redisdata:

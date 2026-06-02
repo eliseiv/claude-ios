@@ -1,0 +1,93 @@
+# Документация проекta — Backend для iOS-приложения (Claude orchestration)
+
+Единственный источник истины. Любое расхождение `docs/` ↔ код — дефект.
+
+## Карта документации
+
+### Корневые документы
+| Документ | Назначение |
+|---|---|
+| [00-vision.md](00-vision.md) | Цели, бизнес-правила, NFR |
+| [01-architecture.md](01-architecture.md) | Компоненты, 17 модулей (13 реализовано: 9 базовых + Chats/Profile/Preferences + Token Purchase MVP; 4 спроектировано Figma-gap), диаграмма, потоки |
+| [02-tech-stack.md](02-tech-stack.md) | Стек, версии, команды lint/format/typecheck/test |
+| [03-data-model.md](03-data-model.md) | 17 таблиц, DDL, индексы |
+| [05-security.md](05-security.md) | Auth, секреты, BYOK encryption, rate limits |
+| [06-testing-strategy.md](06-testing-strategy.md) | Пирамида тестов, coverage gate |
+| [07-deployment.md](07-deployment.md) | Деплой, конфигурация, env |
+| [08-api-documentation.md](08-api-documentation.md) | Стандарт OpenAPI/Swagger: русский язык, JWT scheme, теги, blocked-ответы, примеры, `DOCS_ENABLED` |
+| [API-REFERENCE.md](API-REFERENCE.md) | Сводный API-справочник для PM/интеграторов iOS: все эндпоинты, заголовки, коды, blockReason, tool-протокол, лимиты |
+| [09-e2e-testing.md](09-e2e-testing.md) | ТЗ e2e в контейнерах: STOREKIT_TEST_MODE, реальный Anthropic, TD-008 fix, полный перечень сценариев |
+| [figma-gap-analysis.md](figma-gap-analysis.md) | **Gap-анализ дизайн↔backend (Figma)**: покрыто/частично/пробел, новые модули/ADR, приоритизация по спринтам |
+| [99-open-questions.md](99-open-questions.md) | Открытые вопросы Q-NNN-N |
+| [100-known-tech-debt.md](100-known-tech-debt.md) | Реестр tech-debt TD-NNN |
+
+### ADR
+| Документ | Назначение |
+|---|---|
+| [adr/INDEX.md](adr/INDEX.md) | Реестр всех ADR |
+| [adr/ADR-001-stack-choice.md](adr/ADR-001-stack-choice.md) | Выбор стека |
+| [adr/ADR-002-access-policy-state-machine.md](adr/ADR-002-access-policy-state-machine.md) | Политика доступа (state machine) |
+| [adr/ADR-003-byok-envelope-encryption.md](adr/ADR-003-byok-envelope-encryption.md) | BYOK envelope encryption / KMS |
+| [adr/ADR-004-blocked-http-200.md](adr/ADR-004-blocked-http-200.md) | HTTP 200 для бизнес-blocked, blockReason enum |
+| [adr/ADR-005-idempotency-ledger.md](adr/ADR-005-idempotency-ledger.md) | Идемпотентность и атомарность ledger |
+| [adr/ADR-006-credit-billing-and-subscription-grant.md](adr/ADR-006-credit-billing-and-subscription-grant.md) | Биллинг: 1 кредит = 1 сообщение; фикс. пакет кредитов на период |
+| [adr/ADR-007-lazy-user-provisioning.md](adr/ADR-007-lazy-user-provisioning.md) | Ленивый провижининг users из JWT sub (upsert в gateway) |
+| [adr/ADR-008-provider-tool-use-id.md](adr/ADR-008-provider-tool-use-id.md) | Раздельное хранение provider `tool_use.id` (`toolu_...`) для continuation |
+| [adr/ADR-009-admin-token-auth.md](adr/ADR-009-admin-token-auth.md) | Admin-авторизация: изолированный `X-Admin-Token` (статический secret), ротация |
+| [adr/ADR-010-backend-hosted-preview.md](adr/ADR-010-backend-hosted-preview.md) | Backend-hosted preview: signed URL (HMAC+TTL) + threat model |
+| [adr/ADR-011-server-side-tools.md](adr/ADR-011-server-side-tools.md) | Server-side tools `site.*`: backend исполняет в tool-loop |
+| [adr/ADR-012-assistant-mode-vs-billing-mode.md](adr/ADR-012-assistant-mode-vs-billing-mode.md) | `assistant_mode` (chat/code) vs `billing_mode` (credits/byok) |
+| [adr/ADR-013-workspace-projects-vs-website-builder.md](adr/ADR-013-workspace-projects-vs-website-builder.md) | Workspace-проекты — отдельный модуль, не website-builder `projects` |
+| [adr/ADR-014-multimodal-attachments.md](adr/ADR-014-multimodal-attachments.md) | Мультимодальные вложения: upload → ссылка в `/chat/run` |
+| [adr/ADR-015-consumable-token-iap.md](adr/ADR-015-consumable-token-iap.md) | Покупка токенов: consumable IAP → grant кредитов |
+| [adr/ADR-016-extended-byok-statuses.md](adr/ADR-016-extended-byok-statuses.md) | Расширенные BYOK-статусы + активная модель |
+
+### Модули
+| Модуль | Каталог | Статус |
+|---|---|---|
+| API Gateway | [modules/api-gateway/](modules/api-gateway/README.md) | Реализован |
+| Chat Orchestrator | [modules/chat-orchestrator/](modules/chat-orchestrator/README.md) | Реализован |
+| Policy Engine | [modules/policy-engine/](modules/policy-engine/README.md) | Реализован |
+| Wallet / Ledger | [modules/wallet-ledger/](modules/wallet-ledger/README.md) | Реализован |
+| Subscription | [modules/subscription/](modules/subscription/README.md) | Реализован |
+| BYOK | [modules/byok/](modules/byok/README.md) | Реализован |
+| Audit | [modules/audit/](modules/audit/README.md) | Реализован |
+| Admin | [modules/admin/](modules/admin/README.md) | Реализован |
+| Website Builder | [modules/website-builder/](modules/website-builder/README.md) | Реализован |
+| Chats | [modules/chats/](modules/chats/README.md) | Реализован (Спринт 1) |
+| Profile | [modules/profile/](modules/profile/README.md) | Реализован (Спринт 1) |
+| Preferences | [modules/preferences/](modules/preferences/README.md) | Реализован (Спринт 1) |
+| Workspaces | [modules/workspaces/](modules/workspaces/README.md) | Спроектирован, ожидает реализации (Спринт 2) |
+| Snippets | [modules/snippets/](modules/snippets/README.md) | Спроектирован, ожидает реализации (Спринт 2) |
+| Attachments | [modules/attachments/](modules/attachments/README.md) | Спроектирован, ожидает реализации (Спринт 3) |
+| Token Purchase | [modules/token-purchase/](modules/token-purchase/README.md) | **Реализован (MVP)** — ⏳ доработка policy-guard «требует активной подписки» ([Q-015-1](99-open-questions.md) Closed = вариант B) |
+| Notifications | [modules/notifications/](modules/notifications/README.md) | Спроектирован частично, ожидает реализации (Спринт 3; push → TD-011) |
+
+> Observability — сквозная функция (cross-cutting), не отдельный модуль с API. Описана в [01-architecture.md](01-architecture.md#наблюдаемость) и [05-security.md](05-security.md).
+
+## Порядок чтения для разработчика
+1. `00-vision.md` → бизнес-правила.
+2. `01-architecture.md` → как устроено.
+3. `02-tech-stack.md` → на чём пишем.
+4. Модуль, над которым работаешь → `modules/<M>/`.
+5. `03-data-model.md`, `05-security.md` → инварианты.
+
+## Статус проекта
+Backend: **13 реализованных модулей** (9 базовых: 7 core + Admin + Website Builder, offline-сьют 455/455; + Спринт 1 Figma-gap: Chats/Profile/Preferences; + **Token Purchase (MVP)** — consumable IAP, без миграции, общий offline-сьют **681/681 зелёный**) + observability. Инфра: Dockerfile, docker-compose + e2e-override, observability-стек. **Deploy-топология (2026-06-02, [ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)): общий сервер за внешним Traefik + GitHub Actions SSH** (`git pull && docker compose up -d --build` в `/opt/<service>`); prod-артефакты: `docker-compose.prod.yml` (Traefik-labels, сеть `web` external, `expose: 8000` без портов 80/443), `.env.prod.example`, GitHub Actions deploy workflow — см. [07-deployment.md](07-deployment.md#prod-артефакты-источник-истины--реальные-файлы-в-репозитории). Прежние Caddy/`deploy-vps.sh` — legacy (TLS/reverse-proxy = внешний Traefik). _Devops-доработка (compose под Traefik, workflow, `.env`) ожидается._ Миграции — цепочка `0001`→`0002`→`0003`→`0004` (expand-only), применяются на pre-deploy: `0003` — `projects`/`site_files` website-builder; `0004` — Figma-gap Спринт 1 (`chat_sessions.title`/`assistant_mode`/`is_pinned`, `users.display_name`, таблица `user_preferences`, расширение enum `byok_key_status`).
+
+**Расширение (2026-06-01, реализовано):** добавлены и реализованы два модуля — **Admin** (начисление кредитов под изолированным `X-Admin-Token`, [ADR-009](adr/ADR-009-admin-token-auth.md): `POST /v1/admin/wallet/grant`, `GET /v1/admin/wallet/{userId}`) и **Website Builder** (хранение сгенерированных сайтов `projects`/`site_files` — миграция `0003`, server-side tools `site.*` [ADR-011](adr/ADR-011-server-side-tools.md), backend-hosted preview по signed URL `GET /v1/preview/{projectId}/{token}/{path}` [ADR-010](adr/ADR-010-backend-hosted-preview.md)). Контракты, data model, threat model и фазы зафиксированы; **код реализован, отревьюен и протестирован** (offline-сьют 455/455 зелёный, включая e2e admin-grant/get-wallet и preview write→signed-URL→serve). Деплой/публикация сайтов в интернет — отложен (вне scope этого прохода). Хранение контента сайтов в БД (BYTEA) на старте → миграция в object-storage зафиксирована как [TD-009](100-known-tech-debt.md). Сводный API-справочник для PM/интеграторов — [API-REFERENCE.md](API-REFERENCE.md).
+**Live-подтверждение website-builder:** offline e2e (admin/preview) зелёные; прогон live website-builder с реальным Claude (server-side `site.*` tool-loop end-to-end) ожидает эмпирического подтверждения после пополнения баланса Anthropic-аккаунта — это **внешнее ограничение оплаты, не дефект кода**; контракты и offline-проверки полностью покрывают поведение.
+**E2E (2026-05-25): пройден полностью** — весь [09-e2e-testing.md §4](09-e2e-testing.md#4-e2e-сценарии-acceptance-для-прогона) зелёный против живого сервиса (Claude — реальный Anthropic, StoreKit — HS256 test-mode), DoD §5 закрыт, `production_ready=true`, расхождений docs↔поведение нет.
+Открытые вопросы, не блокирующие prod-старт, см. `99-open-questions.md`.
+
+**MVP-scope и deployment-решения (2026-06-02, решения пользователя):**
+- **MVP-scope зафиксирован** ([figma-gap-analysis.md §MVP-scope](figma-gap-analysis.md#mvp-scope-решение-пользователя-2026-06-02)): MVP = базовый backend + Admin + Website Builder + Спринт 1 (chats/profile/preferences/расширение BYOK) + **Token Purchase** (consumable IAP, [ADR-015](adr/ADR-015-consumable-token-iap.md), перенесён в MVP). Post-MVP: Спринты 2/3 (workspaces, snippets, attachments, notifications), Actions/styles ([Q-016-1](99-open-questions.md)), web search ([Q-016-2](99-open-questions.md)).
+- **Deploy-target: общий сервер за внешним Traefik + GitHub Actions SSH** ([ADR-017](adr/ADR-017-shared-server-traefik-deploy.md), ревизует [TD-005](100-known-tech-debt.md)): сервис в `/opt/<service>` на общем сервере `87.239.135.154`; reverse-proxy/TLS/ACME — внешний Traefik (`/opt/edge`), не наш стек; `api` в сети `web` (external) + `default`, `expose: 8000` без портов 80/443, Traefik-labels; деплой — `git pull && docker compose up -d --build` по SSH. Топология, процедура и **prod-readiness checklist** — [07-deployment.md](07-deployment.md).
+- **MVP-режимы:** KMS = `LocalKmsClient` (master key из env, облачный KMS — post-MVP [Q-002-1](99-open-questions.md)); StoreKit = test-mode (prod-верификация — must-before-launch [Q-007-1](99-open-questions.md)); JWT — любой валидный RS256-источник (реальный issuer — must-before-launch [Q-005-1](99-open-questions.md)).
+
+**Расширение Figma-gap — Спринт 1 (2026-06-02, РЕАЛИЗОВАН):** по результатам gap-анализа дизайна iOS-приложения (15 экранов) спроектированы **8 новых модулей** (10–17) и **5 ADR** ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)..[ADR-016](adr/ADR-016-extended-byok-statuses.md)). **Спринт 1 реализован и протестирован** (offline-сьют **681/681 зелёный**, production-ready): модули **Chats** (`GET /v1/chats` список/поиск `q`/курсорная пагинация, `GET /v1/chats/{id}` история, `GET /v1/chats/{id}/steps` steps-view, `PATCH /v1/chats/{id}` rename/pin, `DELETE /v1/chats/{id}`), **Profile** (`GET`/`PATCH /v1/profile` — `displayName` + производный `accountId`), **Preferences** (`GET`/`PATCH /v1/preferences` — `defaultAssistantMode` chat\|code, `notificationsEnabled`, `codeDefaults`), расширение **BYOK** (`keyStatus` 6 значений + `activeModel`, [ADR-016](adr/ADR-016-extended-byok-statuses.md)) и поле **`assistantMode`** (chat\|code) в `/chat/run` (fallback preferences→`chat`, фиксируется на сессию, [ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Миграция **`0004`** (`chat_sessions.title`/`assistant_mode`/`is_pinned` + индекс `ix_sessions_user_pinned_updated`; `users.display_name`; таблица `user_preferences`; расширение enum `byok_key_status`; новый enum `assistant_mode`), цепочка **`0001`→`0002`→`0003`→`0004`** (expand-only). `chat_sessions.workspace_project_id` — Спринт 2 (в ответе списка `workspaceProjectId` пока `null`). Сводка соответствия — [figma-gap-analysis.md](figma-gap-analysis.md), DDL — [03-data-model.md](03-data-model.md). Терминология разведена: `assistant_mode`≠`billing_mode` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)), workspace-проекты≠website-builder `projects` ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). Инварианты биллинга/policy/tool-loop сохранены.
+
+**Token Purchase — РЕАЛИЗОВАН (MVP, 2026-06-02):** consumable IAP → grant кредитов ([ADR-015](adr/ADR-015-consumable-token-iap.md)), перенесён из Спринта 3 в MVP. Эндпоинты `POST /v1/tokens/purchase` (StoreKit consumable transaction + `productId` → `creditsAdded`/`newBalance`/`transactionId`) и `GET /v1/tokens/products` (каталог). Идемпотентность по `transactionId`, маппинг `productId→credits` server-side через `TOKEN_PRODUCTS`, reuse общего StoreKit-verifier'а (включая `STOREKIT_TEST_MODE`) и `WalletService.grant`. **Без миграции** — переиспользует `ledger_transactions` (`type=credit`, `meta.source=token_purchase`). ✅ **[Q-015-1](99-open-questions.md) Closed (2026-06-02, вариант B):** покупка токенов **требует активной подписки** (докупка сверх месячного пакета) — без активной подписки → `403 subscription_required` (policy-guard до grant); [ADR-002](adr/ADR-002-access-policy-state-machine.md) без изменений. ⏳ Backend-доработка: добавить guard перед `WalletService.grant` ([Phase 4](modules/token-purchase/07-implementation-phases.md)).
+
+**Спринты 2/3 — спроектированы, ожидают реализации:** модули Workspaces/Snippets (Спринт 2), Attachments/Notifications (Спринт 3) — статус «Спроектирован, код не написан». Открытые вопросы для пользователя: ~~Q-015-1~~ **Closed (вариант B — покупка токенов требует активной подписки)**; **Q-016-1** (Actions/styles — дефолт клиентские пресеты), **Q-016-2** (web search — блокер фичи до выбора провайдера) — ждут ответа пользователя.
+Известный tech-debt — `100-known-tech-debt.md` (**TD-005 закрыт/ревизован** — deploy-target = общий сервер + внешний Traefik + GitHub Actions SSH, [ADR-017](adr/ADR-017-shared-server-traefik-deploy.md); **TD-008 закрыт** e2e-фиксом migrations/env.py; TD-007 — STOREKIT_TEST_MODE остаётся осознанным test-only seam до закрытия Q-007-1, must-before-launch).

@@ -1,0 +1,246 @@
+"""BYOK service: envelope encryption set/toggle/delete + key retrieval (ADR-003, byok/03).
+
+Plaintext key and plaintext DEK are NEVER persisted or logged. get_plaintext_key returns
+the key in-memory only to Chat Orchestrator on the time of an Anthropic call; the caller
+zeroizes after use.
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+from dataclasses import dataclass
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.audit.service import EVENT_BYOK_CHANGE, AuditEvent, AuditService
+from app.byok.kms import KmsClient
+from app.chat.anthropic_client import AnthropicClient, KeyValidation
+from app.config import get_settings
+from app.models import BYOKKey
+
+_DEK_LEN = 32
+_NONCE_LEN = 12
+
+
+@dataclass(frozen=True)
+class BYOKResult:
+    byok_enabled: bool
+    # ADR-016: valid | invalid | missing | validating | offline | expired.
+    key_status: str
+    # ADR-016: active model when key_status == valid, else None.
+    active_model: str | None = None
+
+
+def _active_model_for(key_status: str) -> str | None:
+    """Active model is reported only when the key is valid (ADR-016)."""
+    if key_status == "valid":
+        return get_settings().byok_default_model
+    return None
+
+
+class BYOKService:
+    def __init__(
+        self,
+        session: AsyncSession,
+        kms: KmsClient,
+        anthropic_client: AnthropicClient,
+        audit: AuditService,
+    ) -> None:
+        self._session = session
+        self._kms = kms
+        self._anthropic = anthropic_client
+        self._audit = audit
+
+    async def _load(self, user_id: uuid.UUID) -> BYOKKey | None:
+        row: BYOKKey | None = await self._session.scalar(
+            select(BYOKKey).where(BYOKKey.user_id == user_id)
+        )
+        return row
+
+    async def set_key(self, user_id: uuid.UUID, api_key: str) -> BYOKResult:
+        """Encrypt and store a user key (envelope encryption). Validates the key (ADR-016).
+
+        Status transitions: missing → validating → (valid | invalid | offline). 401 → invalid;
+        network/non-401 → offline; success → valid (+ activeModel). An invalid/offline key is
+        still stored encrypted with its status; byok is never auto-enabled when not valid.
+        """
+        # Validate the key with a lightweight Anthropic call before deciding the terminal status.
+        validation = await self._anthropic.validate_key(api_key)
+        key_status = {
+            KeyValidation.valid: "valid",
+            KeyValidation.invalid: "invalid",
+            KeyValidation.offline: "offline",
+        }[validation]
+
+        dek = os.urandom(_DEK_LEN)
+        nonce = os.urandom(_NONCE_LEN)
+        try:
+            aead = AESGCM(dek)
+            encrypted_key = aead.encrypt(nonce, api_key.encode("utf-8"), None)
+            encrypted_dek = self._kms.encrypt_dek(dek)
+        finally:
+            # Best-effort zeroization of the plaintext DEK reference.
+            dek = b"\x00" * _DEK_LEN
+
+        existing = await self._load(user_id)
+        if existing is None:
+            row = BYOKKey(
+                user_id=user_id,
+                encrypted_key=encrypted_key,
+                encrypted_dek=encrypted_dek,
+                nonce=nonce,
+                key_status=key_status,
+                enabled=False,
+            )
+            self._session.add(row)
+        else:
+            existing.encrypted_key = encrypted_key
+            existing.encrypted_dek = encrypted_dek
+            existing.nonce = nonce
+            existing.key_status = key_status
+            # An invalid (re)set must not leave byok enabled.
+            if key_status != "valid":
+                existing.enabled = False
+        await self._session.flush()
+
+        enabled = existing.enabled if existing is not None else False
+        await self._audit.record(
+            AuditEvent(
+                user_id=user_id,
+                event_type=EVENT_BYOK_CHANGE,
+                payload={"action": "set", "keyStatus": key_status, "byokEnabled": enabled},
+            )
+        )
+        return BYOKResult(
+            byok_enabled=enabled,
+            key_status=key_status,
+            active_model=_active_model_for(key_status),
+        )
+
+    async def toggle(self, user_id: uuid.UUID, enabled: bool) -> BYOKResult:
+        """Enable/disable BYOK. Cannot enable unless key_status == valid (byok/02, ADR-016).
+
+        Extended statuses validating/offline/expired are NOT valid → enabling is rejected.
+        """
+        row = await self._load(user_id)
+        if row is None:
+            return BYOKResult(byok_enabled=False, key_status="missing")
+
+        if enabled and row.key_status != "valid":
+            # Do not enable; return current status without error (documented default).
+            await self._audit.record(
+                AuditEvent(
+                    user_id=user_id,
+                    event_type=EVENT_BYOK_CHANGE,
+                    payload={
+                        "action": "toggle_rejected",
+                        "requested": enabled,
+                        "keyStatus": row.key_status,
+                    },
+                )
+            )
+            return BYOKResult(
+                byok_enabled=False,
+                key_status=row.key_status,
+                active_model=_active_model_for(row.key_status),
+            )
+
+        row.enabled = enabled
+        await self._session.flush()
+        await self._audit.record(
+            AuditEvent(
+                user_id=user_id,
+                event_type=EVENT_BYOK_CHANGE,
+                payload={"action": "toggle", "byokEnabled": enabled, "keyStatus": row.key_status},
+            )
+        )
+        return BYOKResult(
+            byok_enabled=enabled,
+            key_status=row.key_status,
+            active_model=_active_model_for(row.key_status),
+        )
+
+    async def delete_key(self, user_id: uuid.UUID) -> BYOKResult:
+        """Physically delete the encrypted materials → keyStatus=missing."""
+        await self._session.execute(delete(BYOKKey).where(BYOKKey.user_id == user_id))
+        await self._session.flush()
+        await self._audit.record(
+            AuditEvent(
+                user_id=user_id,
+                event_type=EVENT_BYOK_CHANGE,
+                payload={"action": "delete", "byokEnabled": False, "keyStatus": "missing"},
+            )
+        )
+        return BYOKResult(byok_enabled=False, key_status="missing", active_model=None)
+
+    async def get_status(self, user_id: uuid.UUID) -> BYOKResult:
+        row = await self._load(user_id)
+        if row is None:
+            return BYOKResult(byok_enabled=False, key_status="missing")
+        return BYOKResult(
+            byok_enabled=row.enabled,
+            key_status=row.key_status,
+            active_model=_active_model_for(row.key_status),
+        )
+
+    async def get_plaintext_key(self, user_id: uuid.UUID) -> str | None:
+        """Decrypt the user's key in-memory for Chat Orchestrator. Never logged.
+
+        Returns None if no key stored. Caller must not persist the returned value.
+        """
+        row = await self._load(user_id)
+        if row is None:
+            return None
+        dek = self._kms.decrypt_dek(bytes(row.encrypted_dek))
+        try:
+            aead = AESGCM(dek)
+            plaintext = aead.decrypt(bytes(row.nonce), bytes(row.encrypted_key), None)
+        finally:
+            dek = b"\x00" * _DEK_LEN
+        return plaintext.decode("utf-8")
+
+    async def mark_invalid(self, user_id: uuid.UUID) -> None:
+        """Mark a key invalid at runtime (Anthropic 401) → next policy yields byok_invalid.
+
+        Retained for callers that explicitly want the ``invalid`` terminal state. Per ADR-016,
+        the /chat/run runtime 401 path now uses :meth:`mark_expired` (a previously-valid key that
+        stopped working is ``expired``, not freshly ``invalid``). Both are non-valid → policy
+        yields ``byok_invalid`` either way (ADR-016 §Consequences).
+        """
+        row = await self._load(user_id)
+        if row is None:
+            return
+        row.key_status = "invalid"
+        row.enabled = False
+        await self._session.flush()
+        await self._audit.record(
+            AuditEvent(
+                user_id=user_id,
+                event_type=EVENT_BYOK_CHANGE,
+                payload={"action": "runtime_invalidate", "keyStatus": "invalid"},
+            )
+        )
+
+    async def mark_expired(self, user_id: uuid.UUID) -> None:
+        """Mark a previously-valid key expired at runtime (Anthropic 401 on use, ADR-016).
+
+        The key was ``valid`` but Anthropic now rejects it (revoked/expired). Sets status to
+        ``expired`` and disables byok; the next policy-evaluate yields ``byok_invalid`` (expired
+        is non-valid). A network error on use does NOT call this (transient — status unchanged).
+        """
+        row = await self._load(user_id)
+        if row is None:
+            return
+        row.key_status = "expired"
+        row.enabled = False
+        await self._session.flush()
+        await self._audit.record(
+            AuditEvent(
+                user_id=user_id,
+                event_type=EVENT_BYOK_CHANGE,
+                payload={"action": "runtime_expire", "keyStatus": "expired"},
+            )
+        )

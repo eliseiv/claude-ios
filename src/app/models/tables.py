@@ -1,0 +1,336 @@
+"""ORM table definitions mirroring 03-data-model.md (9 tables, enums, indexes)."""
+
+from __future__ import annotations
+
+import datetime
+import uuid
+from typing import Any
+
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy import (
+    text as sa_text,
+)
+from sqlalchemy.dialects.postgresql import BIGINT, JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base
+
+# --- Enum value tuples (match CREATE TYPE in 03-data-model.md) ---
+SUBSCRIPTION_STATUS = ("active", "expired", "none")
+LEDGER_TX_TYPE = ("credit", "debit")
+# ADR-016: extended BYOK statuses (validating/offline/expired) added in migration 0004.
+BYOK_KEY_STATUS = ("valid", "invalid", "missing", "validating", "offline", "expired")
+CHAT_MODE = ("credits", "byok")
+CHAT_ROLE = ("user", "assistant", "tool")
+TOOL_CALL_STATUS = ("pending", "completed", "errored")
+# ADR-012: assistant type (chat|code) — orthogonal to chat_mode (billing).
+ASSISTANT_MODE = ("chat", "code")
+
+_subscription_status_enum = Enum(
+    *SUBSCRIPTION_STATUS, name="subscription_status", create_type=False
+)
+_ledger_tx_type_enum = Enum(*LEDGER_TX_TYPE, name="ledger_tx_type", create_type=False)
+_byok_key_status_enum = Enum(*BYOK_KEY_STATUS, name="byok_key_status", create_type=False)
+_chat_mode_enum = Enum(*CHAT_MODE, name="chat_mode", create_type=False)
+_chat_role_enum = Enum(*CHAT_ROLE, name="chat_role", create_type=False)
+_tool_call_status_enum = Enum(*TOOL_CALL_STATUS, name="tool_call_status", create_type=False)
+_assistant_mode_enum = Enum(*ASSISTANT_MODE, name="assistant_mode", create_type=False)
+
+_uuid_default = sa_text("gen_random_uuid()")
+_now = sa_text("now()")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    trial_used: Mapped[bool] = mapped_column(nullable=False, server_default=sa_text("false"))
+    # ADR Figma-gap (migration 0004): human-readable profile name (Profile screen), nullable.
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(
+        _subscription_status_enum, nullable=False, server_default=sa_text("'none'")
+    )
+    plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (Index("ix_subscriptions_expires_at", "expires_at"),)
+
+
+class Wallet(Base):
+    __tablename__ = "wallets"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    balance: Mapped[int] = mapped_column(BIGINT, nullable=False, server_default=sa_text("0"))
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (CheckConstraint("balance >= 0", name="ck_wallets_balance_nonneg"),)
+
+
+class LedgerTransaction(Base):
+    __tablename__ = "ledger_transactions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(_ledger_tx_type_enum, nullable=False)
+    amount: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=sa_text("'{}'::jsonb")
+    )
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint("amount > 0", name="ck_ledger_amount_positive"),
+        UniqueConstraint("user_id", "idempotency_key", name="ux_ledger_idempotency"),
+        Index("ix_ledger_user_created", "user_id", "created_at", postgresql_using="btree"),
+    )
+
+
+class BYOKKey(Base):
+    __tablename__ = "byok_keys"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    encrypted_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    encrypted_dek: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_status: Mapped[str] = mapped_column(
+        _byok_key_status_enum, nullable=False, server_default=sa_text("'missing'")
+    )
+    enabled: Mapped[bool] = mapped_column(nullable=False, server_default=sa_text("false"))
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(_chat_mode_enum, nullable=False)  # billing_mode (ADR-012)
+    # --- Figma-gap extension (migration 0004), chats/preferences modules ---
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ADR-012: assistant type fixed at session creation (chat|code), distinct from `mode`.
+    assistant_mode: Mapped[str] = mapped_column(
+        _assistant_mode_enum, nullable=False, server_default=sa_text("'chat'")
+    )
+    is_pinned: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("false")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        Index("ix_sessions_user_updated", "user_id", "updated_at"),
+        # chats list: pinned first, then recency (BR-CH-3).
+        Index(
+            "ix_sessions_user_pinned_updated",
+            "user_id",
+            sa_text("is_pinned DESC"),
+            sa_text("updated_at DESC"),
+        ),
+    )
+
+
+class ChatStep(Base):
+    __tablename__ = "chat_steps"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    message_step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    role: Mapped[str] = mapped_column(_chat_role_enum, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        Index("ix_steps_session_created", "session_id", "created_at"),
+        Index("ix_steps_message_step", "message_step_id"),
+    )
+
+
+class ToolCall(Base):
+    __tablename__ = "tool_calls"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    message_step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # ADR-008: raw Anthropic tool_use.id ("toolu_..."), opaque (NOT a UUID). Internal-only;
+    # used as tool_result.tool_use_id on continuation so the id pair in Anthropic history
+    # matches. The public toolCallId stays the domain UUID (id above).
+    provider_tool_use_id: Mapped[str] = mapped_column(Text, nullable=False)
+    args: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(
+        _tool_call_status_enum, nullable=False, server_default=sa_text("'pending'")
+    )
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (Index("ix_tool_calls_session", "session_id", "created_at"),)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        Index("ix_audit_user_created", "user_id", "created_at"),
+        Index("ix_audit_event_type", "event_type", "created_at"),
+    )
+
+
+class Project(Base):
+    """Website-builder project: one backend project per (user, external_project_id)."""
+
+    __tablename__ = "projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # client-side projectId from the chat session (chat_sessions.project_id).
+    external_project_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "external_project_id", name="ux_projects_user_external"),
+        Index("ix_projects_user", "user_id", "updated_at"),
+    )
+
+
+class SiteFile(Base):
+    """A stored file of a website-builder project (BYTEA content; TD-009)."""
+
+    __tablename__ = "site_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    # normalized relative path (no ".."/absolute/NUL).
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    size: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint("size >= 0", name="ck_site_files_size_nonneg"),
+        UniqueConstraint("project_id", "path", name="ux_site_files_project_path"),
+        Index("ix_site_files_project", "project_id"),
+    )
+
+
+class UserPreferences(Base):
+    """Per-user preferences (ADR-012, preferences module). One row per user (lazy upsert)."""
+
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    # ADR-012: default assistant type (chat|code) — orthogonal to billing_mode.
+    default_assistant_mode: Mapped[str] = mapped_column(
+        _assistant_mode_enum, nullable=False, server_default=sa_text("'chat'")
+    )
+    notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("true")
+    )
+    # Code-context defaults (language etc.); no secrets (validated + redacted).
+    code_defaults: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=sa_text("'{}'::jsonb")
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )

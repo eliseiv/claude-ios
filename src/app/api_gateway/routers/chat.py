@@ -1,0 +1,230 @@
+"""Chat routes: /v1/chat/run, /v1/chat/tool-result (chat-orchestrator/02)."""
+
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Body, Depends, Header, Request
+
+from app.api_gateway.openapi_security import bearer_scheme
+from app.api_gateway.rate_limit import enforce_chat_limits
+from app.chat.orchestrator import ChatOrchestrator, ChatRunOut
+from app.deps import (
+    CurrentUser,
+    client_ip,
+    get_orchestrator,
+    require_owner,
+)
+from app.errors import RateLimitedError
+from app.observability.context import set_session_id
+from app.schemas.chat import (
+    ChatResponse,
+    ChatRunRequest,
+    ChatToolResultRequest,
+    ToolCallSchema,
+)
+
+router = APIRouter(prefix="/v1/chat", tags=["Chat"], dependencies=[Depends(bearer_scheme)])
+
+# --- Согласованные id для end-to-end tool-loop примеров (run -> tool_call -> tool-result) ---
+_SESSION_ID = "3f1c2a7e-9b54-4d2e-8a11-6c0d5e7f1a23"
+_TOOL_CALL_ID = "a7b9c1d2-3e4f-5061-7283-94a5b6c7d8e9"
+
+_RUN_RESPONSE_EXAMPLES = {
+    "assistant_message": {
+        "summary": "Ответ ассистента (финал)",
+        "description": "Модель ответила текстом, генерация списана. Без toolCall/blockReason.",
+        "value": {
+            "status": "assistant_message",
+            "sessionId": _SESSION_ID,
+            "assistantMessage": "Конечно! Вот краткое содержание вашего файла…",
+            "usage": {"inputTokens": 1240, "outputTokens": 320},
+        },
+    },
+    "tool_call": {
+        "summary": "Запрос на вызов инструмента",
+        "description": (
+            "Ассистент просит клиента выполнить инструмент на устройстве (здесь — `files.read`). "
+            "Клиент исполняет его и возвращает результат через `POST /v1/chat/tool-result`, "
+            "передав тот же id в `toolCallId`."
+        ),
+        "value": {
+            "status": "tool_call",
+            "sessionId": _SESSION_ID,
+            "toolCall": {
+                "id": _TOOL_CALL_ID,
+                "name": "files.read",
+                "args": {"path": "/Documents/notes.md"},
+            },
+            "usage": {"inputTokens": 980, "outputTokens": 64},
+        },
+    },
+    "blocked": {
+        "summary": "Блокировка по бизнес-правилам (HTTP 200)",
+        "description": (
+            "Баланс кредитов исчерпан. Это успешный ответ 200, а не ошибка. UI показывает "
+            "баланс и предлагает пополнение/подписку."
+        ),
+        "value": {
+            "status": "blocked",
+            "sessionId": _SESSION_ID,
+            "blockReason": "credits_empty",
+        },
+    },
+}
+
+_RUN_REQUEST_EXAMPLES = {
+    "credits_mode": {
+        "summary": "Запуск шага диалога (режим credits)",
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "projectId": "my-ios-project",
+            "sessionId": _SESSION_ID,
+            "message": "Прочитай файл notes.md и сделай краткое содержание.",
+            "mode": "credits",
+            "context": {"locale": "ru-RU"},
+        },
+    },
+}
+
+_TOOL_RESULT_RESPONSE_EXAMPLES = {
+    "assistant_message": {
+        "summary": "Финал tool-loop",
+        "description": "После получения результата инструмента модель выдала итоговый ответ.",
+        "value": {
+            "status": "assistant_message",
+            "sessionId": _SESSION_ID,
+            "assistantMessage": "В файле notes.md перечислены задачи на неделю…",
+            "usage": {"inputTokens": 1500, "outputTokens": 210},
+        },
+    },
+}
+
+_TOOL_RESULT_REQUEST_EXAMPLES = {
+    "result": {
+        "summary": "Продолжение tool-loop: успешный результат",
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "sessionId": _SESSION_ID,
+            "toolCallId": _TOOL_CALL_ID,
+            "result": {"content": "# Заметки\n- задача 1\n- задача 2"},
+        },
+    },
+    "error": {
+        "summary": "Продолжение tool-loop: ошибка инструмента",
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "sessionId": _SESSION_ID,
+            "toolCallId": _TOOL_CALL_ID,
+            "error": {"code": "not_found", "message": "Файл не найден на устройстве"},
+        },
+    },
+}
+
+_CHAT_RESPONSES: dict[int | str, dict[str, Any]] = {
+    422: {"description": "Невалидная схема запроса."},
+    429: {"description": "Жёсткое превышение rate limit (мягкое приходит как blocked, HTTP 200)."},
+}
+
+
+def _to_response(out: ChatRunOut) -> ChatResponse:
+    set_session_id(str(out.session_id))
+    tool_call = (
+        ToolCallSchema(id=out.tool_call.id, name=out.tool_call.name, args=out.tool_call.args)
+        if out.tool_call is not None
+        else None
+    )
+    return ChatResponse(
+        status=out.status,
+        sessionId=out.session_id,
+        assistantMessage=out.assistant_message,
+        toolCall=tool_call,
+        blockReason=out.block_reason,
+        usage=out.usage,
+    )
+
+
+@router.post(
+    "/run",
+    response_model=ChatResponse,
+    summary="Запустить шаг диалога",
+    description=(
+        "Принимает сообщение пользователя, проверяет права доступа и обращается к модели. "
+        "Возвращает одно из трёх состояний `ChatResponse`: `assistant_message` (готовый ответ), "
+        "`tool_call` (нужно выполнить инструмент на устройстве и прислать результат в "
+        "`/v1/chat/tool-result`) или `blocked`.\n\n"
+        "**Блокировки по бизнес-правилам возвращаются с HTTP 200 и полем `blockReason` "
+        "(машиночитаемо).** Технические ошибки — 4xx/5xx. Заголовок `X-Device-Id` опционален — "
+        "override `device_id` для per-device rate limit; при отсутствии заголовка `device_id` "
+        "берётся из JWT-claim, а если пусто и там — per-device лимит просто не применяется "
+        "(per-user и per-IP остаются)."
+    ),
+    responses={
+        200: {"content": {"application/json": {"examples": _RUN_RESPONSE_EXAMPLES}}},
+        **_CHAT_RESPONSES,
+    },
+)
+async def chat_run(
+    request: Request,
+    current: CurrentUser,
+    orchestrator: Annotated[ChatOrchestrator, Depends(get_orchestrator)],
+    body: Annotated[ChatRunRequest, Body(openapi_examples=_RUN_REQUEST_EXAMPLES)],
+    x_device_id: Annotated[str | None, Header()] = None,
+) -> ChatResponse:
+    require_owner(body.userId, current)
+    device_id = x_device_id or current.device_id
+    if not await enforce_chat_limits(
+        user_id=current.user_id, device_id=device_id, ip=client_ip(request)
+    ):
+        raise RateLimitedError("rate limit exceeded")
+
+    out = await orchestrator.run(
+        user_id=current.user_id,
+        project_id=body.projectId,
+        session_id=body.sessionId,
+        message=body.message,
+        mode=body.mode,
+        assistant_mode=body.assistantMode,
+    )
+    return _to_response(out)
+
+
+@router.post(
+    "/tool-result",
+    response_model=ChatResponse,
+    summary="Передать результат инструмента",
+    description=(
+        "Продолжение tool-loop: клиент исполнил инструмент из предыдущего `tool_call` и "
+        "присылает его результат (поле `result`) либо ошибку исполнения (поле `error`) — ровно "
+        "одно из двух. `toolCallId` должен совпадать с `toolCall.id` из `/v1/chat/run`. Обычно "
+        "возвращает `assistant_message`, но может снова запросить `tool_call`.\n\n"
+        "**Блокировки по бизнес-правилам возвращаются с HTTP 200 и полем `blockReason`.** "
+        "Технические ошибки — 4xx/5xx."
+    ),
+    responses={
+        200: {"content": {"application/json": {"examples": _TOOL_RESULT_RESPONSE_EXAMPLES}}},
+        **_CHAT_RESPONSES,
+    },
+)
+async def chat_tool_result(
+    request: Request,
+    current: CurrentUser,
+    orchestrator: Annotated[ChatOrchestrator, Depends(get_orchestrator)],
+    body: Annotated[ChatToolResultRequest, Body(openapi_examples=_TOOL_RESULT_REQUEST_EXAMPLES)],
+    x_device_id: Annotated[str | None, Header()] = None,
+) -> ChatResponse:
+    require_owner(body.userId, current)
+    device_id = x_device_id or current.device_id
+    if not await enforce_chat_limits(
+        user_id=current.user_id, device_id=device_id, ip=client_ip(request)
+    ):
+        raise RateLimitedError("rate limit exceeded")
+
+    out = await orchestrator.tool_result(
+        user_id=current.user_id,
+        session_id=body.sessionId,
+        tool_call_id=body.toolCallId,
+        result=body.result,
+        error=body.error.model_dump() if body.error is not None else None,
+    )
+    return _to_response(out)
