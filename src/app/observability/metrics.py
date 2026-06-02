@@ -55,6 +55,14 @@ preview_request_total = Counter(
     "Count of preview endpoint requests by result (ok | forbidden | not_found).",
     ["result"],
 )
+# Anthropic upstream errors (TD-014): bounded enum labels only (no user-content).
+# status_code is the numeric HTTP status or "none" for timeout/connection errors;
+# error_type is the Anthropic error.type (or "unknown" when the body has none).
+anthropic_upstream_errors_total = Counter(
+    "anthropic_upstream_errors_total",
+    "Count of Anthropic upstream errors by status_code and error_type.",
+    ["status_code", "error_type"],
+)
 
 
 def render_metrics() -> tuple[bytes, str]:

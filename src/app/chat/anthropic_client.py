@@ -11,6 +11,7 @@ Model and key come from config / per-call override; never hardcoded (02-tech-sta
 from __future__ import annotations
 
 import enum
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -19,6 +20,10 @@ import anthropic
 from app.chat.tools import UnknownToolNameError, to_domain_tool_name
 from app.config import get_settings
 from app.errors import UpstreamError, ValidationFailedError
+from app.observability.logging import get_logger, log_event
+from app.observability.metrics import anthropic_upstream_errors_total
+
+_logger = get_logger("app.chat.anthropic")
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,71 @@ class KeyValidation(str, enum.Enum):
     valid = "valid"
     invalid = "invalid"
     offline = "offline"
+
+
+def _extract_error_body(exc: Exception) -> tuple[str | None, str | None]:
+    """Extract Anthropic error.type / error.message from the SDK exception body (TD-014).
+
+    The Anthropic wire error body is `{"type": "error", "error": {"type": ..., "message": ...}}`.
+    `APIError.body` is the decoded JSON (or raw/None when undecodable). This is the *provider's*
+    error body — never user-content — so it is safe to log (03-architecture.md §Логирование
+    upstream-ошибок Anthropic). Returns (error_type, error_message); either may be None when the
+    body is absent or not in the expected shape (then the field is omitted from the log).
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return None, None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None, None
+    error_type = error.get("type")
+    error_message = error.get("message")
+    return (
+        error_type if isinstance(error_type, str) else None,
+        error_message if isinstance(error_message, str) else None,
+    )
+
+
+def _log_upstream_error(exc: Exception, *, model: str) -> None:
+    """Log the `anthropic_upstream_error` event BEFORE mapping to UpstreamError (TD-014).
+
+    Logs only the provider error body (status_code / error.type / error.message), the anthropic
+    request id, the model and the exception class — never the api-key, BYOK key or user-content
+    (03-architecture.md §Логирование upstream-ошибок Anthropic, 05-security.md §Логирование).
+    Correlation fields (requestId/sessionId) are attached automatically by the log formatter.
+    Levels per the TD-014 matrix: WARNING for 4xx (incl. 429), ERROR for 5xx and for
+    timeout/connection errors (which carry no HTTP status). The same metric is incremented with
+    bounded-enum labels (01-architecture.md §Наблюдаемость).
+    """
+    status_code: int | None = getattr(exc, "status_code", None)
+    error_type, error_message = _extract_error_body(exc)
+    anthropic_request_id: str | None = getattr(exc, "request_id", None)
+
+    if status_code is not None and 400 <= status_code < 500:
+        level = logging.WARNING
+    else:
+        # 5xx, or timeout/connection errors with no HTTP status.
+        level = logging.ERROR
+
+    fields: dict[str, Any] = {
+        "event": "anthropic_upstream_error",
+        "model": model,
+        "exceptionClass": type(exc).__name__,
+    }
+    if status_code is not None:
+        fields["status_code"] = status_code
+    if error_type is not None:
+        fields["errorType"] = error_type
+    if error_message is not None:
+        fields["errorMessage"] = error_message
+    if anthropic_request_id is not None:
+        fields["anthropicRequestId"] = anthropic_request_id
+
+    log_event(_logger, level, "anthropic_upstream_error", **fields)
+    anthropic_upstream_errors_total.labels(
+        status_code=str(status_code) if status_code is not None else "none",
+        error_type=error_type or "unknown",
+    ).inc()
 
 
 class AnthropicClient:
@@ -139,6 +209,8 @@ class AnthropicClient:
             )
         except anthropic.AuthenticationError as exc:
             # BYOK/service key rejected → mapped to byok_invalid (block) or 401 upstream.
+            # TD-014: log the upstream error (401 → WARNING) BEFORE mapping; key is never logged.
+            _log_upstream_error(exc, model=model)
             raise AnthropicAuthError(str(exc)) from exc
         except (
             anthropic.APITimeoutError,
@@ -146,7 +218,9 @@ class AnthropicClient:
             anthropic.APIStatusError,
         ) as exc:
             # Timeout / connection / 5xx (or other status) from Anthropic → 502 upstream_error.
-            # Message is not logged here; the SDK never includes the api_key in str(exc).
+            # TD-014: log the structured upstream-error event BEFORE mapping to UpstreamError;
+            # only the provider error body is logged, never the api_key or user-content.
+            _log_upstream_error(exc, model=model)
             raise UpstreamError("anthropic upstream error") from exc
 
         content_blocks: list[dict[str, Any]] = []

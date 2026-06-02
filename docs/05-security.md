@@ -121,11 +121,13 @@
 - Структурированный JSON, correlation id (`requestId`, `sessionId`).
 - Allowlist полей в логах; redaction middleware вырезает заголовок `Authorization`, любые поля `*key*`, `*token*`, `*secret*`, BYOK/StoreKit payload.
 - Policy decision log и billing decision log не содержат секретов.
+- **Upstream-ошибки Anthropic** ([TD-014](100-known-tech-debt.md), [modules/chat-orchestrator/03-architecture.md §Логирование upstream-ошибок Anthropic](modules/chat-orchestrator/03-architecture.md#логирование-upstream-ошибок-anthropic-td-014) — **канонический контракт ключей лог-записи**): логировать **разрешено** тело ошибки апстрима. Запись — структурированный JSON, событие `anthropic_upstream_error`, с camelCase-ключами лог-записи `status_code`, `errorType`, `errorMessage`, `anthropicRequestId`, `model`, `exceptionClass`. Значения `errorType`/`errorMessage`/`anthropicRequestId` берутся из ТЕЛА ошибки Anthropic — соответственно `error.type`/`error.message` (источник) и `request_id` SDK; это поля провайдера-источника, а не имена ключей лог-записи. Содержимое тела ошибки — сообщение провайдера, не user-content. **Запрещено** логировать `ANTHROPIC_API_KEY`, BYOK-ключ пользователя и содержимое пользовательских сообщений/тело промпта — даже когда ошибка апстрима связана с ключом (логируется сообщение Anthropic, не сам ключ). Запись проходит через ту же redaction-middleware. Поведение наружу не меняется (502).
 
 ## Модель угроз (кратко)
 | Угроза | Митигирование |
 |---|---|
 | Утечка BYOK ключа | Envelope encryption, no-log redaction, ключ только in-memory на время вызова. |
+| Утечка api-key/BYOK при логировании upstream-ошибки | Логируется только тело ошибки Anthropic (лог-ключи `status_code`/`errorType`/`errorMessage`/`anthropicRequestId`, из полей-источника `error.type`/`error.message`/`request_id`), но не сам ключ и не user-content; redaction-middleware ([TD-014](100-known-tech-debt.md)). |
 | Обход trial / двойной trial | Атомарный `UPDATE users SET trial_used=TRUE WHERE trial_used=FALSE`. |
 | Двойное списание кредитов | Idempotency key + unique index + транзакция БД. |
 | Спуфинг чужого userId | Сверка `userId` с `sub` JWT. |
