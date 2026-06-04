@@ -41,6 +41,26 @@ def _is_sensitive_key(key: str) -> bool:
     return any(sub in lowered for sub in _DENY_SUBSTRINGS)
 
 
+def _redact_attachments(value: Any) -> Any:
+    """Redact the base64 `data` of each inline attachment (ADR-020, 05-security.md).
+
+    Attachment content (`attachments[].data` and decoded bytes/text) is never logged. The key is
+    `data` (not matched by the generic *key*/*token*/*secret* denylist), so attachment lists get
+    this targeted rule: each item's `data` becomes REDACTED while metadata (type/mediaType/
+    filename) survives for diagnostics. Non-list/non-dict items are passed through redact().
+    """
+    if not isinstance(value, list | tuple):
+        return redact(value)
+    redacted_items: list[Any] = []
+    for item in value:
+        if isinstance(item, dict):
+            redacted_item = {k: (REDACTED if k == "data" else redact(v)) for k, v in item.items()}
+            redacted_items.append(redacted_item)
+        else:
+            redacted_items.append(redact(item))
+    return redacted_items
+
+
 def redact(value: Any) -> Any:
     """Recursively redact sensitive values in dicts/lists. Returns a redacted copy."""
     if isinstance(value, dict):
@@ -48,6 +68,8 @@ def redact(value: Any) -> Any:
         for k, v in value.items():
             if isinstance(k, str) and _is_sensitive_key(k):
                 result[k] = REDACTED
+            elif isinstance(k, str) and k.lower() == "attachments":
+                result[k] = _redact_attachments(v)
             else:
                 result[k] = redact(v)
         return result

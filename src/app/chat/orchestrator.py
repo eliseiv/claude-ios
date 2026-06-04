@@ -26,6 +26,7 @@ from app.audit.service import (
 )
 from app.byok.service import BYOKService
 from app.chat.anthropic_client import AnthropicAuthError, AnthropicClient, AnthropicResult
+from app.chat.attachments import prepare_attachments
 from app.chat.repository import ChatRepository, derive_title
 from app.chat.tools import (
     MUTATING_TOOLS,
@@ -57,6 +58,7 @@ from app.policy.engine import (
 )
 from app.policy.loader import load_policy_state
 from app.preferences.service import PreferencesService
+from app.schemas.chat import AttachmentIn
 from app.wallet.service import WalletService
 from app.website.tools import SiteToolHandlers
 
@@ -184,6 +186,7 @@ class ChatOrchestrator:
         message: str,
         mode: str,
         assistant_mode: str | None = None,
+        attachments: list[AttachmentIn] | None = None,
     ) -> ChatRunOut:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
         # ADR-012: resolve assistant_mode for a NEW session — explicit request → preferences
@@ -208,12 +211,29 @@ class ChatOrchestrator:
         effective_mode = Mode(sess.mode)
         system_prompt = _system_prompt_for(sess.assistant_mode)
 
-        # Persist the user message under this step.
+        # ADR-020: validate inline attachments and split into (a) full content blocks sent to
+        # Claude ONCE on turn 0 (in-memory only) and (b) light text placeholders persisted in
+        # chat_steps.payload. Raw base64 is NEVER persisted (storage invariant). Validation runs
+        # BEFORE persisting the user step so a bad attachment is a clean 422 with no DB write.
+        first_turn_content: list[dict[str, Any]] | None = None
+        user_payload_content: list[dict[str, Any]] = [{"type": "text", "text": message}]
+        if attachments:
+            prepared = prepare_attachments(attachments, get_settings())
+            first_turn_content = [
+                {"type": "text", "text": message},
+                *prepared.content_blocks,
+            ]
+            user_payload_content = [
+                {"type": "text", "text": message},
+                *prepared.placeholders,
+            ]
+
+        # Persist the user message under this step (placeholders only — no base64, ADR-020 §3).
         await self._deps.repo.add_step(
             session_id=sess.id,
             message_step_id=message_step_id,
             role="user",
-            payload={"content": [{"type": "text", "text": message}]},
+            payload={"content": user_payload_content},
         )
 
         decision, state = await self._evaluate(user_id, effective_mode, sess.id)
@@ -231,6 +251,7 @@ class ChatOrchestrator:
             billing=_billing_plan(effective_mode, state),
             api_key=api_key,
             system_prompt=system_prompt,
+            first_turn_user_content=first_turn_content,
         )
 
     async def tool_result(
@@ -422,6 +443,7 @@ class ChatOrchestrator:
         billing: _BillingPlan,
         api_key: str | None,
         system_prompt: str,
+        first_turn_user_content: list[dict[str, Any]] | None = None,
     ) -> ChatRunOut:
         # ADR-011: server-side site.* tools are executed by the backend synchronously inside this
         # loop, WITHOUT a round-trip to iOS. We keep calling Anthropic as long as the turn contains
@@ -429,8 +451,21 @@ class ChatOrchestrator:
         # A turn with any client-side tool returns status=tool_call to iOS as before. A pure
         # assistant turn is the final step. The loop is bounded by MAX_SERVER_TOOL_ROUNDS (§2).
         max_rounds = get_settings().max_server_tool_rounds
+        # ADR-020: the FULL attachment content blocks are injected into the last user turn on the
+        # first iteration ONLY; subsequent (tool-loop) iterations replay placeholders from
+        # chat_steps. The override is consumed after the first iteration so heavy base64 is never
+        # re-sent to Anthropic.
+        turn0_override = first_turn_user_content
         for _ in range(max_rounds + 1):
             messages = await self._build_messages(session_id)
+            if turn0_override is not None:
+                # Replace the last user turn's content (placeholders) with the full blocks for the
+                # single first call; then drop the override so later rounds use placeholders only.
+                for msg in reversed(messages):
+                    if msg["role"] == "user":
+                        msg["content"] = turn0_override
+                        break
+                turn0_override = None
             # MAJOR-4: commit the persisted steps + audit BEFORE the network call so the pooled DB
             # connection is not held open for the whole Anthropic generation. Each subsequent
             # server-side round commits its own persisted tool_use/tool_result before re-calling.

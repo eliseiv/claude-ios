@@ -79,12 +79,16 @@ async def test_body_validation_422(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_oversized_body_413(client: AsyncClient) -> None:
+    # ADR-020: the transport size limit is now PER-ROUTE. The general ≤512KB cap still applies to
+    # ordinary routes (here /v1/wallet) — an oversized body is rejected at the middleware with 413
+    # before parsing. /v1/chat/run has its OWN raised limit (12MB for inline base64 attachments)
+    # and is covered separately in test_chat_attachments.py; it must NOT be 413 at 600KB.
+    big = b"x" * (600 * 1024)  # > size_limit_body (512KiB)
     uid = uuid.uuid4()
-    big = "x" * (600 * 1024)  # > size_limit_body (512KiB)
     r = await client.post(
-        "/v1/chat/run",
-        json={"userId": str(uid), "projectId": "p", "message": big, "mode": "credits"},
-        headers=auth_headers(uid),
+        "/v1/wallet/me",
+        content=big,
+        headers={**auth_headers(uid), "content-type": "application/json"},
     )
     assert r.status_code == 413
 

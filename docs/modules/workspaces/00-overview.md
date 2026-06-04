@@ -23,6 +23,6 @@
 ## Бизнес-правила
 - BR-WS-1: workspace принадлежит пользователю (`user_id == sub`); чужой → `404`.
 - BR-WS-2: `instructions` (nullable) добавляются к base-system-prompt (после assistant_mode prompt, [ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)) при генерации в сессии этого workspace.
-- BR-WS-3: файл-контекст — это `attachment` ([ADR-014](../../adr/ADR-014-multimodal-attachments.md)), привязанный к workspace через `workspace_files`. Привязываемый `attachmentId` обязан принадлежать тому же пользователю.
+- BR-WS-3: файл-контекст — это `attachment` ([ADR-014](../../adr/ADR-014-multimodal-attachments.md)), привязанный к workspace через `workspace_files`. Привязываемый `attachmentId` обязан принадлежать тому же пользователю. ⚠️ **Зависимость:** workspace file-context требует таблицы `attachments`, которая на MVP **отложена** ([TD-015](../../100-known-tech-debt.md); chat-вложения на MVP — inline base64 без таблицы, [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)). Workspaces (Спринт 2) реализует двухшаговый attachments-upload как свою предпосылку, либо подаёт файлы-контекст альтернативным способом — решение при реализации модуля.
 - BR-WS-4: подача `workspace_files` Claude — `extracted_text` (document) как текстовый контекст / image как vision; суммарный размер контекста ограничен ([Q-013-1](../../99-open-questions.md)).
 - BR-WS-5: удаление workspace → `workspace_files` cascade; `chat_sessions.workspace_project_id` → NULL (чаты сохраняются).

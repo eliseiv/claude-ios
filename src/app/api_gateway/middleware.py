@@ -28,17 +28,32 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 
 
 class SizeLimitMiddleware(BaseHTTPMiddleware):
-    """Rejects bodies exceeding the global limit before parsing (413)."""
+    """Rejects bodies exceeding the limit before parsing (413).
+
+    The general limit applies to all routes. /v1/chat/run gets a RAISED transport limit for
+    inline base64 attachments (ADR-020, 05-security.md): heavy multimodal payloads exceed the
+    general ≤512KB cap, so the raise is scoped to exactly that one route — the attack surface for
+    accepting a large payload is not widened globally.
+    """
+
+    _CHAT_RUN_PATH = "/v1/chat/run"
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
-        self._limit = get_settings().size_limit_body
+        settings = get_settings()
+        self._limit = settings.size_limit_body
+        self._chat_run_limit = settings.attachment_request_body_limit
+
+    def _limit_for(self, path: str) -> int:
+        if path == self._CHAT_RUN_PATH:
+            return self._chat_run_limit
+        return self._limit
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
-                if int(content_length) > self._limit:
+                if int(content_length) > self._limit_for(request.url.path):
                     return self._too_large(request)
             except ValueError:
                 pass

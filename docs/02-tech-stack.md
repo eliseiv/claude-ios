@@ -25,7 +25,7 @@
 ## Внешние SDK / интеграции
 | Компонент | Версия | Назначение |
 |---|---|---|
-| anthropic | **0.39.x** (Python SDK) | Claude messages API + prompt caching |
+| anthropic | **0.39.x** (Python SDK) | Claude messages API + prompt caching. ⚠️ **Не типизирует `document`-блок** (есть `ImageBlockParam`, нет `DocumentBlockParam` — проверено эмпирически). Backend передаёт `messages` как сырые dict (`cast(Any, ...)`), поэтому PDF-`document`-блок проходит без отказа SDK; wire-совместимость для `claude-sonnet-4-5/4-6` подтверждается e2e ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). Bump SDK для типобезопасности document-блока — [TD-016](100-known-tech-debt.md). |
 | httpx | **0.27.x** | App Store Server API, прочие HTTP |
 | pyjwt | **2.9.x** | JWT verify (или App Store JWS) |
 | cryptography | **43.x** | AES-GCM envelope encryption (data layer); StoreKit JWS x5c chain/signature verify |
@@ -34,10 +34,12 @@
 > constant-time сравнение admin/preview-токенов — stdlib `hmac`/`hashlib`/`secrets` (Python 3.12). `cryptography` (уже в стеке)
 > при необходимости. См. [ADR-009](adr/ADR-009-admin-token-auth.md), [ADR-010](adr/ADR-010-backend-hosted-preview.md).
 | prometheus-client | **0.21.x** (`>=0.21,<0.22`) | Prometheus exposition для `GET /metrics` (observability cross-cutting) |
-| pypdf | **5.x** | извлечение текста из PDF-вложений (модуль attachments, [ADR-014](adr/ADR-014-multimodal-attachments.md)). Pure-Python, без системных зависимостей. |
-| python-multipart | **0.0.x** (актуальная) | парсинг `multipart/form-data` для `POST /v1/attachments` (загрузка бинаря, [ADR-014](adr/ADR-014-multimodal-attachments.md)). Требуется FastAPI для form/file. |
+| pypdf | **5.x** (`>=5,<6`; зарезолвлено `5.9.0` в `uv.lock`) | **MVP ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)): guard числа страниц PDF** (анти-decompression-bomb) — только подсчёт страниц/структуры, без полного рендера (`src/app/chat/attachments.py::_check_pdf_pages`). PDF отдаётся Claude нативным `document`-блоком, текст НЕ извлекается (Claude разбирает сам). Pure-Python, без системных зависимостей. Фактически добавлен в `pyproject.toml`/`uv.lock` при реализации ADR-020 (2026-06-03); до этого числился в стеке только в docs (см. примечание ниже). (Извлечение `extracted_text` по [ADR-014](adr/ADR-014-multimodal-attachments.md) — отложено вместе с двухшаговой моделью, [TD-015](100-known-tech-debt.md).) |
+| python-multipart | **0.0.x** (актуальная) | парсинг `multipart/form-data`. **Для MVP-вложений ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) НЕ требуется** (inline base64 в JSON, без multipart-upload). Остаётся в стеке (был добавлен под двухшаговый `POST /v1/attachments` [ADR-014](adr/ADR-014-multimodal-attachments.md) → [TD-015](100-known-tech-debt.md)); удаление — отдельное решение, безвредно. |
 
-> **Расширение Figma-gap (2026-06-02):** добавлены `pypdf` (извлечение `extracted_text` из PDF, модуль attachments) и `python-multipart` (multipart-upload вложений). Прочие новые модули (chats/profile/preferences/workspaces/snippets/token-purchase/notifications) **новых внешних зависимостей не требуют** — используют существующий стек (FastAPI/SQLAlchemy/Pydantic, stdlib `hmac`/`hashlib`/`secrets` для accountId-производной). Определение media_type вложений по magic bytes — stdlib (`mimetypes`/собственная сигнатурная проверка), без новой зависимости. APNs-отправка push отложена ([TD-011](100-known-tech-debt.md)) — APNs-зависимость добавится при её реализации, не в этом проходе.
+> **MVP-вложения (2026-06-03, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)):** мультимодальный ввод реализуется inline base64 в `/v1/chat/run` (base64 — stdlib; magic-bytes — stdlib-сигнатуры). Единственная требующаяся внешняя зависимость — `pypdf` (PDF page-guard). Важно: `pypdf` числился в стеке (в этом документе) уже с расширения Figma-gap 2026-06-02, но **физически в `pyproject.toml`/`uv.lock` отсутствовал** — реальная зависимость `pypdf>=5,<6` добавлена backend'ом именно при реализации ADR-020 (2026-06-03). Пин в коде совпадает с задокументированным. Прочих новых внешних зависимостей фича не добавляет. Новые config-настройки (env, конфигурируемы, [Q-020-2](99-open-questions.md)): `ATTACHMENT_MAX_COUNT` (дефолт 10), `ATTACHMENT_MAX_BYTES_IMAGE` (5 MB) и `ATTACHMENT_MAX_BYTES_DOCUMENT` (8 MB — отдельные env-ключи в коде, `src/app/config.py`), `ATTACHMENT_TOTAL_BYTES` (10 MB), `ATTACHMENT_PDF_MAX_PAGES` (100), `ATTACHMENT_REQUEST_BODY_LIMIT` (12 MB — повышенный transport-лимит только роута `/v1/chat/run`). Allowlist `mediaType` — фиксирован в коде ([Q-020-1](99-open-questions.md) — расширение).
+
+> **Расширение Figma-gap (2026-06-02):** в стек (на уровне этого документа) были внесены `pypdf` (тогда — под извлечение `extracted_text` из PDF, модуль attachments) и `python-multipart` (multipart-upload вложений). Уточнение (2026-06-03): на тот момент это была только docs-фиксация намерения — `pypdf` физически в `pyproject.toml` отсутствовал и был реально добавлен лишь при реализации [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md) (с назначением «guard числа страниц», а не извлечение текста — извлечение отложено в [TD-015](100-known-tech-debt.md)). Прочие новые модули (chats/profile/preferences/workspaces/snippets/token-purchase/notifications) **новых внешних зависимостей не требуют** — используют существующий стек (FastAPI/SQLAlchemy/Pydantic, stdlib `hmac`/`hashlib`/`secrets` для accountId-производной). Определение media_type вложений по magic bytes — stdlib (`mimetypes`/собственная сигнатурная проверка), без новой зависимости. APNs-отправка push отложена ([TD-011](100-known-tech-debt.md)) — APNs-зависимость добавится при её реализации, не в этом проходе.
 
 ### Модели Claude (значения по умолчанию)
 - Оркестрация: `claude-sonnet-4-5` (значение конфигурируемо через env `ANTHROPIC_MODEL`).
@@ -114,7 +116,7 @@ src/app/
   byok/                   # service (envelope encrypt/toggle/delete), kms (KmsClient + LocalKmsClient)
   audit/                  # service (append-only logging)
   observability/          # metrics (prometheus), logging, context (request id), redaction
-  models/                 # base, tables (17 SQLAlchemy таблиц: 9 базовых + projects, site_files + расширение Figma-gap: user_preferences, workspace_projects, workspace_files, snippets, attachments, device_push_tokens)
+  models/                 # base, tables. На MVP активны 14 таблиц (миграции 0001=9 базовых, 0003=projects/site_files, 0004=user_preferences, 0005=auth_devices/auth_refresh_tokens). Спроектированы, миграцией ещё не созданы: workspace_projects/snippets/device_push_tokens (Спринт 2/3) + ОТЛОЖЕНЫ workspace_files/attachments (TD-015, ADR-020). Полный статус — 03-data-model.md.
   schemas/                # Pydantic request/response (chat, policy, wallet, subscription, byok, common)
   # Расширение Figma-gap (новые пакеты — каждый со своим router/service/repository):
   chats/                  # CRUD/список/поиск/steps-view поверх chat_sessions (модуль chats)
@@ -122,7 +124,7 @@ src/app/
   preferences/            # default_assistant_mode, notif toggle, code defaults
   workspaces/             # рабочие пространства чатов (≠ website projects, ADR-013)
   snippets/               # сохранённые код-фрагменты
-  attachments/            # мультимодальные вложения (upload, extract_text, резолв в Anthropic content; ADR-014)
+  attachments/            # двухшаговый upload/extract_text/таблица — ОТЛОЖЕН (TD-015, transport ADR-014 Superseded); MVP — inline base64 в /chat/run (ADR-020, реализует chat-orchestrator)
   token_purchase/         # consumable IAP → grant кредитов (reuse storekit verifier + Wallet, ADR-015)
   notifications/          # device push-token CRUD (отправка push → TD-011)
 migrations/               # alembic

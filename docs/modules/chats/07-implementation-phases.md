@@ -7,4 +7,4 @@
 3. **Phase 3 — steps-view:** `GET /v1/chats/{id}/steps`.
 4. **Phase 4 — мутации:** `PATCH` (rename/pin), `DELETE`. Автоген `title` в orchestrator при создании сессии.
 
-Зависимости: миграция `0004` — общая с preferences/workspaces/snippets/attachments/notifications (один alembic-ревижн расширения, либо серия `0004`..`0009`; конкретное дробление — на усмотрение devops/backend, фиксируется в 07-deployment).
+Зависимости: миграция `0004` (MVP) создаёт поля `chat_sessions`/`users` + таблицу `user_preferences` (общая с модулем preferences, Спринт 1). Объекты Спринта 2+ — `workspace_projects`/`snippets`/`chat_sessions.workspace_project_id` (и отложенные `workspace_files`/`attachments`/`device_push_tokens`, [TD-015](../../100-known-tech-debt.md)) — **в `0004` НЕ входят**, создаются отдельными будущими миграциями (дробление — на усмотрение devops/backend, фиксируется в 07-deployment).

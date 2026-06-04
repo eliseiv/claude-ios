@@ -30,6 +30,11 @@ router = APIRouter(prefix="/v1/chat", tags=["Chat"], dependencies=[Depends(beare
 _SESSION_ID = "3f1c2a7e-9b54-4d2e-8a11-6c0d5e7f1a23"
 _TOOL_CALL_ID = "a7b9c1d2-3e4f-5061-7283-94a5b6c7d8e9"
 
+# Tiny valid base64-encoded 1x1 PNG for the Swagger attachment example (not a real photo).
+_EXAMPLE_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
 _RUN_RESPONSE_EXAMPLES = {
     "assistant_message": {
         "summary": "Ответ ассистента (финал)",
@@ -75,7 +80,7 @@ _RUN_RESPONSE_EXAMPLES = {
 
 _RUN_REQUEST_EXAMPLES = {
     "credits_mode": {
-        "summary": "Запуск шага диалога (режим credits)",
+        "summary": "Запуск шага диалога, режим credits",
         "value": {
             "userId": "11111111-2222-3333-4444-555555555555",
             "projectId": "my-ios-project",
@@ -83,6 +88,29 @@ _RUN_REQUEST_EXAMPLES = {
             "message": "Прочитай файл notes.md и сделай краткое содержание.",
             "mode": "credits",
             "context": {"locale": "ru-RU"},
+        },
+    },
+    "with_attachment": {
+        "summary": "Сообщение с вложением, фото",
+        "description": (
+            "Поле `attachments` принимает фото, PDF и текстовые файлы в base64. `type` — класс "
+            "вложения, `mediaType` — MIME из allowlist, `data` — содержимое в base64. Вложения "
+            "отправляются модели только в первом сообщении; в `/v1/chat/tool-result` не "
+            "принимаются. Только base64, URL запрещены."
+        ),
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "projectId": "my-ios-project",
+            "message": "Что на этом фото?",
+            "mode": "credits",
+            "attachments": [
+                {
+                    "type": "image",
+                    "mediaType": "image/png",
+                    "filename": "photo.png",
+                    "data": _EXAMPLE_PNG_B64,
+                }
+            ],
         },
     },
 }
@@ -185,6 +213,7 @@ async def chat_run(
         message=body.message,
         mode=body.mode,
         assistant_mode=body.assistantMode,
+        attachments=body.attachments,
     )
     return _to_response(out)
 

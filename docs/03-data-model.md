@@ -1,8 +1,8 @@
 # 03 — Data Model
 
-PostgreSQL 16. **19 таблиц** (9 базовых + `projects`/`site_files` website-builder + 6 расширения Figma-gap: `user_preferences`, `workspace_projects`, `workspace_files`, `snippets`, `attachments`, `device_push_tokens` + 2 встроенного auth-issuer: `auth_devices`, `auth_refresh_tokens`, [ADR-018](adr/ADR-018-embedded-auth-issuer.md)). UUID v4 (`gen_random_uuid()` из `pgcrypto`). Все timestamp — `timestamptz`, UTC. Деньги/кредиты — целочисленные (минимальная неделимая единица), без float.
+PostgreSQL 16. **19 таблиц спроектировано; 14 активны на MVP, 5 отложены** (`workspace_projects`, `workspace_files`, `snippets`, `attachments`, `device_push_tokens` — Sprint-2/3, миграция `0004` их **не создаёт**). Активные на MVP: 9 базовых + `projects`/`site_files` website-builder + 1 расширения Figma-gap Sprint 1 (`user_preferences`) + 2 встроенного auth-issuer (`auth_devices`, `auth_refresh_tokens`, [ADR-018](adr/ADR-018-embedded-auth-issuer.md)). Отдельно про `attachments`: таблица **спроектирована, но на MVP не создаётся** — двухшаговый transport [ADR-014](adr/ADR-014-multimodal-attachments.md) Superseded ([TD-015](100-known-tech-debt.md)), chat-вложения на MVP реализуются inline base64 без таблицы ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). UUID v4 (`gen_random_uuid()` из `pgcrypto`). Все timestamp — `timestamptz`, UTC. Деньги/кредиты — целочисленные (минимальная неделимая единица), без float.
 
-> Расширение (2026-06-02, Figma-gap, см. [figma-gap-analysis.md](figma-gap-analysis.md)): новые таблицы и колонки спроектированы как expand-only миграции (`0004`+). Затронутые ADR: [ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md) (`assistant_mode`), [ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md) (workspaces), [ADR-014](adr/ADR-014-multimodal-attachments.md) (attachments), [ADR-015](adr/ADR-015-consumable-token-iap.md) (consumable IAP — без новой таблицы).
+> Расширение (2026-06-02, Figma-gap, см. [figma-gap-analysis.md](figma-gap-analysis.md)): новые таблицы и колонки спроектированы как expand-only миграции (`0004`+). Затронутые ADR: [ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md) (`assistant_mode`), [ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md) (workspaces), [ADR-014](adr/ADR-014-multimodal-attachments.md) (attachments — **спроектирована, реализация отложена**, transport Superseded → [TD-015](100-known-tech-debt.md); MVP — inline base64 [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)), [ADR-015](adr/ADR-015-consumable-token-iap.md) (consumable IAP — без новой таблицы). На MVP миграция `0004` создаёт только Sprint-1 объекты (`user_preferences`, поля `chat_sessions`/`users`); `workspace_projects`/`workspace_files`/`snippets`/`attachments`/`device_push_tokens` — Sprint-2/3, **не созданы**.
 
 ## ER-диаграмма
 
@@ -150,10 +150,10 @@ CREATE TABLE chat_sessions (
     user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     project_id           TEXT NOT NULL,  -- website-builder external project id (НЕ workspace), см. ADR-013
     mode                 chat_mode NOT NULL,  -- billing_mode (credits|byok), ADR-012
-    -- Расширение Figma-gap (миграция 0004):
+    -- Расширение Figma-gap, миграция 0004 (только title/assistant_mode/is_pinned):
     title                TEXT,           -- заголовок чата (автоген из 1-го сообщения или rename), nullable
     assistant_mode       assistant_mode NOT NULL DEFAULT 'chat',  -- тип ассистента, ADR-012
-    workspace_project_id UUID REFERENCES workspace_projects(id) ON DELETE SET NULL,  -- привязка к workspace, ADR-013, nullable
+    workspace_project_id UUID REFERENCES workspace_projects(id) ON DELETE SET NULL,  -- привязка к workspace, ADR-013, nullable; СПРИНТ 2 — НЕ в 0004 (отдельная будущая миграция)
     is_pinned            BOOLEAN NOT NULL DEFAULT FALSE,  -- закрепление в списке чатов
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -252,7 +252,9 @@ CREATE INDEX ix_site_files_project ON site_files (project_id);
 
 ---
 
-## Таблицы расширения Figma-gap (миграция `0004`, expand-only)
+## Таблицы расширения Figma-gap (expand-only)
+
+> **Статус по миграциям (MVP).** Из таблиц этого раздела миграцией `0004` создаётся **только `user_preferences` (таблица 12)** (вместе с полями `chat_sessions`/`users` и enum — см. выше). `workspace_projects` (13), `snippets` (15), `device_push_tokens` (17) — Спринт 2/3, **отдельные будущие миграции** (НЕ `0004`). `workspace_files` (14) и `attachments` (16) — **отложены** ([TD-015](100-known-tech-debt.md), на MVP миграцией не создаются; chat-вложения MVP — inline base64 [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). DDL ниже — зафиксированные контракты; per-table заметки уточняют статус каждой.
 
 ### 12. user_preferences ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md), модуль `preferences`)
 ```sql
@@ -282,6 +284,7 @@ CREATE INDEX ix_workspace_projects_user ON workspace_projects (user_id, updated_
 > Рабочее пространство чатов. **Не путать** с website-builder `projects` ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). `instructions` добавляются к base-system-prompt при генерации в сессии этого workspace.
 
 ### 14. workspace_files ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md), [ADR-014](adr/ADR-014-multimodal-attachments.md), модуль `workspaces`)
+> ⚠️ **Отложена на MVP.** Таблица зависит от `attachments` (FK), которая на MVP **не создаётся** (двухшаговый transport [ADR-014](adr/ADR-014-multimodal-attachments.md) Superseded → [TD-015](100-known-tech-debt.md); chat-вложения MVP — inline base64 [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). Миграция `0004` `workspace_files` **не создаёт** — Sprint-2 объект. Реализуется модулем `workspaces` как предпосылка Спринта 2.
 ```sql
 CREATE TABLE workspace_files (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -313,6 +316,7 @@ CREATE INDEX ix_snippets_user_language ON snippets (user_id, language);
 > Сохранённые код-фрагменты. `language` — свободная строка с нормализацией (фильтр UI All/TypeScript/Python/SQL). Поиск — ILIKE по `title`/`code`. `source_chat_id` поддерживает действие «Open in Chat».
 
 ### 16. attachments ([ADR-014](adr/ADR-014-multimodal-attachments.md), модуль `attachments`)
+> ⚠️ **Спроектирована, реализация отложена — на MVP таблица НЕ создаётся.** Двухшаговый transport (отдельный `POST /v1/attachments` + персист байтов) [ADR-014](adr/ADR-014-multimodal-attachments.md) — **Superseded** для MVP ([TD-015](100-known-tech-debt.md)). Chat-вложения на MVP реализуются **inline base64** в `/v1/chat/run` без таблицы и без персиста байтов ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). DDL ниже — зафиксированный путь для будущей двухшаговой модели; миграция `0004` его **не применяет**.
 ```sql
 CREATE TABLE attachments (
     id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -330,7 +334,7 @@ CREATE INDEX ix_attachments_user_created ON attachments (user_id, created_at DES
 CREATE INDEX ix_attachments_session ON attachments (session_id) WHERE session_id IS NOT NULL;
 -- Orphan-очистка (session_id IS NULL, старше ATTACHMENT_ORPHAN_TTL) — TD-010 (без фонового джоба на старте).
 ```
-> Хранилище байтов вложений мультимодального ввода **и** файлов-контекста workspace (общее, [ADR-014](adr/ADR-014-multimodal-attachments.md)). Лимиты (image ≤ 5 MB, document ≤ 10 MB, ≤ 10/сообщение) и media_type allowlist — [modules/attachments/05-security.md](modules/attachments/05-security.md), [Q-014-1](99-open-questions.md)/[Q-014-2](99-open-questions.md). Контент в БД на старте → [TD-009](100-known-tech-debt.md); orphan-retention → [TD-010](100-known-tech-debt.md).
+> Хранилище байтов вложений мультимодального ввода **и** файлов-контекста workspace (общее, [ADR-014](adr/ADR-014-multimodal-attachments.md)) — **только в двухшаговой модели, отложенной на MVP** ([TD-015](100-known-tech-debt.md); MVP — inline base64 [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). Лимиты MVP (мультимодальный ввод inline base64): image ≤ 5 MB, document ≤ 8 MB, total ≤ 10 MB, ≤ 10/сообщение — заданы env `ATTACHMENT_*` ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md), точные ключи — [07-deployment.md](07-deployment.md)). Лимиты в [modules/attachments/05-security.md](modules/attachments/05-security.md) (напр. document ≤ 10 MB) относятся к **отложенной двухшаговой upload-модели** ([TD-015](100-known-tech-debt.md)), а не к MVP. media_type allowlist — [Q-020-1](99-open-questions.md), [modules/attachments/05-security.md](modules/attachments/05-security.md), [Q-014-1](99-open-questions.md)/[Q-014-2](99-open-questions.md). Контент в БД (двухшаговая модель) → [TD-009](100-known-tech-debt.md); orphan-retention → [TD-010](100-known-tech-debt.md).
 
 ### 17. device_push_tokens (модуль `notifications`)
 ```sql

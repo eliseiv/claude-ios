@@ -38,11 +38,12 @@
 | [adr/ADR-011-server-side-tools.md](adr/ADR-011-server-side-tools.md) | Server-side tools `site.*`: backend исполняет в tool-loop |
 | [adr/ADR-012-assistant-mode-vs-billing-mode.md](adr/ADR-012-assistant-mode-vs-billing-mode.md) | `assistant_mode` (chat/code) vs `billing_mode` (credits/byok) |
 | [adr/ADR-013-workspace-projects-vs-website-builder.md](adr/ADR-013-workspace-projects-vs-website-builder.md) | Workspace-проекты — отдельный модуль, не website-builder `projects` |
-| [adr/ADR-014-multimodal-attachments.md](adr/ADR-014-multimodal-attachments.md) | Мультимодальные вложения: upload → ссылка в `/chat/run` |
+| [adr/ADR-014-multimodal-attachments.md](adr/ADR-014-multimodal-attachments.md) | Мультимодальные вложения: upload → ссылка в `/chat/run` (**Superseded транспортом → ADR-020**) |
 | [adr/ADR-015-consumable-token-iap.md](adr/ADR-015-consumable-token-iap.md) | Покупка токенов: consumable IAP → grant кредитов |
 | [adr/ADR-016-extended-byok-statuses.md](adr/ADR-016-extended-byok-statuses.md) | Расширенные BYOK-статусы + активная модель |
 | [adr/ADR-018-embedded-auth-issuer.md](adr/ADR-018-embedded-auth-issuer.md) | Встроенный auth-issuer (device-based, RS256, refresh-rotation) — закрывает Q-005-1 |
 | [adr/ADR-019-tools-catalog-endpoint.md](adr/ADR-019-tools-catalog-endpoint.md) | Каталог инструментов `GET /v1/tools` (JWT-protected) |
+| [adr/ADR-020-inline-base64-attachments-mvp.md](adr/ADR-020-inline-base64-attachments-mvp.md) | Мультимодальный ввод: inline base64-вложения в `/chat/run` (MVP); заменяет транспорт ADR-014 |
 
 ### Модули
 | Модуль | Каталог | Статус |
@@ -62,7 +63,7 @@
 | Preferences | [modules/preferences/](modules/preferences/README.md) | Реализован (Спринт 1) |
 | Workspaces | [modules/workspaces/](modules/workspaces/README.md) | Спроектирован, ожидает реализации (Спринт 2) |
 | Snippets | [modules/snippets/](modules/snippets/README.md) | Спроектирован, ожидает реализации (Спринт 2) |
-| Attachments | [modules/attachments/](modules/attachments/README.md) | Спроектирован, ожидает реализации (Спринт 3) |
+| Attachments | [modules/attachments/](modules/attachments/README.md) | **Отложен ([TD-015](100-known-tech-debt.md))** — MVP мультимодального ввода реализуется inline base64 в `/chat/run` ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) без этого модуля; двухшаговый upload — будущий путь |
 | Token Purchase | [modules/token-purchase/](modules/token-purchase/README.md) | **Реализован (MVP)** — ⏳ доработка policy-guard «требует активной подписки» ([Q-015-1](99-open-questions.md) Closed = вариант B) |
 | Notifications | [modules/notifications/](modules/notifications/README.md) | Спроектирован частично, ожидает реализации (Спринт 3; push → TD-011) |
 

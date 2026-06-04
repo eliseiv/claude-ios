@@ -10,6 +10,47 @@ from pydantic import Field, model_validator
 from app.config import get_settings
 from app.schemas.common import StrictModel
 
+# Allowed mediaType values per attachment class (ADR-020, 05-security.md; Q-020-1 extension).
+# Fixed in code as a server-side allowlist (not a denylist) — anything else => 422.
+AttachmentMediaType = Literal[
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "application/json",
+]
+
+
+class AttachmentIn(StrictModel):
+    """Inline base64 attachment (ADR-020). Only base64 — URL sources are forbidden (anti-SSRF).
+
+    Class/mediaType consistency and magic-byte/size/page guards are enforced in the orchestrator
+    (chat/attachments.py) after parsing, since they need the decoded content and config limits.
+    """
+
+    type: Literal["image", "document", "text"] = Field(
+        description="Класс вложения: `image` (фото), `document` (PDF) или `text` (текстовый файл)."
+    )
+    mediaType: AttachmentMediaType = Field(
+        description=(
+            "MIME-тип содержимого из allowlist: `image/jpeg|png|gif|webp`, `application/pdf`, "
+            "`text/plain|markdown|csv`, `application/json`. Вне списка → 422."
+        )
+    )
+    filename: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Имя файла для человекочитаемой разметки (особенно для `text`-вложений).",
+    )
+    data: str = Field(
+        min_length=1,
+        description="Содержимое файла в base64. Только inline base64 — URL запрещены.",
+    )
+
 
 class ChatRunRequest(StrictModel):
     userId: uuid.UUID = Field(
@@ -35,6 +76,14 @@ class ChatRunRequest(StrictModel):
             "Тип ассистента: `chat` или `code`. Опционально; при отсутствии берётся дефолт из "
             "настроек пользователя, затем `chat`. Фиксируется при создании сессии. "
             "Ортогонален `mode` (оплата)."
+        ),
+    )
+    attachments: list[AttachmentIn] | None = Field(
+        default=None,
+        description=(
+            "Inline base64-вложения (фото/PDF/текст), отправляемые модели в первом сообщении "
+            "(ADR-020). Опционально. Лимиты числа/размера и проверка MIME по содержимому — на "
+            "сервере. Только base64, URL запрещены. В `/v1/chat/tool-result` не принимаются."
         ),
     )
     context: dict[str, Any] | None = Field(

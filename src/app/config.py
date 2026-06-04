@@ -141,6 +141,29 @@ class Settings(BaseSettings):
     size_limit_tool_result: int = Field(default=256 * 1024, alias="SIZE_LIMIT_TOOL_RESULT")
     size_limit_api_key: int = Field(default=4 * 1024, alias="SIZE_LIMIT_API_KEY")
 
+    # --- Inline multimodal attachments (ADR-020, 05-security.md, Q-020-2 defaults) ---
+    # Inline base64 attachments are accepted only in the first user message-step of
+    # /v1/chat/run. All limits are enforced BEFORE base64 decoding to bound memory use
+    # (decoded size ≈ 3/4 of the base64 length). The mediaType allowlist is fixed in code
+    # (schemas/chat.py, Q-020-1 governs extension), not env-driven.
+    attachment_max_count: int = Field(default=10, alias="ATTACHMENT_MAX_COUNT")
+    # Per-attachment decoded-byte ceiling, split by class: image vs document (PDF).
+    attachment_max_bytes_image: int = Field(
+        default=5 * 1024 * 1024, alias="ATTACHMENT_MAX_BYTES_IMAGE"
+    )
+    attachment_max_bytes_document: int = Field(
+        default=8 * 1024 * 1024, alias="ATTACHMENT_MAX_BYTES_DOCUMENT"
+    )
+    # Combined decoded-byte ceiling across all attachments in a request.
+    attachment_total_bytes: int = Field(default=10 * 1024 * 1024, alias="ATTACHMENT_TOTAL_BYTES")
+    # PDF page-count guard (anti decompression/structure bomb) via pypdf.
+    attachment_pdf_max_pages: int = Field(default=100, alias="ATTACHMENT_PDF_MAX_PAGES")
+    # Raised transport body limit applied ONLY to the /v1/chat/run route (other routes keep
+    # size_limit_body). Inline base64 of large files exceeds the general ≤512KB cap.
+    attachment_request_body_limit: int = Field(
+        default=12 * 1024 * 1024, alias="ATTACHMENT_REQUEST_BODY_LIMIT"
+    )
+
     # --- DB connection pool (02-tech-stack.md, sized for ~10k users / 2-3 replicas) ---
     # Per-process pool. Effective max conns ≈ (pool_size + max_overflow) * workers * replicas;
     # keep below Postgres max_connections. architect documents the sizing math in docs.

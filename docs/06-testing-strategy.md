@@ -25,6 +25,25 @@
 | `/policy/effective` совпадает с фактическим решением `/chat/run` для всех состояний | AC-6 | integration |
 | Audit-запись на каждое мутирующее tool-действие и каждое списание | AC-7 | integration |
 
+## Тест-кейсы мультимодальных вложений (ADR-020)
+| Тест | Уровень |
+|---|---|
+| `image` (jpeg/png/gif/webp) → корректный Anthropic `image`-блок (base64, media_type из записи) | unit |
+| `document` (PDF) → нативный `document`-блок base64; текст НЕ извлекается | unit |
+| `text` (plain/markdown/csv/json) → `text`-блок с разметкой имени файла; невалидный UTF-8 → `422` | unit |
+| MIME вне allowlist (DOCX/HEIC/zip/octet-stream) → `422 unsupported_media_type` | unit+integration |
+| Рассогласование `type`/`mediaType` ↔ magic bytes (бинарь под видом image/png) → `422` | unit |
+| Невалидный/обрезанный base64 → `422` (не 500) | unit |
+| Лимит размера одного вложения / суммарного / числа — проверка ДО декодирования → `413`/`422` | unit+integration |
+| Повышенный body-лимит применяется **только** к `/v1/chat/run`; прочие роуты сохраняют `≤512KB` | integration |
+| PDF page-guard: PDF с числом страниц > `ATTACHMENT_PDF_MAX_PAGES` → `422` (анти-bomb) | unit |
+| URL-вложение / `source.type=url` → отвергается (нет backend-fetch, анти-SSRF) | unit |
+| Реплей: `chat_steps.payload` user-turn содержит плейсхолдер, НЕ base64; на витке ≥1 tool-loop тяжёлый контент не реплеится | integration |
+| Биллинг: сообщение с вложениями = 1 кредит (mode=credits и mode=byok); usage пишется в meta | integration |
+| Логи/audit не содержат `attachments[].data` и декодированного содержимого (redaction) | integration |
+| Вложения в `/chat/run` принимаются; `/chat/tool-result` их не принимает (`extra='forbid'`) | unit |
+| **E2E (реальный Anthropic):** image + PDF + text в одном сообщении → корректный assistant_message; подтверждает wire-совместимость `document`-блока на SDK 0.39.0 ([TD-016](100-known-tech-debt.md)). **Статус: обязателен, но пока НЕ выполнен — org Anthropic отключена (generation blocked); прогон обязателен сразу после восстановления org. До прогона live-совместимость PDF `document`-блока остаётся неподтверждённой (TD-016 открыт).** | e2e (`@pytest.mark.external`) |
+
 ## Политика моков
 - **PostgreSQL и Redis — реальные** (testcontainers). Не мокать БД.
 - **Anthropic API, App Store Server API, KMS** — мокаются (respx / fakes). Реальные вызовы только в отдельном `@pytest.mark.external` наборе (вне CI по умолчанию).

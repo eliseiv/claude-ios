@@ -34,11 +34,24 @@
 |---|---|---|---|---|
 | Q-012-1 | Состав tool-реестра по `assistant_mode`: какие tools доступны Claude в `chat` vs `code` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md))? | Open | Дефолт: `code` — полный реестр (`files.*`, `site.*`, `calendar.*`, `reminders.*`); `chat` — без `site.*`/`files.*` (только `calendar.*`/`reminders.*`). Конфигурируемо. Реализуемо на дефолте. | Нет |
 | Q-013-1 | Стратегия инъекции `workspace_files`/больших контекстов в prompt при росте объёма (полный текст vs усечение vs RAG) ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). | Open | Старт: простая вставка `extracted_text` с лимитом на суммарный размер контекста; усечение сверх лимита. RAG — будущее. | Нет |
-| Q-014-1 | Полный allowlist media_type вложений (нужны ли DOCX/CSV/HEIC и пр.) ([ADR-014](adr/ADR-014-multimodal-attachments.md)). | Open | Старт: `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `application/pdf`, `text/plain`. Расширение по мере необходимости. | Нет |
-| Q-014-2 | Точные лимиты вложений (размер/число на сообщение) ([ADR-014](adr/ADR-014-multimodal-attachments.md)). | Open | Старт: image ≤ 5 MB, document ≤ 10 MB, ≤ 10 вложений/сообщение. Конфигурируемо. | Нет |
+| Q-014-1 | Полный allowlist media_type вложений (нужны ли DOCX/CSV/HEIC и пр.) ([ADR-014](adr/ADR-014-multimodal-attachments.md)). | **Заменён [Q-020-1](#q-020-1--allowlist-mediatype-вложений-mvp)** (ADR-014 superseded транспортом [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). | — | Нет |
+| Q-014-2 | Точные лимиты вложений (размер/число на сообщение) ([ADR-014](adr/ADR-014-multimodal-attachments.md)). | **Заменён [Q-020-2](#q-020-2--лимиты-вложений-mvp)** (ADR-014 superseded транспортом [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). | — | Нет |
 | **Q-015-1** | **Покупка токенов (consumable IAP) без активной подписки — продуктовое противоречие монетизации MVP.** | **Closed (2026-06-02, решение пользователя = вариант B)** | **Покупка токенов требует активной подписки** (докупка сверх месячного пакета). Без активной подписки `POST /v1/tokens/purchase` → `403 subscription_required` (policy-guard **до** grant). Сохраняет §2 ТЗ и [ADR-002](adr/ADR-002-access-policy-state-machine.md) без изменений; устраняет «мёртвый» баланс. См. [ADR-015 §Доступность](adr/ADR-015-consumable-token-iap.md). | Нет (решено) |
 | **Q-016-1** | **Actions** (Plan Week, Meeting Notes, Tasks from Photo, Summarize Text, Project Structure, Daily Review, Design Brief) и **Choose style** (Normal/Learning/Concise/Formal): серверные пресеты (endpoint + хранение) ИЛИ клиентские (iOS подставляет промпт)? | **Open — для пользователя** | Дефолт **клиентские пресеты**: iOS формирует готовый промпт/`assistantMode`/`context`, backend получает уже готовое сообщение — **новый backend-эндпоинт не нужен**. Стиль ответа можно передавать через `context.style` (информативно). Реализуемо без backend-работы. | Нет |
 | **Q-016-2** | **Web search** (toggle в Add To Chat): backend-tool (серверная интеграция веб-поиска, как `site.*`) ИЛИ клиентская фича? | **Open — для пользователя, НЕ реализуем до ответа** | Дефолт-намерение: backend server-side tool, но требует **выбора провайдера поиска** (Brave/Bing/Anthropic web_search и т.п.) и тарификации → **не реализуем до ответа пользователя**. Без выбора провайдера — нет контракта tool. | **Да — блокер для фичи web search** (не для остального) |
+
+## Открытые вопросы мультимодальных вложений (MVP, 2026-06-03, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md))
+
+| ID | Вопрос | Статус | Принятый дефолт (если есть) | Блокирует backend? |
+|---|---|---|---|---|
+| Q-020-1 | Полный allowlist `mediaType` вложений: нужны ли DOCX/XLSX/HEIC/SVG и пр.? | Open | Старт: `image/jpeg|png|gif|webp`, `application/pdf`, `text/plain|markdown|csv`, `application/json`. Расширение по мере необходимости. Реализуемо на дефолте. | Нет |
+| Q-020-2 | Точные значения `ATTACHMENT_*` лимитов (размер одного/суммарный, число, PDF-страницы, повышенный body-лимит `/chat/run`). | Open | Дефолты: `ATTACHMENT_MAX_COUNT=10`, `ATTACHMENT_MAX_BYTES_IMAGE=5 MB` / `ATTACHMENT_MAX_BYTES_DOCUMENT=8 MB`, `ATTACHMENT_TOTAL_BYTES=10 MB`, `ATTACHMENT_PDF_MAX_PAGES=100`, `ATTACHMENT_REQUEST_BODY_LIMIT=12 MB`. Конфигурируемо ([TD-004](100-known-tech-debt.md)-аналог — не калибровано на нагрузке). Согласованы с лимитами Anthropic по vision/PDF. | Нет |
+
+### Q-020-1 — allowlist mediaType вложений (MVP)
+Заменяет Q-014-1 (транспорт ADR-014 superseded). Дефолтный allowlist покрывает сценарии дизайна (фото, PDF, текстовые/csv/json-файлы). DOCX/XLSX требуют конвертации/извлечения — вне MVP. HEIC (iOS-фото) — кандидат на расширение, но iOS может конвертировать в JPEG на клиенте; решение отложено.
+
+### Q-020-2 — лимиты вложений (MVP)
+Заменяет Q-014-2. Дефолты эвристические, согласованы с ограничениями Anthropic Messages API (vision-изображения и PDF-document по размеру/разрешению). Калибровка по прод-метрикам — как [TD-004](100-known-tech-debt.md).
 
 ## Q-015-1 — продуктовое противоречие монетизации MVP (Closed)
 

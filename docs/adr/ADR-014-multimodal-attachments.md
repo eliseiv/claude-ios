@@ -1,8 +1,10 @@
 # ADR-014 — Мультимодальный ввод: вложения (images/files) в /chat/run
 
-- Статус: Accepted
+- Статус: **Superseded (транспортная часть) — [ADR-020](ADR-020-inline-base64-attachments-mvp.md) (2026-06-03)**
 - Дата: 2026-06-02
 - Связан с: chat-orchestrator, модуль `attachments`, ADR-013 (workspace-файлы), 05-security.
+
+> **⚠️ Superseded для MVP ([ADR-020](ADR-020-inline-base64-attachments-mvp.md), 2026-06-03).** Транспортное решение этого ADR (двухшаговый upload `POST /v1/attachments` → `attachmentId` → ссылка в `/chat/run`) для MVP **заменено** на inline base64 в теле `/chat/run`. Модуль `attachments` и таблица `attachments` на MVP **не реализуются** — двухшаговый upload/storage перенесён в [TD-015](../100-known-tech-debt.md) (вернуться при reuse/больших файлах/object-storage). Концептуальные решения (allowlist, владелец=`sub`, биллинг как обычный шаг, image→image / pdf→document) сохранены в [ADR-020](ADR-020-inline-base64-attachments-mvp.md). Документ ниже сохранён как зафиксированная альтернатива / будущий путь.
 
 ## Context
 Дизайн позволяет прикреплять фото и файлы к сообщению («Tasks from Photo», «Add photos», «Add files»). Сейчас `/v1/chat/run` принимает только `message` (text) + `context` (object). Нужно передать изображения в Claude (vision) и файлы (PDF/текст) как контекст.

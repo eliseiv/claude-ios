@@ -18,6 +18,7 @@ dependencies = [
     "pyjwt[crypto]>=2.9,<2.10",
     "cryptography>=43,<44",
     "prometheus-client>=0.21,<0.22",
+    "pypdf>=5,<6",
 ]
 
 [dependency-groups]
@@ -70,6 +71,9 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = [
+    "external: tests that hit real external services (e.g. real Anthropic). Excluded from CI; run on demand.",
+]
 
 [tool.coverage.run]
 source = ["src"]

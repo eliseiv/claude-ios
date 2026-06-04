@@ -8,6 +8,7 @@
 
 ## chat_steps
 - `payload` — content blocks (assistant text / tool_use / tool_result).
+- **Вложения ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)):** для user-turn с `attachments[]` `payload["content"]` хранит текстовый блок сообщения **+ лёгкие текстовые плейсхолдеры вложений** (`[attachment: <mediaType> "<filename>", <size> — ...]`). **Сырой base64 вложений в `payload` НЕ хранится** (инвариант): контроль раздувания БД и токенов реплея. Полные image/document/text-блоки собираются in-memory только для первого вызова Anthropic message-шага и не персистятся.
 - `usage` — `{inputTokens, outputTokens, model, cacheReadTokens, cacheWriteTokens}`. Без секретов.
 - `message_step_id` — billing message-step id шага: генерируется в `/chat/run`, един на весь пользовательский message-шаг (все tool-раунды и re-entry). Передаётся в `Wallet.consume` как idempotency key debit ([ADR-005](../../adr/ADR-005-idempotency-ledger.md), [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Не путать с gateway `requestId`.
 - Используется для реконструкции контекста и идемпотентного возврата следующего шага.
@@ -23,4 +24,5 @@
 ## Инварианты
 - Запись в `chat_steps`/`tool_calls` только этим модулем.
 - `args`/`result`/`payload`/`usage` без API-ключей и секретов.
+- `payload` user-turn **не содержит сырой base64 вложений** — только текстовые плейсхолдеры ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)).
 - **Tool-id двойственность ([ADR-008](../../adr/ADR-008-provider-tool-use-id.md)):** доменный `id` (UUID) ↔ `provider_tool_use_id` (`toolu_...`) связаны 1:1. Наружу — только доменный UUID; в Anthropic history — только `provider_tool_use_id`. Доменный id **никогда** не используется как `tool_use.id`/`tool_result.tool_use_id` в Anthropic-протоколе.

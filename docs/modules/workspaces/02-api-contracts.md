@@ -38,6 +38,7 @@ JWT, владелец = `sub`. Чужой workspace → `404`.
   "description": "string | null",
   "instructions": "string | null",
   "files": [ { "fileId": "uuid", "attachmentId": "uuid", "filename": "string | null", "mediaType": "string", "size": 0 } ],
+  // files[] зависит от таблицы attachments — отложена на MVP (см. раздел «Файлы-контекст workspace — предпосылка»: BR-WS-3 / TD-015)
   "createdAt": "ISO8601",
   "updatedAt": "ISO8601"
 }
@@ -59,6 +60,9 @@ JWT, владелец = `sub`. Чужой workspace → `404`.
 { "deleted": true }
 ```
 - Cascade удаляет `workspace_files`; `chat_sessions.workspace_project_id` → NULL (чаты остаются).
+
+## Файлы-контекст workspace — предпосылка
+> ⚠️ Контракты файлов-контекста ниже (`{attachmentId}` в POST/response, `files[]` в GET `/{id}`) зависят от таблицы `attachments` и двухшагового upload ([BR-WS-3](00-overview.md), [ADR-014](../../adr/ADR-014-multimodal-attachments.md)), **отложенных на MVP** (transport Superseded → [TD-015](../../100-known-tech-debt.md); chat-вложения MVP — inline base64, [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)). Модуль `workspaces` реализует таблицу `attachments` + upload как свою предпосылку Спринта 2.
 
 ## POST /v1/workspaces/{id}/files
 Привязать ранее загруженный attachment как файл-контекст.

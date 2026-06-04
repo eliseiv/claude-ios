@@ -17,12 +17,13 @@
 | [ADR-011](ADR-011-server-side-tools.md) | Server-side tools (`site.*`): backend исполняет в tool-loop, не отдаёт клиенту | Accepted | 2026-06-01 |
 | [ADR-012](ADR-012-assistant-mode-vs-billing-mode.md) | Разведение терминологии: `assistant_mode` (chat/code, тип ассистента) vs `billing_mode` (credits/byok, способ оплаты) | Accepted | 2026-06-02 |
 | [ADR-013](ADR-013-workspace-projects-vs-website-builder.md) | Workspace-проекты (рабочие пространства чатов) — отдельный модуль, не website-builder `projects` | Accepted | 2026-06-02 |
-| [ADR-014](ADR-014-multimodal-attachments.md) | Мультимодальный ввод: двухшаговые вложения (upload `/v1/attachments` → ссылка в `/chat/run`) | Accepted | 2026-06-02 |
+| [ADR-014](ADR-014-multimodal-attachments.md) | Мультимодальный ввод: двухшаговые вложения (upload `/v1/attachments` → ссылка в `/chat/run`) | **Superseded (транспорт) → [ADR-020](ADR-020-inline-base64-attachments-mvp.md)** | 2026-06-02 |
 | [ADR-015](ADR-015-consumable-token-iap.md) | Покупка токенов: consumable StoreKit IAP → идемпотентный grant кредитов (отдельно от подписки) | Accepted | 2026-06-02 |
 | [ADR-016](ADR-016-extended-byok-statuses.md) | Расширенные BYOK-статусы (`validating`/`offline`/`expired`) + активная модель в ответе, обратная совместимость | Accepted | 2026-06-02 |
 | [ADR-017](ADR-017-shared-server-traefik-deploy.md) | Deploy-топология: общий сервер за внешним Traefik + GitHub Actions SSH (ревизует TD-005 VPS+Caddy) | Accepted | 2026-06-02 |
 | [ADR-018](ADR-018-embedded-auth-issuer.md) | Встроенный auth-issuer в backend (device-based identity, RS256, refresh-rotation) — закрывает Q-005-1 | Accepted | 2026-06-02 |
 | [ADR-019](ADR-019-tools-catalog-endpoint.md) | Каталог инструментов `GET /v1/tools` (JWT-protected, источник — chat/tools.py) | Accepted | 2026-06-02 |
+| [ADR-020](ADR-020-inline-base64-attachments-mvp.md) | Мультимодальный ввод: inline base64-вложения в `/chat/run` (MVP); заменяет транспорт ADR-014 | Accepted | 2026-06-03 |
 
 ## Ревизии
 

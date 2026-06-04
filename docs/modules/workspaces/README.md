@@ -12,7 +12,7 @@
 - [07-implementation-phases.md](07-implementation-phases.md)
 - [09-testing.md](09-testing.md)
 
-> Data model — `workspace_projects` (таблица 13), `workspace_files` (таблица 14), `chat_sessions.workspace_project_id` (миграция `0004`). Файлы-контекст хранятся в `attachments` ([ADR-014](../../adr/ADR-014-multimodal-attachments.md)).
+> Data model — `workspace_projects` (таблица 13) + `chat_sessions.workspace_project_id`: предпосылка Спринта 2, создаётся **отдельной будущей миграцией** (НЕ `0004` — `0004` создаёт только `user_preferences` + поля `chat_sessions`/`users`). `workspace_files` (таблица 14) и `attachments` — **отложены** ([TD-015](../../100-known-tech-debt.md)), на MVP миграцией не создаются; файлы-контекст (хранение в `attachments`, [ADR-014](../../adr/ADR-014-multimodal-attachments.md)) появляются только при реализации двухшаговой модели.
 
 ## DoD
 - CRUD `/v1/workspaces` (name/description/instructions).

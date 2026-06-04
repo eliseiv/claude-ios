@@ -79,8 +79,8 @@
 ## Size-лимиты (защита payload)
 Два разных уровня контроля размера с **разной HTTP-семантикой** (не путать):
 
-1. **Transport-уровень — общий размер тела запроса (`413`).** Enforced `SizeLimitMiddleware` на API Gateway **до парсинга** тела, по `Content-Length`/объёму потока. Превышение → `413 Payload Too Large`. Это защита от приёма крупного payload как такового.
-   - Общий request body: ≤ 512 KB.
+1. **Transport-уровень — общий размер тела запроса (`413`).** Enforced `SizeLimitMiddleware` на API Gateway **до парсинга** тела, по заголовку `Content-Length`. Превышение → `413 Payload Too Large`. Это защита от приёма крупного payload как такового. **Ограничение (на 2026-06-03):** проверка опирается на `Content-Length`; при его отсутствии (chunked-запрос без заголовка) transport-guard пропускается — streaming-устойчивая проверка по фактическому объёму потока **не реализована** ([TD-017](100-known-tech-debt.md); на MVP за внешним Traefik не эксплуатируется).
+   - Общий request body: ≤ 512 KB. Повышенный лимит только роута `/v1/chat/run` (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB) под inline base64-вложения (ADR-020).
 
 2. **Schema-уровень — лимиты отдельных полей (`422`).** Enforced Pydantic v2 валидаторами (`max_length`) после парсинга. Нарушение лимита конкретного поля при допустимом размере тела → `422 Unprocessable Entity` (стандартная семантика per-field schema violation, согласована с прочей валидацией ввода ниже). Это **не** `413`: тело прошло transport-лимит, отклонено уже на валидации схемы.
    - `message`: ≤ 32 KB.
@@ -88,6 +88,23 @@
    - `tool-result` `result`: ≤ 256 KB.
 
 Дефолты конкретных значений — [Q-003-2](99-open-questions.md). Оба пути — валидный технический reject 4xx; различие 413 vs 422 отражает уровень, на котором сработал лимит (transport до парсинга vs schema поля).
+
+### Повышенный transport-лимит для `/v1/chat/run` (inline base64-вложения, ADR-020)
+Inline base64-вложения ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) превышают общий `≤512KB`. Поэтому `SizeLimitMiddleware` применяет **повышенный лимит только к роуту `/v1/chat/run`** (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB); все прочие роуты сохраняют общий `≤512KB`. Превышение per-route лимита → `413` (до парсинга). Повышение НЕ глобальное — поверхность приёма крупного payload ограничена одним роутом.
+
+## Мультимодальные вложения — валидация и модель угроз (ADR-020)
+Критично: `/v1/chat/run` принимает в `attachments[]` загруженный пользователем бинарный контент (фото/PDF/текст) в base64 и передаёт его Claude ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). Правила валидации (фокус ревью):
+
+- **Allowlist `mediaType` (не denylist).** `image/jpeg|png|gif|webp`, `application/pdf`, `text/plain|markdown|csv`, `application/json`. Вне allowlist → `422 unsupported_media_type` ([Q-020-1](99-open-questions.md) — расширение).
+- **Соответствие заявленного MIME содержимому (magic bytes).** `type`/`mediaType` из запроса сверяются с реальной сигнатурой декодированного содержимого (JPEG/PNG/GIF/WEBP/PDF magic bytes; для `text/*`/`json` — успешная UTF-8-декодировка и при необходимости JSON-парс). Рассогласование → `422`. Нельзя доверять заявленному клиентом `mediaType`.
+- **Лимиты — ДО декодирования base64.** Размер base64-строки проверяется до `b64decode` (decoded ≈ 3/4 от base64-длины): одно вложение ≤ `ATTACHMENT_MAX_BYTES_IMAGE` (дефолт 5 MB) / `ATTACHMENT_MAX_BYTES_DOCUMENT` (дефолт 8 MB), суммарно ≤ `ATTACHMENT_TOTAL_BYTES` (10 MB), число ≤ `ATTACHMENT_MAX_COUNT` (10). Превышение → `413`/`422`. Это защита от раздувания памяти декодированием.
+- **Валидность base64.** Невалидный/обрезанный base64 → `422` (не 500).
+- **Анти-decompression/zip-bomb для PDF.** Guard числа страниц PDF (`ATTACHMENT_PDF_MAX_PAGES`, дефолт 100) через `pypdf` (только подсчёт страниц/структуры, без полного рендера); превышение → `422`. PDF с подозрительной структурой/паролем → `422`. Защищает от «маленький файл → гигантский разворот».
+- **Никакого URL-fetch (анти-SSRF).** URL-вложения (`source.type=url`) запрещены: backend НЕ выполняет исходящих запросов за содержимым вложения. Только inline base64 — SSRF-вектор устранён by construction.
+- **Redaction.** Содержимое вложений (`attachments[].data`, декодированные байты, текст файлов) **никогда не логируется** — попадает в redaction-allowlist наравне с user-content промпта. В логах — только метаданные (класс, `mediaType`, размер, число). См. [§ Логирование](#логирование-безопасное).
+- **Хранение.** Сырой base64 НЕ персистится в `chat_steps.payload` (только текстовый плейсхолдер, [ADR-020 §3](adr/ADR-020-inline-base64-attachments-mvp.md)) — снижает поверхность утечки данных пользователя из БД.
+
+Полный набор `ATTACHMENT_*` settings — [02-tech-stack.md](02-tech-stack.md) / backend config; дефолты конфигурируемы ([Q-020-2](99-open-questions.md)).
 
 ## Валидация ввода
 - Строгие Pydantic v2 схемы на всех endpoint; `extra='forbid'`.
@@ -119,7 +136,7 @@
 
 ## Логирование (безопасное)
 - Структурированный JSON, correlation id (`requestId`, `sessionId`).
-- Allowlist полей в логах; redaction middleware вырезает заголовок `Authorization`, любые поля `*key*`, `*token*`, `*secret*`, BYOK/StoreKit payload.
+- Allowlist полей в логах; redaction middleware вырезает заголовок `Authorization`, любые поля `*key*`, `*token*`, `*secret*`, BYOK/StoreKit payload, **содержимое вложений (`attachments[].data` и декодированные байты/текст, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md))**.
 - Policy decision log и billing decision log не содержат секретов.
 - **Upstream-ошибки Anthropic** ([TD-014](100-known-tech-debt.md), [modules/chat-orchestrator/03-architecture.md §Логирование upstream-ошибок Anthropic](modules/chat-orchestrator/03-architecture.md#логирование-upstream-ошибок-anthropic-td-014) — **канонический контракт ключей лог-записи**): логировать **разрешено** тело ошибки апстрима. Запись — структурированный JSON, событие `anthropic_upstream_error`, с camelCase-ключами лог-записи `status_code`, `errorType`, `errorMessage`, `anthropicRequestId`, `model`, `exceptionClass`. Значения `errorType`/`errorMessage`/`anthropicRequestId` берутся из ТЕЛА ошибки Anthropic — соответственно `error.type`/`error.message` (источник) и `request_id` SDK; это поля провайдера-источника, а не имена ключей лог-записи. Содержимое тела ошибки — сообщение провайдера, не user-content. **Запрещено** логировать `ANTHROPIC_API_KEY`, BYOK-ключ пользователя и содержимое пользовательских сообщений/тело промпта — даже когда ошибка апстрима связана с ключом (логируется сообщение Anthropic, не сам ключ). Запись проходит через ту же redaction-middleware. Поведение наружу не меняется (502).
 
@@ -147,3 +164,9 @@
 | Массовая анонимная регистрация (Sybil/abuse) | Per-IP rate-limit на `/v1/auth/*`; App Attest/DeviceCheck — post-MVP ([Q-018-1](99-open-questions.md)). |
 | Кража refresh-token | Single-use rotation + reuse-детект → ревокация цепочки устройства; hashed-store, не plaintext (ADR-018). |
 | Подмена чужого `userId` при register | `userId` назначает backend (uuid4/find-by-device); `register`/`token` не принимают `userId` в теле (ADR-018). |
+| Подделка MIME вложения (выдать бинарь за image) | Сверка `type`/`mediaType` с magic bytes декодированного содержимого; рассогласование → `422` (ADR-020). |
+| Memory-DoS через гигантское base64-вложение | Лимиты размера/числа проверяются ДО `b64decode`; повышенный body-лимит только на `/v1/chat/run`; `413`/`422` (ADR-020). Остаточный риск: transport-guard опирается на `Content-Length` ([TD-017](100-known-tech-debt.md)). |
+| PDF decompression/structure bomb | Guard числа страниц PDF (`pypdf`, без полного рендера); подозрительный/защищённый PDF → `422` (ADR-020). Остаточный риск: CPU-spike при парсинге злонамеренного PDF в рамках 8 MB-cap ([TD-004](100-known-tech-debt.md) §TD-004a). |
+| SSRF через URL-вложение | URL-вложения запрещены; backend не фетчит внешний контент, только inline base64 (ADR-020). |
+| Утечка содержимого вложений в логах | Redaction `attachments[].data` и декодированных байт/текста; в логах только метаданные (ADR-020). |
+| Раздувание/утечка байтов вложений из БД | Сырой base64 не персистится в `chat_steps.payload` — только текстовый плейсхолдер (ADR-020 §3). |

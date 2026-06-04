@@ -26,7 +26,7 @@
 | Блок | Состав | Причина отложения |
 |---|---|---|
 | **Спринт 2** | workspaces, snippets | Не критично для первого релиза |
-| **Спринт 3 (остаток)** | attachments / мультимодальность, notifications (хранение токена + push → [TD-011](100-known-tech-debt.md)) | Не критично для первого релиза |
+| **Спринт 3 (остаток)** | двухшаговый upload-модуль `attachments` (таблица `attachments`, [TD-015](100-known-tech-debt.md)) — отложен; notifications (хранение токена + push → [TD-011](100-known-tech-debt.md)) | Не критично для первого релиза. **Мультимодальный ввод (chat-вложения) НЕ в этом блоке — реализован на MVP inline base64 ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)), см. строку 51.** |
 | **Actions / Choose style** | пресеты ([Q-016-1](99-open-questions.md)) | Открытый вопрос; дефолт — клиентские пресеты, backend не нужен |
 | **Web search** | server-side tool ([Q-016-2](99-open-questions.md)) | Блокер: не выбран провайдер поиска и тарификация |
 
@@ -48,7 +48,7 @@
 | **assistant_mode (chat/code) vs billing_mode (credits/byok)** | ✅ **реализовано** (Спринт 1) | chat-orchestrator/preferences (`assistantMode` в `/chat/run`) | ADR-012 | **1** |
 | **Projects-воркспейсы (name/desc/instructions/files/чаты)** | 🔴 | **workspaces** (новый), `workspace_projects`/`workspace_files` | ADR-013 | **2** |
 | **Snippets (Code-режим)** | 🔴 | **snippets** (новый), `snippets` | — | **2** |
-| **Мультимодальный ввод (фото/файлы → Claude vision)** | 🔴 | **attachments** (новый), `attachments`; расширение `/chat/run` | ADR-014 | **3** |
+| **Мультимодальный ввод (фото/файлы → Claude vision)** | 🟢 реализован (MVP, 2026-06-03) | **inline base64 в `/chat/run`** (chat-orchestrator, без отдельного модуля/таблицы; `src/app/chat/attachments.py`); двухшаговый `attachments` отложен ([TD-015](100-known-tech-debt.md)); live-e2e PDF document-блока — после восстановления org Anthropic ([TD-016](100-known-tech-debt.md)) | **ADR-020** (заменяет транспорт ADR-014) | **MVP** |
 | **Покупка токенов (consumable IAP)** | 🔴 | **token-purchase** (новый), reuse ledger/Wallet | ADR-015 | **3** |
 | **Аутентификация / выпуск JWT (онбординг устройства)** | ✅ **реализовано** | **auth** (новый), `auth_devices`/`auth_refresh_tokens` (миграция `0005`) | ADR-018 (закрывает Q-005-1) | **—** |
 | **Каталог инструментов (`GET /v1/tools`)** | ✅ **реализовано** | chat-orchestrator (`src/app/chat/tools.py`) | ADR-019 | **—** |
@@ -64,23 +64,31 @@
 | Preferences ✅ | [modules/preferences/](modules/preferences/README.md) | 1 (реализован) | default_assistant_mode, notif toggle, code defaults |
 | Workspaces | [modules/workspaces/](modules/workspaces/README.md) | 2 | рабочие пространства чатов (≠ website-builder) |
 | Snippets | [modules/snippets/](modules/snippets/README.md) | 2 | сохранённые код-фрагменты |
-| Attachments | [modules/attachments/](modules/attachments/README.md) | 3 | мультимодальные вложения (vision/document) |
+| Attachments | [modules/attachments/](modules/attachments/README.md) | 3 (отложен, [TD-015](100-known-tech-debt.md)) | двухшаговый upload-модуль (таблица `attachments`). **Мультимодальный ввод (vision/document) уже реализован на MVP inline base64 в `/chat/run` ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md), строка 51) — без этого модуля.** |
 | Token Purchase | [modules/token-purchase/](modules/token-purchase/README.md) | 3 | consumable IAP → grant кредитов |
 | Notifications | [modules/notifications/](modules/notifications/README.md) | 3 | toggle + device push-token (push-отправка → TD-011) |
 
 ## Новые ADR (5)
 - [ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md) — `assistant_mode` (chat/code) vs `billing_mode` (credits/byok). Критично: разводит терминологию «mode».
 - [ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md) — workspace-проекты как отдельный модуль, не website-builder `projects`.
-- [ADR-014](adr/ADR-014-multimodal-attachments.md) — двухшаговые вложения (upload → ссылка в /chat/run).
+- [ADR-014](adr/ADR-014-multimodal-attachments.md) — двухшаговые вложения (upload → ссылка в /chat/run). **Транспорт Superseded → [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)** (inline base64 в /chat/run для MVP); двухшаговая модель отложена ([TD-015](100-known-tech-debt.md)).
+- [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md) — мультимодальный ввод inline base64 в /chat/run (MVP), без отдельного модуля/таблицы.
 - [ADR-015](adr/ADR-015-consumable-token-iap.md) — consumable IAP → идемпотентный grant кредитов.
 - [ADR-016](adr/ADR-016-extended-byok-statuses.md) — расширенные BYOK-статусы + активная модель.
 
-## Изменения схемы (миграция `0004`+, expand-only)
+## Изменения схемы (expand-only)
+
+**Применено миграцией `0004` (MVP):**
 - `users.display_name` (profile).
-- `chat_sessions`: `title`, `assistant_mode`, `workspace_project_id`, `is_pinned` (chats/workspaces).
-- Новые enum: `assistant_mode`, `attachment_kind`; расширение enum `byok_key_status` (`validating`/`offline`/`expired`).
-- Новые таблицы: `user_preferences`, `workspace_projects`, `workspace_files`, `snippets`, `attachments`, `device_push_tokens`.
-- Полный DDL — [03-data-model.md](03-data-model.md).
+- `chat_sessions`: `title`, `assistant_mode`, `is_pinned` (chats). **`workspace_project_id` — НЕ в `0004`** (Спринт 2, отдельная будущая миграция).
+- Таблица `user_preferences`.
+- Enum `assistant_mode`; расширение enum `byok_key_status` (`validating`/`offline`/`expired`).
+
+**Спроектировано, на MVP миграцией НЕ создаётся:**
+- `workspace_projects` + `chat_sessions.workspace_project_id` — предпосылка Спринта 2, отдельная будущая миграция (НЕ `0004`).
+- `snippets` (Спринт 2) и `device_push_tokens` (notifications, Спринт 3) — отдельными будущими миграциями (НЕ `0004`).
+- **Отложены ([TD-015](100-known-tech-debt.md)):** `workspace_files`, `attachments` (двухшаговый transport [ADR-014](adr/ADR-014-multimodal-attachments.md) Superseded; chat-вложения MVP — inline base64 [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). Enum `attachment_kind` объявлен в сводном DDL, но миграцией на MVP не применяется.
+- Полный DDL и статусы — [03-data-model.md](03-data-model.md).
 
 ## Приоритизация по спринтам и зависимости
 
@@ -93,13 +101,14 @@
 
 ### Спринт 2 — рабочие пространства и Code-режим (⏳ спроектирован, ожидает реализации)
 Модули: **workspaces**, **snippets**.
-- Зависимость: миграция `0004` (workspace_projects/workspace_files/chat_sessions.workspace_project_id, snippets, attachments-таблица).
-- workspaces Phase 3–4 (файлы-контекст) зависят от `attachments` (таблица в `0004`; upload-endpoint — Спринт 3, но CRUD workspace без файлов реализуем раньше).
-- snippets — независим (только своя таблица).
+- Зависимость: **отдельная будущая миграция** (НЕ `0004`) — `workspace_projects` + `chat_sessions.workspace_project_id` + `snippets`. `0004` создал только `user_preferences` (+ поля `chat_sessions`/`users`).
+- workspaces Phase 3–4 (файлы-контекст) зависят от `workspace_files`+`attachments` — **отложены** ([TD-015](100-known-tech-debt.md), на MVP миграцией не создаются); CRUD workspace без файлов (Phase 1–2) реализуем раньше.
+- snippets — независим (только своя таблица, отдельная будущая миграция).
 
 ### Спринт 3 — ввод и интеграции (⏳ спроектирован, ожидает реализации; частично зависит от ответов пользователя)
-Модули: **attachments**, **token-purchase**, **notifications**.
-- attachments: PDF-extractor в стек, multipart upload, резолв в /chat/run. Разблокирует полноценные workspace-файлы (Спринт 2 Phase 3–4).
+Модули: **attachments** (двухшаговый upload, отложен), **token-purchase**, **notifications**.
+- **Мультимодальный ввод (chat-вложения) — реализован на MVP inline base64 ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)), не входит в этот спринт** (см. строку 51). PDF отдаётся Claude нативным `document`-блоком; `pypdf` — только page-guard (анти-bomb), НЕ extractor; multipart НЕ используется.
+- attachments (двухшаговый upload-модуль, **отложен** [TD-015](100-known-tech-debt.md)): таблица `attachments`, `POST /v1/attachments` для персистируемых файлов-контекста (workspace), резолв ссылок в `/chat/run`. Разблокирует полноценные workspace-файлы (Спринт 2 Phase 3–4). Транспорт прежней редакции — [ADR-014](adr/ADR-014-multimodal-attachments.md) (Superseded).
 - token-purchase: reuse StoreKit verifier + Wallet.grant; [Q-015-1](99-open-questions.md) Closed = вариант B — покупка требует активной подписки (policy-guard перед grant, `403 subscription_required`).
 - notifications: хранение токена/настройки; отправка push → [TD-011](100-known-tech-debt.md) (отдельный поздний проход).
 
