@@ -56,8 +56,16 @@ class ChatRunRequest(StrictModel):
     userId: uuid.UUID = Field(
         description="Идентификатор пользователя. Обязан совпадать с `sub` JWT."
     )
-    projectId: str = Field(
-        min_length=1, description="Идентификатор проекта/приложения на стороне клиента."
+    projectId: str | None = Field(
+        default=None,
+        description=(
+            "Идентификатор проекта website-builder (опционально, ADR-022). Основной поток — "
+            "«чистый чат» без проекта: при отсутствии `projectId` сессия создаётся с "
+            "`project_id = NULL` и server-side `site.*` tools НЕ предлагаются модели. Если задан "
+            "— website-builder доступен (в набор tools входят `site.*`). Фиксируется при создании "
+            "сессии (как `mode`/`assistantMode`); при resume берётся из сессии, поле запроса "
+            "игнорируется. Если присутствует — должен быть непустой строкой."
+        ),
     )
     sessionId: uuid.UUID | None = Field(
         default=None,
@@ -93,6 +101,10 @@ class ChatRunRequest(StrictModel):
 
     @model_validator(mode="after")
     def _check_sizes(self) -> ChatRunRequest:
+        # ADR-022: projectId is optional (default None) → «чистый чат». When present it must be a
+        # non-empty string (a blank projectId is rejected rather than silently treated as NULL).
+        if self.projectId is not None and not self.projectId.strip():
+            raise ValueError("projectId must be a non-empty string when provided")
         settings = get_settings()
         if len(self.message.encode("utf-8")) > settings.size_limit_message:
             raise ValueError("message exceeds size limit")

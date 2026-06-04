@@ -4,6 +4,7 @@
 
 ## chat_sessions
 - `mode` фиксируется при создании, неизменяем на протяжении сессии.
+- `project_id` (**nullable** с миграции `0007`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)) — external project id website-builder; фиксируется при создании, неизменяем. `NULL` → «чистый чат» без website-builder (server-side `site.*` не предлагаются). Непустая строка → website-builder доступен. При resume значение берётся из сессии; `projectId` запроса игнорируется. **НЕ** путать с `workspace_project_id` (workspace, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
 - `updated_at` обновляется на каждом шаге (используется для soft TTL, [Q-001-1](../../99-open-questions.md)).
 
 ## chat_steps

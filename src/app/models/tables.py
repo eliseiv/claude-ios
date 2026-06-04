@@ -153,7 +153,11 @@ class ChatSession(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    project_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # ADR-022 (migration 0007): nullable. NULL = «чистый чат» without website-builder (server-side
+    # site.* tools are NOT offered to Claude); a non-empty string = website-builder available.
+    # Fixed at session creation; on resume it is read from the session (request field ignored).
+    # NOT to be confused with workspace_project_id (workspace, ADR-013).
+    project_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     mode: Mapped[str] = mapped_column(_chat_mode_enum, nullable=False)  # billing_mode (ADR-012)
     # --- Figma-gap extension (migration 0004), chats/preferences modules ---
     title: Mapped[str | None] = mapped_column(Text, nullable=True)

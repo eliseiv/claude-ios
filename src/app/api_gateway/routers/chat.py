@@ -79,6 +79,18 @@ _RUN_RESPONSE_EXAMPLES = {
 }
 
 _RUN_REQUEST_EXAMPLES = {
+    "clean_chat": {
+        "summary": "Чистый чат без projectId (ADR-022)",
+        "description": (
+            "Основной поток — чат-агрегатор без website-builder. `projectId` не указан → сессия "
+            "создаётся без проекта, server-side `site.*` модели не предлагаются."
+        ),
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "message": "Объясни, как работает async/await в Python.",
+            "mode": "credits",
+        },
+    },
     "credits_mode": {
         "summary": "Запуск шага диалога, режим credits",
         "value": {

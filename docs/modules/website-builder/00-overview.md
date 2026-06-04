@@ -4,6 +4,8 @@
 Claude в ходе обычного chat-диалога генерирует статический сайт (HTML/CSS/JS/ассеты). Backend **хранит** файлы
 сайта и отдаёт **превью** по временному signed URL, работающему в любом браузере.
 
+> **Опциональная фича ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)).** Основной поток сервиса — чат-агрегатор без проекта. Website-builder (server-side `site.*`) активируется **только** когда сессия создана с `projectId`; без проекта `site.*` Claude не предлагаются.
+
 ## Scope (этот проход)
 - Хранение: таблицы `projects` + `site_files` (контент в БД на старте, лимиты размера/числа файлов).
 - Server-side tools (`site.*`), исполняемые **backend'ом** в tool-loop ([ADR-011](../../adr/ADR-011-server-side-tools.md)):

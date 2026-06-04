@@ -181,7 +181,7 @@ class ChatOrchestrator:
         self,
         *,
         user_id: uuid.UUID,
-        project_id: str,
+        project_id: str | None,
         session_id: uuid.UUID | None,
         message: str,
         mode: str,
@@ -251,6 +251,8 @@ class ChatOrchestrator:
             billing=_billing_plan(effective_mode, state),
             api_key=api_key,
             system_prompt=system_prompt,
+            # ADR-022 axis A: offer site.* only when the session has a project.
+            has_project=sess.project_id is not None,
             first_turn_user_content=first_turn_content,
         )
 
@@ -348,6 +350,8 @@ class ChatOrchestrator:
             billing=_billing_plan(mode, state),
             api_key=api_key,
             system_prompt=_system_prompt_for(sess.assistant_mode),
+            # ADR-022 axis A: project_id is session-fixed; gate site.* by the session's project.
+            has_project=sess.project_id is not None,
         )
 
     # ---- internals ----
@@ -443,6 +447,7 @@ class ChatOrchestrator:
         billing: _BillingPlan,
         api_key: str | None,
         system_prompt: str,
+        has_project: bool,
         first_turn_user_content: list[dict[str, Any]] | None = None,
     ) -> ChatRunOut:
         # ADR-011: server-side site.* tools are executed by the backend synchronously inside this
@@ -474,7 +479,10 @@ class ChatOrchestrator:
                 result: AnthropicResult = await self._deps.anthropic.create_message(
                     system_prompt=system_prompt,
                     messages=messages,
-                    tools=anthropic_tool_definitions(),
+                    # ADR-022 axis A: in «чистый чат» (no project) site.* (SERVER_SIDE_TOOLS) are
+                    # NOT offered to Claude. Axis B (assistant_mode, Q-012-1) is not yet
+                    # implemented; the effective set = this project gate over current behavior.
+                    tools=anthropic_tool_definitions(include_server_side=has_project),
                     api_key=api_key,
                 )
             except AnthropicAuthError:
@@ -501,6 +509,7 @@ class ChatOrchestrator:
                     message_step_id=message_step_id,
                     result=result,
                     usage=usage,
+                    has_project=has_project,
                 )
                 # Persist the tool_use step + tool_calls + tool_results + audit (no billing here).
                 await self._session.commit()
@@ -544,10 +553,14 @@ class ChatOrchestrator:
         """external_project_id for site.* tools — from chat_sessions.project_id (session context).
 
         Never from model-supplied tool args (IDOR guard, website-builder/05-security.md).
+        ADR-022 defensive-guard: called ONLY for sessions with a project (`project_id IS NOT NULL`);
+        a NULL here is an upstream anomaly (site.* should not have been offered/executed).
         """
         sess = await self._session.get(ChatSession, session_id)
         if sess is None:  # pragma: no cover - session was just created/validated upstream
             raise NotFoundError("session not found")
+        if sess.project_id is None:  # pragma: no cover - guarded by has_project before this call
+            raise UpstreamError("site.* resolution attempted for a project-less session")
         return sess.project_id
 
     async def _finalize_assistant(
@@ -624,6 +637,7 @@ class ChatOrchestrator:
         message_step_id: uuid.UUID,
         result: AnthropicResult,
         usage: dict[str, Any],
+        has_project: bool,
     ) -> _TurnOutcome:
         """Process a tool_use turn (ADR-008/011): persist tool_calls, branch server/client-side.
 
@@ -646,11 +660,23 @@ class ChatOrchestrator:
             usage=usage,
         )
 
-        external_project_id = await self._external_project_id(session_id)
+        # ADR-022 §2/§4 defensive-guard: _external_project_id() (which resolves the project for
+        # site.* execution) is resolved ONLY when the session has a project. Without a project,
+        # site.* were not offered to Claude, so this path is unreachable in normal operation; if
+        # Claude returns a site.* tool_use anyway (upstream anomaly), we must NOT execute it and
+        # must NOT resolve a project — see the per-block guard below.
+        external_project_id = await self._external_project_id(session_id) if has_project else None
         first_client_out: ToolCallOut | None = None
         for block in result.tool_uses:
             tool_name = str(block["name"])
             provider_tool_use_id = str(block["id"])  # raw anthropic "toolu_...", opaque
+
+            # ADR-022 defensive-guard: a server-side site.* tool_use with no project must never be
+            # executed (the tool was not offered; this is an upstream anomaly, treated like an
+            # unknown tool name — ADR-008). Fail before validating args / resolving any project.
+            if tool_name in SERVER_SIDE_TOOLS and not has_project:
+                raise UpstreamError("server-side site.* tool requested for a project-less session")
+
             try:
                 validated_args = validate_tool_args(tool_name, dict(block["input"]))
             except ValueError as exc:
@@ -675,6 +701,9 @@ class ChatOrchestrator:
             )
 
             if tool_name in SERVER_SIDE_TOOLS:
+                # Invariant (ADR-022): reaching here implies has_project is True (the project-less
+                # site.* anomaly raised above), so external_project_id is a resolved string.
+                assert external_project_id is not None  # noqa: S101 - ADR-022 guard invariant
                 await self._execute_server_side_tool(
                     user_id=user_id,
                     session_id=session_id,

@@ -25,6 +25,7 @@
 - `assistant_mode` влияет на **выбор базового system-prompt** оркестратором (chat-режим — обычный ассистент; code-режим — кодовый ассистент с уклоном в технические ответы) и на **состав tool-реестра**, доступного Claude (например, `site.*` и `files.*` уместны в `code`).
 - `assistant_mode` **НЕ влияет** на policy/billing — это ортогональные оси. Любая комбинация (`assistant_mode` × `billing_mode`) допустима.
 - Точный текст base-system-prompt для каждого `assistant_mode` — конфигурируемый шаблон (не хардкод в нескольких местах), единый источник в orchestrator. Конкретные tool-наборы по режиму — [Q-012-1](../99-open-questions.md).
+- **Примечание (cross-ref [ADR-022](ADR-022-optional-project-and-tool-gating.md)):** доступность `site.*` дополнительно гейтится наличием `project_id` (ADR-022) **поверх** фильтра по `assistant_mode`. Фильтр по `assistant_mode` (эта ось) — НЕ единственный фильтр `site.*`: итоговое предложение `site.*` Claude — И-композиция `(assistant_mode допускает site.*) AND (project_id IS NOT NULL)`. См. ADR-022 §2.
 
 ## Consequences
 - Никакой миграции существующего `chat_mode`/`mode` — биллинг и policy не затрагиваются, инварианты ADR-002/006 сохранены.

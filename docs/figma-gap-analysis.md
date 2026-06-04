@@ -18,7 +18,7 @@
 |---|---|---|
 | **Базовый backend** | 9 базовых модулей (7 core + Admin + Website Builder), биллинг, policy, BYOK, tool-loop, preview | ✅ Реализован |
 | **Admin** | `POST /v1/admin/wallet/grant`, `GET /v1/admin/wallet/{userId}` ([ADR-009](adr/ADR-009-admin-token-auth.md)) | ✅ Реализован |
-| **Website Builder** | server-side `site.*` tools, backend-hosted preview ([ADR-010](adr/ADR-010-backend-hosted-preview.md)/[ADR-011](adr/ADR-011-server-side-tools.md)) | ✅ Реализован |
+| **Website Builder** (**опциональная** фича) | server-side `site.*` tools, backend-hosted preview ([ADR-010](adr/ADR-010-backend-hosted-preview.md)/[ADR-011](adr/ADR-011-server-side-tools.md)). Активна только при сессии с `projectId` ([ADR-022](adr/ADR-022-optional-project-and-tool-gating.md)); основной поток — чат-агрегатор без проекта | ✅ Реализован |
 | **Спринт 1** | chats, profile, preferences, расширение BYOK-статусов ([ADR-016](adr/ADR-016-extended-byok-statuses.md)), `assistantMode` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)) | ✅ Реализован |
 | **Token Purchase** | consumable IAP → grant кредитов ([ADR-015](adr/ADR-015-consumable-token-iap.md)), перенесён из Спринта 3 в MVP. `POST /v1/tokens/purchase` + `GET /v1/tokens/products`, идемпотентность по `transactionId`, reuse StoreKit-verifier + `WalletService.grant`, без миграции | ✅ **Реализован (MVP)** — ⏳ доработка policy-guard «требует активной подписки» ([Q-015-1](99-open-questions.md) Closed = вариант B) |
 

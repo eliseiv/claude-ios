@@ -80,7 +80,7 @@ class ChatRepository:
         self,
         *,
         user_id: uuid.UUID,
-        project_id: str,
+        project_id: str | None,
         mode: str,
         session_id: uuid.UUID | None,
         assistant_mode: str = "chat",
@@ -88,9 +88,10 @@ class ChatRepository:
     ) -> SessionContext:
         """Resume an owned, non-expired session or create a new one.
 
-        ``assistant_mode`` (ADR-012) and the auto-generated ``title`` (chats/03) are fixed at
-        creation only — they are a single source of truth and never re-written here for an
-        existing session (rename is handled by the chats module).
+        ``project_id`` (ADR-022), ``assistant_mode`` (ADR-012) and the auto-generated ``title``
+        (chats/03) are fixed at creation only — a single source of truth, never re-written here for
+        an existing session (rename is handled by the chats module). ``project_id=None`` creates a
+        «чистый чат» session (``chat_sessions.project_id = NULL``; ``site.*`` tools not offered).
         """
         if session_id is not None:
             existing = await self.get_session(session_id, user_id)

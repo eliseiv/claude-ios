@@ -159,7 +159,7 @@ Inline base64-вложения ([ADR-020](adr/ADR-020-inline-base64-attachments-
 | Доступ к чужому проекту через превью | `ownerUserId` в подписи + сверка с `projects.user_id`; чужой → `404`. |
 | XSS / доступ к API-origin из preview-контента | Sandbox CSP, `nosniff`, без cookies/credentials, рекомендация отдельного поддомена ([Q-010-3](99-open-questions.md)). |
 | Path-traversal в превью | Нормализация `path`, запрет `..`/абсолютных, lookup по `(project_id, path)` в БД. |
-| Запись в чужой проект моделью | `userId`/`external_project_id` server-side tools берут из контекста сессии, не из args (ADR-011). |
+| Запись в чужой проект моделью | `userId`/`external_project_id` server-side tools берут из контекста сессии, не из args (ADR-011). Дополнительно: при сессии **без `projectId`** (`chat_sessions.project_id IS NULL`, [ADR-022](adr/ADR-022-optional-project-and-tool-gating.md)) `site.*` Claude **не предлагаются** и не исполняются → резолв проекта не происходит, поверхность IDOR по проекту отсутствует по построению. |
 | Утечка приватного ключа подписи JWT | Секрет-менеджер/mounted-файл, redaction, не в образе; ротация через `kid`/JWKS (future) (ADR-018). |
 | Массовая анонимная регистрация (Sybil/abuse) | Per-IP rate-limit на `/v1/auth/*`; App Attest/DeviceCheck — post-MVP ([Q-018-1](99-open-questions.md)). |
 | Кража refresh-token | Single-use rotation + reuse-детект → ревокация цепочки устройства; hashed-store, не plaintext (ADR-018). |

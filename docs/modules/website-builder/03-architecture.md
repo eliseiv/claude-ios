@@ -1,8 +1,10 @@
 # Website Builder — Architecture
 
+> **Опциональность ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)).** Website-builder — необязательная фича. Server-side `site.*` предлагаются Claude **только** когда у сессии есть `chat_sessions.project_id` (сессия создана с `projectId`). В «чистом чате» (`project_id IS NULL`) `site.*` в tool-набор не включаются → нижеописанный tool-loop website-builder не активируется. Гейтинг — [chat-orchestrator/03-architecture.md §Гейтинг site.* tools](../chat-orchestrator/03-architecture.md#гейтинг-site-tools-по-наличию-проекта-adr-022).
+
 ## Размещение
 - Новый пакет `src/app/website/` (service: проекты/файлы, signed URL, лимиты; tool-хэндлеры `site.*`).
-- Tool-хэндлеры регистрируются в каталоге tools Chat Orchestrator как **server-side** ([ADR-011](../../adr/ADR-011-server-side-tools.md)).
+- Tool-хэндлеры регистрируются в каталоге tools Chat Orchestrator как **server-side** ([ADR-011](../../adr/ADR-011-server-side-tools.md)); предлагаются Claude только при наличии проекта у сессии ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)).
 - Публичный роутер `api_gateway/routers/preview.py` (`GET /v1/preview/*`) — без `get_current_user`, со security-заголовками превью.
 
 ## Server-side tool-loop (ADR-011)
@@ -40,7 +42,7 @@ sequenceDiagram
 ## Разрешение проекта
 - При `site.write_file` backend разрешает `projects` по `(user_id, external_project_id)` (idempotent upsert,
   `ux_projects_user_external`): существует → используется, нет → создаётся. `user_id` — из сессии шага (не из args),
-  `external_project_id` — `chat_sessions.project_id` текущей сессии. Так модель не может писать в чужой/произвольный проект.
+  `external_project_id` — `chat_sessions.project_id` текущей сессии (непустой — иначе `site.*` не были бы предложены, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)). Так модель не может писать в чужой/произвольный проект.
 - `site.preview`/`site.list`/`site.read`/`site.delete` требуют существующего проекта владельца; нет → tool `is_error`.
 
 ## Signed URL (ADR-010)

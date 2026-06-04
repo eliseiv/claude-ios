@@ -8,7 +8,7 @@
 ## A. Server-side tools `site.*` (ADR-011)
 
 Исполняет **backend** немедленно в tool-loop ([ADR-011](../../adr/ADR-011-server-side-tools.md)); **НЕ** отдаются клиенту
-как `status=tool_call`. Строгие Pydantic v2 схемы (`extra='forbid'`). domain↔anthropic mapping — точка → подчёркивание
+как `status=tool_call`. **Предлагаются Claude только при наличии `chat_sessions.project_id`** (сессия создана с `projectId`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)); в «чистом чате» отсутствуют. Строгие Pydantic v2 схемы (`extra='forbid'`). domain↔anthropic mapping — точка → подчёркивание
 (дополняет таблицу [chat-orchestrator/02-api-contracts.md](../chat-orchestrator/02-api-contracts.md#имена-tools-доменный-ios-vs-anthropic-формат)).
 
 | Domain-name (внутренний контракт) | Anthropic-name | Класс | Тип |

@@ -14,7 +14,7 @@
 - Браузер пользователя открывает превью по signed URL.
 
 ## Связь project ↔ session
-- `chat_sessions.project_id` (TEXT, уже существует) — клиентский идентификатор проекта в рамках диалога.
+- `chat_sessions.project_id` (TEXT, **nullable** с миграции `0007`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)) — клиентский идентификатор проекта в рамках диалога. `NULL` → «чистый чат» без website-builder: `site.*` не предлагаются Claude, этот модуль не задействуется. Непустая строка → website-builder активен для сессии.
 - Новая таблица `projects` (UUID PK, `user_id` FK, `external_project_id` = строковый клиентский id) — backend-сущность
   хранилища сайта. Связь: server-side tool при первой записи **разрешает/создаёт** `projects`-строку для
   `(user_id, external_project_id)` сессии (см. [03-architecture.md](03-architecture.md#разрешение-проекта)).

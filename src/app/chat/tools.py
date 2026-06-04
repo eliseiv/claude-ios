@@ -311,10 +311,24 @@ def tool_catalog() -> list[dict[str, Any]]:
     return catalog
 
 
-def anthropic_tool_definitions() -> list[dict[str, Any]]:
-    """Tool definitions for the Anthropic messages API (input_schema per tool)."""
+def anthropic_tool_definitions(*, include_server_side: bool = True) -> list[dict[str, Any]]:
+    """Tool definitions for the Anthropic messages API (input_schema per tool).
+
+    ADR-022 (axis A — project presence): when ``include_server_side`` is False, server-side
+    ``site.*`` tools (``SERVER_SIDE_TOOLS``) are EXCLUDED from the offered set — Claude never sees
+    them and cannot call them. The orchestrator passes ``include_server_side=False`` for «чистый
+    чат» sessions (``chat_sessions.project_id IS NULL``) and ``True`` when a project is present.
+
+    Note (Q-012-1 — Open): the orthogonal assistant_mode filter (axis B) is NOT yet implemented in
+    code. Until it is, the effective offer-set = this project_id gate over the current behavior
+    (all client-side tools always offered; site.* gated only by project presence). When axis B
+    lands, it composes by logical AND with this flag.
+    """
     definitions: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
+        if not include_server_side and name in SERVER_SIDE_TOOLS:
+            # Axis A gate: drop site.* when the session has no project (ADR-022 §2).
+            continue
         definitions.append(
             {
                 # BUG-3 forward map: Anthropic requires underscore names; iOS-facing names stay

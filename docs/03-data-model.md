@@ -148,7 +148,7 @@ CREATE TABLE byok_keys (
 CREATE TABLE chat_sessions (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    project_id           TEXT NOT NULL,  -- website-builder external project id (НЕ workspace), см. ADR-013
+    project_id           TEXT,           -- website-builder external project id (НЕ workspace), см. ADR-013. NULLABLE с миграции 0007 (ADR-022): NULL = «чистый чат» без website-builder (site.* не предлагаются); непустая строка = website-builder доступен. Фиксируется при создании сессии.
     mode                 chat_mode NOT NULL,  -- billing_mode (credits|byok), ADR-012
     -- Расширение Figma-gap, миграция 0004 (только title/assistant_mode/is_pinned):
     title                TEXT,           -- заголовок чата (автоген из 1-го сообщения или rename), nullable
@@ -167,6 +167,7 @@ CREATE INDEX ix_sessions_workspace ON chat_sessions (workspace_project_id) WHERE
 ```
 > TTL/expiry сессии — [Q-001-1](99-open-questions.md). Дефолт: «soft TTL 24h по `updated_at`», задаётся на уровне приложения.
 > **Расширение Figma-gap:** `title`/`assistant_mode`/`workspace_project_id`/`is_pinned` — добавлены для экранов Home (список/поиск/rename/pin чатов), Code-режима ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)) и workspace-проектов ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). `project_id` (website-builder) и `workspace_project_id` (рабочее пространство) — **разные поля**, не путать ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). Автогенерация `title` — модуль `chats` ([modules/chats/03-architecture.md](modules/chats/03-architecture.md)).
+> **`project_id` → nullable (миграция `0007`, expand-only, [ADR-022](adr/ADR-022-optional-project-and-tool-gating.md)):** `ALTER TABLE chat_sessions ALTER COLUMN project_id DROP NOT NULL`. Существующие строки сохраняют значение; новые сессии без `projectId` → `NULL` («чистый чат», website-builder отключён, `site.*` не предлагаются Claude). Бэкфилл не требуется; существующие индексы не меняются. `projectId` фиксируется при создании сессии (как `mode`/`assistant_mode`); при resume берётся из сессии.
 
 ### 7. chat_steps
 ```sql

@@ -3,6 +3,8 @@
 ## Топология
 Один deployable: **модульный монолит** на FastAPI (см. [ADR-001](adr/ADR-001-stack-choice.md)). Модули — это внутренние пакеты Python с чёткими границами, а не отдельные сервисы. PostgreSQL — единственное хранилище состояния. Redis — rate limiting и кэш policy/idempotency-меток.
 
+> **Позиционирование ([ADR-022](adr/ADR-022-optional-project-and-tool-gating.md)).** Основная задача сервиса — **агрегатор Claude для iOS («чистый чат»)**: работает без проекта (`projectId` опционален) и без website-инструментов. Генерация сайтов (Website Builder, server-side `site.*`) — **опциональная, второстепенная** фича, активируемая наличием `projectId` у сессии.
+
 ```mermaid
 flowchart TB
     iOS[iOS App] -->|HTTPS + JWT| GW[API Gateway<br/>auth, rate limit, validation]
@@ -19,7 +21,7 @@ flowchart TB
 
     BR[Browser] -->|signed URL| PVGW[/v1/preview/* signed URL]
     PVGW --> WB[Website Builder]
-    ORCH -->|server-side tools site.*| WB
+    ORCH -.->|server-side tools site.*<br/>only if session has projectId| WB
 
     ORCH --> POL
     ORCH --> WAL
@@ -72,7 +74,7 @@ flowchart TB
 | 6 | **BYOK** | Envelope-шифрование пользовательского ключа, toggle, delete, routing генерации на ключ пользователя. | [modules/byok](modules/byok/README.md) |
 | 7 | **Audit** | Запись всех мутирующих tool-действий и billing trace; неизменяемый журнал. | [modules/audit](modules/audit/README.md) |
 | 8 | **Admin** | Операторские действия под изолированной admin-авторизацией ([ADR-009](adr/ADR-009-admin-token-auth.md)): начисление кредитов (`grant`), read-only просмотр кошелька. Тонкая обёртка над Wallet. | [modules/admin](modules/admin/README.md) |
-| 9 | **Website Builder** | Хранение сгенерированных сайтов (`projects`/`site_files`), server-side tools `site.*` ([ADR-011](adr/ADR-011-server-side-tools.md)), backend-hosted preview по signed URL ([ADR-010](adr/ADR-010-backend-hosted-preview.md)). | [modules/website-builder](modules/website-builder/README.md) |
+| 9 | **Website Builder** (**опциональная** фича) | Хранение сгенерированных сайтов (`projects`/`site_files`), server-side tools `site.*` ([ADR-011](adr/ADR-011-server-side-tools.md)), backend-hosted preview по signed URL ([ADR-010](adr/ADR-010-backend-hosted-preview.md)). **Активна только когда сессия создана с `projectId`** ([ADR-022](adr/ADR-022-optional-project-and-tool-gating.md)); основной поток — «чистый чат» без проекта. | [modules/website-builder](modules/website-builder/README.md) |
 | 10 | **Chats** | CRUD/список/поиск/rename/pin/delete чатов + steps-view, поверх `chat_sessions`/`chat_steps`. Не вызывает Anthropic. | [modules/chats](modules/chats/README.md) |
 | 11 | **Profile** | `displayName` + производный человекочитаемый `accountId`. | [modules/profile](modules/profile/README.md) |
 | 12 | **Preferences** | `default_assistant_mode` (chat/code, [ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)), notif toggle, Code-defaults. | [modules/preferences](modules/preferences/README.md) |

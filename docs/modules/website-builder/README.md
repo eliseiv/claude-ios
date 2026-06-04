@@ -1,7 +1,8 @@
 # Module: Website Builder
 
-- Статус: Реализован
+- Статус: Реализован (**опциональная фича**, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md))
 - Ответственность: хранение сгенерированных Claude статических сайтов (`projects`/`site_files`) и backend-hosted превью по временному signed URL. Server-side tools `site.*`, исполняемые backend'ом в tool-loop.
+- **Позиционирование:** основной поток сервиса — чат-агрегатор без проекта; website-builder — необязательная фича, активируется **только** когда сессия создана с `projectId` (иначе `site.*` Claude не предлагаются, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)).
 
 ## Документы
 - [00-overview.md](00-overview.md)
