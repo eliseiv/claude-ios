@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Identity,
     Index,
     LargeBinary,
     String,
@@ -188,6 +189,15 @@ class ChatStep(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
     )
+    # ADR-021 (migration 0006): monotonic global identity. Step order in a session is determined
+    # by `seq` (insertion order), NOT `created_at`. `seq` guarantees tool_use < tool_result for
+    # the server-side tool-loop (same transaction → equal created_at, random UUID tie-break →
+    # orphan tool_result → Anthropic 400, BUG-5). Assigned by the DB on INSERT; never set in code.
+    seq: Mapped[int] = mapped_column(
+        BIGINT,
+        Identity(always=True),
+        nullable=False,
+    )
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
     )
@@ -200,7 +210,8 @@ class ChatStep(Base):
     )
 
     __table_args__ = (
-        Index("ix_steps_session_created", "session_id", "created_at"),
+        # ADR-021: reconstruction / next-step lookup order by seq (NOT created_at).
+        Index("ix_steps_session_seq", "session_id", "seq"),
         Index("ix_steps_message_step", "message_step_id"),
     )
 

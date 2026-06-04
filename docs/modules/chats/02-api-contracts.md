@@ -55,7 +55,7 @@
   ]
 }
 ```
-- `steps` — упорядочены по `created_at` (= `chat_steps`).
+- `steps` — упорядочены по `chat_steps.seq` (монотонный порядок вставки, [ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)), **НЕ** по `created_at` (равен для шагов одной транзакции). `createdAt` отдаётся как информационный timestamp каждого шага.
 - `payload` — content-блоки (assistant text / tool_use / tool_result), как в `chat_steps.payload`.
 
 ## GET /v1/chats/{id}/steps
@@ -79,7 +79,7 @@ Steps-view для UI («N steps»): агрегированные шаги пос
   ]
 }
 ```
-- Источник — `chat_steps` + `tool_calls` по `message_step_id`. `toolName` — доменное имя (с точкой), как в `tool_calls.tool_name`. Никаких секретов/raw provider id наружу.
+- Источник — `chat_steps` + `tool_calls` по `message_step_id`. Порядок шагов внутри message-шага — по `chat_steps.seq` ([ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)), НЕ `created_at`. `toolName` — доменное имя (с точкой), как в `tool_calls.tool_name`. Никаких секретов/raw provider id наружу.
 
 ## PATCH /v1/chats/{id}
 Переименование и/или закрепление.

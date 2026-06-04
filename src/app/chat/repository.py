@@ -133,11 +133,16 @@ class ChatRepository:
         return step
 
     async def list_steps(self, session_id: uuid.UUID) -> list[ChatStep]:
+        # ADR-021: order by the monotonic `seq` (insertion order), NOT (created_at, id).
+        # In the server-side tool-loop tool_use + tool_result are written in one transaction →
+        # equal transaction-time created_at; the UUID-id tie-break is random and could place
+        # tool_result before its tool_use → orphan tool_result → Anthropic 400 (BUG-5). `seq`
+        # guarantees tool_use < tool_result by insertion order.
         return list(
             await self._session.scalars(
                 select(ChatStep)
                 .where(ChatStep.session_id == session_id)
-                .order_by(ChatStep.created_at, ChatStep.id)
+                .order_by(ChatStep.seq.asc())
             )
         )
 
@@ -193,37 +198,39 @@ class ChatRepository:
     ) -> ChatStep | None:
         """For idempotent replay: the assistant step persisted right after a completed tool-result.
 
-        Anchored to the tool-call's ``completed_at`` (the time of the /chat/tool-result
-        transaction), NOT ``created_at``. ``created_at`` is unreliable here: in the /chat/run
-        transaction the initiating tool_use assistant-step and the tool_call get an identical
-        ``now()`` (Postgres ``now()`` = transaction-start time), so a ``created_at``-anchored
-        filter catches the textless tool_use step instead of the later text step. The final
-        assistant text step is written in the /chat/tool-result transaction, where its
-        ``created_at`` equals that transaction's ``completed_at`` and is strictly later than the
-        earlier /chat/run round — so ``>= completed_at`` deterministically selects this round's
-        text step while excluding the prior tool_use step, independent of ``now()`` granularity.
+        ADR-021: anchored to the monotonic ``seq``, NOT ``created_at``. The tool step recording
+        this tool-call's tool_result has a deterministic ``seq``; the next assistant step in this
+        message-step with a strictly greater ``seq`` is the round's continuation. ``created_at`` is
+        unreliable as an order key (transaction-time ``now()`` is equal for steps of one
+        transaction; the UUID-id tie-break is random), so it is not used here.
 
-        Multi-round tool-loop safe: a later round's assistant steps are written in a later
-        transaction (strictly greater ``created_at``), so ASC ``.first()`` returns this round's
-        step. Falls back to the latest assistant step if the tool_call (or its completion
-        timestamp) is unavailable.
+        Multi-round tool-loop safe: a later round's assistant step has a greater ``seq`` than this
+        round's tool step, but the FIRST (smallest seq) assistant step after the anchor is this
+        round's step (ASC ``.first()``). Falls back to the latest assistant step (max seq) if the
+        anchor tool step is unavailable.
         """
-        tool_call = await self._session.get(ToolCall, after_tool_call)
+        anchor_seq = await self._session.scalar(
+            select(ChatStep.seq)
+            .where(
+                ChatStep.session_id == session_id,
+                ChatStep.message_step_id == message_step_id,
+                ChatStep.role == "tool",
+                ChatStep.payload["toolCallId"].astext == str(after_tool_call),
+            )
+            .order_by(ChatStep.seq.asc())
+            .limit(1)
+        )
         query = select(ChatStep).where(
             ChatStep.session_id == session_id,
             ChatStep.message_step_id == message_step_id,
             ChatStep.role == "assistant",
         )
-        if tool_call is not None and tool_call.completed_at is not None:
+        if anchor_seq is not None:
             rows = await self._session.scalars(
-                query.where(ChatStep.created_at >= tool_call.completed_at).order_by(
-                    ChatStep.created_at.asc(), ChatStep.id.asc()
-                )
+                query.where(ChatStep.seq > anchor_seq).order_by(ChatStep.seq.asc())
             )
             return rows.first()
-        rows = await self._session.scalars(
-            query.order_by(ChatStep.created_at.desc(), ChatStep.id.desc())
-        )
+        rows = await self._session.scalars(query.order_by(ChatStep.seq.desc()))
         return rows.first()
 
 

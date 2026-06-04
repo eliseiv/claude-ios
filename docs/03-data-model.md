@@ -172,17 +172,21 @@ CREATE INDEX ix_sessions_workspace ON chat_sessions (workspace_project_id) WHERE
 ```sql
 CREATE TABLE chat_steps (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    seq             BIGINT GENERATED ALWAYS AS IDENTITY,  -- ADR-021: монотонный порядок реконструкции (НЕ created_at); миграция 0006
     session_id      UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
     message_step_id UUID NOT NULL,  -- billing message-step id: единый на пользовательский message-шаг (все его tool-раунды); ключ идемпотентности debit (ADR-006)
     role            chat_role NOT NULL,
-    payload         JSONB NOT NULL,    -- content blocks (assistant text / tool_use / tool_result)
+    payload         JSONB NOT NULL,    -- content blocks (assistant text / tool_use / tool_result), нормализованы (только wire-валидные поля Anthropic; служебные SDK-поля типа `caller` вырезаны — ADR-021)
     usage           JSONB,             -- {inputTokens, outputTokens, model, cacheReadTokens, cacheWriteTokens}
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()  -- информационный timestamp; НЕ порядковый ключ (порядок — по seq, ADR-021)
 );
-CREATE INDEX ix_steps_session_created ON chat_steps (session_id, created_at);
+-- Реконструкция истории и поиск следующего шага сортируют по seq (ADR-021), НЕ по (created_at, id).
+CREATE INDEX ix_steps_session_seq ON chat_steps (session_id, seq);
 CREATE INDEX ix_steps_message_step ON chat_steps (message_step_id);
 ```
+> `seq` ([ADR-021](adr/ADR-021-deterministic-step-order-and-block-normalization.md), миграция `0006`) — глобальный монотонный identity, присваивается БД при INSERT в порядке вставки. **Порядок шагов сессии определяется `seq`, НЕ `created_at`.** `created_at` — transaction-time `now()`: для шагов, записанных в одной транзакции (server-side tool-loop `site.*`, [ADR-011](adr/ADR-011-server-side-tools.md): `tool_use` + `tool_result`), он одинаков, а UUID-tie-break по `id` случаен → раньше давал orphan `tool_result` → Anthropic `400` → `502` (BUG-5). `seq` гарантирует `tool_use` < `tool_result` по порядку вставки. `created_at` остаётся информационным (отдаётся в `steps[].createdAt`).
 > `message_step_id` генерируется Orchestrator в `/chat/run` при старте нового пользовательского message-шага и переиспользуется всеми записями шага (включая ответы после re-entry из `/chat/tool-result`) до финального assistant_message. Это значение передаётся в `Wallet.consume` как `idempotency_key` debit — гарантирует «ровно 1 списание на message-шаг» (ADR-005, ADR-006). Не путать с `requestId` Gateway (per-HTTP-request correlation id).
+> `payload` нормализуется перед персистом ([ADR-021](adr/ADR-021-deterministic-step-order-and-block-normalization.md)): хранятся только wire-валидные поля Anthropic Messages API; служебные поля SDK (`caller` из `block.model_dump()` и любые будущие аннотации) вырезаются, чтобы не реплеиться на wire. Raw `tool_use.id` (`toolu_...`) сохраняется дословно — инвариант [ADR-008](adr/ADR-008-provider-tool-use-id.md) не нарушается.
 
 ### 8. tool_calls
 ```sql
@@ -393,6 +397,8 @@ CREATE INDEX ix_refresh_user_device ON auth_refresh_tokens (user_id, device_id);
 - Идемпотентность списания — `ux_ledger_idempotency (user_id, idempotency_key)`. Для credits-debit `idempotency_key` = `messageStepId` (= `chat_steps.message_step_id`/`tool_calls.message_step_id`), единый на пользовательский message-шаг; гарантирует ровно 1 debit на шаг независимо от числа tool-раундов и re-entry. Это **не** `requestId` Gateway.
 - `users.trial_used` переключается в `TRUE` ровно один раз (атомарный `UPDATE ... WHERE trial_used = FALSE`).
 - **Двойственность tool-id (ADR-008):** `tool_calls.id` (UUID) — публичный доменный `toolCallId` для iOS-контракта; `tool_calls.provider_tool_use_id` (TEXT, `toolu_...`) — внутренний id для согласованности истории Anthropic. Связь 1:1 в пределах записи. Наружу (`toolCall.id` в ответах API, `/chat/tool-result` request) фигурирует **только** доменный UUID; в `tool_result.tool_use_id` запроса к Anthropic — **только** `provider_tool_use_id`. Реплеемые `chat_steps.payload` хранят raw anthropic id и согласованы с `provider_tool_use_id` по построению.
+- **Порядок шагов сессии (ADR-021):** реконструкция истории (`list_steps`) и поиск следующего шага (`next_step_after`) сортируют `chat_steps` по `seq` (монотонный identity), **НЕ** по `(created_at, id)`. `created_at` — информационный transaction-time timestamp, не порядковый ключ (несколько шагов одной транзакции имеют равный `created_at`; UUID-`id` не монотонный). `seq` гарантирует порядок вставки `tool_use` < `tool_result` в server-side tool-loop (устранён orphan tool_result → Anthropic 400, BUG-5).
+- **Нормализация content-блоков (ADR-021):** в `chat_steps.payload` хранятся только wire-валидные поля Anthropic Messages API; служебные поля SDK (`caller` и т.п.) вырезаются перед персистом и не попадают в реплей к Anthropic. Raw `tool_use.id` сохраняется дословно (ADR-008).
 - В `meta`, `payload`, `usage`, `args`, `result` запрещено хранить API-ключи и секреты.
 - Любая FK-зависимая вставка (`subscriptions`/`wallets`/`byok_keys`/`ledger_transactions`/`chat_sessions`/`audit_logs`/`user_preferences`/`workspace_projects`/`snippets`/`attachments`/`device_push_tokens`) выполняется только после того, как строка `users` для `sub` гарантированно существует — обеспечивается ленивым провижинингом в gateway ([ADR-007](adr/ADR-007-lazy-user-provisioning.md)). Прямой FK-violation на отсутствующем `users` — дефект провижининга.
 - **Изоляция расширения (Figma-gap):** `workspace_files` → `workspace_projects` → `users`; `snippets`/`attachments`/`device_push_tokens` → `users` (все FK `ON DELETE CASCADE`). Доступ только владельца (`user_id == sub`). `chat_sessions.workspace_project_id` и `attachments.session_id` — `ON DELETE SET NULL` (чат/сессия переживает удаление workspace/при отвязке).

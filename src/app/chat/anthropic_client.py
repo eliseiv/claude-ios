@@ -25,6 +25,37 @@ from app.observability.metrics import anthropic_upstream_errors_total
 
 _logger = get_logger("app.chat.anthropic")
 
+# ADR-021: wire-valid field allowlist per content-block type for the Anthropic Messages API.
+# block.model_dump() carries non-wire SDK fields (e.g. "caller": {"type": "direct"}) that are
+# garbage on replay and violate the payload-purity invariant. Normalization keeps ONLY these
+# fields per type (allowlist, not point-removal of `caller`) so it is robust to future SDK
+# annotations. Applied ONCE at the persist boundary (when assembling content blocks from the
+# Anthropic response); all later replays read already-clean blocks (hot-path continuation does
+# not re-normalize). Raw tool_use.id is preserved verbatim — ADR-008 invariant.
+_BLOCK_WIRE_FIELDS: dict[str, tuple[str, ...]] = {
+    "text": ("type", "text"),
+    "image": ("type", "source"),
+    "document": ("type", "source"),
+    "tool_use": ("type", "id", "name", "input"),
+    "thinking": ("type", "thinking", "signature"),
+    "redacted_thinking": ("type", "data"),
+}
+
+
+def _normalize_block(block: dict[str, Any]) -> dict[str, Any]:
+    """Strip non-wire SDK fields from one content block by its type's wire allowlist (ADR-021).
+
+    For a known block type, keep only the wire-valid fields present in the block. For an unknown
+    type, drop only confirmed non-wire SDK annotations (``caller``) and keep the rest so no content
+    is lost (forward-compatible with new block types).
+    """
+    block_type = block.get("type")
+    if isinstance(block_type, str) and block_type in _BLOCK_WIRE_FIELDS:
+        allowed = _BLOCK_WIRE_FIELDS[block_type]
+        return {k: block[k] for k in allowed if k in block}
+    # Unknown type: don't lose content — drop only known non-wire SDK fields.
+    return {k: v for k, v in block.items() if k != "caller"}
+
 
 @dataclass(frozen=True)
 class AnthropicUsage:
@@ -227,7 +258,10 @@ class AnthropicClient:
         text_parts: list[str] = []
         tool_uses: list[dict[str, Any]] = []
         for block in message.content:
-            block_dict = block.model_dump()
+            # ADR-021: normalize at the persist boundary — strip non-wire SDK fields (e.g.
+            # `caller`) so chat_steps.payload holds only wire-valid Anthropic blocks and replays
+            # carry no garbage. raw tool_use.id is kept verbatim (ADR-008).
+            block_dict = _normalize_block(block.model_dump())
             content_blocks.append(block_dict)
             if block.type == "text":
                 text_parts.append(block.text)

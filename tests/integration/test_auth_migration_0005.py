@@ -78,18 +78,22 @@ def test_migration_0005_downgrade_drops_only_auth_tables(isolated_pg: str) -> No
     from alembic import command
 
     cfg = _alembic_config(isolated_pg)
-    command.upgrade(cfg, "head")
+    # Pin to the EXPLICIT 0005 revision, not "head": head now advances past 0005 (e.g. 0006
+    # chat_steps.seq, ADR-021), so a relative `downgrade -1` would only undo the newest migration
+    # and leave the auth tables in place. This test validates the 0005 <-> 0004 boundary
+    # specifically, so it targets those exact revisions and is immune to future head changes.
+    command.upgrade(cfg, "0005_embedded_auth_issuer")
     assert {"auth_devices", "auth_refresh_tokens"} <= _table_names(isolated_pg)
 
-    # Roll back exactly one revision (0005 → 0004): the two auth tables disappear, users stays.
-    command.downgrade(cfg, "-1")
+    # Roll back exactly to 0004: the two auth tables disappear, users stays.
+    command.downgrade(cfg, "0004_figma_gap_sprint1")
     after_down = _table_names(isolated_pg)
     assert "auth_devices" not in after_down
     assert "auth_refresh_tokens" not in after_down
     assert "users" in after_down
 
-    # Re-upgrade restores them (reversible).
-    command.upgrade(cfg, "head")
+    # Re-upgrade to 0005 restores them (reversible).
+    command.upgrade(cfg, "0005_embedded_auth_issuer")
     after_up = _table_names(isolated_pg)
     assert {"auth_devices", "auth_refresh_tokens"} <= after_up
 

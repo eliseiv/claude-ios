@@ -456,7 +456,7 @@ Read-only просмотр кошелька для саппорта.
 | `title` | string \| null | заголовок |
 | `assistantMode` | `chat` \| `code` | тип ассистента (assistant_mode) |
 | `mode` | `credits` \| `byok` | режим оплаты сессии (billing_mode) |
-| `steps` | array | упорядоченные шаги |
+| `steps` | array | шаги, упорядоченные по `chat_steps.seq` (порядок вставки, ADR-021); `createdAt` — информационный timestamp |
 | `steps[].id` | string (uuid) | идентификатор шага |
 | `steps[].messageStepId` | string (uuid) | message-шаг (биллинг-ключ) |
 | `steps[].role` | `user` \| `assistant` \| `tool` | роль шага |
