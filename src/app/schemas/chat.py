@@ -180,7 +180,8 @@ class ChatResponse(StrictModel):
     """Ответ chat-endpoint: три взаимоисключающих состояния по полю `status`.
 
     - `status=assistant_message`: есть `assistantMessage`, `usage`; нет `toolCall`, `blockReason`.
-    - `status=tool_call`: есть `toolCall`, `usage`; нет `assistantMessage`, `blockReason`.
+    - `status=tool_call`: есть `toolCall`, `usage`; `assistantMessage` опционален — присутствует,
+      если модель выдала текст вместе с tool_use (текст того же шага); нет `blockReason`.
     - `status=blocked`: есть `blockReason`; нет `assistantMessage`, `toolCall`, `usage`.
 
     `messageStepId`/`stepId` присутствуют при `assistant_message`/`tool_call` и `null` при
@@ -209,7 +210,12 @@ class ChatResponse(StrictModel):
         ),
     )
     assistantMessage: str | None = Field(
-        default=None, description="Текст ответа ассистента (только при `status=assistant_message`)."
+        default=None,
+        description=(
+            "Текст ответа ассистента. При `status=assistant_message` — финальный ответ. При "
+            "`status=tool_call` — опционально текст того же шага, если модель выдала его вместе "
+            "с вызовом инструмента (иначе `null`). При `status=blocked` — `null`."
+        ),
     )
     toolCall: ToolCallSchema | None = Field(
         default=None, description="Запрос на вызов инструмента (только при `status=tool_call`)."

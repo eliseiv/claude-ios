@@ -737,6 +737,11 @@ class ChatOrchestrator:
                 client_out=ChatRunOut(
                     status="tool_call",
                     session_id=session_id,
+                    # ADR-024 §3 / Q-024-1 (variant A): carry the accompanying text of THIS same
+                    # assistant step (the one whose tool_use is returned as toolCall). result.text
+                    # is the concatenation of this turn's text blocks; empty → None (no text). The
+                    # text is no longer dropped — it equals the text blocks of step_id in history.
+                    assistant_message=result.text or None,
                     tool_call=first_client_out,
                     usage=usage,
                     message_step_id=message_step_id,

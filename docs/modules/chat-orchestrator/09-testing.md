@@ -32,6 +32,28 @@
 - **`blocked` → оба `null`:** при `status=blocked` `messageStepId` = `null` и `stepId` = `null` (шаг/ход не создаются — блок до генерации, [ADR-004](../../adr/ADR-004-blocked-http-200.md)).
 - **`stepId`/`messageStepId` ≠ `toolCall.id`:** при `status=tool_call` ни `stepId`, ни `messageStepId` **не равны** `toolCall.id` — это разные идентификаторы (id шага/хода vs доменный `tool_calls.id`, [ADR-008](../../adr/ADR-008-provider-tool-use-id.md)).
 
+## Integration — История: доменная нормализация payload (ADR-024)
+
+Нормативное покрытие нормализации `GET /v1/chats/{id}` → `steps[].payload` ([ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)). Fake Anthropic возвращает `tool_use.id = "toolu_..."` и `tool_use.name` в underscore-формате (инвариант fake, см. выше).
+
+- **Имя — dot, == `/v1/tools`:** `steps[].payload.content[]` с `type=tool_use` отдаёт `name` в доменном dot-формате (`calendar.create_events`), **дословно равном** `name` соответствующего инструмента в `GET /v1/tools` и `toolName` в `GET /v1/chats/{id}/steps`.
+- **id — domain, == `/chat/run` `toolCall.id`:** `tool_use.id` в истории **дословно равен** `toolCall.id`, который `/chat/run` вернул для этого вызова (= `tool_calls.id`), а **не** provider `toolu_...`.
+- **`tool_result.tool_use_id` == тот же domain id:** блок `tool_result` в истории несёт `tool_use_id`, равный domain `tool_calls.id` породившего `tool_use` (та же доменная пара).
+- **Provider id не утекает:** ни в одном блоке ответа `GET /v1/chats/{id}` нет строки `toolu_...`.
+- **Текстовые блоки целы:** `type=text`-блоки и `tool_use.input` отдаются байт-в-байт как в хранилище (не модифицированы).
+- **Полнота шага `[text, tool_use]`:** assistant-шаг, чей `payload.content` содержит и `text`, и `tool_use` (один ход Claude), отдаётся **полностью** — оба блока присутствуют в `steps[].payload.content[]` в исходном порядке. (Опционально: parallel tool use — несколько `tool_use`, каждый со своим domain id.)
+- **Хранение не мутировано:** после отдачи истории `chat_steps.payload` в БД по-прежнему содержит underscore-имя и provider `toolu_...` (нормализация — на копии при сериализации, не in-place); реплей `_build_messages` не сломан.
+- **Без N+1:** карта `provider_tool_use_id → domain id` строится одним запросом на сессию (проверка числа запросов на отдачу истории с многораундовым tool-loop).
+
+### `assistantMessage` при `tool_call` (ADR-024 п.3 / Q-024-1, вариант A)
+
+Нормативное покрытие enrichment `ChatResponse` сопутствующим текстом ([Q-024-1](../../99-open-questions.md) Closed = вариант A, [ADR-024 §Decision п.3](../../adr/ADR-024-history-payload-domain-normalization.md)).
+
+- **Текст + tool_use → assistantMessage непустой:** когда assistant-ход Claude несёт `[text, tool_use]` (fake Anthropic возвращает оба блока в одном сообщении), ответ `/chat/run` (и `/chat/tool-result`) имеет `status=tool_call`, **непустой** `toolCall` (обязателен) И **непустой** `assistantMessage`, равный тексту `text`-блока(ов) того же шага.
+- **tool_use без текста → assistantMessage null:** assistant-ход с одним `tool_use` без `text`-блока → `status=tool_call`, `toolCall` непустой, `assistantMessage = null`/опущен.
+- **Совпадение с историей:** `assistantMessage` при `tool_call` **дословно равен** конкатенации `text`-блоков шага `stepId` в `GET /v1/chats/{id}` → `steps[].payload.content[]` (тот же шаг, на который указывает `ChatResponse.stepId`; нормализация текстовые блоки не меняет).
+- **Обратная совместимость финала/blocked:** при `status=assistant_message` `assistantMessage` = финальный текст (без изменений); при `status=blocked` `assistantMessage = null`.
+
 ## E2E (AC-4)
 - Полный tool-loop: run → tool_call → tool-result → tool_call → ... → assistant_message (≥2 итерации).
 - **Server-side tool-loop continuation (BUG-5 регресс, live):** website-builder `site.*` multi-round tool-loop с реальным Claude → реконструкция диалога корректна (нет orphan tool_result, нет Anthropic 400/502). Покрывается live e2e website-builder после восстановления org Anthropic (см. memory/deployment-state).

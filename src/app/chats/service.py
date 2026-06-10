@@ -7,15 +7,20 @@ domain tool names and human summaries — NEVER raw provider tool_use.id (ADR-00
 
 from __future__ import annotations
 
+import copy
 import datetime
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from app.chat.tools import UnknownToolNameError, to_domain_tool_name
 from app.chats.cursor import ChatCursor, InvalidCursorError
 from app.chats.repository import ChatsRepository
 from app.errors import NotFoundError, ValidationFailedError
 from app.models import ChatSession, ChatStep, ToolCall
+
+logger = logging.getLogger("app.chats.service")
 
 _SUMMARY_MAX_CHARS = 120
 
@@ -130,6 +135,10 @@ class ChatsService:
     async def get_history(self, session_id: uuid.UUID, user_id: uuid.UUID) -> ChatHistoryView:
         session = await self._require_session(session_id, user_id)
         steps = await self._repo.list_steps(session_id)
+        # ADR-024: build the provider_tool_use_id → domain tool_calls.id map ONCE per session (one
+        # query, no N+1). Every tool_use/tool_result block of every step resolves its public id
+        # through this map; provider ids (toolu_...) never surface in the history response.
+        provider_to_domain = await self._repo.provider_id_to_domain_id(session_id)
         return ChatHistoryView(
             id=session.id,
             title=session.title,
@@ -140,7 +149,7 @@ class ChatsService:
                     id=step.id,
                     message_step_id=step.message_step_id,
                     role=step.role,
-                    payload=self._sanitize_payload(step),
+                    payload=self._normalize_payload(step, provider_to_domain),
                     usage=step.usage,
                     created_at=step.created_at,
                 )
@@ -149,15 +158,76 @@ class ChatsService:
         )
 
     @staticmethod
-    def _sanitize_payload(step: ChatStep) -> dict[str, Any]:
-        """Drop internal-only fields from a tool step payload before exposing it (ADR-008).
+    def _normalize_payload(
+        step: ChatStep, provider_to_domain: dict[str, uuid.UUID]
+    ) -> dict[str, Any]:
+        """Normalize a step's stored wire payload to the domain view for the history response.
 
-        Tool steps persist ``providerToolUseId`` (raw ``toolu_...``) for continuation replay; it
-        must never surface in the public history. Other roles' payloads are content blocks only.
+        ADR-024 — applied ONLY at the serialization boundary, on a DEEP COPY: the stored
+        ``chat_steps.payload`` MUST stay wire-valid for Anthropic replay (underscore tool names,
+        provider ``toolu_...`` ids) and is never mutated here. On the copy:
+        - ``providerToolUseId`` (internal, ADR-008) is dropped from the (tool) step payload;
+        - ``tool_use`` blocks: ``name`` underscore→dot via ``to_domain_tool_name``; ``id``
+          (``toolu_...``) → domain ``tool_calls.id`` via the session map;
+        - ``tool_result`` blocks: ``tool_use_id`` (``toolu_...``) → the same domain id;
+        - ``text`` blocks and ``tool_use.input`` are left byte-for-byte unchanged.
+        Defensive (history is read-only, never 500): an unknown tool name or a provider id absent
+        from the map is left as-is and a WARNING is logged (BUG-4 invariant says tool_calls cover
+        every tool_use, so this is an upstream anomaly, not a normal path).
         """
-        payload = dict(step.payload)
+        payload = copy.deepcopy(step.payload)
+        # ADR-008: never expose the raw provider id stored on tool steps.
         payload.pop("providerToolUseId", None)
+        content = payload.get("content")
+        if not isinstance(content, list):
+            return payload
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "tool_use":
+                ChatsService._normalize_tool_use_block(block, provider_to_domain, step)
+            elif block_type == "tool_result":
+                ChatsService._normalize_tool_result_block(block, provider_to_domain, step)
+            # text blocks and tool_use.input are intentionally left unchanged.
         return payload
+
+    @staticmethod
+    def _normalize_tool_use_block(
+        block: dict[str, Any], provider_to_domain: dict[str, uuid.UUID], step: ChatStep
+    ) -> None:
+        raw_name = block.get("name")
+        if isinstance(raw_name, str):
+            try:
+                block["name"] = to_domain_tool_name(raw_name)
+            except UnknownToolNameError:
+                logger.warning(
+                    "history payload: unknown tool name in tool_use block (left as-is)",
+                    extra={"sessionId": str(step.session_id), "stepId": str(step.id)},
+                )
+        provider_id = block.get("id")
+        domain_id = provider_to_domain.get(provider_id) if isinstance(provider_id, str) else None
+        if domain_id is not None:
+            block["id"] = str(domain_id)
+        elif provider_id is not None:
+            logger.warning(
+                "history payload: provider tool_use.id not found in tool_calls map (left as-is)",
+                extra={"sessionId": str(step.session_id), "stepId": str(step.id)},
+            )
+
+    @staticmethod
+    def _normalize_tool_result_block(
+        block: dict[str, Any], provider_to_domain: dict[str, uuid.UUID], step: ChatStep
+    ) -> None:
+        provider_id = block.get("tool_use_id")
+        domain_id = provider_to_domain.get(provider_id) if isinstance(provider_id, str) else None
+        if domain_id is not None:
+            block["tool_use_id"] = str(domain_id)
+        elif provider_id is not None:
+            logger.warning(
+                "history payload: provider tool_use_id not found in tool_calls map (left as-is)",
+                extra={"sessionId": str(step.session_id), "stepId": str(step.id)},
+            )
 
     async def steps_view(
         self,

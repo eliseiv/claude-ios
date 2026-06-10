@@ -153,7 +153,7 @@
 | `sessionId` | string (uuid) | сессия (новая или переданная) |
 | `messageStepId` | string (uuid) \| null | ключ **хода** (один на сообщение, переиспользуется во всех tool-раундах); `null` при `blocked`. Совпадает с `steps[].messageStepId` в истории. ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)) |
 | `stepId` | string (uuid) \| null | id **конкретного** assistant/tool-шага этого ответа; `null` при `blocked`. Совпадает с `steps[].id` в истории `GET /v1/chats/{id}`. ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)) |
-| `assistantMessage` | string, опц. | присутствует при `assistant_message` |
+| `assistantMessage` | string, опц. | присутствует при `assistant_message`; **также при `tool_call`**, если Claude выдал текст вместе с `tool_use` — текст того же assistant-шага (`stepId`); `null`/опущено, если текста не было ([Q-024-1](99-open-questions.md) / [ADR-024](adr/ADR-024-history-payload-domain-normalization.md)) |
 | `toolCall` | object `{ id, name, args }`, опц. | присутствует при `tool_call`; `id` — публичный UUID для последующего `/chat/tool-result` (≠ `stepId`) |
 | `blockReason` | enum, опц. | присутствует при `blocked` (см. [раздел 12](#12-blockreason--справочник)) |
 | `usage` | object `{ inputTokens, outputTokens, model }` | при `assistant_message`/`tool_call`; нет при `blocked` |
@@ -162,7 +162,7 @@
 
 Значения `status`:
 - **`assistant_message`** — финальный текстовый ответ Claude. На этом шаге списывается 1 кредит (для `mode=credits`).
-- **`tool_call`** — Claude запросил исполнение client-side инструмента; iOS обязан исполнить и вернуть результат через `/v1/chat/tool-result`. Кредит на промежуточных tool-раундах не списывается. Server-side инструменты (`site.*`) исполняет backend сам и наружу как `tool_call` не отдаёт.
+- **`tool_call`** — Claude запросил исполнение client-side инструмента; iOS обязан исполнить и вернуть результат через `/v1/chat/tool-result`. Кредит на промежуточных tool-раундах не списывается. Server-side инструменты (`site.*`) исполняет backend сам и наружу как `tool_call` не отдаёт. **Если Claude в том же ходе выдал текст вместе с `tool_use`, он возвращается в `assistantMessage`** (тот же шаг, `stepId`) — клиент может показать «Claude сказал X и вызвал инструмент Y» без запроса истории ([ADR-024](adr/ADR-024-history-payload-domain-normalization.md)).
 - **`blocked`** — генерация запрещена бизнес-правилом; смотри `blockReason`.
 
 **Коды:** `200` (вкл. blocked); `401` (нет JWT); `403` (`userId ≠ sub`); `404` (сессия не найдена); `413` (тело > 12 MB — повышенный лимит этого роута под inline base64-вложения, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)); `422` (схема/`message` > 32 KB/`context` > 64 KB/вложение вне allowlist/невалидный base64/MIME-mismatch/PDF page-guard); `429` (rate limit); `502/5xx` (ошибка Anthropic/внутренняя).

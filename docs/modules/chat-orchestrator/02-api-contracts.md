@@ -51,7 +51,7 @@
   "sessionId": "uuid",
   "messageStepId": "uuid | null",
   "stepId": "uuid | null",
-  "assistantMessage": "string (optional, при assistant_message)",
+  "assistantMessage": "string (optional, при assistant_message; ТАКЖЕ при tool_call, если Claude выдал текст вместе с tool_use — ADR-024 п.3 / Q-024-1)",
   "toolCall": { "id": "uuid", "name": "string", "args": { } },
   "blockReason": "enum (optional, при blocked)",
   "usage": { "inputTokens": 0, "outputTokens": 0, "model": "string" }
@@ -60,11 +60,17 @@
 - `toolCall` присутствует только при `status=tool_call`. `toolCall.id` — **доменный UUID** (`= tool_calls.id`), стабильный публичный идентификатор для iOS и для последующего `/chat/tool-result`. Внутренний Anthropic `tool_use.id` (`toolu_...`) наружу **не** отдаётся (хранится в `tool_calls.provider_tool_use_id`, [ADR-008](../../adr/ADR-008-provider-tool-use-id.md)).
 - `blockReason` присутствует только при `status=blocked`.
 - `usage` присутствует при `assistant_message`/`tool_call` (не при blocked).
+- **`assistantMessage` ([Q-024-1](../../99-open-questions.md) Closed = вариант A, [ADR-024 §Decision п.3](../../adr/ADR-024-history-payload-domain-normalization.md)):**
+  - `status=assistant_message` — финальный текст Claude (как и раньше, без изменений).
+  - `status=tool_call` — **опционально присутствует**: текст из `text`-блоков **того же** assistant-шага, чей `tool_use` вернулся как `toolCall` (тот шаг, на который указывает `stepId`). Значение = текст/конкатенация `text`-блоков этого шага. Если Claude вернул `tool_use` **без** сопутствующего текста — `assistantMessage = null`/опущено. `toolCall` при этом **обязателен** (семантика не меняется); добавление `assistantMessage` аддитивно/обратносовместимо (поле уже опционально-nullable в схеме; новизна — оно теперь может быть НЕ-null при `tool_call`). Backend перестаёт отбрасывать сопутствующий текст (`orchestrator.py:661`) и кладёт его в `assistantMessage`.
+  - `status=blocked` — `assistantMessage = null` (генерация не выполнялась).
+  - **Согласование с историей и [ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md):** `assistantMessage` при `tool_call` = тот же текст, что отдают `text`-блоки `GET /v1/chats/{id}` → `steps[].payload.content[]` шага `stepId` (нормализация истории текстовые блоки не меняет — байт-в-байт хранилище). Инвариант: `ChatResponse.stepId` указывает на этот же assistant-шаг, поэтому run-проекция и история несут один и тот же сопутствующий текст.
 - **`messageStepId` / `stepId` — идентификаторы синхронизации с историей чата ([ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md), nullable).** Позволяют клиенту склеить ответ генерации с шагами `GET /v1/chats/{id}` → `steps[]`. Обе величины уже существуют в orchestrator: `messageStepId` = `chat_steps.message_step_id` (ключ хода, см. §below про генерацию), `stepId` = `chat_steps.id` (PK конкретного шага). Семантика по статусам:
   - `status=assistant_message`: `messageStepId` = ход; `stepId` = `id` финального assistant-шага (= `ChatStepSchema.id` этого шага в истории). **Оба присутствуют.**
   - `status=tool_call`: `messageStepId` = ход; `stepId` = `id` assistant-шага, содержащего `tool_use` (тот шаг истории, чей `payload` несёт этот `tool_use`-блок). `toolCall.id` **остаётся как есть** (provider-независимый доменный id tool-вызова для `/chat/tool-result`) — `toolCall.id` ≠ `stepId`. **Оба присутствуют.**
   - `status=blocked`: `messageStepId = null`, `stepId = null` — блокировка срабатывает в Policy Engine **до** генерации ([ADR-002](../../adr/ADR-002-access-policy-state-machine.md), [ADR-004](../../adr/ADR-004-blocked-http-200.md)), `chat_steps`/ход **не создаются**, ссылаться не на что (согласовано с отсутствием `usage` при blocked).
-- **Инвариант синка (нормативно):** `ChatResponse.messageStepId` / `ChatResponse.stepId` дословно совпадают с `ChatStepSchema.messageStepId` / `ChatStepSchema.id` соответствующего шага в [chats/02-api-contracts.md `GET /v1/chats/{id}` → `steps[]`](../chats/02-api-contracts.md#get-v1chatsid). Аддитивно/обратносовместимо: существующие поля, security, коды, пути не меняются ([ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md)).
+- **Инвариант синка id шага/хода (нормативно):** `ChatResponse.messageStepId` / `ChatResponse.stepId` дословно совпадают с `ChatStepSchema.messageStepId` / `ChatStepSchema.id` соответствующего шага в [chats/02-api-contracts.md `GET /v1/chats/{id}` → `steps[]`](../chats/02-api-contracts.md#get-v1chatsid). Аддитивно/обратносовместимо: существующие поля, security, коды, пути не меняются ([ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md)).
+- **Инвариант синка имени/id инструмента (нормативно, [ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)):** `toolCall.name` (dot) и `toolCall.id` (domain UUID = `tool_calls.id`) этого ответа **дословно совпадают** с `tool_use.name`/`tool_use.id` соответствующего блока в `GET /v1/chats/{id}` → `steps[].payload.content[]` (история нормализует свой сырой wire-payload к доменному виду при отдаче — см. [chats/02-api-contracts.md](../chats/02-api-contracts.md#get-v1chatsid)) и с `name` в `/v1/tools`. Сопутствующий текст при `status=tool_call` (`text`-блок того же шага) в истории доступен полностью и **также** пробрасывается в `ChatResponse.assistantMessage` ([Q-024-1](../../99-open-questions.md) Closed = вариант A): тот же текст того же шага (`stepId`) — см. описание `assistantMessage` выше.
 
 ### Правила
 - Перед генерацией — обязательный вызов Policy Engine (ADR-002).

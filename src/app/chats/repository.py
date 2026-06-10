@@ -199,6 +199,20 @@ class ChatsRepository:
         )
         return {row.id: row for row in rows}
 
+    async def provider_id_to_domain_id(self, session_id: uuid.UUID) -> dict[str, uuid.UUID]:
+        """Map provider_tool_use_id (raw ``toolu_...``) → domain tool_calls.id for a session.
+
+        ADR-024: built with a SINGLE query per session (no N+1) so history payload normalization
+        can resolve every tool_use/tool_result block's id without a per-block lookup. Only the two
+        id columns are selected (no full ORM rows needed for the map).
+        """
+        rows = await self._session.execute(
+            select(ToolCall.provider_tool_use_id, ToolCall.id).where(
+                ToolCall.session_id == session_id
+            )
+        )
+        return dict(rows.tuples().all())
+
     # ---- mutations (metadata only) ----
 
     async def update_metadata(
