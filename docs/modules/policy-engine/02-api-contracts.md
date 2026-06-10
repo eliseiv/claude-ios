@@ -31,7 +31,7 @@
 ### `reasons[]` значения
 Подмножество blockReason enum, **которое умеет вычислять `evaluate` (ADR-002)**: `trial_used | subscription_required | subscription_expired | credits_empty | byok_disabled | byok_invalid | policy_denied`.
 
-**`rate_limited` НЕ входит в `reasons[]`** (BLK-7b). Это gateway-concern: rate-limit выражается исключительно как HTTP `429` на уровне API Gateway. Policy Engine не знает о rate-limit состоянии (оно не часть `PolicyState`), поэтому `reasons[]` строится строго из `evaluate()` и не содержит `rate_limited`. Значение `rate_limited` остаётся в общем blockReason enum (8 значений) для HTTP-слоя и `/chat/run` — см. [ADR-004](../../adr/ADR-004-blocked-http-200.md).
+**`rate_limited` и `max_tokens` НЕ входят в `reasons[]`** (BLK-7b; `max_tokens` — [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). Оба — не до-генерационные policy-причины: `rate_limited` — gateway-concern (HTTP `429`), `max_tokens` — обрыв генерации лимитом output-токенов (выясняется только в ходе вызова Anthropic). Policy Engine не знает ни о rate-limit, ни о truncation-состоянии (не часть `PolicyState`), поэтому `reasons[]` строится строго из `evaluate()` и их не содержит. Оба значения остаются в общем blockReason enum (9 значений) для HTTP-слоя и `/chat/run` — см. [ADR-004](../../adr/ADR-004-blocked-http-200.md).
 
 ### Правила
 - Консистентность с `/chat/run`: `canGenerateCreditsMode`/`canGenerateByokMode` и `reasons[]` вычисляются той же `evaluate` (AC-6). `reasons[]` отражает только бизнес-policy причины (subscription/trial/credits/byok), не транспортный rate-limit.

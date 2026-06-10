@@ -43,6 +43,10 @@ build/
 # Figma design reference screenshots used for the gap-analysis (not backend source).
 # Remove this line if you intend to version the design references.
 screenshot/
+# Ad-hoc screenshots pasted into the repo root during debugging (not source).
+*.jpg
+*.jpeg
+*.png
 
 # ── Agent tooling (multi-agent orchestration kitchen, not the service) ──
 CLAUDE.md

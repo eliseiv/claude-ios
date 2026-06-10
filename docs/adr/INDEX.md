@@ -28,6 +28,7 @@
 | [ADR-022](ADR-022-optional-project-and-tool-gating.md) | Опциональный `projectId` в `/v1/chat/run` + гейтинг `site.*` по наличию проекта (website-builder — опциональная фича; «чистый чат» без проекта) | Accepted | 2026-06-04 |
 | [ADR-023](ADR-023-sync-ids-in-chat-response.md) | Идентификаторы синхронизации в `ChatResponse` (`messageStepId` + `stepId`, nullable при blocked) — склейка ответа генерации с историей чата | Accepted | 2026-06-05 |
 | [ADR-024](ADR-024-history-payload-domain-normalization.md) | Нормализация content-блоков истории `GET /v1/chats/{id}` `steps[].payload` к доменному виду (dot-имя + domain id) при отдаче — хранение/реплей не меняются | Accepted | 2026-06-10 |
+| [ADR-025](ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) | Параллельные client-side tool-вызовы (`toolCalls[]` в `ChatResponse` + батч `/chat/tool-result`, барьер хода) + обработка обрезки по `max_tokens` (`blockReason=max_tokens`, дефолт `ANTHROPIC_MAX_TOKENS=16000`) | Accepted | 2026-06-10 |
 
 ## Ревизии
 

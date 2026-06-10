@@ -46,6 +46,8 @@
 | [adr/ADR-020-inline-base64-attachments-mvp.md](adr/ADR-020-inline-base64-attachments-mvp.md) | Мультимодальный ввод: inline base64-вложения в `/chat/run` (MVP); заменяет транспорт ADR-014 |
 | [adr/ADR-021-deterministic-step-order-and-block-normalization.md](adr/ADR-021-deterministic-step-order-and-block-normalization.md) | Детерминированный порядок шагов (`chat_steps.seq`) + нормализация content-блоков (BUG-5) |
 | [adr/ADR-023-sync-ids-in-chat-response.md](adr/ADR-023-sync-ids-in-chat-response.md) | Id синхронизации в `ChatResponse` (`messageStepId` + `stepId`, nullable при blocked) — склейка ответа генерации с историей чата |
+| [adr/ADR-024-history-payload-domain-normalization.md](adr/ADR-024-history-payload-domain-normalization.md) | Доменная нормализация payload истории `GET /v1/chats/{id}` (dot-имя + domain id) + `assistantMessage` при `tool_call` |
+| [adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) | Параллельные client-side tool-вызовы (`toolCalls[]` + батч `/chat/tool-result`, барьер хода) + обрезка по `max_tokens` (`blockReason=max_tokens`, дефолт `ANTHROPIC_MAX_TOKENS=16000`) |
 
 ### Модули
 | Модуль | Каталог | Статус |

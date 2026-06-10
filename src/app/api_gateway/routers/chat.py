@@ -7,7 +7,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, Header, Request
 
 from app.api_gateway.rate_limit import enforce_chat_limits
-from app.chat.orchestrator import ChatOrchestrator, ChatRunOut
+from app.chat.orchestrator import ChatOrchestrator, ChatRunOut, ToolResultIn
 from app.deps import (
     CurrentUser,
     client_ip,
@@ -28,6 +28,8 @@ router = APIRouter(prefix="/v1/chat", tags=["Chat"])
 # --- Согласованные id для end-to-end tool-loop примеров (run -> tool_call -> tool-result) ---
 _SESSION_ID = "3f1c2a7e-9b54-4d2e-8a11-6c0d5e7f1a23"
 _TOOL_CALL_ID = "a7b9c1d2-3e4f-5061-7283-94a5b6c7d8e9"
+# Second parallel tool-call id for the multi-tool (parallel tool use) example (ADR-025).
+_TOOL_CALL_ID_2 = "f1e2d3c4-b5a6-4978-8c0d-1e2f3a4b5c6d"
 # Один messageStepId на весь ход (стабилен через tool-loop); stepId — у каждого шага свой.
 _MESSAGE_STEP_ID = "b1e2d3c4-5f60-4718-9a2b-3c4d5e6f7081"
 _STEP_ID_TOOL_CALL = "c2f3e4d5-6071-4829-ab3c-4d5e6f708192"
@@ -53,23 +55,36 @@ _RUN_RESPONSE_EXAMPLES = {
         },
     },
     "tool_call": {
-        "summary": "Запрос на вызов инструмента",
+        "summary": "Запрос на вызов инструментов",
         "description": (
-            "Ассистент просит клиента выполнить инструмент на устройстве (здесь — `files.read`). "
-            "Клиент исполняет его и возвращает результат через `POST /v1/chat/tool-result`, "
-            "передав тот же id в `toolCallId`."
+            "Ассистент просит клиента выполнить инструменты на устройстве. `toolCalls[]` содержит "
+            "ВСЕ вызовы хода (здесь — два `files.write` параллельно). Клиент исполняет каждый и "
+            "возвращает результаты батчем через `POST /v1/chat/tool-result`. Поле `toolCall` = "
+            "`toolCalls[0]` (deprecated, читайте `toolCalls[]`)."
         ),
         "value": {
             "status": "tool_call",
             "sessionId": _SESSION_ID,
             "messageStepId": _MESSAGE_STEP_ID,
             "stepId": _STEP_ID_TOOL_CALL,
+            "toolCalls": [
+                {
+                    "id": _TOOL_CALL_ID,
+                    "name": "files.write",
+                    "args": {"path": "index.html", "content": "<!doctype html>…"},
+                },
+                {
+                    "id": _TOOL_CALL_ID_2,
+                    "name": "files.write",
+                    "args": {"path": "style.css", "content": "body{…}"},
+                },
+            ],
             "toolCall": {
                 "id": _TOOL_CALL_ID,
-                "name": "files.read",
-                "args": {"path": "/Documents/notes.md"},
+                "name": "files.write",
+                "args": {"path": "index.html", "content": "<!doctype html>…"},
             },
-            "usage": {"inputTokens": 980, "outputTokens": 64},
+            "usage": {"inputTokens": 980, "outputTokens": 220},
         },
     },
     "blocked": {
@@ -84,6 +99,23 @@ _RUN_RESPONSE_EXAMPLES = {
             "messageStepId": None,
             "stepId": None,
             "blockReason": "credits_empty",
+        },
+    },
+    "blocked_max_tokens": {
+        "summary": "Ответ обрезан лимитом токенов (HTTP 200)",
+        "description": (
+            "Модель не успела завершить ход — ответ обрезан лимитом output-токенов. В отличие от "
+            "policy-блокировки: `usage`/`messageStepId`/`stepId` присутствуют, кредит не списан, "
+            "`toolCalls`/`toolCall` не отдаются. UI: повторить или сократить запрос."
+        ),
+        "value": {
+            "status": "blocked",
+            "sessionId": _SESSION_ID,
+            "messageStepId": _MESSAGE_STEP_ID,
+            "stepId": _STEP_ID_TOOL_CALL,
+            "assistantMessage": "Вот начало лендинга…",
+            "blockReason": "max_tokens",
+            "usage": {"inputTokens": 1240, "outputTokens": 16000},
         },
     },
 }
@@ -137,35 +169,93 @@ _RUN_REQUEST_EXAMPLES = {
 _TOOL_RESULT_RESPONSE_EXAMPLES = {
     "assistant_message": {
         "summary": "Финал tool-loop",
-        "description": "После получения результата инструмента модель выдала итоговый ответ.",
+        "description": (
+            "Барьер хода закрыт (получены результаты на все `toolCalls[]`) — модель выдала "
+            "итоговый ответ."
+        ),
         "value": {
             "status": "assistant_message",
             "sessionId": _SESSION_ID,
             "messageStepId": _MESSAGE_STEP_ID,
             "stepId": _STEP_ID_TOOL_RESULT_FINAL,
-            "assistantMessage": "В файле notes.md перечислены задачи на неделю…",
+            "assistantMessage": "Готово. Лендинг собран из index.html и style.css.",
             "usage": {"inputTokens": 1500, "outputTokens": 210},
+        },
+    },
+    "awaiting_results": {
+        "summary": "Барьер не закрыт — ждём остальные результаты",
+        "description": (
+            "Прислан результат части вызовов хода. `toolCalls[]` — оставшиеся вызовы, по которым "
+            "результаты ещё ожидаются. Модель не вызывается, кредит не списывается, пока барьер "
+            "не закрыт."
+        ),
+        "value": {
+            "status": "tool_call",
+            "sessionId": _SESSION_ID,
+            "messageStepId": _MESSAGE_STEP_ID,
+            "stepId": _STEP_ID_TOOL_CALL,
+            "toolCalls": [
+                {
+                    "id": _TOOL_CALL_ID_2,
+                    "name": "files.write",
+                    "args": {"path": "style.css", "content": "body{…}"},
+                }
+            ],
+            "toolCall": {
+                "id": _TOOL_CALL_ID_2,
+                "name": "files.write",
+                "args": {"path": "style.css", "content": "body{…}"},
+            },
         },
     },
 }
 
 _TOOL_RESULT_REQUEST_EXAMPLES = {
-    "result": {
-        "summary": "Продолжение tool-loop: успешный результат",
+    "batch": {
+        "summary": "Батч результатов на все вызовы хода (рекомендуется)",
+        "description": (
+            "Результаты на все `toolCalls[]` хода одним запросом — барьер закрывается сразу. В "
+            "каждом элементе ровно одно из `result`/`error`."
+        ),
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "sessionId": _SESSION_ID,
+            "results": [
+                {
+                    "toolCallId": _TOOL_CALL_ID,
+                    "result": {"path": "index.html", "bytesWritten": 512},
+                },
+                {
+                    "toolCallId": _TOOL_CALL_ID_2,
+                    "result": {"path": "style.css", "bytesWritten": 64},
+                },
+            ],
+        },
+    },
+    "single_deprecated": {
+        "summary": "Одиночная форма (deprecated)",
+        "description": (
+            "Старая форма `toolCallId` + `result|error` на верхнем уровне. Эквивалентна батчу из "
+            "одного. Поддерживается ради совместимости; используйте `results[]`."
+        ),
         "value": {
             "userId": "11111111-2222-3333-4444-555555555555",
             "sessionId": _SESSION_ID,
             "toolCallId": _TOOL_CALL_ID,
-            "result": {"content": "# Заметки\n- задача 1\n- задача 2"},
+            "result": {"path": "index.html", "bytesWritten": 512},
         },
     },
     "error": {
-        "summary": "Продолжение tool-loop: ошибка инструмента",
+        "summary": "Ошибка исполнения инструмента (батч)",
         "value": {
             "userId": "11111111-2222-3333-4444-555555555555",
             "sessionId": _SESSION_ID,
-            "toolCallId": _TOOL_CALL_ID,
-            "error": {"code": "not_found", "message": "Файл не найден на устройстве"},
+            "results": [
+                {
+                    "toolCallId": _TOOL_CALL_ID,
+                    "error": {"code": "not_found", "message": "Файл не найден на устройстве"},
+                }
+            ],
         },
     },
 }
@@ -183,12 +273,19 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
         if out.tool_call is not None
         else None
     )
+    # ADR-025: surface ALL client-side tool calls of the turn; toolCall (deprecated) = toolCalls[0].
+    tool_calls = (
+        [ToolCallSchema(id=tc.id, name=tc.name, args=tc.args) for tc in out.tool_calls]
+        if out.tool_calls is not None
+        else None
+    )
     return ChatResponse(
         status=out.status,
         sessionId=out.session_id,
         messageStepId=out.message_step_id,
         stepId=out.step_id,
         assistantMessage=out.assistant_message,
+        toolCalls=tool_calls,
         toolCall=tool_call,
         blockReason=out.block_reason,
         usage=out.usage,
@@ -240,11 +337,13 @@ async def chat_run(
 @router.post(
     "/tool-result",
     response_model=ChatResponse,
-    summary="Передать результат инструмента",
+    summary="Передать результаты инструментов",
     description=(
-        "Пришлите результат инструмента из предыдущего `tool_call`: ровно одно из полей "
-        "`result` или `error`. `toolCallId` обязан совпадать с `toolCall.id` из `/v1/chat/run`. "
-        "Обычно возвращает `assistant_message`, может снова запросить `tool_call`. "
+        "Пришлите результаты вызовов из предыдущего `tool_call`. Рекомендуемая форма — батч "
+        "`results[]` (по элементу на каждый `toolCalls[].id`, в каждом ровно одно из "
+        "`result`/`error`); поддерживается deprecated одиночная форма (`toolCallId` + "
+        "`result|error`). Продолжение к модели запускается только когда собраны результаты на все "
+        "вызовы хода (барьер) — иначе ответ снова `tool_call` с оставшимися `toolCalls[]`. "
         "Блокировки приходят с HTTP 200 и полем `blockReason`; технические ошибки — `4xx`/`5xx`."
     ),
     responses={
@@ -266,11 +365,18 @@ async def chat_tool_result(
     ):
         raise RateLimitedError("rate limit exceeded")
 
+    # ADR-025: normalize batch/single forms to a list; map each item's error body to a plain dict.
+    normalized = [
+        ToolResultIn(
+            tool_call_id=item.toolCallId,
+            result=item.result,
+            error=item.error.model_dump() if item.error is not None else None,
+        )
+        for item in body.normalized_results()
+    ]
     out = await orchestrator.tool_result(
         user_id=current.user_id,
         session_id=body.sessionId,
-        tool_call_id=body.toolCallId,
-        result=body.result,
-        error=body.error.model_dump() if body.error is not None else None,
+        results=normalized,
     )
     return _to_response(out)

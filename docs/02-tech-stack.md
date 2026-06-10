@@ -45,6 +45,9 @@
 - Оркестрация: `claude-sonnet-4-5` (значение конфигурируемо через env `ANTHROPIC_MODEL`).
 - Prompt caching: включён через `cache_control` на системном промте и стабильном контексте.
 - Точную модель/версию pin фиксирует Chat Orchestrator config; пользователь BYOK использует ту же модель, но со своим ключом.
+- **`ANTHROPIC_MAX_TOKENS` (output budget на вызов, [ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** дефолт **`16000`** (`src/app/config.py`). Прежний дефолт `4096` был мал для генерации кода/файлов (несколько `files.write` с полным содержимым) → ответ обрезался (`stop_reason="max_tokens"`). `16000` покрывает типовой генеративный ход; вызов остаётся **non-streaming** (`create_message`) — `16000` ниже порога SDK non-streaming-гарда. **Per-instance** в `.env`-контракте (применяется к каждому инстансу мульти-инстанс-деплоя, [ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)). Обрезку по `max_tokens` оркестратор обрабатывает явно (`status=blocked`, `blockReason=max_tokens`, кредит не списывается) — [chat-orchestrator/03-architecture.md §Обработка обрезки](modules/chat-orchestrator/03-architecture.md#обработка-обрезки-по-max_tokens-adr-025). Переход на streaming при дальнейшем росте `max_tokens` — [TD-018](100-known-tech-debt.md).
+- **`ANTHROPIC_TIMEOUT_SECONDS`:** дефолт поднят до **`120`** (с 60) — страховка от ложного `502` по таймауту на длинной non-streaming-генерации при `max_tokens=16000` ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). Конфигурируемо, существенно ниже SDK non-streaming-гарда.
+- `ANTHROPIC_MAX_RETRIES` (дефолт `2`) — без изменений.
 
 ## Инструменты разработки
 | Инструмент | Версия | Роль |

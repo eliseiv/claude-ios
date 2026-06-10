@@ -41,6 +41,12 @@ class BlockReason(str, enum.Enum):
     byok_invalid = "byok_invalid"
     rate_limited = "rate_limited"
     policy_denied = "policy_denied"
+    # ADR-025: response truncated by the output-token limit (stop_reason="max_tokens"). NOT a
+    # policy reason and NOT a gateway concern — it is an orchestration outcome that fires AFTER
+    # generation begins. `evaluate()` never returns it; it is set only by the orchestrator. Unlike
+    # policy reasons it is excluded from /policy/effective.reasons[] (not predictable before
+    # generation), and usage/messageStepId/stepId are present, credit is not debited.
+    max_tokens = "max_tokens"
 
 
 @dataclass(frozen=True)

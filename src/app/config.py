@@ -32,8 +32,13 @@ class Settings(BaseSettings):
     # --- Anthropic ---
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-sonnet-4-5", alias="ANTHROPIC_MODEL")
-    anthropic_max_tokens: int = Field(default=4096, alias="ANTHROPIC_MAX_TOKENS")
-    anthropic_timeout_seconds: float = Field(default=60.0, alias="ANTHROPIC_TIMEOUT_SECONDS")
+    # ADR-025: output budget per call. Raised 4096→16000 so code/file generation (several
+    # files.write with full content) is not truncated by max_tokens. Stays non-streaming; 16000
+    # is below the SDK non-streaming guard. Per-instance in .env (applied to every deploy instance).
+    anthropic_max_tokens: int = Field(default=16000, alias="ANTHROPIC_MAX_TOKENS")
+    # ADR-025: raised 60→120 to avoid a false 502 timeout on a long non-streaming generation at
+    # max_tokens=16000. Configurable; still well below the SDK non-streaming guard.
+    anthropic_timeout_seconds: float = Field(default=120.0, alias="ANTHROPIC_TIMEOUT_SECONDS")
     anthropic_max_retries: int = Field(default=2, alias="ANTHROPIC_MAX_RETRIES")
     # ADR-016: active model reported in BYOK responses when keyStatus=valid. Defaults to a
     # current Claude model; configurable via env. Not a secret (model name).

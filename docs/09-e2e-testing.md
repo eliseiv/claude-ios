@@ -191,7 +191,7 @@ Anthropic; `StoreKit-test` = нужен `STOREKIT_TEST_MODE`; `—` = незав
 > `/policy/effective.reasons[]`. Policy Engine (`evaluate`, ADR-002) оперирует только состоянием
 > subscription/trial/credits/byok и не знает rate-limit состояния, поэтому `reasons[]` строится из
 > `evaluate()` без `rate_limited` — это корректное поведение, код policy не меняется.
-> `rate_limited` остаётся значением **blockReason enum** (8 значений) для HTTP-слоя и `/chat/run`,
+> `rate_limited` остаётся значением **blockReason enum** (9 значений с `max_tokens`, [ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) для HTTP-слоя и `/chat/run`,
 > но из множества возможных значений `/policy/effective.reasons[]` исключён. qa проверяет E2E-BLK-7
 > только по факту HTTP `429`; присутствия `rate_limited` в `/policy/effective` НЕ требуется и НЕ ожидается.
 
@@ -203,6 +203,8 @@ Anthropic; `StoreKit-test` = нужен `STOREKIT_TEST_MODE`; `—` = незав
 | E2E-TOOL-3 | `tool-result` c `error` вместо `result` | backend передаёт Claude `is_error=true`, loop продолжается корректно | **Claude** |
 | E2E-TOOL-4 | `tool-result` с `toolCallId` чужой/несуществующей сессии | `404`/`403` | — |
 | E2E-TOOL-5 | `tool-result` с `result`, нарушающим схему tool | `422` | — |
+| E2E-TOOL-6 | **Parallel tool use ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** промпт, провоцирующий несколько client-side tool_use в одном ходе (напр. два `files.write`) | ответ `tool_call` с `toolCalls[]` (≥2); continuation к Claude **только** после батч `tool-result` на все вызовы (барьер хода); ровно 1 debit на весь ход | **Claude** |
+| E2E-TOOL-7 | **max_tokens-обрезка ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** запрос с искусственно малым `ANTHROPIC_MAX_TOKENS` (через env), провоцирующий `stop_reason="max_tokens"` | `200 status=blocked`, `blockReason=max_tokens`, `usage`/`messageStepId`/`stepId` присутствуют, `toolCalls` отсутствуют, **кредит не списан** | **Claude** |
 
 ### 4.6 BYOK set/toggle/delete + routing (AC-5, BR-4)
 | ID | Сценарий | Ожидание | Зависимость |

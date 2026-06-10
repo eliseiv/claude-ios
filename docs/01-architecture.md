@@ -124,7 +124,7 @@ sequenceDiagram
             W-->>O: newBalance
         end
         O->>AU: audit step (+ tool lifecycle if tool_call)
-        O-->>GW: status (assistant_message|tool_call) + usage
+        O-->>GW: status (assistant_message|tool_call+toolCalls[]|blocked) + usage
         GW-->>C: 200 {status, sessionId, ...}
     end
 ```
@@ -139,14 +139,14 @@ sequenceDiagram
     participant A as Anthropic
     participant AU as Audit
 
-    O-->>C: 200 {status: tool_call, toolCall{id, name, args}}
-    Note over C: клиент исполняет tool локально (files/calendar/reminders)
-    C->>GW: POST /v1/chat/tool-result (toolCallId, result|error)
-    GW->>O: continue(sessionId, toolCallId, result)
-    O->>O: проверка принадлежности toolCallId сессии + идемпотентность
+    O-->>C: 200 {status: tool_call, toolCalls[]{id, name, args}}
+    Note over C: клиент исполняет ВСЕ tool хода локально (files/calendar/reminders)
+    C->>GW: POST /v1/chat/tool-result (results[] — батч на все toolCalls хода)
+    GW->>O: continue(sessionId, results[])
+    O->>O: проверка принадлежности toolCallId сессии + идемпотентность + барьер хода (ADR-025)
     O->>O: восстановить messageStepId из tool_calls.message_step_id (тот же billing-ключ шага)
     O->>AU: audit tool completion (мутирующие действия)
-    O->>A: messages.create (tool_result blocks)
+    O->>A: messages.create (все tool_result blocks хода — при закрытом барьере)
     A-->>O: assistant_message | tool_use
     Note over O,A: финальный assistant_message → consume(requestId=messageStepId) ровно один раз
     O-->>C: 200 {status, ...}

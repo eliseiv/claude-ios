@@ -89,6 +89,7 @@ Steps-view для UI («N steps»): агрегированные шаги пос
 }
 ```
 - Источник — `chat_steps` + `tool_calls` по `message_step_id`. Порядок шагов внутри message-шага — по `chat_steps.seq` ([ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)), НЕ `created_at`. `toolName` — доменное имя (с точкой), как в `tool_calls.tool_name`. Никаких секретов/raw provider id наружу.
+- **Parallel tool use ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** assistant-ход с несколькими `tool_use`-блоками порождает несколько строк `tool_calls` (по одной на вызов) → несколько `kind=tool_call` шагов steps-view одного `messageStepId` (по `toolName` каждого). Это согласуется с `toolCalls[]` ответа `/chat/run` — каждый элемент массива соответствует своему `tool_call`-шагу.
 
 ## PATCH /v1/chats/{id}
 Переименование и/или закрепление.

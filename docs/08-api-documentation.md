@@ -92,7 +92,7 @@ OpenAPI-тексты (`summary`, `description` эндпоинтов, `Field(desc
 
 - В `description` endpoint `/v1/chat/run` и `/v1/chat/tool-result` — абзац на русском: «Блокировка по бизнес-правилам возвращается с HTTP 200 и полем `blockReason` (машиночитаемо). Технические ошибки — 4xx/5xx (см. таблицу кодов)».
 - В общем `description` API (R6) — короткая ссылка на это правило, чтобы интегратор не искал 4xx там, где приходит 200.
-- Поле `blockReason` (в `ChatResponse` и в `reasons[]` `/policy/effective`) описать как enum с расшифровкой **каждого** из 8 значений: что означает и что должен сделать UI. Канонический источник значений — [ADR-004](adr/ADR-004-blocked-http-200.md); документация не вводит новых значений.
+- Поле `blockReason` (в `ChatResponse`; в `reasons[]` `/policy/effective` — подмножество policy-причин, без `rate_limited`/`max_tokens`) описать как enum с расшифровкой **каждого** из 9 значений: что означает и что должен сделать UI. Канонический источник значений — [ADR-004](adr/ADR-004-blocked-http-200.md) (расширен `max_tokens` в [ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); документация не вводит новых значений.
 
 ### Расшифровка blockReason (для описаний полей и общего раздела)
 
@@ -110,9 +110,10 @@ OpenAPI-тексты (`summary`, `description` эндпоинтов, `Field(desc
 ### Дискриминация ответа `/chat/run` и `/chat/tool-result`
 
 Ответ — одна модель `ChatResponse` (`src/app/schemas/chat.py`) с тремя взаимоисключающими состояниями по полю `status`. Документация обязана сделать варианты очевидными:
-- `status=assistant_message`: присутствуют `assistantMessage`, `usage`, `messageStepId`, `stepId`; нет `toolCall`, `blockReason`.
-- `status=tool_call`: присутствуют `toolCall`, `usage`, `messageStepId`, `stepId`; нет `blockReason`. **`assistantMessage` — опционально присутствует**, если Claude выдал текст вместе с `tool_use` (текст того же assistant-шага `stepId`); `null`/опущено, если текста не было ([Q-024-1](99-open-questions.md) / [ADR-024](adr/ADR-024-history-payload-domain-normalization.md)).
-- `status=blocked`: присутствует `blockReason`; `messageStepId`/`stepId` = `null`; нет `assistantMessage`, `toolCall`, `usage`.
+- `status=assistant_message`: присутствуют `assistantMessage`, `usage`, `messageStepId`, `stepId`; нет `toolCall`/`toolCalls`, `blockReason`.
+- `status=tool_call`: присутствуют **`toolCalls[]`** (все client-side tool_use хода) и `toolCall` (= `toolCalls[0]`, deprecated, [ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)), `usage`, `messageStepId`, `stepId`; нет `blockReason`. **`assistantMessage` — опционально присутствует**, если Claude выдал текст вместе с `tool_use` (текст того же assistant-шага `stepId`); `null`/опущено, если текста не было ([Q-024-1](99-open-questions.md) / [ADR-024](adr/ADR-024-history-payload-domain-normalization.md)).
+- `status=blocked` (**policy**, `blockReason ≠ max_tokens`): присутствует `blockReason`; `messageStepId`/`stepId` = `null`; нет `assistantMessage`, `toolCall`/`toolCalls`, `usage`.
+- `status=blocked` + **`blockReason=max_tokens`** (обрезка, [ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)): присутствуют `usage`, `messageStepId`, `stepId` (НЕ null), опционально `assistantMessage` (частичный текст); нет `toolCall`/`toolCalls` (обрезанные tool_use не отдаются). Кредит не списан.
 
 `messageStepId`/`stepId` ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md), nullable) — идентификаторы синхронизации с историей чата: дословно совпадают с `steps[].messageStepId` / `steps[].id` из `GET /v1/chats/{id}` (модуль chats). В `description` поля `stepId` указать: «id шага этого ответа, совпадает со `steps[].id` в истории»; `messageStepId`: «ключ хода (стабилен через tool-loop), совпадает со `steps[].messageStepId`». При `blocked` оба `null` (шаг/ход не создаются — блок до генерации).
 
@@ -148,12 +149,12 @@ OpenAPI-тексты (`summary`, `description` эндпоинтов, `Field(desc
 
 | Endpoint | Обязательные примеры |
 |---|---|
-| `POST /v1/chat/run` | request (`mode=credits`); response `assistant_message`; response `tool_call` (например, `files.read`); response `blocked` (`credits_empty`). |
-| `POST /v1/chat/tool-result` | request с `result` (продолжение tool-loop); request с `error`; response `assistant_message` (финал loop). |
+| `POST /v1/chat/run` | request (`mode=credits`); response `assistant_message`; response `tool_call` с `toolCalls[]` (≥1, напр. `files.read`); response `blocked` (`credits_empty`); response `blocked` (`max_tokens`, [ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) — с `usage`/`stepId`, без `toolCalls`). |
+| `POST /v1/chat/tool-result` | request батч `results[]` (один и несколько результатов хода); request с `error` в элементе; response `assistant_message` (финал loop); response `tool_call` с оставшимися `toolCalls[]` (барьер хода не закрыт, [ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). |
 | `POST /v1/wallet/consume` | request (`amount=1`, `requestId`); response (`newBalance`, `ledgerTxId`). |
 | `POST /v1/byok/set` | request (`apiKey` — плейсхолдер, помечен «не логируется»); response `keyStatus=valid` и `keyStatus=invalid`. |
 
-Tool-loop сценарий описать связно (в `description` тега `Chat` или endpoint `/chat/run`): `run` → `tool_call` → клиент исполняет tool → `tool-result` → `assistant_message`. Использовать согласованные id между примерами `tool_call.id` и `tool-result.toolCallId`, чтобы сценарий читался end-to-end.
+Tool-loop сценарий описать связно (в `description` тега `Chat` или endpoint `/chat/run`): `run` → `tool_call` (`toolCalls[]`) → клиент исполняет **все** tool → `tool-result` (батч `results[]`) → `assistant_message`. Использовать согласованные id между примерами `toolCalls[].id` и `tool-result.results[].toolCallId`, чтобы сценарий читался end-to-end. **Parallel tool use ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** пример `tool_call` рекомендуется показать с ≥2 элементами `toolCalls[]` и соответствующим батч `tool-result` (барьер хода: backend продолжает только когда собраны все результаты). Поле `toolCall` (одиночное) — deprecated, помечать в `description` как «= `toolCalls[0]`, читайте `toolCalls`».
 
 Запрещено в примерах: реальные секреты, реальные JWT, реальные ключи Anthropic, реальные StoreKit payload. Только очевидные плейсхолдеры. Для `apiKey`, `transaction`, `Authorization` — плейсхолдер + пометка о redaction (R7 [05-security.md](05-security.md)).
 

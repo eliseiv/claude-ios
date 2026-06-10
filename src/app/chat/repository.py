@@ -173,6 +173,34 @@ class ChatRepository:
     async def get_tool_call(self, tool_call_id: uuid.UUID) -> ToolCall | None:
         return await self._session.get(ToolCall, tool_call_id)
 
+    async def list_tool_calls_for_step(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID
+    ) -> list[ToolCall]:
+        """All tool_calls of one assistant turn (ADR-025 barrier). Single query, no N+1.
+
+        Ordered by creation order (id is insertion-stable enough here; the orchestrator filters
+        client-side rows and checks their status to decide whether the barrier is closed).
+
+        ``populate_existing=True`` (CRITICAL identity-map fix): ``complete_tool_call()`` flips the
+        status with a raw SQL ``UPDATE ... RETURNING`` that does NOT touch the ORM identity-map, so
+        ToolCall rows already loaded earlier in this session (e.g. via ``get_tool_call`` in
+        ``tool_result``) keep their stale ``status='pending'``. Without this option the barrier
+        SELECT would re-return those cached objects unchanged and the continuation would never run.
+        ``populate_existing`` forces the freshly-SELECTed DB values (status='completed'/'errored')
+        to overwrite the cached attributes, so the barrier sees the actual statuses.
+        """
+        return list(
+            await self._session.scalars(
+                select(ToolCall)
+                .where(
+                    ToolCall.session_id == session_id,
+                    ToolCall.message_step_id == message_step_id,
+                )
+                .order_by(ToolCall.created_at.asc(), ToolCall.id.asc())
+                .execution_options(populate_existing=True)
+            )
+        )
+
     async def complete_tool_call(
         self,
         *,
@@ -180,7 +208,17 @@ class ChatRepository:
         status: str,
         result: dict[str, Any] | None,
     ) -> bool:
-        """Atomic pending → completed/errored. True if this call performed the transition."""
+        """Atomic pending → completed/errored. True if this call performed the transition.
+
+        The raw SQL ``UPDATE`` bypasses the ORM identity-map: any ToolCall instance already loaded
+        in this session keeps a stale ``status='pending'``. The freshness guarantee the ADR-025
+        barrier relies on is provided by ``list_tool_calls_for_step`` (``populate_existing=True``),
+        which re-populates the exact rows the barrier reads from the DB. We intentionally do NOT
+        ``expire`` the cached instance here: an expired ToolCall would lazy-refresh on the next
+        attribute access (e.g. the audit step reading ``tool_name``/``id`` right after this call),
+        and that synchronous refresh outside a greenlet context raises ``MissingGreenlet`` in the
+        async engine.
+        """
         updated = await self._session.scalar(
             text(
                 "UPDATE tool_calls SET status = :status, result = CAST(:result AS JSONB), "
@@ -193,6 +231,27 @@ class ChatRepository:
             },
         )
         return updated is not None
+
+    async def assistant_tool_step_id(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID
+    ) -> uuid.UUID | None:
+        """ADR-025: id of the assistant step carrying the current turn's tool_use blocks.
+
+        For a status=tool_call response on /chat/tool-result with the barrier still open, stepId
+        must point at the assistant step whose payload holds the (still-pending) tool_use blocks —
+        the latest assistant step of this turn (greatest ``seq``). Returns None if absent.
+        """
+        step_id: uuid.UUID | None = await self._session.scalar(
+            select(ChatStep.id)
+            .where(
+                ChatStep.session_id == session_id,
+                ChatStep.message_step_id == message_step_id,
+                ChatStep.role == "assistant",
+            )
+            .order_by(ChatStep.seq.desc())
+            .limit(1)
+        )
+        return step_id
 
     async def next_step_after(
         self, session_id: uuid.UUID, message_step_id: uuid.UUID, after_tool_call: uuid.UUID

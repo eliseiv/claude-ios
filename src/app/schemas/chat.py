@@ -114,29 +114,98 @@ class ToolErrorBody(StrictModel):
     message: str = Field(description="Человекочитаемое описание ошибки инструмента.")
 
 
+class ToolResultItem(StrictModel):
+    """Один элемент батча tool-результатов (ADR-025)."""
+
+    toolCallId: uuid.UUID = Field(
+        description="Идентификатор вызова инструмента — равен `toolCalls[].id` из `/v1/chat/run`."
+    )
+    result: dict[str, Any] | None = Field(
+        default=None,
+        description="Результат исполнения инструмента. В элементе ровно одно из `result`/`error`.",
+    )
+    error: ToolErrorBody | None = Field(
+        default=None,
+        description="Ошибка исполнения инструмента. В элементе ровно одно из `result`/`error`.",
+    )
+
+    @model_validator(mode="after")
+    def _check_one_of(self) -> ToolResultItem:
+        if (self.result is None) == (self.error is None):
+            raise ValueError("exactly one of result/error is required per item")
+        if self.result is not None:
+            import json
+
+            settings = get_settings()
+            if len(json.dumps(self.result).encode("utf-8")) > settings.size_limit_tool_result:
+                raise ValueError("result exceeds size limit")
+        return self
+
+
 class ChatToolResultRequest(StrictModel):
+    """Приём результата(ов) tools (ADR-025).
+
+    Батч-форма (`results[]`) — рекомендуемая: результаты на все `toolCalls[]` одного хода.
+    Одиночная форма (`toolCallId` + `result|error` на верхнем уровне) — **deprecated**,
+    обратная совместимость; нормализуется в батч из одного элемента (`normalized_results`).
+    Указывается ровно одна из двух форм.
+    """
+
     userId: uuid.UUID = Field(
         description="Идентификатор пользователя. Обязан совпадать с `sub` JWT."
     )
     sessionId: uuid.UUID = Field(
         description="Идентификатор сессии, в рамках которой шёл tool-loop."
     )
-    toolCallId: uuid.UUID = Field(
+    # Батч-форма (рекомендуемая, ADR-025).
+    results: list[ToolResultItem] | None = Field(
+        default=None,
         description=(
-            "Идентификатор вызова инструмента — равен `toolCall.id` из ответа `/v1/chat/run`."
+            "Результаты на один или несколько tool-вызовов одного хода. Рекомендуемая форма для "
+            "parallel tool use. В каждом элементе ровно одно из `result`/`error`."
+        ),
+    )
+    # Одиночная форма (deprecated, обратная совместимость).
+    toolCallId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "DEPRECATED (используйте `results[]`). Идентификатор вызова инструмента — равен "
+            "`toolCall.id` из ответа `/v1/chat/run`."
         ),
     )
     result: dict[str, Any] | None = Field(
         default=None,
-        description="Результат исполнения инструмента. Указывается одно из `result`/`error`.",
+        description="DEPRECATED (одиночная форма). Результат исполнения инструмента.",
     )
     error: ToolErrorBody | None = Field(
         default=None,
-        description="Ошибка исполнения инструмента. Указывается ровно одно из `result`/`error`.",
+        description="DEPRECATED (одиночная форма). Ошибка исполнения инструмента.",
     )
 
     @model_validator(mode="after")
     def _check(self) -> ChatToolResultRequest:
+        has_batch = self.results is not None
+        has_single = (
+            self.toolCallId is not None or self.result is not None or self.error is not None
+        )
+        if has_batch == has_single:
+            raise ValueError(
+                "exactly one of batch form (results) or single form "
+                "(toolCallId + result/error) is required"
+            )
+        if has_batch:
+            if not self.results:
+                raise ValueError("results must be a non-empty list")
+            seen: set[uuid.UUID] = set()
+            for item in self.results:
+                # Duplicate toolCallId within one batch → 422 (ADR-025 idempotency rules).
+                if item.toolCallId in seen:
+                    raise ValueError("duplicate toolCallId in batch")
+                seen.add(item.toolCallId)
+            return self
+        # Single (deprecated) form: validate exactly one of result/error + size.
+        if self.toolCallId is None:
+            raise ValueError("toolCallId is required in single form")
         if (self.result is None) == (self.error is None):
             raise ValueError("exactly one of result/error is required")
         if self.result is not None:
@@ -146,6 +215,13 @@ class ChatToolResultRequest(StrictModel):
             if len(json.dumps(self.result).encode("utf-8")) > settings.size_limit_tool_result:
                 raise ValueError("result exceeds size limit")
         return self
+
+    def normalized_results(self) -> list[ToolResultItem]:
+        """Normalize to a batch list (ADR-025): single form → list of one. Order preserved."""
+        if self.results is not None:
+            return self.results
+        assert self.toolCallId is not None  # noqa: S101 - guaranteed by _check
+        return [ToolResultItem(toolCallId=self.toolCallId, result=self.result, error=self.error)]
 
 
 class ToolCallSchema(StrictModel):
@@ -172,20 +248,27 @@ _BLOCK_REASON_DOC = (
     "- `rate_limited` — мягкое превышение лимита оркестрации (жёсткое — `429`). "
     "UI: «слишком часто», предложить повторить позже.\n"
     "- `policy_denied` — общий fallback для непредвиденного состояния Policy Engine. "
-    "UI: generic-сообщение «недоступно», лог/ретрай."
+    "UI: generic-сообщение «недоступно», лог/ретрай.\n"
+    "- `max_tokens` — ответ модели обрезан лимитом output-токенов. В отличие от прочих "
+    "причин — `usage`/`messageStepId`/`stepId` присутствуют, кредит не списан, `toolCall(s)` "
+    "не отдаются. UI: повторить/сократить запрос."
 )
 
 
 class ChatResponse(StrictModel):
     """Ответ chat-endpoint: три взаимоисключающих состояния по полю `status`.
 
-    - `status=assistant_message`: есть `assistantMessage`, `usage`; нет `toolCall`, `blockReason`.
-    - `status=tool_call`: есть `toolCall`, `usage`; `assistantMessage` опционален — присутствует,
-      если модель выдала текст вместе с tool_use (текст того же шага); нет `blockReason`.
-    - `status=blocked`: есть `blockReason`; нет `assistantMessage`, `toolCall`, `usage`.
+    - `status=assistant_message`: есть `assistantMessage`, `usage`; нет `toolCall(s)`,
+      `blockReason`.
+    - `status=tool_call`: есть `toolCalls[]` (все client-side вызовы хода) и `toolCall`
+      (= `toolCalls[0]`, deprecated), `usage`; `assistantMessage` опционален — присутствует, если
+      модель выдала текст вместе с tool_use (текст того же шага); нет `blockReason`.
+    - `status=blocked`: есть `blockReason`; нет `toolCall(s)`. При `blockReason=max_tokens`
+      (ADR-025) `usage`/`messageStepId`/`stepId`/`assistantMessage` присутствуют (ход обрезан после
+      начала генерации); при policy-blocked все они `null`.
 
-    `messageStepId`/`stepId` присутствуют при `assistant_message`/`tool_call` и `null` при
-    `blocked` (шаг/ход не создаются).
+    `messageStepId`/`stepId` присутствуют при `assistant_message`/`tool_call` и при
+    `blocked`+`max_tokens`; `null` при policy-`blocked` (шаг/ход не создаются).
     """
 
     status: Literal["assistant_message", "tool_call", "blocked"] = Field(
@@ -217,8 +300,22 @@ class ChatResponse(StrictModel):
             "с вызовом инструмента (иначе `null`). При `status=blocked` — `null`."
         ),
     )
+    toolCalls: list[ToolCallSchema] | None = Field(
+        default=None,
+        description=(
+            "ВСЕ client-side вызовы инструментов текущего хода (parallel tool use, ADR-025). "
+            "Присутствует только при `status=tool_call`. Клиент обязан исполнить и вернуть "
+            "результаты на все элементы через `/v1/chat/tool-result`. Server-side `site.*` сюда "
+            "не входят."
+        ),
+    )
     toolCall: ToolCallSchema | None = Field(
-        default=None, description="Запрос на вызов инструмента (только при `status=tool_call`)."
+        default=None,
+        description=(
+            "DEPRECATED (читайте `toolCalls[]`). Первый client-side вызов хода (= `toolCalls[0]`). "
+            "Присутствует при `status=tool_call`. На мульти-tool ходе неполон — continuation "
+            "сломается, если читать только его."
+        ),
     )
     blockReason: str | None = Field(default=None, description=_BLOCK_REASON_DOC)
     usage: dict[str, Any] | None = Field(

@@ -54,6 +54,27 @@
 - **Совпадение с историей:** `assistantMessage` при `tool_call` **дословно равен** конкатенации `text`-блоков шага `stepId` в `GET /v1/chats/{id}` → `steps[].payload.content[]` (тот же шаг, на который указывает `ChatResponse.stepId`; нормализация текстовые блоки не меняет).
 - **Обратная совместимость финала/blocked:** при `status=assistant_message` `assistantMessage` = финальный текст (без изменений); при `status=blocked` `assistantMessage = null`.
 
+## Integration — Параллельные tool-вызовы + max_tokens (ADR-025)
+
+Нормативное покрытие [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md). Fake Anthropic возвращает `tool_use.id = "toolu_..."` (инвариант fake).
+
+### Параллельные client-side tool-вызовы (`toolCalls[]`, барьер хода)
+- **Все client-side вызовы surface'ятся:** assistant-ход с ≥2 client-side `tool_use`-блоками (например два `files.write`) → `/chat/run` `status=tool_call`, `toolCalls[]` содержит **все** вызовы (в порядке блоков), каждый со своим domain `id`/`name`/`args`; `toolCall` (одиночный) = `toolCalls[0]`. **Тест должен падать на старой реализации** (`first_client_out` — только первый).
+- **stepId один на ход:** все элементы `toolCalls[]` принадлежат одному `stepId` (assistant-шаг с несколькими `tool_use`-блоками); `messageStepId` — один ход.
+- **Барьер хода — continuation только при всех результатах:** прислать `/chat/tool-result` с результатом **одного** из двух tool-вызовов → ответ снова `status=tool_call` с **оставшимся** `toolCalls[]`, Anthropic **не** вызван, кредит не списан. Прислать результат второго → барьер закрыт → continuation-виток (следующий шаг). Батч-форма (`results=[r1,r2]` в одном запросе) → барьер закрыт сразу.
+- **Server-side в toolCalls[] не попадает:** смешанный ход (`site.write_file` + `files.write`) → `site.*` исполнен на бэке, в `toolCalls[]` только client-side `files.write`; continuation собирает `tool_result` обоих (server-side + client-side) перед `messages.create`.
+- **Идемпотентность:** повторный `toolCallId` (completed) в батче/запросе → результат не перезаписан, continuation не дублируется; дубль `toolCallId` в одном батче → `422`.
+- **Обратная совместимость:** одиночная форма запроса (`toolCallId`+`result|error`) эквивалентна батчу из одного; одиночный `toolCall` в ответе = `toolCalls[0]`.
+- **Биллинг неизменен:** ход с несколькими параллельными tool-вызовами и батч-результатами списывает **ровно 1** кредит на финальном `assistant_message` (идемпотентно по `messageStepId`).
+- **Инвариант синка истории:** `toolCalls[i].name`/`.id` == соответствующий `tool_use`-блок шага `stepId` в `GET /v1/chats/{id}` == `/v1/tools` `name` ([ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)).
+
+### Обрезка по max_tokens (`blockReason=max_tokens`)
+- **stop_reason=max_tokens → blocked(max_tokens):** fake Anthropic возвращает `stop_reason="max_tokens"` c content, содержащим `text` + неполный `tool_use` → `/chat/run` `status=blocked`, `blockReason=max_tokens`. **`toolCall`/`toolCalls` отсутствуют** (неполные tool_use не отдаются). **Тест должен падать на старой реализации** (уходило в `assistant_message`, `toolCall=null`).
+- **id/usage присутствуют (отличие от policy-blocked):** при `blockReason=max_tokens` `messageStepId`/`stepId` — **НЕ** null (ход/обрезанный assistant-шаг созданы), `usage` присутствует; `assistantMessage` = частичный текст (если был).
+- **Кредит не списан:** `mode=credits` ход, оборванный по `max_tokens`, не списывает кредит и не флипает trial (баланс/`trial_used` не меняются).
+- **policy-blocked не регрессировал:** policy-deny (например `credits_empty`) по-прежнему `messageStepId=null`/`stepId=null`/без `usage`.
+- **Дефолт max_tokens:** `ANTHROPIC_MAX_TOKENS` дефолт = `16000` (проверка config-дефолта); `ANTHROPIC_TIMEOUT_SECONDS` дефолт = `120`.
+
 ## E2E (AC-4)
 - Полный tool-loop: run → tool_call → tool-result → tool_call → ... → assistant_message (≥2 итерации).
 - **Server-side tool-loop continuation (BUG-5 регресс, live):** website-builder `site.*` multi-round tool-loop с реальным Claude → реконструкция диалога корректна (нет orphan tool_result, нет Anthropic 400/502). Покрывается live e2e website-builder после восстановления org Anthropic (см. memory/deployment-state).

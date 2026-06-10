@@ -10,39 +10,48 @@
    - `mode=byok` → запросить plaintext ключ у **BYOK Service** (in-memory).
 4. Реконструировать контекст: системный промт (с `cache_control`) + история из `chat_steps` (`list_steps`, **сортировка по `seq` ASC** — монотонный порядок вставки, НЕ `(created_at, id)`; [ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)) + новое сообщение. **При наличии `attachments[]` ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)):** валидировать (allowlist `mediaType`, magic bytes, лимиты до декодирования, base64-валидность, PDF page-guard); собрать Anthropic content-блоки нового user-turn (image/document/text — полные, in-memory); в `chat_steps.payload` записать **лёгкий текстовый плейсхолдер вложения**, НЕ base64 (см. [§ Мультимодальные вложения](#мультимодальные-вложения-inline-base64-adr-020)).
 5. Вызвать **Anthropic** `messages.create` с определением tools и prompt caching. Tool definitions строятся `anthropic_tool_definitions()` с **anthropic-именами** (`files_read`, `calendar_create_events`, …) — см. [02-api-contracts.md §Имена tools](02-api-contracts.md#имена-tools-доменный-ios-vs-anthropic-формат). Anthropic API требует `^[a-zA-Z0-9_-]{1,128}$`; dotted-имя → `400` (BUG-3). **Набор tools фильтруется по наличию `chat_sessions.project_id` ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)):** `project_id IS NULL` → `site.*` (`SERVER_SIDE_TOOLS`) исключаются; `project_id IS NOT NULL` → полный набор. См. [§Гейтинг site.* tools](#гейтинг-site-tools-по-наличию-проекта-adr-022).
-6. Обработать ответ:
-   - `end_turn` (текст) → `status=assistant_message`.
-   - `tool_use` → применить **обратный маппинг** `anthropic-name → domain-name` (`files_read`→`files.read`); создать `tool_calls(status=pending)` с доменным `tool_name`, сгенерированным доменным `id` (UUID) и `provider_tool_use_id = <raw tool_use.id блока>` (`toolu_...`); вернуть `status=tool_call` с типизированным payload, где `toolCall.id` — **доменный UUID**, `toolCall.name` — **доменный формат с точкой**. Raw anthropic `tool_use.id` наружу не отдаётся.
+6. Обработать ответ (диспетчеризация по `stop_reason`, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):
+   - `stop_reason="tool_use"` → ветка tool_use (ниже). **Условие — именно `stop_reason="tool_use"`** (не «есть tool_use-блоки в content»): при `stop_reason="max_tokens"` блоки `tool_use` могут присутствовать в content, но они **неполны** и в эту ветку не идут.
+   - `stop_reason="max_tokens"` (**обрезка**, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) → **НЕ** трактовать как финальный `assistant_message` и **НЕ** выдавать неполные `tool_use`. Персистировать обрезанный assistant-шаг (для истории/диагностики); вернуть `status=blocked`, `blockReason=max_tokens`, с `usage` обрезанного хода, `messageStepId` = ход, `stepId` = id обрезанного шага (НЕ null), `assistantMessage` = частичный текст (если был). **Кредит НЕ списывается** (см. §8). Обрезанные `tool_use`-блоки исключаются из continuation-реплея (re-entry по такому ходу не предусмотрен).
+   - иначе (`end_turn`/`stop_sequence`, текст) → `status=assistant_message`.
+   - **ветка `tool_use`** → применить **обратный маппинг** `anthropic-name → domain-name` (`files_read`→`files.read`); для **каждого** `tool_use`-блока хода создать `tool_calls(status=pending)` с доменным `tool_name`, сгенерированным доменным `id` (UUID) и `provider_tool_use_id = <raw tool_use.id блока>` (`toolu_...`); вернуть `status=tool_call` с **`toolCalls[]`** — все client-side tool-вызовы хода (типизированный payload), где каждый `id` — **доменный UUID**, `name` — **доменный формат с точкой**; `toolCall` (одиночный, deprecated) = `toolCalls[0]`. Server-side `site.*` исполняются на бэке немедленно и в `toolCalls[]` НЕ попадают ([ADR-011](../../adr/ADR-011-server-side-tools.md)). Raw anthropic `tool_use.id` наружу не отдаётся. См. [§Параллельные client-side tool-вызовы](#параллельные-client-side-tool-вызовы-и-барьер-хода-adr-025).
 7. Записать `chat_steps` (assistant, usage с `cacheReadTokens`/`cacheWriteTokens`). `payload` хранит content blocks **нормализованными** ([ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)): raw `tool_use.id` (`toolu_...`) сохраняется дословно — для реплея при continuation (см. [§ Согласованность tool_use.id](#согласованность-tool_useid-в-истории-anthropic-bug-4)), но служебные поля SDK (`caller` из `block.model_dump()`) вырезаются и не попадают в реплей (см. [§ Детерминированный порядок шагов и нормализация payload](#детерминированный-порядок-шагов-и-нормализация-payload-adr-021)). Порядок шага в сессии определяется `chat_steps.seq` (монотонный identity), НЕ `created_at`.
 8. **Списание кредитов** (`mode=credits`, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)):
    - Debit происходит **только** при `status=assistant_message` (успешная финальная генерация),
      **после** записи `chat_steps`.
    - При `status=tool_call` (промежуточный tool-раунд) списание **НЕ выполняется** —
      ждём `tool-result` и продолжения.
+   - При `status=blocked` с `blockReason=max_tokens` (обрезка, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) списание **НЕ выполняется** (обрыв — не успешный финальный assistant_message; trial-flip также не выполняется). Пользователь не платит за оборванную генерацию.
    - Вызов: **Wallet** `consume(idempotency_key=messageStepId, amount=1)` — `messageStepId` передаётся
      в публичное поле `requestId` контракта `/wallet/consume`. `meta` хранит usage(inputTokens/outputTokens/model)
      для аудита (на `amount` не влияет). Затем audit `billing_debit`.
 9. Audit шага.
 
 ## Поток /v1/chat/tool-result
-1. Найти `tool_calls` по `toolCallId` (доменный UUID); проверить `session_id == sessionId` (иначе 404/403). Восстановить `messageStepId` из `tool_calls.message_step_id` (тот же на весь message-шаг; debit на финальном шаге использует его как idempotency key) и `provider_tool_use_id` (raw `toolu_...`).
-2. Идемпотентность: если `status=completed` → вернуть ранее сохранённый следующий шаг, не вызывая Anthropic.
-3. Атомарно `pending → completed/errored`; сохранить `result`.
-4. Audit мутирующего tool-действия (для mutate-tools).
-5. Re-evaluate Policy (доступ мог измениться); продолжить с шага 3 потока run (повторный вызов Anthropic с tool_result блоком). При сборке messages tool_result-блок формируется с `tool_use_id = tool_calls.provider_tool_use_id` (НЕ доменный UUID, НЕ свежий uuid4) — см. [§ Согласованность tool_use.id](#согласованность-tool_useid-в-истории-anthropic-bug-4).
+Принимает **батч** `results[]` (или одиночную deprecated-форму, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)).
+1. Нормализовать вход: одиночная форма → `results = [{toolCallId, result|error}]`. Для **каждого** элемента найти `tool_calls` по `toolCallId` (доменный UUID); проверить `session_id == sessionId` (иначе 404/403) и принадлежность одному ходу (один `message_step_id`); дубль `toolCallId` в батче → `422`. Восстановить `messageStepId` из `tool_calls.message_step_id` (тот же на весь message-шаг; debit на финальном шаге использует его как idempotency key) и `provider_tool_use_id` (raw `toolu_...`) каждого.
+2. Идемпотентность поэлементно: если `tool_call.status` уже `completed/errored` → результат не перезаписывать; если барьер хода уже закрыт и continuation-шаг сохранён → вернуть его, не вызывая Anthropic ([ADR-005](../../adr/ADR-005-idempotency-ledger.md)).
+3. Атомарно для каждого элемента `pending → completed/errored`; сохранить `result`.
+4. Audit мутирующего tool-действия (для mutate-tools), поэлементно.
+5. **Барьер хода ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** собрать множество client-side `tool_calls` этого `message_step_id`. Если **не все** completed/errored → вернуть `status=tool_call` с `toolCalls[]` = оставшиеся (без вызова Anthropic, без биллинга). Если **все** собраны → продолжить (шаг 6).
+6. Re-evaluate Policy (доступ мог измениться); продолжить с шага 3 потока run (повторный вызов Anthropic). При сборке messages **все** `tool_result`-блоки хода (client-side из этого/прошлых батчей + server-side, исполненные на бэке) формируются с `tool_use_id = tool_calls.provider_tool_use_id` (НЕ доменный UUID, НЕ свежий uuid4) — см. [§ Согласованность tool_use.id](#согласованность-tool_useid-в-истории-anthropic-bug-4). Continuation-виток выполняется **один раз** на закрытие барьера.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Policy
-    Policy --> Blocked: deny
+    Policy --> Blocked: deny (policy)
     Policy --> Generate: allow
-    Generate --> AssistantMessage: end_turn
-    Generate --> ToolCall: tool_use
-    ToolCall --> WaitResult
-    WaitResult --> Generate: tool-result (continue)
+    Generate --> AssistantMessage: stop_reason=end_turn
+    Generate --> ToolCall: stop_reason=tool_use (toolCalls[])
+    Generate --> Truncated: stop_reason=max_tokens
+    ToolCall --> WaitResults
+    WaitResults --> WaitResults: tool-result (барьер не закрыт)
+    WaitResults --> Generate: все tool_result собраны (continue)
     AssistantMessage --> [*]
     Blocked --> [*]
+    Truncated --> [*]
 ```
+> `Truncated` = `status=blocked`, `blockReason=max_tokens` ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)): неполные `tool_use` не отдаются, кредит не списывается, `usage`/`stepId` присутствуют. `toolCalls[]` — все client-side вызовы хода; continuation — только при закрытом барьере (все `tool_result` собраны).
 
 ## Маппинг имён tools (BUG-3)
 Anthropic Messages API не принимает точку в имени tool (`^[a-zA-Z0-9_-]{1,128}$`). Чтобы не менять публичный iOS-контракт (доменные имена с точкой, ТЗ §5), вводится двунаправленный статический маппинг `domain ↔ anthropic` (замена `.`↔`_`, таблица — [02-api-contracts.md](02-api-contracts.md#имена-tools-доменный-ios-vs-anthropic-формат)).
@@ -55,6 +64,31 @@ Anthropic Messages API не принимает точку в имени tool (`^
 - За пределами этих двух точек (БД `tool_calls.tool_name`, audit, ответы API, типизация args/result) — **только доменные имена с точкой**.
 - Неизвестное anthropic-имя в ответе Claude → ошибка обработки (upstream-аномалия), не транслируется в iOS как валидный tool.
 - Маппинг — статическая таблица из 8 пар; backend не «угадывает» преобразование строкой, а валидирует по таблице.
+
+## Параллельные client-side tool-вызовы и барьер хода (ADR-025)
+
+Claude в одном assistant-ходе может вернуть **несколько** `tool_use`-блоков (parallel tool use). Хранение это уже поддерживает поблочно ([ADR-008](../../adr/ADR-008-provider-tool-use-id.md): каждый блок → свой `tool_calls` с domain id + `provider_tool_use_id`). [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) распространяет это на публичный ответ и continuation.
+
+**Нормативный контракт:**
+1. **Surface всех client-side tool_use.** `_handle_tool_use` собирает **список** всех client-side `ToolCallOut` хода → `ChatResponse.toolCalls[]` (порядок = порядок блоков ответа Claude). `toolCall` (одиночный, deprecated) = `toolCalls[0]`. Server-side `site.*` исполняются на бэке немедленно и в `toolCalls[]` не попадают ([ADR-011](../../adr/ADR-011-server-side-tools.md)). **Прежний дефект:** `first_client_out` (только первый) — остальные client-side вызовы терялись для клиента → orphan `tool_use` на continuation → Anthropic `400` → `502`.
+2. **Один assistant-шаг.** Все `tool_use`-блоки одного хода → **один** assistant-шаг (`chat_steps`, payload с несколькими блоками). `ChatResponse.stepId` ([ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md)) указывает на этот шаг; все `toolCalls[]` принадлежат ему; `messageStepId` — один ход. `assistantMessage` ([ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)) — сопутствующий `text` того же шага.
+3. **Барьер хода.** Continuation-виток к Anthropic разрешён **только** когда все client-side `tool_use` хода имеют `tool_result` (completed/errored) — иначе orphan `tool_use`. До закрытия барьера `/chat/tool-result` отвечает `status=tool_call` с оставшимися `toolCalls[]`, без вызова Anthropic и без биллинга.
+4. **Смешанный ход (server-side + client-side).** Server-side `site.*` исполнить немедленно (как [ADR-011](../../adr/ADR-011-server-side-tools.md)), записать их `tool_result` на бэке; client-side вернуть в `toolCalls[]` и ждать их результатов. Continuation-виток собирает `messages` со **всеми** `tool_result` хода (server-side + client-side) перед следующим `messages.create`; порядок шагов — по `seq` ([ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)).
+5. **Биллинг неизменен** ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)): 1 кредит = 1 message-step; списание один раз на финальном `assistant_message` хода — **не** на каждый tool и **не** на каждый `/chat/tool-result`.
+
+**Инвариант синка ([ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)):** для каждого `i` `toolCalls[i].name`/`.id` дословно совпадают с соответствующим `tool_use`-блоком шага `stepId` в `GET /v1/chats/{id}` → `steps[].payload.content[]` и с `name` в `/v1/tools`. Provider `toolu_...` наружу не утекает ни в одном из путей.
+
+## Обработка обрезки по max_tokens (ADR-025)
+
+`anthropic_client.create_message` — non-streaming, `max_tokens = ANTHROPIC_MAX_TOKENS`. При недостаточном лимите Claude обрывает ход с `stop_reason="max_tokens"`; в `content` могут быть **неполные** `tool_use`-блоки (например `files.write` без `content`).
+
+**Нормативный контракт ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):**
+1. **Диспетчеризация по `stop_reason`, не по наличию tool_use-блоков.** Ветка tool_use берётся **только** при `stop_reason="tool_use"`. **Прежний дефект:** условие `if stop_reason == "tool_use"` без обработки `max_tokens` → обрезанный ход с tool_use-блоками уходил в else → `status=assistant_message`, `toolCall=null`, неполные `tool_use` молча терялись (но персистились в `chat_steps.payload` как неполные блоки).
+2. **`stop_reason="max_tokens"` → `status=blocked`, `blockReason=max_tokens`** (HTTP 200, [ADR-004](../../adr/ADR-004-blocked-http-200.md)). Неполные `tool_use` наружу **НЕ** отдаются (`toolCall`/`toolCalls` отсутствуют) — `input` неполон, исполнять нельзя.
+3. **Семантика id/usage (отличие от policy-blocked):** `messageStepId` = ход, `stepId` = id обрезанного assistant-шага (**НЕ** null — ход/шаг создаются, Claude сгенерировал контент); `usage` присутствует (реальный usage хода, `outputTokens ≈ max_tokens`); `assistantMessage` = частичный `text` (если был). policy-blocked (deny **до** генерации) остаётся `messageStepId=null`/`stepId=null`/без `usage`.
+4. **Биллинг:** кредит **не** списывается (обрыв — не успешный финальный `assistant_message`); trial-flip не выполняется (см. [§Биллинг кредитов](#биллинг-кредитов-правило-списания) / поток run §8).
+5. **Continuation:** re-entry по `max_tokens`-обрезанному ходу не предусмотрен (исполнять/реплеить неполные `tool_use` нельзя); обрезанный шаг персистится для истории, но его неполные `tool_use`-блоки исключаются из continuation-реплея. Клиентский UX — повторить/сократить запрос.
+6. **Дефолт `ANTHROPIC_MAX_TOKENS=16000`** ([02-tech-stack.md](../../02-tech-stack.md), config + `.env*`, per-instance) делает обрезку редкой; п.2–5 — safety-net, не штатный путь. non-streaming сохраняется на MVP; streaming + partial-tool_use accumulation — [TD-018](../../100-known-tech-debt.md). `ANTHROPIC_TIMEOUT_SECONDS` поднят до 120 под более длинные ходы.
 
 ## Гейтинг site.* tools по наличию проекта (ADR-022)
 
@@ -216,3 +250,4 @@ Anthropic Messages API не принимает точку в имени tool (`^
 ## Конкурентность / TTL
 - Soft TTL сессии 24h ([Q-001-1](../../99-open-questions.md)).
 - Параллельные tool-result на один `toolCallId` разрешаются атомарным переходом статуса (ADR-005).
+- **Параллельные tool-вызовы одного хода** ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)): результаты на разные `toolCallId` хода могут приходить разными `/chat/tool-result` (накопительный путь); каждый — атомарный переход статуса; continuation-виток к Anthropic — один раз при закрытии барьера хода (защищён `messageStepId`-идемпотентностью дебита). Конкурентные батчи, закрывающие барьер одновременно, разрешаются той же идемпотентностью (повторный continuation возвращает сохранённый шаг).

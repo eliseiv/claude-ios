@@ -482,8 +482,8 @@ def test_chat_tool_result_response_examples(openapi_schema: dict[str, Any]) -> N
 def test_chat_tool_result_request_examples(openapi_schema: dict[str, Any]) -> None:
     op = _operation(openapi_schema, "/v1/chat/tool-result", "post")
     names = _request_example_names(op)
-    # R5: request with result and request with error.
-    assert {"result", "error"} <= names, names
+    # R5 (ADR-025): parallel batch, single deprecated form, and an error item.
+    assert {"batch", "single_deprecated", "error"} <= names, names
 
 
 def test_byok_set_examples_valid_and_invalid(openapi_schema: dict[str, Any]) -> None:

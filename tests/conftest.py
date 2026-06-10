@@ -212,6 +212,87 @@ class FakeAnthropicClient:
             tool_uses=[],
         )
 
+    def parallel_tool_result(
+        self,
+        calls: list[tuple[str, dict[str, Any]]],
+        *,
+        text: str = "",
+        tool_ids: list[str] | None = None,
+    ) -> Any:
+        """ADR-025: one assistant turn with MULTIPLE tool_use blocks (parallel tool use).
+
+        ``calls`` is an ordered list of (tool_name, args). content_blocks carry an optional
+        leading text block then one tool_use block per call (in order); tool_uses mirrors them.
+        Each tool_use.id is a realistic ``toolu_...`` (BUG-4 invariant), distinct per block.
+        ``tool_ids`` (optional) pins the provider ids in order.
+        """
+        usage = self._AnthropicUsage(
+            input_tokens=10,
+            output_tokens=5,
+            model="claude-sonnet-4-5",
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+        )
+        content_blocks: list[dict[str, Any]] = []
+        if text:
+            content_blocks.append({"type": "text", "text": text})
+        tool_uses: list[dict[str, Any]] = []
+        for i, (tool_name, args) in enumerate(calls):
+            tid = (
+                tool_ids[i]
+                if tool_ids is not None and i < len(tool_ids)
+                else f"toolu_{uuid.uuid4().hex[:24]}"
+            )
+            block = {"type": "tool_use", "id": tid, "name": tool_name, "input": args}
+            content_blocks.append(block)
+            tool_uses.append({"id": tid, "name": tool_name, "input": args})
+        return self._AnthropicResult(
+            stop_reason="tool_use",
+            content_blocks=content_blocks,
+            usage=usage,
+            text=text,
+            tool_uses=tool_uses,
+        )
+
+    def max_tokens_result(
+        self,
+        *,
+        text: str = "",
+        truncated_tool: tuple[str, dict[str, Any]] | None = None,
+        tool_id: str | None = None,
+        output_tokens: int = 16000,
+    ) -> Any:
+        """ADR-025: a turn TRUNCATED by the output-token limit (stop_reason="max_tokens").
+
+        Mirrors production: content_blocks may carry a partial text block plus an INCOMPLETE
+        tool_use block (e.g. files.write missing ``content``). The orchestrator must NOT execute
+        nor surface these blocks; tool_uses is left empty (no executable tool_use on truncation —
+        the orchestrator dispatches purely on stop_reason). ``output_tokens`` ≈ the max_tokens cap.
+        """
+        usage = self._AnthropicUsage(
+            input_tokens=1240,
+            output_tokens=output_tokens,
+            model="claude-sonnet-4-5",
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+        )
+        content_blocks: list[dict[str, Any]] = []
+        if text:
+            content_blocks.append({"type": "text", "text": text})
+        if truncated_tool is not None:
+            tname, partial_args = truncated_tool
+            tid = tool_id or f"toolu_{uuid.uuid4().hex[:24]}"
+            content_blocks.append(
+                {"type": "tool_use", "id": tid, "name": tname, "input": partial_args}
+            )
+        return self._AnthropicResult(
+            stop_reason="max_tokens",
+            content_blocks=content_blocks,
+            usage=usage,
+            text=text,
+            tool_uses=[],
+        )
+
     def tool_result(self, tool_name: str, args: dict[str, Any], tool_id: str | None = None) -> Any:
         # ADR-008 / BUG-4: the raw Anthropic tool_use.id has the realistic "toolu_..." shape, NOT a
         # UUID. The previous UUID-like default masked BUG-4 (domain uuid4 leaking into

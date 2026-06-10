@@ -53,13 +53,18 @@
   "stepId": "uuid | null",
   "assistantMessage": "string (optional, при assistant_message; ТАКЖЕ при tool_call, если Claude выдал текст вместе с tool_use — ADR-024 п.3 / Q-024-1)",
   "toolCall": { "id": "uuid", "name": "string", "args": { } },
+  "toolCalls": [ { "id": "uuid", "name": "string", "args": { } } ],
   "blockReason": "enum (optional, при blocked)",
   "usage": { "inputTokens": 0, "outputTokens": 0, "model": "string" }
 }
 ```
-- `toolCall` присутствует только при `status=tool_call`. `toolCall.id` — **доменный UUID** (`= tool_calls.id`), стабильный публичный идентификатор для iOS и для последующего `/chat/tool-result`. Внутренний Anthropic `tool_use.id` (`toolu_...`) наружу **не** отдаётся (хранится в `tool_calls.provider_tool_use_id`, [ADR-008](../../adr/ADR-008-provider-tool-use-id.md)).
+- **`toolCalls[]` (множественный, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) присутствует только при `status=tool_call`** — **ВСЕ** client-side tool-вызовы текущего assistant-хода (parallel tool use), в порядке блоков ответа Claude. Каждый элемент `{ id (доменный UUID = tool_calls.id), name (dot), args }`. **Server-side `site.*` в `toolCalls[]` НЕ попадают** (исполняются на бэке в tool-loop, [ADR-011](../../adr/ADR-011-server-side-tools.md)) — массив несёт только client-side (`files.*`/`calendar.*`/`reminders.*`).
+- **`toolCall` (одиночный) — deprecated, обратная совместимость ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)).** Присутствует при `status=tool_call` и **равен `toolCalls[0]`** (первый client-side вызов хода). Корректный клиент обязан читать `toolCalls[]` (на мульти-tool ходе одиночный `toolCall` неполон → continuation сломается). Удаление одиночного поля — отдельным ADR после миграции iOS.
+- `toolCall.id` / `toolCalls[].id` — **доменный UUID** (`= tool_calls.id`), стабильный публичный идентификатор для iOS и для последующего `/chat/tool-result`. Внутренний Anthropic `tool_use.id` (`toolu_...`) наружу **не** отдаётся (хранится в `tool_calls.provider_tool_use_id`, [ADR-008](../../adr/ADR-008-provider-tool-use-id.md)).
+- **Контракт Anthropic tool-loop ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** на КАЖДЫЙ `tool_use` ассистент-хода в следующем витке обязан быть `tool_result`. Поэтому клиент обязан исполнить и вернуть результаты на **все** `toolCalls[]` (см. `/chat/tool-result` батч) — иначе continuation не соберётся (Anthropic `400` → `502`). Одиночный `toolCall` достаточен только когда `len(toolCalls)==1`.
 - `blockReason` присутствует только при `status=blocked`.
-- `usage` присутствует при `assistant_message`/`tool_call` (не при blocked).
+- `usage` присутствует при `assistant_message`/`tool_call`, **а также при `blocked` с `blockReason=max_tokens`** ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); при policy-blocked (генерация не выполнялась) — отсутствует.
+- **`status=blocked` + `blockReason=max_tokens` (обрезка по лимиту output-токенов, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** Claude обрезан на `ANTHROPIC_MAX_TOKENS` (`stop_reason="max_tokens"`); обрезанные `tool_use` **неполны** и наружу **НЕ** отдаются (`toolCall`/`toolCalls` отсутствуют). В отличие от policy-blocked: `messageStepId`/`stepId` **НЕ null** (ход и обрезанный assistant-шаг созданы), `usage` присутствует, `assistantMessage` — частичный текст хода (если был). **Кредит НЕ списывается** (обрыв — не успешный финальный `assistant_message`, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Клиенту рекомендуется повторить/сократить запрос. С дефолтом `ANTHROPIC_MAX_TOKENS=16000` кейс редкий (safety-net).
 - **`assistantMessage` ([Q-024-1](../../99-open-questions.md) Closed = вариант A, [ADR-024 §Decision п.3](../../adr/ADR-024-history-payload-domain-normalization.md)):**
   - `status=assistant_message` — финальный текст Claude (как и раньше, без изменений).
   - `status=tool_call` — **опционально присутствует**: текст из `text`-блоков **того же** assistant-шага, чей `tool_use` вернулся как `toolCall` (тот шаг, на который указывает `stepId`). Значение = текст/конкатенация `text`-блоков этого шага. Если Claude вернул `tool_use` **без** сопутствующего текста — `assistantMessage = null`/опущено. `toolCall` при этом **обязателен** (семантика не меняется); добавление `assistantMessage` аддитивно/обратносовместимо (поле уже опционально-nullable в схеме; новизна — оно теперь может быть НЕ-null при `tool_call`). Backend перестаёт отбрасывать сопутствующий текст (`orchestrator.py:661`) и кладёт его в `assistantMessage`.
@@ -68,7 +73,8 @@
 - **`messageStepId` / `stepId` — идентификаторы синхронизации с историей чата ([ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md), nullable).** Позволяют клиенту склеить ответ генерации с шагами `GET /v1/chats/{id}` → `steps[]`. Обе величины уже существуют в orchestrator: `messageStepId` = `chat_steps.message_step_id` (ключ хода, см. §below про генерацию), `stepId` = `chat_steps.id` (PK конкретного шага). Семантика по статусам:
   - `status=assistant_message`: `messageStepId` = ход; `stepId` = `id` финального assistant-шага (= `ChatStepSchema.id` этого шага в истории). **Оба присутствуют.**
   - `status=tool_call`: `messageStepId` = ход; `stepId` = `id` assistant-шага, содержащего `tool_use` (тот шаг истории, чей `payload` несёт этот `tool_use`-блок). `toolCall.id` **остаётся как есть** (provider-независимый доменный id tool-вызова для `/chat/tool-result`) — `toolCall.id` ≠ `stepId`. **Оба присутствуют.**
-  - `status=blocked`: `messageStepId = null`, `stepId = null` — блокировка срабатывает в Policy Engine **до** генерации ([ADR-002](../../adr/ADR-002-access-policy-state-machine.md), [ADR-004](../../adr/ADR-004-blocked-http-200.md)), `chat_steps`/ход **не создаются**, ссылаться не на что (согласовано с отсутствием `usage` при blocked).
+  - `status=blocked` (**policy-blocked**, `blockReason ≠ max_tokens`): `messageStepId = null`, `stepId = null` — блокировка срабатывает в Policy Engine **до** генерации ([ADR-002](../../adr/ADR-002-access-policy-state-machine.md), [ADR-004](../../adr/ADR-004-blocked-http-200.md)), `chat_steps`/ход **не создаются**, ссылаться не на что (согласовано с отсутствием `usage` при policy-blocked).
+  - `status=blocked` + **`blockReason=max_tokens`** (обрезка, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)): `messageStepId` = ход, `stepId` = `id` обрезанного assistant-шага — **оба НЕ null** (Claude сгенерировал контент, ход/шаг созданы). `usage` присутствует. Отличие от policy-blocked: здесь блокировка — обрыв **после** начала генерации, а не deny до неё.
 - **Инвариант синка id шага/хода (нормативно):** `ChatResponse.messageStepId` / `ChatResponse.stepId` дословно совпадают с `ChatStepSchema.messageStepId` / `ChatStepSchema.id` соответствующего шага в [chats/02-api-contracts.md `GET /v1/chats/{id}` → `steps[]`](../chats/02-api-contracts.md#get-v1chatsid). Аддитивно/обратносовместимо: существующие поля, security, коды, пути не меняются ([ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md)).
 - **Инвариант синка имени/id инструмента (нормативно, [ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)):** `toolCall.name` (dot) и `toolCall.id` (domain UUID = `tool_calls.id`) этого ответа **дословно совпадают** с `tool_use.name`/`tool_use.id` соответствующего блока в `GET /v1/chats/{id}` → `steps[].payload.content[]` (история нормализует свой сырой wire-payload к доменному виду при отдаче — см. [chats/02-api-contracts.md](../chats/02-api-contracts.md#get-v1chatsid)) и с `name` в `/v1/tools`. Сопутствующий текст при `status=tool_call` (`text`-блок того же шага) в истории доступен полностью и **также** пробрасывается в `ChatResponse.assistantMessage` ([Q-024-1](../../99-open-questions.md) Closed = вариант A): тот же текст того же шага (`stepId`) — см. описание `assistantMessage` выше.
 
@@ -79,9 +85,23 @@
 - Тех. ошибки (auth/size/validation/upstream) — 4xx/5xx (см. api-gateway).
 
 ## POST /v1/chat/tool-result
-Приём результата локального tool и продолжение шага.
+Приём результата(ов) локальных tools и продолжение шага. **Батч-форма ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md))** — для parallel tool use возвращаются результаты на все `toolCalls[]` хода.
 
-### Request
+### Request (батч — рекомендуемая форма, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md))
+```json
+{
+  "userId": "uuid",
+  "sessionId": "uuid",
+  "results": [
+    { "toolCallId": "uuid", "result": { "any": "object" } },
+    { "toolCallId": "uuid", "error": { "code": "string", "message": "string" } }
+  ]
+}
+```
+- `results[]` — результаты на один или несколько tool-вызовов **одного хода**. В каждом элементе ровно одно из `result` / `error` (валидатор `extra=forbid` поэлементно).
+- Каждый `result` ≤ 256KB (поэлементно).
+
+### Request (одиночная форма — deprecated, обратная совместимость)
 ```json
 {
   "userId": "uuid",
@@ -91,19 +111,29 @@
   "error": { "code": "string", "message": "string" }
 }
 ```
-- Ровно одно из `result` / `error` (валидатор `extra=forbid`).
+- Эквивалентна `results = [{ toolCallId, result|error }]` (батч из одного). Backend принимает обе формы; одиночная — **deprecated** ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)), удаление — отдельным ADR после миграции iOS.
+- Ровно одно из `result` / `error`.
 - `result` ≤ 256KB.
 
+### Барьер хода и continuation ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md))
+- Continuation-виток к Anthropic выполняется **ТОЛЬКО** когда для **всех** client-side `tool_use` текущего assistant-хода собраны `tool_result` (completed/errored). Иначе orphan `tool_use` → Anthropic `400` → `502`.
+- **Рекомендуемый путь** — один батч-запрос со всеми результатами хода → барьер закрывается сразу, backend делает continuation и возвращает следующий шаг.
+- **Накопительный путь (поддерживается):** результаты можно слать частями (несколько `/chat/tool-result` одного хода). Пока барьер не закрыт — ответ `status=tool_call` с `toolCalls[]` = **оставшиеся** (ещё без результата) client-side вызовы хода (`toolCall` = первый из оставшихся); Anthropic не вызывается; биллинг не выполняется. Когда последний результат закрывает барьер — continuation-виток, следующий шаг.
+- Server-side `site.*` результаты в `/chat/tool-result` **не присылаются** — backend их сформировал сам ([ADR-011](../../adr/ADR-011-server-side-tools.md)); барьер хода учитывает только client-side tool-вызовы.
+
 ### Response (200)
-Та же схема, что у `/v1/chat/run` (включая `messageStepId` / `stepId`, [ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md)).
+Та же схема, что у `/v1/chat/run` (включая `messageStepId` / `stepId`, [ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md), и `toolCalls[]`, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)).
 - `messageStepId` **стабилен в рамках хода**: равен тому, что был выдан в исходном `/chat/run` этого хода (берётся из `tool_calls.message_step_id` по `toolCallId`, см. re-entry ниже) — это и есть смысл синка tool-loop: клиент держит один `messageStepId` на весь ход.
 - `stepId` = `id` **нового** шага, который представляет этот ответ: assistant-tool_use следующего раунда (при `status=tool_call`) либо финальный assistant-шаг (при `status=assistant_message`). Ответ всегда указывает на **следующий шаг, порождённый Claude**, а не на только что принятый шаг-`tool_result`.
 - `status=blocked` (если возникает на продолжении): `messageStepId`/`stepId` = `null` — как в `/chat/run`.
 
 ### Правила
-- Проверка принадлежности `toolCallId` текущей сессии: `tool_calls.session_id == sessionId`, иначе `404`/`403`.
-- Re-entry message-шага: `messageStepId` берётся из `tool_calls.message_step_id` найденного `toolCallId` (НЕ генерируется заново). Все ответы и финальный debit этого шага используют тот же `messageStepId`.
-- Идемпотентность: повторный `toolCallId` со статусом `completed` → не пересылать в Anthropic, вернуть сохранённый следующий шаг (ADR-005).
+- Проверка принадлежности каждого `toolCallId` текущей сессии: `tool_calls.session_id == sessionId`, иначе `404`/`403` (применяется к каждому элементу `results[]`).
+- Re-entry message-шага: `messageStepId` берётся из `tool_calls.message_step_id` найденного `toolCallId` (НЕ генерируется заново). Все элементы батча должны относиться к одному ходу (один `message_step_id`). Все ответы и финальный debit этого шага используют тот же `messageStepId`.
+- **Идемпотентность / повторы ([ADR-005](../../adr/ADR-005-idempotency-ledger.md), [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):**
+  - повторный `toolCallId` со статусом `completed`/`errored` → результат не перезаписывается, Anthropic повторно не вызывается; если барьер уже закрыт и continuation-шаг сохранён — вернуть его (как сейчас);
+  - дубль `toolCallId` внутри одного батча → `422`;
+  - continuation-виток к Anthropic выполняется **один раз** на закрытие барьера хода (дополнительно защищён `messageStepId`-идемпотентностью дебита, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)).
 - `result` валидируется по схеме соответствующего tool (см. ниже); несоответствие → `422`.
 
 ## Классы tools: client-side vs server-side ([ADR-011](../../adr/ADR-011-server-side-tools.md))
@@ -161,7 +191,7 @@ Backend только инициирует tool-call; исполняет клие
 - `error` (в tool-result) имеет форму `{ "code": string, "message": string }`; при `error` backend передаёт Claude tool_result с `is_error=true`.
 
 ### blockReason enum (повтор для удобства)
-`trial_used | subscription_required | subscription_expired | credits_empty | byok_disabled | byok_invalid | rate_limited | policy_denied` (источник — [ADR-004](../../adr/ADR-004-blocked-http-200.md)).
+`trial_used | subscription_required | subscription_expired | credits_empty | byok_disabled | byok_invalid | rate_limited | policy_denied | max_tokens` (источник — [ADR-004](../../adr/ADR-004-blocked-http-200.md); `max_tokens` добавлен [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) — обрезка ответа по лимиту output-токенов, в отличие от прочих policy-причин срабатывает **после** начала генерации: `usage`/`messageStepId`/`stepId` присутствуют, кредит не списывается).
 
 ---
 

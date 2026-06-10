@@ -41,7 +41,7 @@ from app.errors import (
     UpstreamError,
     ValidationFailedError,
 )
-from app.models import ChatSession, ChatStep
+from app.models import ChatSession, ChatStep, ToolCall
 from app.observability.logging import log_event
 from app.observability.metrics import (
     blocked_requests_total,
@@ -92,17 +92,30 @@ class ToolCallOut:
 
 
 @dataclass(frozen=True)
+class ToolResultIn:
+    """One normalized tool-result item (ADR-025 batch). error is the dumped ToolErrorBody dict."""
+
+    tool_call_id: uuid.UUID
+    result: dict[str, Any] | None
+    error: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class ChatRunOut:
     status: str  # assistant_message | tool_call | blocked
     session_id: uuid.UUID
     assistant_message: str | None = None
+    # ADR-025: ALL client-side tool calls of the turn (parallel tool use). tool_call (singular,
+    # deprecated) = tool_calls[0]. Server-side site.* are executed on the backend and excluded.
+    tool_calls: list[ToolCallOut] | None = None
     tool_call: ToolCallOut | None = None
     block_reason: str | None = None
     usage: dict[str, Any] | None = None
     # ADR-023: sync ids for chat history. message_step_id = the turn (one per user message-step,
     # reused across tool-rounds/re-entry); step_id = the id of the persisted assistant/tool step
-    # this response represents (= ChatStep.id = ChatStepSchema.id). Both None for blocked (no step
-    # / turn is created — policy blocks before generation).
+    # this response represents (= ChatStep.id = ChatStepSchema.id). Both None for policy-blocked
+    # (no step/turn is created — policy blocks before generation). For blocked+max_tokens (ADR-025)
+    # both are set (the truncated assistant step IS created) and usage is present.
     message_step_id: uuid.UUID | None = None
     step_id: uuid.UUID | None = None
 
@@ -267,79 +280,85 @@ class ChatOrchestrator:
         *,
         user_id: uuid.UUID,
         session_id: uuid.UUID,
-        tool_call_id: uuid.UUID,
-        result: dict[str, Any] | None,
-        error: dict[str, Any] | None,
+        results: list[ToolResultIn],
     ) -> ChatRunOut:
-        tool_call = await self._deps.repo.get_tool_call(tool_call_id)
-        if tool_call is None or tool_call.session_id != session_id:
-            raise NotFoundError("tool call not found for session")
-        # Ownership: the session must belong to the user.
+        """Apply a batch of tool results and continue only when the turn barrier closes (ADR-025).
+
+        Each item is applied independently (per-item idempotency). The continuation to Anthropic is
+        gated by the turn barrier: it runs ONLY when every client-side tool_call of the assistant
+        turn (one message_step_id) is completed/errored — otherwise an orphan tool_use would make
+        Anthropic reject the next messages.create (400 → 502). Until the barrier closes the response
+        is status=tool_call with the remaining (not-yet-completed) client-side calls.
+        """
+        if not results:  # pragma: no cover - schema guarantees non-empty
+            raise ValidationFailedError("results must be non-empty")
+
+        # Resolve every referenced tool_call; enforce session ownership + single-turn invariant.
         sess = await self._deps.repo.get_session(session_id, user_id)
         if sess is None:
             raise NotFoundError("session not found")
 
-        message_step_id = tool_call.message_step_id  # re-entry: reuse the billing key
+        resolved: list[tuple[ToolResultIn, ToolCall]] = []
+        message_step_id: uuid.UUID | None = None
+        for item in results:
+            tool_call = await self._deps.repo.get_tool_call(item.tool_call_id)
+            if tool_call is None or tool_call.session_id != session_id:
+                raise NotFoundError("tool call not found for session")
+            if message_step_id is None:
+                message_step_id = tool_call.message_step_id
+            elif tool_call.message_step_id != message_step_id:
+                # All batch items must belong to one turn (one message_step_id) — 02-api-contracts.
+                raise ValidationFailedError("all results must belong to the same turn")
+            resolved.append((item, tool_call))
 
-        # Idempotent replay: already completed → return the saved next step.
-        if tool_call.status == "completed":
-            saved = await self._deps.repo.next_step_after(session_id, message_step_id, tool_call_id)
-            return self._render_saved_step(session_id, message_step_id, saved)
+        assert message_step_id is not None  # noqa: S101 - results is non-empty
 
-        # Atomic pending → completed/errored.
-        status = "errored" if error is not None else "completed"
-        transitioned = await self._deps.repo.complete_tool_call(
-            tool_call_id=tool_call_id, status=status, result=result if result is not None else error
-        )
-        if not transitioned:
-            # Concurrent completion won the race → behave idempotently.
-            saved = await self._deps.repo.next_step_after(session_id, message_step_id, tool_call_id)
-            return self._render_saved_step(session_id, message_step_id, saved)
-
-        # Persist the tool_result as a tool step. (result size limit is enforced at the
-        # schema layer; result content is opaque per-tool and forwarded to Claude as-is.)
-        await self._deps.repo.add_step(
-            session_id=session_id,
-            message_step_id=message_step_id,
-            role="tool",
-            payload={
-                "toolCallId": str(tool_call_id),
-                # ADR-008: tool_result.tool_use_id MUST equal the raw provider id of the matching
-                # tool_use block, NOT the domain UUID. Stored here so _build_messages replays the
-                # continuation history with a consistent id pair.
-                "providerToolUseId": tool_call.provider_tool_use_id,
-                "toolName": tool_call.tool_name,
-                "result": result,
-                "error": error,
-            },
-        )
-
-        # Audit mutating tool completion (AC-7).
-        if tool_call.tool_name in MUTATING_TOOLS:
-            await self._deps.audit.record(
-                AuditEvent(
-                    user_id=user_id,
-                    session_id=session_id,
-                    event_type=EVENT_TOOL_MUTATION,
-                    payload={
-                        "toolCallId": str(tool_call_id),
-                        "toolName": tool_call.tool_name,
-                        "status": status,
-                    },
-                )
-            )
-        await self._deps.audit.record(
-            AuditEvent(
+        # Apply each result (per-item idempotency, ADR-005): already completed/errored → skip
+        # the write (do NOT overwrite, do NOT re-audit). New ones transition pending → done.
+        for item, tool_call in resolved:
+            if tool_call.status in ("completed", "errored"):
+                continue  # idempotent: result not overwritten
+            await self._apply_tool_result(
                 user_id=user_id,
                 session_id=session_id,
-                event_type=EVENT_TOOL_CALL_COMPLETED,
-                payload={
-                    "toolCallId": str(tool_call_id),
-                    "toolName": tool_call.tool_name,
-                    "status": status,
-                },
+                message_step_id=message_step_id,
+                tool_call=tool_call,
+                result=item.result,
+                error=item.error,
             )
-        )
+
+        # ADR-025 barrier: continuation only when ALL client-side tool_calls of this turn are
+        # completed/errored. Server-side site.* are executed on the backend and were completed in
+        # the run loop; the barrier considers only client-side calls.
+        turn_calls = await self._deps.repo.list_tool_calls_for_step(session_id, message_step_id)
+        client_calls = [tc for tc in turn_calls if tc.tool_name not in SERVER_SIDE_TOOLS]
+        pending = [tc for tc in client_calls if tc.status not in ("completed", "errored")]
+        if pending:
+            # Barrier not closed → tell the client which results are still awaited. No Anthropic
+            # call, no billing. messageStepId stable; stepId = the assistant turn step with the
+            # tool_use blocks (ADR-025: same turn).
+            await self._session.commit()
+            remaining = [
+                ToolCallOut(id=str(tc.id), name=tc.tool_name, args=dict(tc.args)) for tc in pending
+            ]
+            assistant_step_id = await self._deps.repo.assistant_tool_step_id(
+                session_id, message_step_id
+            )
+            return ChatRunOut(
+                status="tool_call",
+                session_id=session_id,
+                tool_calls=remaining,
+                tool_call=remaining[0],
+                message_step_id=message_step_id,
+                step_id=assistant_step_id,
+            )
+
+        # Barrier closed. Idempotent replay: if a continuation step was already saved for this turn
+        # (e.g. a repeated batch after the turn completed), return it without re-calling Anthropic.
+        anchor_id = resolved[0][1].id
+        saved = await self._deps.repo.next_step_after(session_id, message_step_id, anchor_id)
+        if saved is not None and self._all_already_done_before(resolved):
+            return self._render_saved_step(session_id, message_step_id, saved)
 
         mode = Mode(sess.mode)
         # Re-evaluate policy (access may have changed).
@@ -358,6 +377,82 @@ class ChatOrchestrator:
             system_prompt=_system_prompt_for(sess.assistant_mode),
             # ADR-022 axis A: project_id is session-fixed; gate site.* by the session's project.
             has_project=sess.project_id is not None,
+        )
+
+    @staticmethod
+    def _all_already_done_before(resolved: list[tuple[ToolResultIn, ToolCall]]) -> bool:
+        """True when every referenced tool_call was ALREADY completed/errored on entry (replay).
+
+        A fully-replayed batch (all items previously applied) closes the barrier without any new
+        transition → the saved continuation step is returned idempotently rather than re-calling
+        Anthropic (ADR-025 idempotency: continuation runs once per barrier close).
+        """
+        return all(tc.status in ("completed", "errored") for _, tc in resolved)
+
+    async def _apply_tool_result(
+        self,
+        *,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        tool_call: ToolCall,
+        result: dict[str, Any] | None,
+        error: dict[str, Any] | None,
+    ) -> None:
+        """Atomically transition one tool_call and persist its tool_result + audit (ADR-025)."""
+        status = "errored" if error is not None else "completed"
+        transitioned = await self._deps.repo.complete_tool_call(
+            tool_call_id=tool_call.id,
+            status=status,
+            result=result if result is not None else error,
+        )
+        if not transitioned:
+            # Concurrent completion won the race → behave idempotently (no duplicate step/audit).
+            return
+
+        # Persist the tool_result as a tool step. (result size limit is enforced at the schema
+        # layer; result content is opaque per-tool and forwarded to Claude as-is.)
+        await self._deps.repo.add_step(
+            session_id=session_id,
+            message_step_id=message_step_id,
+            role="tool",
+            payload={
+                "toolCallId": str(tool_call.id),
+                # ADR-008: tool_result.tool_use_id MUST equal the raw provider id of the matching
+                # tool_use block, NOT the domain UUID. Stored here so _build_messages replays the
+                # continuation history with a consistent id pair.
+                "providerToolUseId": tool_call.provider_tool_use_id,
+                "toolName": tool_call.tool_name,
+                "result": result,
+                "error": error,
+            },
+        )
+
+        # Audit mutating tool completion (AC-7).
+        if tool_call.tool_name in MUTATING_TOOLS:
+            await self._deps.audit.record(
+                AuditEvent(
+                    user_id=user_id,
+                    session_id=session_id,
+                    event_type=EVENT_TOOL_MUTATION,
+                    payload={
+                        "toolCallId": str(tool_call.id),
+                        "toolName": tool_call.tool_name,
+                        "status": status,
+                    },
+                )
+            )
+        await self._deps.audit.record(
+            AuditEvent(
+                user_id=user_id,
+                session_id=session_id,
+                event_type=EVENT_TOOL_CALL_COMPLETED,
+                payload={
+                    "toolCallId": str(tool_call.id),
+                    "toolName": tool_call.tool_name,
+                    "status": status,
+                },
+            )
         )
 
     # ---- internals ----
@@ -508,6 +603,20 @@ class ChatOrchestrator:
                 result.usage.output_tokens
             )
 
+            # ADR-025: dispatch by stop_reason, NOT by the mere presence of tool_use blocks. A
+            # max_tokens-truncated turn may carry incomplete tool_use blocks in content — they are
+            # not executable and must NOT be surfaced; only stop_reason="tool_use" enters the
+            # tool branch.
+            if result.stop_reason == "max_tokens":
+                api_key = None
+                return await self._handle_max_tokens(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message_step_id=message_step_id,
+                    result=result,
+                    usage=usage,
+                )
+
             if result.stop_reason == "tool_use" and result.tool_uses:
                 outcome = await self._handle_tool_use(
                     user_id=user_id,
@@ -640,6 +749,64 @@ class ChatOrchestrator:
             step_id=assistant_step.id,
         )
 
+    async def _handle_max_tokens(
+        self,
+        *,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        result: AnthropicResult,
+        usage: dict[str, Any],
+    ) -> ChatRunOut:
+        """Handle a max_tokens-truncated turn (ADR-025 A2): blocked(max_tokens), NO debit.
+
+        The turn was truncated by the output-token limit (stop_reason="max_tokens"). Its tool_use
+        blocks (if any) are INCOMPLETE and must NOT be surfaced — toolCall(s) are omitted. The
+        truncated assistant step IS persisted (history/diagnostics), but its incomplete tool_use
+        blocks are excluded from continuation replay (re-entry by this turn is not supported). The
+        response is status=blocked, blockReason=max_tokens with usage + message_step_id + step_id
+        (unlike policy-blocked where they are null), assistantMessage = partial text if any. No
+        credit is debited, no trial flip — the user does not pay for a truncated generation.
+        """
+        # Persist the truncated assistant step (for history/diagnostics). Its content is replayed
+        # via _build_messages only as the assistant turn; since no tool_result will ever be sent
+        # for its incomplete tool_use blocks, re-entry by this turn is not initiated (no pending
+        # client tool_calls are created here — we do NOT call _handle_tool_use).
+        truncated_step = await self._deps.repo.add_step(
+            session_id=session_id,
+            message_step_id=message_step_id,
+            role="assistant",
+            payload={"content": result.content_blocks},
+            usage=usage,
+        )
+        await self._deps.audit.record(
+            AuditEvent(
+                user_id=user_id,
+                session_id=session_id,
+                event_type=EVENT_CHAT_STEP,
+                payload={
+                    "sessionId": str(session_id),
+                    "role": "assistant",
+                    "blockReason": BlockReason.max_tokens.value,
+                    "model": usage.get("model"),
+                    "usage": usage,
+                },
+            )
+        )
+        await self._session.commit()
+        blocked_requests_total.labels(reason=BlockReason.max_tokens.value).inc()
+        return ChatRunOut(
+            status="blocked",
+            session_id=session_id,
+            # Partial text of the truncated turn (if Claude produced any) — clients may show
+            # "ответ оборван". None when there was no text block.
+            assistant_message=result.text or None,
+            block_reason=BlockReason.max_tokens.value,
+            usage=usage,
+            message_step_id=message_step_id,
+            step_id=truncated_step.id,
+        )
+
     async def _handle_tool_use(
         self,
         *,
@@ -657,8 +824,10 @@ class ChatOrchestrator:
         - server-side (site.*): executed on the backend NOW; tool_call goes straight to status
           completed with the backend result; a tool step records the tool_result (replayed to
           Anthropic on continuation, ADR-011 §4). No round-trip to iOS.
-        - client-side (files.*/...): left pending; the FIRST one is returned as status=tool_call
-          to iOS (public contract returns a single toolCall, 02-api-contracts.md).
+        - client-side (files.*/...): left pending; ALL of them are returned as status=tool_call to
+          iOS in toolCalls[] (ADR-025 parallel tool use); tool_call (singular, deprecated) =
+          toolCalls[0]. The Anthropic tool-loop requires a tool_result for EVERY tool_use of the
+          turn — surfacing only the first would orphan the rest → Anthropic 400 → 502.
         If the turn contains any client-side tool, client_out is set (hand off to iOS). If the turn
         is purely server-side, client_out is None and the orchestrator continues the loop.
         """
@@ -679,7 +848,8 @@ class ChatOrchestrator:
         # Claude returns a site.* tool_use anyway (upstream anomaly), we must NOT execute it and
         # must NOT resolve a project — see the per-block guard below.
         external_project_id = await self._external_project_id(session_id) if has_project else None
-        first_client_out: ToolCallOut | None = None
+        # ADR-025: collect ALL client-side tool calls of this turn (in block order) → toolCalls[].
+        client_outs: list[ToolCallOut] = []
         for block in result.tool_uses:
             tool_name = str(block["name"])
             provider_tool_use_id = str(block["id"])  # raw anthropic "toolu_...", opaque
@@ -727,22 +897,24 @@ class ChatOrchestrator:
                     provider_tool_use_id=provider_tool_use_id,
                     external_project_id=external_project_id,
                 )
-            elif first_client_out is None:
-                first_client_out = ToolCallOut(
-                    id=str(tool_call_id), name=tool_name, args=validated_args
+            else:
+                # Client-side: leave pending; surface in toolCalls[] (ADR-025).
+                client_outs.append(
+                    ToolCallOut(id=str(tool_call_id), name=tool_name, args=validated_args)
                 )
 
-        if first_client_out is not None:
+        if client_outs:
             return _TurnOutcome(
                 client_out=ChatRunOut(
                     status="tool_call",
                     session_id=session_id,
                     # ADR-024 §3 / Q-024-1 (variant A): carry the accompanying text of THIS same
-                    # assistant step (the one whose tool_use is returned as toolCall). result.text
-                    # is the concatenation of this turn's text blocks; empty → None (no text). The
-                    # text is no longer dropped — it equals the text blocks of step_id in history.
+                    # assistant step (the one whose tool_use blocks are returned). result.text is
+                    # the concatenation of this turn's text blocks; empty → None (no text).
                     assistant_message=result.text or None,
-                    tool_call=first_client_out,
+                    # ADR-025: ALL client-side calls; tool_call (deprecated) = toolCalls[0].
+                    tool_calls=client_outs,
+                    tool_call=client_outs[0],
                     usage=usage,
                     message_step_id=message_step_id,
                     step_id=assistant_step.id,
