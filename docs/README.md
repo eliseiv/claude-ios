@@ -60,7 +60,8 @@
 | Chat Orchestrator | [modules/chat-orchestrator/](modules/chat-orchestrator/README.md) | Реализован |
 | Policy Engine | [modules/policy-engine/](modules/policy-engine/README.md) | Реализован |
 | Wallet / Ledger | [modules/wallet-ledger/](modules/wallet-ledger/README.md) | Реализован |
-| Subscription | [modules/subscription/](modules/subscription/README.md) | Реализован |
+| Subscription | [modules/subscription/](modules/subscription/README.md) | Реализован (StoreKit `sync` — оставлен; источник истины подписок сместился на Adapty, [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)) |
+| Billing — Adapty | [modules/billing-adapty/](modules/billing-adapty/README.md) | **Спроектирован, ожидает реализации** — `POST /v1/billing/adapty/webhook`, основной путь биллинга подписок, миграция `0008` ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)) |
 | BYOK | [modules/byok/](modules/byok/README.md) | Реализован |
 | Audit | [modules/audit/](modules/audit/README.md) | Реализован |
 | Admin | [modules/admin/](modules/admin/README.md) | Реализован |

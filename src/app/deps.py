@@ -18,6 +18,7 @@ from app.api_gateway.openapi_security import bearer_scheme
 from app.audit.service import AuditService
 from app.auth.issuer import TokenIssuer
 from app.auth.service import AuthService
+from app.billing_adapty.service import AdaptyWebhookService
 from app.byok.kms import get_kms_client
 from app.byok.service import BYOKService
 from app.chat.anthropic_client import get_anthropic_client
@@ -154,6 +155,16 @@ def get_token_purchase_service(session: DbSession) -> TokenPurchaseService:
         session,
         get_storekit_verifier(),
         WalletService(session, AuditService(session)),
+    )
+
+
+def get_adapty_webhook_service(session: DbSession) -> AdaptyWebhookService:
+    audit = AuditService(session)
+    return AdaptyWebhookService(
+        session,
+        WalletService(session, audit),
+        audit,
+        get_settings(),
     )
 
 

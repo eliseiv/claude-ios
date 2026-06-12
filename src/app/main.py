@@ -19,6 +19,7 @@ from app.api_gateway.rate_limit import close_redis
 from app.api_gateway.routers import (
     admin,
     auth,
+    billing_adapty,
     byok,
     chat,
     chats,
@@ -207,6 +208,7 @@ def create_app() -> FastAPI:
         chats,
         profile,
         preferences,
+        billing_adapty,
     ):
         app.include_router(module.router)
     app.include_router(health.router)

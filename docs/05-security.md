@@ -38,9 +38,18 @@
 - Защита admin-API: отдельный rate limit (дефолт 10 req/min per source IP), `extra='forbid'`, тело ≤ 8 KB.
 - `X-Admin-Token` — в redaction allowlist (никогда не логируется).
 
+## Adapty webhook-авторизация (изолированная, без HMAC-подписи payload, ADR-029)
+См. [ADR-029](adr/ADR-029-adapty-subscription-webhook.md), [modules/billing-adapty](modules/billing-adapty/README.md).
+- `POST /v1/billing/adapty/webhook` авторизуется **отдельным статическим секретом** `ADAPTY_WEBHOOK_SECRET` через заголовок `Authorization: Bearer <...>`. Это **machine-to-machine** контур (вызывает только сервис Adapty), per-route dependency, **изолированный** от пользовательского JWT, admin-токена и preview-секрета.
+- **Adapty НЕ подписывает payload (нет HMAC).** Аутентичность запроса = знание bearer-секрета (shared secret, заданный оператором в Adapty UI). Это ограничение платформы, принято осознанно. Митигация: высокоэнтропийный секрет (≥ 32 байта), TLS на edge, per-instance значение, ротация, audit.
+- Сравнение токена — **constant-time** (`hmac.compare_digest`, образец `require_admin`). Несовпадение/отсутствие → `401` (причина не раскрывается). `ADAPTY_WEBHOOK_SECRET` не задан → `500` (мис-конфигурация); пустой секрет никогда не матчит.
+- **2xx на кривой payload — анти-абуз бесконечных ретраев (а не «проглатывание ошибок»):** Adapty ретраит любой не-2xx бесконечно и не сохранит вебхук без 2xx на проверочный пинг. Поэтому **после успешной авторизации** любое нераспознанное/неполное/мусорное тело → `200 ignored/<reason>`. `5xx` — только при реальном внутреннем сбое (БД недоступна), где ретрай Adapty желателен и безопасен (откат транзакции → чистая переобработка). Тело читается сырым (`request.body()`), **без Pydantic-валидации** (иначе `422` на пинг/дрейф payload).
+- `customer_user_id` из тела **не является авторизацией действий** — это лишь адресат гранта; несуществующий → `200 ignored/user_not_found` (без провижининга `users`). Эскалация невозможна: контур не даёт ни пользовательских, ни admin-привилегий.
+- `Authorization` (и весь bearer) — уже в redaction-денилисте (`authorization` ∈ `_DENY_SUBSTRINGS`); секрет не логируется и не пишется в `adapty_webhook_events.payload` (он в заголовке, не в теле).
+
 ## Секреты и ключи
-- Сервисный Anthropic API key, KMS credentials, **JWT signing keys (приватный RS256-ключ — секрет; публичный — для verify, не секрет)**, App Store credentials, **`ADMIN_API_SECRET`** (+ опц. `ADMIN_API_SECRET_PREV`), **`PREVIEW_URL_SECRET`** — только через **env / secret manager**, никогда в коде/репозитории/образе.
-- Все перечисленные секреты **взаимно не пересекаются** (отдельные значения): JWT signing key, KMS, Anthropic, `ADMIN_API_SECRET`, `PREVIEW_URL_SECRET` — независимы; компрометация одного не даёт доступа к домену другого.
+- Сервисный Anthropic API key, KMS credentials, **JWT signing keys (приватный RS256-ключ — секрет; публичный — для verify, не секрет)**, App Store credentials, **`ADMIN_API_SECRET`** (+ опц. `ADMIN_API_SECRET_PREV`), **`PREVIEW_URL_SECRET`**, **`ADAPTY_WEBHOOK_SECRET`** — только через **env / secret manager**, никогда в коде/репозитории/образе.
+- Все перечисленные секреты **взаимно не пересекаются** (отдельные значения): JWT signing key, KMS, Anthropic, `ADMIN_API_SECRET`, `PREVIEW_URL_SECRET`, `ADAPTY_WEBHOOK_SECRET` — независимы; компрометация одного не даёт доступа к домену другого. `ADAPTY_WEBHOOK_SECRET` — per-instance (мульти-инстанс, [ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)).
 - `.env` в `.gitignore`; в prod — секрет-менеджер (конкретный — [Q-002-1](99-open-questions.md), дефолт: облачный KMS + Secrets Manager того же провайдера).
 - Запрет логировать любые секреты, BYOK plaintext, JWT (выпущенный access-token), refresh-token, приватный ключ подписи, StoreKit payload целиком.
 
@@ -152,6 +161,9 @@ Inline base64-вложения ([ADR-020](adr/ADR-020-inline-base64-attachments-
 | Replay tool-result | Идемпотентность по `toolCallId` + статус `tool_calls`. |
 | Abuse / DoS | Rate limits per user/device/IP + size-лимиты. |
 | Подделка подписки | Server-side verification StoreKit транзакции через App Store Server API. |
+| Форж Adapty-вебхука (нет HMAC) | Статический bearer-секрет `ADAPTY_WEBHOOK_SECRET` (constant-time compare), TLS на edge, per-instance ротация, audit `adapty_subscription`. Знание секрета = условие приёма; idempotency (`event_id` UNIQUE) ограничивает повтор. Ограничение платформы Adapty (нет подписи payload) — [ADR-029](adr/ADR-029-adapty-subscription-webhook.md). |
+| Абуз ретраями Adapty (шторм не-2xx) | После авторизации любой кривой payload → `2xx ignored`; `5xx` только при реальном сбое. Сырое тело без Pydantic (нет `422` на пинг/дрейф). |
+| Двойное начисление подписки (Adapty + StoreKit sync) | Разные idempotency-ключи (`adapty-event:*` vs `sub-grant:*`) НЕ защищают между путями. Митигация контрактом: клиент использует ОДИН путь подписок ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)). В пределах Adapty-пути двойная UNIQUE-граница (`event_id` + ledger key). |
 | Эскалация до admin через пользовательский JWT | Изолированный `ADMIN_API_SECRET`/`X-Admin-Token`, отдельная `require_admin`; нет роли admin в JWT; разные секреты (ADR-009). |
 | Утечка/подделка admin-секрета | Constant-time compare, ротация (PREV-секрет), redaction `X-Admin-Token`, отдельный rate limit, audit `admin_grant`. |
 | Начисление на «фантомный» userId (опечатка) | Admin-grant не создаёт пользователей: несуществующий `userId` → `404` (ADR-009 / [Q-009-2](99-open-questions.md)). |

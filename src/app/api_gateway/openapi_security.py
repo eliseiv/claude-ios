@@ -43,3 +43,16 @@ admin_scheme = APIKeyHeader(
         "выполняется на сервере; это объявление — только для Swagger UI."
     ),
 )
+
+# scheme_name fixes the OpenAPI components.securitySchemes key to `adaptyWebhook`.
+# HTTP Bearer documents the static webhook secret; the real constant-time check stays in
+# require_adapty_webhook (ADR-029). Separate from bearerAuth (user JWT) and adminToken.
+adapty_webhook_scheme = HTTPBearer(
+    scheme_name="adaptyWebhook",
+    auto_error=False,
+    description=(
+        "Статический bearer-секрет вебхука Adapty (`ADAPTY_WEBHOOK_SECRET`). Вызывает Adapty, "
+        "не клиент. Введите секрет как `Bearer <secret>` через Authorize. НЕ пользовательский "
+        "JWT и НЕ admin-токен. Реальная constant-time проверка — на сервере."
+    ),
+)

@@ -93,6 +93,23 @@ class Settings(BaseSettings):
         default=1000, alias="SUBSCRIPTION_CREDITS_PER_PERIOD"
     )
 
+    # --- Adapty subscription webhook (ADR-029, billing-adapty/07) ---
+    # Isolated static bearer secret for POST /v1/billing/adapty/webhook. Set by the operator in
+    # the Adapty UI; compared constant-time (hmac.compare_digest). Separate from JWT / admin /
+    # KMS / preview secrets and per-instance (ADR-017). Empty (default) => the endpoint returns
+    # 500 (misconfiguration); a blank secret never authenticates any presented token.
+    adapty_webhook_secret: str = Field(default="", alias="ADAPTY_WEBHOOK_SECRET")
+    # JSON object vendor_product_id -> tokens. Source of truth for the per-product grant tier on
+    # subscription_started/renewed. Parsed by adapty_product_tokens() (same shape as
+    # token_products()). Malformed/non-object => {} => every product falls back to the fixed grant.
+    adapty_product_tokens_raw: str = Field(default="{}", alias="ADAPTY_PRODUCT_TOKENS")
+    # Fixed fallback grant (tokens) used when vendor_product_id is absent from the tier map.
+    # Isolated from SUBSCRIPTION_CREDITS_PER_PERIOD so the Adapty path is calibrated independently
+    # (ADR-029 §5); defaults coincide (1000) for predictability.
+    adapty_subscription_tokens_grant: int = Field(
+        default=1000, alias="ADAPTY_SUBSCRIPTION_TOKENS_GRANT"
+    )
+
     # --- Token purchase (ADR-015, token-purchase/03) ---
     # Server-side mapping consumable productId -> credits (JSON object). Source of truth for
     # how many credits a token-package purchase grants; never taken from the client body
@@ -208,6 +225,34 @@ class Settings(BaseSettings):
 
         try:
             parsed = json.loads(self.token_products_raw or "{}")
+        except (ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        products: dict[str, int] = {}
+        for key, value in parsed.items():
+            if not isinstance(key, str):
+                continue
+            # bool is a subclass of int; exclude it explicitly to avoid True->1 surprises.
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            if value <= 0:
+                continue
+            products[key] = value
+        return products
+
+    def adapty_product_tokens(self) -> dict[str, int]:
+        """Parse ADAPTY_PRODUCT_TOKENS (JSON object vendor_product_id->tokens) (ADR-029 §5).
+
+        Mirrors token_products(): only string keys with positive-int values survive (bool is a
+        subclass of int and is excluded). A malformed JSON document or non-object yields an empty
+        mapping, in which case every vendor_product_id falls back to
+        adapty_subscription_tokens_grant. Pure (no I/O); cached via get_settings()'s lru_cache.
+        """
+        import json
+
+        try:
+            parsed = json.loads(self.adapty_product_tokens_raw or "{}")
         except (ValueError, json.JSONDecodeError):
             return {}
         if not isinstance(parsed, dict):

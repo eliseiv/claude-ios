@@ -2,6 +2,7 @@
 
 from app.models.base import Base
 from app.models.tables import (
+    AdaptyWebhookEvent,
     AuditLog,
     BYOKKey,
     ChatSession,
@@ -18,6 +19,7 @@ from app.models.tables import (
 
 __all__ = [
     "Base",
+    "AdaptyWebhookEvent",
     "User",
     "Subscription",
     "Wallet",

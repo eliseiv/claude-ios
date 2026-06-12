@@ -391,6 +391,21 @@ CREATE INDEX ix_refresh_user_device ON auth_refresh_tokens (user_id, device_id);
 
 > `users` для встроенного issuer **не меняется**: идентичность по-прежнему `users.id ≡ sub` (UUID, теперь выдаёт **встроенный** issuer вместо внешнего; [ADR-018](adr/ADR-018-embedded-auth-issuer.md) закрывает [Q-005-1](99-open-questions.md)). Endpoint регистрации **появляется** (`POST /v1/auth/register`) — это не противоречит [ADR-007](adr/ADR-007-lazy-user-provisioning.md): register провижинит `users` явно, lazy-provisioning остаётся fallback.
 
+## Таблица Adapty webhook (миграция `0008`, [ADR-029](adr/ADR-029-adapty-subscription-webhook.md), модуль `billing-adapty`)
+
+### 20. adapty_webhook_events (модуль `billing-adapty`)
+```sql
+CREATE TABLE adapty_webhook_events (
+    event_id     TEXT PRIMARY KEY,                                  -- внешний event_id Adapty; точка идемпотентности (UNIQUE)
+    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    event_type   TEXT NOT NULL,                                     -- нормализованный (lower) тип события Adapty
+    payload      JSONB NOT NULL,                                    -- распарсенный объект события (аудит/диагностика); без секретов
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_adapty_webhook_events_user_id ON adapty_webhook_events (user_id);
+```
+> Журнал обработанных событий Adapty и **единая точка дедупликации**: `INSERT ... ON CONFLICT (event_id) DO NOTHING RETURNING event_id` в одной транзакции с upsert `subscriptions` + `WalletService.grant(idempotency_key="adapty-event:{event_id}")`. Повтор `event_id` → ничего не вставлено → `200 duplicate` без побочных эффектов. Двойная UNIQUE-граница (этот PK + `ux_ledger_idempotency`) исключает двойное начисление. `payload` хранит распарсенный объект (не сырые байты); bearer-секрет в нём отсутствует (он в заголовке). Детали — [modules/billing-adapty/04-data-model.md](modules/billing-adapty/04-data-model.md).
+
 ## Инварианты
 - `wallets.balance >= 0` — БД CHECK + проверка в Wallet (двойная защита).
 - **Изоляция website-builder:** `site_files` → `projects` → `users` (FK `ON DELETE CASCADE`); доступ к файлам только через
@@ -402,9 +417,10 @@ CREATE INDEX ix_refresh_user_device ON auth_refresh_tokens (user_id, device_id);
 - **Нормализация content-блоков (ADR-021):** в `chat_steps.payload` хранятся только wire-валидные поля Anthropic Messages API; служебные поля SDK (`caller` и т.п.) вырезаются перед персистом и не попадают в реплей к Anthropic. Raw `tool_use.id` сохраняется дословно (ADR-008).
 - В `meta`, `payload`, `usage`, `args`, `result` запрещено хранить API-ключи и секреты.
 - Любая FK-зависимая вставка (`subscriptions`/`wallets`/`byok_keys`/`ledger_transactions`/`chat_sessions`/`audit_logs`/`user_preferences`/`workspace_projects`/`snippets`/`attachments`/`device_push_tokens`) выполняется только после того, как строка `users` для `sub` гарантированно существует — обеспечивается ленивым провижинингом в gateway ([ADR-007](adr/ADR-007-lazy-user-provisioning.md)). Прямой FK-violation на отсутствующем `users` — дефект провижининга.
+- **`adapty_webhook_events` — исключение из lazy-provisioning:** вебхук Adapty НЕ провижинит `users` (нет доверенного JWT-`sub`). `customer_user_id` из тела события сначала проверяется по существующим `users`; отсутствующий → `200 ignored/user_not_found`, без вставки `users`/`adapty_webhook_events` ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)). FK гарантируется явной проверкой существования пользователя ДО INSERT, а не провижинингом.
 - **Изоляция расширения (Figma-gap):** `workspace_files` → `workspace_projects` → `users`; `snippets`/`attachments`/`device_push_tokens` → `users` (все FK `ON DELETE CASCADE`). Доступ только владельца (`user_id == sub`). `chat_sessions.workspace_project_id` и `attachments.session_id` — `ON DELETE SET NULL` (чат/сессия переживает удаление workspace/при отвязке).
 - **Терминология mode (ADR-012):** `chat_sessions.mode` (enum `chat_mode`) = `billing_mode` (credits|byok, способ оплаты); `chat_sessions.assistant_mode` (enum `assistant_mode`) = тип ассистента (chat|code). Это **разные ортогональные** поля. `chat_sessions.project_id` (TEXT, website-builder) ≠ `chat_sessions.workspace_project_id` (UUID FK, рабочее пространство) ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)).
-- **Источники credit-tx (ADR-006 + ADR-015):** `ledger_transactions.type='credit'` создаётся (а) subscription period grant (idempotency = `transactionId` периода) либо (б) consumable token purchase (idempotency = consumable `transactionId`, `meta.source='token_purchase'`). Оба идемпотентны по `ux_ledger_idempotency`. Списание (`type='debit'`) — без изменений (1 кредит = 1 сообщение).
+- **Источники credit-tx (ADR-006 + ADR-015 + ADR-029):** `ledger_transactions.type='credit'` создаётся (а) StoreKit subscription period grant (idempotency = `sub-grant:{transactionId}`), (б) consumable token purchase (idempotency = consumable `transactionId`, `meta.source='token_purchase'`), либо (в) **Adapty subscription grant** (idempotency = `adapty-event:{event_id}`, `reason='adapty_subscription'`, [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)). Все идемпотентны по `ux_ledger_idempotency`. **Инвариант анти-double-grant:** ключи путей (а) и (в) **различны** (`sub-grant:*` vs `adapty-event:*`), поэтому одна покупка, прошедшая ОБА пути, начислится **дважды** — клиент обязан использовать ОДИН путь подписок (см. [05-security.md](05-security.md), [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)). Списание (`type='debit'`) — без изменений (1 кредит = 1 сообщение).
 
 ## Расширения PostgreSQL
 ```sql

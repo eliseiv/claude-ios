@@ -93,14 +93,27 @@ def _insert_user(url: str) -> uuid.UUID:
     return uid
 
 
-# --------------------------- single head ---------------------------
+# --------------------------- single head (no fork at/after 0007) ---------------------------
 def test_0007_single_head() -> None:
+    """The migration graph stays linear (exactly one head) and 0007 is not a fork point.
+
+    The original assertion pinned the head to 0007, but later sprints legitimately chain new
+    revisions onto it (0008_adapty_webhook_events extends the single linear history, ADR-029).
+    The invariant this test protects is "no fork" — exactly one head — and that 0007 is an
+    ancestor of that head (i.e. 0008 builds on 0007, not in parallel). It must NOT re-pin to a
+    moving tip every time a migration is added.
+    """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(Config("alembic.ini"))
     heads = script.get_heads()
-    assert list(heads) == [_THIS_REV], f"expected single head {_THIS_REV}, got {heads}"
+    assert len(heads) == 1, f"expected a single migration head (no fork), got {heads}"
+
+    # 0007 must be on the path from the single head back to base (linear chain through 0007).
+    head = heads[0]
+    ancestry = {rev.revision for rev in script.walk_revisions("base", head)}
+    assert _THIS_REV in ancestry, f"{_THIS_REV} is not an ancestor of head {head}: {ancestry}"
 
 
 # --------------------------- upgrade relaxes NOT NULL ---------------------------

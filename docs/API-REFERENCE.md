@@ -35,13 +35,14 @@
 
 ## 2. Аутентификация и заголовки
 
-### Три независимых контура авторизации
+### Независимые контуры авторизации
 
 | Контур | Кто использует | Механизм | Заголовок | Swagger security scheme |
 |---|---|---|---|---|
-| **Пользовательский** | iOS-приложение, эндпоинты `/v1/*` (кроме `/v1/auth/*`, admin, preview) | JWT Bearer (RS256) | `Authorization: Bearer <JWT>` | `bearerAuth` (http bearer, format JWT) |
+| **Пользовательский** | iOS-приложение, эндпоинты `/v1/*` (кроме `/v1/auth/*`, admin, preview, adapty-webhook) | JWT Bearer (RS256) | `Authorization: Bearer <JWT>` | `bearerAuth` (http bearer, format JWT) |
 | **Admin** | Операторские/саппорт-инструменты, `/v1/admin/*` | статический секрет | `X-Admin-Token: <ADMIN_API_SECRET>` | `adminToken` (apiKey, header `X-Admin-Token`) |
 | **Preview** | Браузер (открывает превью сайта) | подпись внутри URL (HMAC+TTL) | нет — авторизация в самой ссылке | — (публичный по signed URL) |
+| **Adapty webhook** | Сервис Adapty (M2M), `/v1/billing/adapty/webhook` | статический bearer-секрет (без HMAC-подписи payload) | `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` | отдельная http-bearer схема ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)) |
 
 > Эндпоинты выпуска токена `/v1/auth/register|token|refresh` и `GET /v1/auth/jwks` — **public** (без `Authorization`): это точка получения JWT. Защита — per-IP rate-limit. См. [§21](#21-auth-выпуск-токена).
 
@@ -277,6 +278,34 @@
 Идемпотентно по `transactionId` периода: повторный sync той же транзакции не начисляет кредиты повторно. Refund/revocation → `isSubscribed=false`.
 
 **Коды:** `200`; `401`; `403`; `422` (невалидная/поддельная транзакция — подписка не меняется); `429`; `502/5xx` (ошибка App Store API).
+
+> **Сосуществование с Adapty ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)):** `/v1/subscription/sync` **остаётся рабочим**, но источник истины по подпискам теперь — Adapty-вебхук (§7a). Клиент использует **ОДИН** путь подписок: на Adapty-сборке iOS **не** вызывает `sync` (иначе двойное начисление — разные idempotency-ключи).
+
+---
+
+## 7a. Billing — Adapty webhook ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md))
+
+### POST /v1/billing/adapty/webhook
+Серверный вебхук Adapty (M2M, **вызывает Adapty, не iOS**) — **основной путь биллинга по подпискам**: по событию обновляет подписку и идемпотентно начисляет кредиты по тиру продукта.
+
+**Авторизация:** `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` (статический секрет, constant-time). **Adapty НЕ подписывает payload** (нет HMAC). Неверный/нет токена → `401`; секрет не сконфигурирован → `500`.
+
+**Тело:** читается **сырым**, **без Pydantic-валидации** (Adapty при сохранении вебхука шлёт проверочный пинг с пустым/неполным телом и не сохранит вебхук без `2xx`). Распознаваемые поля (дефенсивно, по версиям Adapty): `event_id`‖`id`; `event_type` (→lower); `customer_user_id`‖`profile.customer_user_id`‖`user_id` (= наш `userId` UUID); `vendor_product_id` (из `event_properties.*`/корня); `expires_at` (опц.).
+
+**После успешной авторизации любое тело → `2xx`** (Adapty ретраит не-2xx бесконечно). Тело ответа `{result, reason?, event_type?}`:
+
+| HTTP | `result` | Когда |
+|---|---|---|
+| 401 | — | нет/неверный bearer |
+| 500 | — | секрет не задан **или** реальный внутренний сбой (БД) → Adapty ретраит |
+| 200 | `ignored` (`reason`: `empty_body`/`invalid_json`/`not_an_object`/`missing_event_id`/`missing_customer_user_id`/`user_not_found`) | кривой/неполный payload или неизвестный пользователь |
+| 200 | `ignored` (+ `event_type` эхо) | неизвестный `event_type` |
+| 200 | `duplicate` | повтор `event_id` |
+| 200 | `applied` | событие применено |
+
+**События (4):** `subscription_started`/`subscription_renewed` → `subscriptions.status=active` (+`plan`,`expiresAt`) + грант кредитов по тиру (идемпотентно `adapty-event:{event_id}`); `subscription_cancelled`/`subscription_expired` → `status=expired`, кредиты не трогаются.
+
+**Идемпотентность:** UNIQUE `adapty_webhook_events.event_id` + UNIQUE ledger `idempotency_key` в одной транзакции; сбой → откат → `5xx` → ретрай Adapty → чистая переобработка. Детали — [modules/billing-adapty/02-api-contracts.md](modules/billing-adapty/02-api-contracts.md).
 
 ---
 

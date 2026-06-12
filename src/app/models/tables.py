@@ -349,3 +349,27 @@ class UserPreferences(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )
+
+
+class AdaptyWebhookEvent(Base):
+    """Processed Adapty subscription webhook events (ADR-029, billing-adapty/04, migration 0008).
+
+    Single deduplication point: ``event_id`` (Adapty's external id) is the PRIMARY KEY, enabling
+    ``INSERT ... ON CONFLICT (event_id) DO NOTHING RETURNING event_id`` so a replayed event is
+    detected and short-circuited to ``duplicate`` with no side effects. ``payload`` stores the
+    PARSED event object (not raw bytes); the bearer secret lives in the header, never the body.
+    """
+
+    __tablename__ = "adapty_webhook_events"
+
+    event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    processed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (Index("ix_adapty_webhook_events_user_id", "user_id"),)
