@@ -96,7 +96,9 @@ jobs:
             # unchanged (same -p/images/labels; verified on the server).
             #
             # INSTANCES — `dir:project` list, claude-ios FIRST (ADR-017 §CI/CD INSTANCES-loop).
-            INSTANCES="claude-ios:claude-ios avelyra:avelyra"
+            # 3rd instance `orvianix:orvianix` (orvianix.shop) is an OpenAI clone (ADR-033:
+            # LLM_PROVIDER=openai + OPENAI_* in its own .env); identical deploy/readiness/smoke.
+            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix"
             FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
             for entry in $INSTANCES; do
               dir="${entry%%:*}"; proj="${entry##*:}"

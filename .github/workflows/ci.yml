@@ -238,8 +238,11 @@ jobs:
             # INSTANCES — space-separated `dir:project` list, claude-ios FIRST (ADR-017 §CI/CD
             # INSTANCES-loop). `-p claude-ios` == basename of /opt/claude-ios => no-op vs the
             # previous no-`-p` deploy (backward-compat for the live broadnova.shop). The second
-            # instance `avelyra:avelyra` (avelyraweb.shop) is provisioned on the server.
-            INSTANCES="claude-ios:claude-ios avelyra:avelyra"
+            # instance `avelyra:avelyra` (avelyraweb.shop) is provisioned on the server. The third
+            # instance `orvianix:orvianix` (orvianix.shop) is an OpenAI clone (ADR-033:
+            # LLM_PROVIDER=openai + OPENAI_* in its own /opt/orvianix/.env) — same code, same
+            # per-instance deploy/readiness/smoke; only its .env differs.
+            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix"
             FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
             for entry in $INSTANCES; do
               dir="${entry%%:*}"; proj="${entry##*:}"
