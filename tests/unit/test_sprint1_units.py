@@ -119,5 +119,5 @@ def test_system_prompt_unknown_mode_falls_back_to_chat() -> None:
 def test_preferences_defaults() -> None:
     d = _defaults()
     assert d.default_assistant_mode == "chat"
-    assert d.notifications_enabled is True
+    assert d.notifications_enabled is False  # ADR-032: privacy-by-default
     assert d.code_defaults == {}

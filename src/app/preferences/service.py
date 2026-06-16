@@ -29,7 +29,7 @@ class PreferencesView:
 def _defaults() -> PreferencesView:
     return PreferencesView(
         default_assistant_mode=DEFAULT_ASSISTANT_MODE,
-        notifications_enabled=True,
+        notifications_enabled=False,
         code_defaults={},
     )
 

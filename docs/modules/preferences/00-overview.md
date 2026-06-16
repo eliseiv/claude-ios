@@ -13,6 +13,6 @@
 
 ## Бизнес-правила
 - BR-PF-1: `defaultAssistantMode` ∈ {chat, code}; дефолт `chat`. Используется orchestrator как fallback `assistantMode` ([ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)).
-- BR-PF-2: `notificationsEnabled` (bool, дефолт `true`) — единый источник настройки уведомлений; регистрация устройства — модуль notifications.
+- BR-PF-2: `notificationsEnabled` (bool, дефолт `false`) — единый источник настройки уведомлений; регистрация устройства — модуль notifications. Дефолт `false` ([ADR-032](../../adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default; iOS запрашивает системное разрешение на push сначала, затем включает через `PATCH`. Меняется только дефолт для новых/без-строки пользователей — существующие строки сохраняют явный выбор.
 - BR-PF-3: `codeDefaults` — JSON-объект дефолтов Code-режима (например `{ "language": "TypeScript" }`); без секретов; валидируется по размеру (≤ 8KB).
 - BR-PF-4: строка `user_preferences` создаётся лениво (upsert при первом PATCH); GET без строки → дефолты.

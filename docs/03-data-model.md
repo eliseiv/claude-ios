@@ -266,7 +266,7 @@ CREATE INDEX ix_site_files_project ON site_files (project_id);
 CREATE TABLE user_preferences (
     user_id                UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     default_assistant_mode assistant_mode NOT NULL DEFAULT 'chat',  -- дефолтный тип ассистента (chat|code)
-    notifications_enabled  BOOLEAN NOT NULL DEFAULT TRUE,           -- toggle уведомлений (модуль notifications)
+    notifications_enabled  BOOLEAN NOT NULL DEFAULT FALSE,          -- toggle уведомлений (модуль notifications); дефолт FALSE — privacy-by-default, iOS запрашивает системное разрешение сначала ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md))
     code_defaults          JSONB NOT NULL DEFAULT '{}'::jsonb,      -- дефолты Code-context (язык и т.п.), без секретов
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );

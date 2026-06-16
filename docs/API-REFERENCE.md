@@ -576,7 +576,7 @@ Steps-view — агрегированные шаги одного message-шаг
 
 ## 19. Preferences
 
-Пользовательские настройки. Источник дефолта `assistantMode` для `/chat/run` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Если строка ещё не создана — возвращаются дефолты (`chat` / `true` / `{}`).
+Пользовательские настройки. Источник дефолта `assistantMode` для `/chat/run` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Если строка ещё не создана — возвращаются дефолты (`chat` / `false` / `{}`). Дефолт `notificationsEnabled=false` ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default; iOS включает push через `PATCH` после системного разрешения. Существующие строки `user_preferences` сохраняют ранее сохранённое значение (без backfill).
 
 **Заголовки:** `Authorization: Bearer <JWT>`.
 
@@ -585,7 +585,7 @@ Steps-view — агрегированные шаги одного message-шаг
 | Поле | Тип | Прим. |
 |---|---|---|
 | `defaultAssistantMode` | `chat` \| `code` | дефолтный тип ассистента; ортогонален billing_mode |
-| `notificationsEnabled` | bool | единый toggle уведомлений (push-токены — модуль notifications, Спринт 3) |
+| `notificationsEnabled` | bool | единый toggle уведомлений (push-токены — модуль notifications, Спринт 3); дефолт `false` при отсутствии строки ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)) |
 | `codeDefaults` | object | дефолты Code-контекста (язык и т.п.); без секретов |
 
 **Коды:** `200`; `401`; `429`; `5xx`.

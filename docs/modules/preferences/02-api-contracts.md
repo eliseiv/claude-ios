@@ -7,11 +7,11 @@ JWT, владелец = `sub`.
 ```json
 {
   "defaultAssistantMode": "chat | code",
-  "notificationsEnabled": true,
+  "notificationsEnabled": false,
   "codeDefaults": { }
 }
 ```
-- Если строки `user_preferences` нет — возвращаются дефолты (`chat` / `true` / `{}`).
+- Если строки `user_preferences` нет — возвращаются дефолты (`chat` / `false` / `{}`). Дефолт `notificationsEnabled=false` ([ADR-032](../../adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default, iOS включает push через `PATCH` после системного разрешения. Существующие строки сохраняют сохранённое значение.
 
 ## PATCH /v1/preferences
 Частичное обновление (любое подмножество полей).

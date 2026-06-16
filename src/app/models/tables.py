@@ -340,7 +340,7 @@ class UserPreferences(Base):
         _assistant_mode_enum, nullable=False, server_default=sa_text("'chat'")
     )
     notifications_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=sa_text("true")
+        Boolean, nullable=False, server_default=sa_text("false")
     )
     # Code-context defaults (language etc.); no secrets (validated + redacted).
     code_defaults: Mapped[dict[str, Any]] = mapped_column(

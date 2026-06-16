@@ -1,6 +1,6 @@
 """Integration tests for /v1/preferences (preferences module, 09-testing.md).
 
-GET without a stored row returns in-memory defaults (chat/true/{}) and does NOT write the DB.
+GET without a stored row returns in-memory defaults (chat/false/{}) and does NOT write the DB.
 PATCH upserts and updates only the provided fields. codeDefaults is bounded (<= 8KB) and must
 not contain secrets. Data is scoped to the JWT sub.
 """
@@ -34,7 +34,7 @@ async def test_get_without_row_returns_defaults_and_does_not_write(
     assert r.status_code == 200
     assert r.json() == {
         "defaultAssistantMode": "chat",
-        "notificationsEnabled": True,
+        "notificationsEnabled": False,
         "codeDefaults": {},
     }
     # GET must NOT create a row (lazy defaults only).
@@ -55,9 +55,10 @@ async def test_patch_upsert_partial_preserves_other_fields(
         headers=auth_headers(uid),
     )
     assert r1.status_code == 200
+    # ADR-032: a row created via PATCH without notificationsEnabled gets the NEW default (false).
     assert r1.json() == {
         "defaultAssistantMode": "code",
-        "notificationsEnabled": True,
+        "notificationsEnabled": False,
         "codeDefaults": {},
     }
     assert await _row_count(db_sessionmaker, str(uid)) == 1
@@ -78,6 +79,32 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "notificationsEnabled": False,
         "codeDefaults": {},
     }
+
+
+@pytest.mark.asyncio
+async def test_patch_notifications_true_is_respected(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """ADR-032: the new default is false, but an EXPLICIT opt-in (true) is stored and persists.
+
+    PATCH {notificationsEnabled: true} → response true; a subsequent GET reads back true (the
+    explicit user choice is honoured and not overwritten by the privacy-by-default false).
+    """
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+    r = await client.patch(
+        "/v1/preferences",
+        json={"notificationsEnabled": True},
+        headers=auth_headers(uid),
+    )
+    assert r.status_code == 200
+    assert r.json()["notificationsEnabled"] is True
+    assert await _row_count(db_sessionmaker, str(uid)) == 1
+
+    g = await client.get("/v1/preferences", headers=auth_headers(uid))
+    assert g.status_code == 200
+    assert g.json()["notificationsEnabled"] is True
 
 
 @pytest.mark.asyncio
