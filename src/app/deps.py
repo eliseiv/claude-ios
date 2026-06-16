@@ -21,8 +21,8 @@ from app.auth.service import AuthService
 from app.billing_adapty.service import AdaptyWebhookService
 from app.byok.kms import get_kms_client
 from app.byok.service import BYOKService
-from app.chat.anthropic_client import get_anthropic_client
 from app.chat.global_tools import GlobalToolHandlers, SystemClock
+from app.chat.llm_client import get_llm_client
 from app.chat.orchestrator import ChatOrchestrator
 from app.chat.repository import ChatRepository
 from app.chats.repository import ChatsRepository
@@ -138,7 +138,8 @@ def get_wallet_service(session: DbSession) -> WalletService:
 
 
 def get_byok_service(session: DbSession) -> BYOKService:
-    return BYOKService(session, get_kms_client(), get_anthropic_client(), AuditService(session))
+    # ADR-033: BYOK validates the key of the ACTIVE provider via the LLMClient factory.
+    return BYOKService(session, get_kms_client(), get_llm_client(), AuditService(session))
 
 
 def get_subscription_service(session: DbSession) -> SubscriptionService:
@@ -192,9 +193,10 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         session=session,
         repo=ChatRepository(session),
         wallet=WalletService(session, audit),
-        byok=BYOKService(session, get_kms_client(), get_anthropic_client(), audit),
+        byok=BYOKService(session, get_kms_client(), get_llm_client(), audit),
         audit=audit,
-        anthropic_client=get_anthropic_client(),
+        # ADR-033: inject the active provider's LLMClient (anthropic default | openai).
+        anthropic_client=get_llm_client(),
         site_tools=SiteToolHandlers(session, website, audit),
         # ADR-026: global server-side tools (time.now) with the default SystemClock. Project-
         # independent — no WebsiteService/session-context, wired alongside site_tools.

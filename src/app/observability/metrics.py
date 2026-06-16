@@ -58,10 +58,21 @@ preview_request_total = Counter(
 # Anthropic upstream errors (TD-014): bounded enum labels only (no user-content).
 # status_code is the numeric HTTP status or "none" for timeout/connection errors;
 # error_type is the Anthropic error.type (or "unknown" when the body has none).
+# KEPT for existing dashboards/tests; the generalized provider-labeled metric below is the
+# ADR-033 §10 unified series (both are incremented on the Anthropic path).
 anthropic_upstream_errors_total = Counter(
     "anthropic_upstream_errors_total",
     "Count of Anthropic upstream errors by status_code and error_type.",
     ["status_code", "error_type"],
+)
+# Generalized LLM upstream errors (ADR-033 §10): provider-labeled unified series for both
+# Anthropic and OpenAI. provider ∈ {anthropic, openai}; status_code is the numeric HTTP status or
+# "none" for timeout/connection errors; error_type is the provider error.type / exception class
+# (or "unknown"). Bounded enum labels only (no user-content).
+llm_upstream_errors_total = Counter(
+    "llm_upstream_errors_total",
+    "Count of LLM upstream errors by provider, status_code and error_type.",
+    ["provider", "status_code", "error_type"],
 )
 
 

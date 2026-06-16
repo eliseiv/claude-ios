@@ -17,7 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import EVENT_BYOK_CHANGE, AuditEvent, AuditService
 from app.byok.kms import KmsClient
-from app.chat.anthropic_client import AnthropicClient, KeyValidation
+
+# AnthropicClient is imported for backward compatibility (conftest patches
+# ``byok.service.AnthropicClient``); the service depends on the neutral LLMClient (ADR-033).
+from app.chat.anthropic_client import AnthropicClient  # noqa: F401
+from app.chat.llm_client import KeyValidation, LLMClient
 from app.config import get_settings
 from app.models import BYOKKey
 
@@ -35,10 +39,18 @@ class BYOKResult:
 
 
 def _active_model_for(key_status: str) -> str | None:
-    """Active model is reported only when the key is valid (ADR-016)."""
-    if key_status == "valid":
-        return get_settings().byok_default_model
-    return None
+    """Active model is reported only when the key is valid (ADR-016), per-provider (ADR-033 §7).
+
+    The BYOK default model depends on the active ``LLM_PROVIDER``: anthropic →
+    ``BYOK_DEFAULT_MODEL``; openai → ``OPENAI_BYOK_DEFAULT_MODEL``. A BYOK instance validates the
+    key of its own provider.
+    """
+    if key_status != "valid":
+        return None
+    settings = get_settings()
+    if settings.llm_provider.strip().lower() == "openai":
+        return settings.openai_byok_default_model
+    return settings.byok_default_model
 
 
 class BYOKService:
@@ -46,11 +58,12 @@ class BYOKService:
         self,
         session: AsyncSession,
         kms: KmsClient,
-        anthropic_client: AnthropicClient,
+        anthropic_client: LLMClient,
         audit: AuditService,
     ) -> None:
         self._session = session
         self._kms = kms
+        # ADR-033: provider-neutral LLM client (the param name is kept for caller compatibility).
         self._anthropic = anthropic_client
         self._audit = audit
 

@@ -401,3 +401,72 @@ def anthropic_tool_definitions(*, include_server_side: bool = True) -> list[dict
             }
         )
     return definitions
+
+
+def neutral_tool_definitions(*, include_server_side: bool = True) -> list[dict[str, Any]]:
+    """Provider-neutral tool definitions (ADR-033 §4): ``{name(domain dotted), description,
+    input_schema}``.
+
+    Single source of truth handed to ``LLMClient.create_message``; the client serializes them to
+    its provider wire format (Anthropic underscore names / OpenAI function-tool wrapper).
+    The ``include_server_side`` gate is identical to ``anthropic_tool_definitions`` (ADR-022 axis A:
+    drop project-scoped ``site.*`` when there is no project; ``GLOBAL_SERVER_SIDE_TOOLS`` like
+    ``time.now`` are never gated — ADR-026 §3).
+    """
+    definitions: list[dict[str, Any]] = []
+    for name in _ARGS_BY_TOOL:
+        if not include_server_side and name in SERVER_SIDE_TOOLS:
+            continue
+        definitions.append(
+            {
+                # Domain (dotted) name — the client maps it to the provider transport name.
+                "name": name,
+                "description": TOOL_DESCRIPTIONS[name],
+                "input_schema": tool_input_schema(name),
+            }
+        )
+    return definitions
+
+
+def openai_tool_function(neutral_def: dict[str, Any]) -> dict[str, Any]:
+    """Serialize ONE neutral tool definition to the OpenAI function-tool wire shape (ADR-033 §4).
+
+    Single source of truth for the OpenAI wire wrapping — used both by ``openai_tool_definitions``
+    (the SSOT generator) and by ``OpenAIClient._serialize_tools`` on the live path, so the shape is
+    defined in exactly one place.
+
+    Input: a neutral def ``{name(domain dotted), description, input_schema}``. A def already in the
+    OpenAI shape (has ``function``) is passed through unchanged (back-compat for any caller that
+    pre-serialized). Output:
+    ``{type:"function", function:{name(underscore), description, parameters(=input_schema)}}``.
+    OpenAI function names match the SAME ``^[a-zA-Z0-9_-]{1,64}$`` constraint as Anthropic — dots
+    are forbidden for both providers — so the underscore map (``to_anthropic_tool_name``) is reused;
+    the name is provider-neutral by value (dot↔underscore).
+    """
+    if "function" in neutral_def:  # already OpenAI-shaped — pass through
+        return neutral_def
+    name = str(neutral_def.get("name", ""))
+    # Same underscore transport name as Anthropic (dots forbidden on both).
+    fn_name = to_anthropic_tool_name(name) if "." in name else name
+    return {
+        "type": "function",
+        "function": {
+            "name": fn_name,
+            "description": neutral_def["description"],
+            "parameters": neutral_def["input_schema"],
+        },
+    }
+
+
+def openai_tool_definitions(*, include_server_side: bool = True) -> list[dict[str, Any]]:
+    """Tool definitions for the OpenAI Chat Completions API (ADR-033 §4).
+
+    SSOT for the OpenAI offered tool-set: builds neutral defs (``neutral_tool_definitions``) and
+    serializes each via ``openai_tool_function`` (the one OpenAI-wire wrapper). The
+    ``include_server_side`` gate is identical to ``anthropic_tool_definitions`` (ADR-022 §A;
+    ``GLOBAL_SERVER_SIDE_TOOLS`` never gated — ADR-026 §3).
+    """
+    return [
+        openai_tool_function(d)
+        for d in neutral_tool_definitions(include_server_side=include_server_side)
+    ]

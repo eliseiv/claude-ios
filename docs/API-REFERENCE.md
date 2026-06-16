@@ -139,6 +139,8 @@
 >
 > MIME вне allowlist → `422`; рассогласование заявленного `mediaType` и реального содержимого (magic bytes) → `422`; невалидный base64 → `422`. URL-вложения не поддерживаются (только inline). Лимиты (дефолты, конфигурируемы): ≤ 10 вложений; одно ≤ 5 MB (image) / 8 MB (document); суммарно ≤ 10 MB; PDF ≤ 100 страниц; тело `/v1/chat/run` ≤ 12 MB (повышенный лимит **только** этого роута). **Биллинг неизменен: сообщение с вложениями = 1 кредит** ([ADR-006](adr/ADR-006-credit-billing-and-subscription-grant.md)). Содержимое вложений не логируется.
 >
+> **Ограничение PDF на OpenAI-инстансах ([ADR-033](adr/ADR-033-llm-provider-abstraction.md)).** Сервис разворачивается мульти-инстансно на разных LLM-провайдерах одним кодом (выбор — env `LLM_PROVIDER`, дефолт `anthropic`). На **OpenAI-инстансе** (`LLM_PROVIDER=openai`, Chat Completions vision) `type: document` (`application/pdf`) **не поддерживается** → `422` (`unsupported_media_type`). `image`/`text` работают (картинки — через `image_url` data-URI). На **anthropic-инстансах** PDF принимается как прежде. Интеграторам OpenAI-инстанса не отправлять PDF-вложения. См. [TD-023](100-known-tech-debt.md).
+>
 > Пример `attachments[]`:
 > ```json
 > [

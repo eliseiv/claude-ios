@@ -65,6 +65,77 @@ Anthropic Messages API не принимает точку в имени tool (`^
 - Неизвестное anthropic-имя в ответе Claude → ошибка обработки (upstream-аномалия), не транслируется в iOS как валидный tool.
 - Маппинг — статическая таблица из 8 пар; backend не «угадывает» преобразование строкой, а валидирует по таблице.
 
+## Провайдер-абстракция LLM (Anthropic | OpenAI) (ADR-033)
+
+Сервис разворачивается мульти-инстансно на разных LLM-провайдерах **одним кодом** (не форк, [ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)). Провайдер выбирается env **`LLM_PROVIDER ∈ {anthropic, openai}`, дефолт `anthropic`** — существующие инстансы `claude-ios`/`avelyra` поведение не меняют. **Один провайдер на инстанс**: `chat_steps.payload` хранит wire-формат активного провайдера; кросс-провайдерный реплей в одной БД не поддерживается (инвариант, не дефект).
+
+### Интерфейс `LLMClient` и нейтральный результат
+
+Нейтральный Protocol/ABC `LLMClient` (`src/app/chat/llm_client.py`). `AnthropicClient` (`anthropic_client.py`, как есть) и новый `OpenAIClient` (`openai_client.py`) — реализации. Factory `get_llm_client()` по `LLM_PROVIDER`. Orchestrator/BYOK инжектят **`LLMClient`** (не `AnthropicClient`).
+
+| Нейтральный тип | Поля | Замена |
+|---|---|---|
+| `LLMResult` | `stop_reason: NeutralStopReason`, `content_blocks: list[dict]` (wire активного провайдера, для персиста), `usage: LLMUsage`, `text: str`, `tool_uses: list[{id(provider raw), name(domain dotted), input(dict)}]` | `AnthropicResult` |
+| `LLMUsage` | `input_tokens`, `output_tokens`, `model`, `cache_read_tokens`, `cache_write_tokens` | `AnthropicUsage` |
+| `KeyValidation` | `valid` \| `invalid` \| `offline` | без изменений ([ADR-016](../../adr/ADR-016-extended-byok-statuses.md)) |
+
+### Нормализованный `stop_reason` (канонический словарь)
+
+Orchestrator диспетчеризует **только** по каноническим значениям `{tool_use, max_tokens, end_turn}` ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) — диспетчеризация по `stop_reason`, не по наличию tool_use-блоков). Каждый клиент мапит свой wire stop_reason:
+
+| Канонический | Anthropic `stop_reason` | OpenAI `finish_reason` |
+|---|---|---|
+| `tool_use` | `tool_use` | `tool_calls` |
+| `max_tokens` | `max_tokens` | `length` |
+| `end_turn` | `end_turn` / `stop_sequence` / прочее | `stop` / `content_filter` / прочее |
+
+**Backend-задача:** заменить в orchestrator строковые литералы Anthropic (`result.stop_reason == "max_tokens"`/`== "tool_use"`) на сравнение с каноническими значениями `NeutralStopReason`.
+
+### Граница orchestrator ↔ client (ЦЕНТРАЛЬНОЕ — провайдер-агностичность персиста)
+
+Вся провайдер-специфичная (де)сериализация wire-формата — **ВНУТРИ клиента**. Orchestrator и персист провайдер-агностичны.
+
+**Что orchestrator ПЕРЕДАЁТ клиенту (`create_message`):**
+1. `system_prompt: str` — как сейчас.
+2. `messages` — **нейтральная история** из `chat_steps` (`_build_messages`): список `{role: user|assistant|tool, content_blocks: [...]}`, где `content_blocks` для user/assistant — wire-блоки активного провайдера из `payload`, для tool-шага — доменная запись `{toolCallId, providerToolUseId, toolName, result|error}`. **Клиент** строит из неё провайдер-messages (Anthropic — как сейчас `_build_messages`-логика уезжает в клиент или клиент принимает уже собранное; OpenAI — Chat Completions messages: assistant с `tool_calls`, role=`tool` с `tool_call_id`).
+3. `tools` — **нейтральные определения** `{name(domain dotted), description, input_schema}`. Per-provider сериализацию делает клиент (см. ниже).
+4. `attachments: PreparedAttachments | None` — нейтральные вложения первого turn. **Клиент строит провайдер content-блоки** (orchestrator больше не собирает Anthropic image/document-блоки сам, см. [§Мультимодальные вложения](#мультимодальные-вложения-inline-base64-adr-020)).
+5. `api_key: str | None` — BYOK override, как сейчас.
+
+**Что клиент ВОЗВРАЩАЕТ (`LLMResult`):**
+- `content_blocks` — **wire-формат активного провайдера** для `chat_steps.payload` (Anthropic — как сейчас; OpenAI — нормализованный assistant-message, достаточный для реплея), **уже нормализованный** клиентом на границе персиста (per-provider allowlist, [ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)).
+- `tool_uses` — **доменные** `{id(provider raw), name(domain dotted), input(dict)}`. Клиент уже применил reverse-map имени и (OpenAI) распарсил `arguments` из JSON-строки в dict. Orchestrator получает однородный результат независимо от провайдера.
+
+**Что orchestrator ХРАНИТ:** `content_blocks` дословно. Реплей читает payload как нейтральную историю и отдаёт клиенту.
+
+**Инвариант минимизации изменений orchestrator:** биллинг, барьер хода, server-side tool-loop, idempotency, `seq`-порядок — **не меняются**; меняется только тип инъекции (`LLMClient`), нейтрализация `stop_reason` и перенос сборки provider-messages/attachment-блоков в клиент.
+
+### `provider_tool_use_id` обобщается (ADR-008 → ADR-033)
+
+`tool_calls.provider_tool_use_id` ([ADR-008](../../adr/ADR-008-provider-tool-use-id.md)) хранит raw provider id: Anthropic — `toolu_...`; **OpenAI — `call_...`** (`tool_calls[].id`). Семантика та же — непрозрачная строка провайдера для согласования tool_use↔tool_result в реплее. Имя колонки/поля не меняется (provider-нейтральная семантика). [§Согласованность tool_use.id](#согласованность-tool_useid-в-истории-anthropic-bug-4) и [§Доменная нормализация payload](#доменная-нормализация-payload-истории-при-отдаче-adr-024) работают поверх той же карты `provider_tool_use_id → domain id` независимо от провайдера.
+
+### Tools per-provider (переиспользование underscore-map)
+
+Нейтральное определение (single source — `tools.py`): `{name(domain dotted), description, input_schema}`. Per-provider сериализация внутри клиента:
+- **Anthropic:** `{name(underscore), description, input_schema}` (`anthropic_tool_definitions()`).
+- **OpenAI:** `{type:"function", function:{name(underscore), description, parameters(=input_schema)}}`.
+
+**Underscore-map ([§Маппинг имён tools (BUG-3)](#маппинг-имён-tools-bug-3)) переиспользуется без изменений:** OpenAI function name тоже `^[a-zA-Z0-9_-]{1,64}$` — **точки запрещены у обоих** провайдеров. Та же таблица `_DOMAIN_TO_ANTHROPIC`/`to_anthropic_tool_name`/`to_domain_tool_name` применяется к OpenAI (имя/тип переименовываются в нейтральные, но значения и dot↔underscore-семантика идентичны). **Reverse-map при парсинге OpenAI tool_calls:** `function.name` (underscore) → domain через `to_domain_tool_name`; `function.arguments` — **JSON-строка**, клиент парсит в dict (невалидный JSON / неизвестное имя → `ValidationFailedError`, как upstream-аномалия). Anthropic отдаёт `input` уже dict — результат одинаков.
+
+### Attachments per-provider
+
+`prepare_attachments` даёт нейтральный `PreparedAttachments`; построение провайдер content-блоков параметризуется провайдером:
+- **Anthropic:** image/document(PDF)/text — как сейчас.
+- **OpenAI:** image → `{type:"image_url", image_url:{url:"data:<mediaType>;base64,<data>"}}`; text → текстовый блок; **PDF (class `document`) → `ValidationFailedError` (422 `unsupported_media_type`)** — Chat Completions vision не принимает PDF ([TD-023](../../100-known-tech-debt.md), [05-security.md](../../05-security.md)). Валидация (allowlist/magic-bytes/лимиты/page-guard) — общая, до провайдер-ветвления; PDF-reject для OpenAI — отдельная провайдер-aware проверка.
+
+### Нормализация payload per-provider
+
+[ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md) (стрип не-wire SDK-полей) — per-provider: Anthropic `_BLOCK_WIRE_FIELDS` (как сейчас); OpenAI — собственный allowlist полей assistant-message/tool_calls. Выполняется **внутри клиента** на границе персиста. `seq`-порядок и барьер хода — провайдер-агностичны.
+
+### Observability per-provider
+
+Вводится обобщённая метрика **`llm_upstream_errors_total`** с label `provider ∈ {anthropic, openai}` (+ `status_code`/`error_type`). **Факт реализации (`metrics.py`):** legacy `anthropic_upstream_errors_total` **сохранена ПАРАЛЛЕЛЬНО** с `llm_upstream_errors_total{provider}` — обе инкрементируются на anthropic-пути (`anthropic_client.py`), OpenAI-путь (`openai_client.py`) пишет только `llm_upstream_errors_total{provider="openai"}`. Legacy-имя оставлено осознанно для обратной совместимости дашбордов/тестов ([ADR-033 §10](../../adr/ADR-033-llm-provider-abstraction.md)). Контракт логирования upstream-ошибок ([§Логирование upstream-ошибок](#логирование-upstream-ошибок-anthropic-td-014)) применяется к обоим клиентам (OpenAI: `openai.AuthenticationError`/`APITimeoutError`/`APIConnectionError`/`APIStatusError` → те же доменные `AuthError`/`UpstreamError`; событие лога `llm_upstream_error`). OpenAI-ключ — под redaction (покрыт денилистом `key`/`secret`).
+
 ## Параллельные client-side tool-вызовы и барьер хода (ADR-025)
 
 Claude в одном assistant-ходе может вернуть **несколько** `tool_use`-блоков (parallel tool use). Хранение это уже поддерживает поблочно ([ADR-008](../../adr/ADR-008-provider-tool-use-id.md): каждый блок → свой `tool_calls` с domain id + `provider_tool_use_id`). [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) распространяет это на публичный ответ и continuation.
@@ -214,6 +285,8 @@ Claude в одном assistant-ходе может вернуть **нескол
 - `text` → `{"type":"text","text":"<filename>\n```\n<декодированный UTF-8>\n```"}`.
 
 Эти блоки добавляются к текстовому блоку сообщения в `content` нового user-turn и отправляются Anthropic **один раз** — на первом вызове `messages.create` message-шага.
+
+> **Провайдер OpenAI ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)).** Построение content-блоков параметризуется провайдером (билдер уезжает в клиент): `image` → `{type:"image_url", image_url:{url:"data:<mediaType>;base64,<data>"}}`; `text` → текстовый блок; **`document` (PDF) → `ValidationFailedError` (422 `unsupported_media_type`)** при `LLM_PROVIDER=openai` (Chat Completions vision не принимает PDF, [TD-023](../../100-known-tech-debt.md)). Общая валидация (allowlist/magic-bytes/лимиты/PDF page-guard) выполняется до провайдер-ветвления; PDF-reject для OpenAI — отдельная провайдер-aware проверка класса `document`. Хранение/реплей (плейсхолдеры, без base64) — без изменений и провайдер-агностичны.
 
 **Хранение и реплей (нормативно, [ADR-020 §3](../../adr/ADR-020-inline-base64-attachments-mvp.md)).** `chat_steps.payload["content"]` для user-turn с вложениями сохраняет текстовый блок сообщения **+ лёгкие плейсхолдеры** вида `{"type":"text","text":"[attachment: <mediaType> \"<filename>\", <size> — отправлено в первом обращении к модели]"}`. **Сырой base64 в `chat_steps.payload` не хранится никогда.**
 - На витках tool-loop ≥1 и при re-entry из `/chat/tool-result` `_build_messages` реконструирует user-turn из payload → реплеится **только плейсхолдер**, тяжёлый base64-контент НЕ повторяется в запросе к Anthropic.

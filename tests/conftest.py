@@ -177,10 +177,24 @@ async def db_session(
 
 # ----------------------------- Fakes for external clients -----------------------------
 class FakeAnthropicClient:
-    """In-memory stand-in for AnthropicClient honoring the same contract.
+    """In-memory stand-in for AnthropicClient honoring the same LLMClient contract (ADR-033).
 
-    Scriptable: `responses` is a list of AnthropicResult returned in order on create_message.
-    Records every call. validate_key returns `valid_keys` membership.
+    Scriptable: `responses` is a list of LLMResult returned in order on create_message.
+    validate_key returns `valid_keys` membership.
+
+    ADR-033 boundary mirror: the orchestrator now passes the provider-NEUTRAL contract to
+    ``create_message`` — ``messages`` is ``list[NeutralMessage]``, ``tools`` are neutral
+    (dotted-name) definitions, and first-turn ``attachments`` arrive as a separate kwarg
+    (PreparedAttachments). Provider wire serialization lives INSIDE the real client
+    (``AnthropicClient._build_provider_messages`` / ``_serialize_tools`` / attachment injection).
+    To keep this fake a faithful double of the real seam, ``create_message`` records BOTH:
+    - the neutral kwargs (``messages``/``tools``/``attachments``/``api_key``/``system_prompt``)
+      under ``neutral_*`` keys, AND
+    - the Anthropic WIRE view the production client would actually send (``messages`` = wire
+      dicts with ``content`` lists / ``tool_use`` / ``tool_result`` blocks; ``tools`` = underscore
+      names; first-turn attachment content blocks injected into the last user wire message).
+    The wire view is produced by reusing the REAL ``AnthropicClient`` translation helpers, so the
+    recorded ``calls[*]`` reflect the exact wire contract — boundary tests assert on ``calls[*]``.
     """
 
     def __init__(self) -> None:
@@ -189,6 +203,9 @@ class FakeAnthropicClient:
         self._AnthropicResult = AnthropicResult
         self._AnthropicUsage = AnthropicUsage
         self.responses: list[Any] = []
+        # calls[*] hold the Anthropic WIRE view (see create_message) so boundary tests assert on
+        # wire messages/tools exactly as the real AnthropicClient would send them. The original
+        # neutral kwargs are preserved alongside (neutral_messages/neutral_tools/...).
         self.calls: list[dict[str, Any]] = []
         self.valid_keys: set[str] = set()
         # Keys for which validate_key must report KeyValidation.offline (network/non-401).
@@ -315,11 +332,49 @@ class FakeAnthropicClient:
         )
 
     async def create_message(self, **kwargs: Any) -> Any:
-        from app.chat.anthropic_client import AnthropicAuthError
+        """LLMClient.create_message double (ADR-033): record the WIRE view, return scripted result.
+
+        Reuses the REAL ``AnthropicClient`` translation helpers (``_build_provider_messages`` /
+        ``_serialize_tools``) so the recorded ``messages``/``tools`` are exactly the Anthropic wire
+        form the production client would send. First-turn ``attachments`` (PreparedAttachments) are
+        injected into the LAST user wire message the same way the real client does, so attachment
+        boundary tests see the full image/document block on turn 0 and placeholders-only on replay.
+        """
+        from app.chat.anthropic_client import AnthropicAuthError, AnthropicClient
         from app.errors import UpstreamError
 
-        self.calls.append(kwargs)
+        neutral_messages = kwargs.get("messages", [])
+        neutral_tools = kwargs.get("tools", [])
+        attachments = kwargs.get("attachments")
         api_key = kwargs.get("api_key")
+        system_prompt = kwargs.get("system_prompt")
+
+        # Translate neutral → Anthropic wire exactly as the real client does (ADR-033 §3/§4).
+        wire_messages = AnthropicClient._build_provider_messages(neutral_messages)
+        wire_tools = AnthropicClient._serialize_tools(neutral_tools)
+        if attachments is not None and getattr(attachments, "content_blocks", None):
+            # Inject the full attachment blocks into the last user turn — production parity.
+            for wm in reversed(wire_messages):
+                if wm.get("role") == "user":
+                    existing = wm.get("content")
+                    base = existing if isinstance(existing, list) else []
+                    wm["content"] = [*base, *attachments.content_blocks]
+                    break
+
+        self.calls.append(
+            {
+                # Wire view (what Anthropic would actually receive) — boundary tests use these.
+                "messages": wire_messages,
+                "tools": wire_tools,
+                "system_prompt": system_prompt,
+                "api_key": api_key,
+                "attachments": attachments,
+                # Neutral kwargs preserved for tests that want to inspect the seam directly.
+                "neutral_messages": neutral_messages,
+                "neutral_tools": neutral_tools,
+            }
+        )
+
         if self.raise_upstream:
             raise UpstreamError("anthropic upstream error")
         if api_key is not None and api_key in self.auth_error_keys:

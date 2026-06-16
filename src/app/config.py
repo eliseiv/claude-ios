@@ -29,6 +29,22 @@ class Settings(BaseSettings):
     )
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
+    # --- LLM provider selection (ADR-033) ---
+    # One provider per instance. Default "anthropic" → existing instances (claude-ios/avelyra)
+    # are unchanged; "openai" activates the OpenAI Chat Completions path. The OpenAI clone is a
+    # separate instance with LLM_PROVIDER=openai + OPENAI_* (07-deployment.md §Мульти-инстанс).
+    llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
+
+    # --- OpenAI (ADR-033; used only when LLM_PROVIDER=openai) ---
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4o", alias="OPENAI_MODEL")
+    # Output budget per call (parity with ANTHROPIC_MAX_TOKENS=16000).
+    openai_max_tokens: int = Field(default=16000, alias="OPENAI_MAX_TOKENS")
+    openai_timeout_seconds: float = Field(default=120.0, alias="OPENAI_TIMEOUT_SECONDS")
+    openai_max_retries: int = Field(default=2, alias="OPENAI_MAX_RETRIES")
+    # BYOK active model reported when keyStatus=valid on an OpenAI instance (ADR-016/ADR-033 §7).
+    openai_byok_default_model: str = Field(default="gpt-4o", alias="OPENAI_BYOK_DEFAULT_MODEL")
+
     # --- Anthropic ---
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-sonnet-4-5", alias="ANTHROPIC_MODEL")

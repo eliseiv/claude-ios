@@ -1,29 +1,70 @@
-"""Anthropic Claude client wrapper (CO-2).
+"""Anthropic Claude client — an LLMClient implementation (CO-2, ADR-033).
 
 Real integration with the Anthropic Python SDK. Supports prompt caching (cache_control
 ephemeral on system prompt and tool definitions), tool-loop generation, usage parsing
 (including cache read/write tokens), and a per-call api_key override for BYOK (the user's
 key is passed in-memory only and never logged — 05-security.md, ADR-003).
 
+ADR-033: this is now one implementation of the provider-neutral ``LLMClient`` Protocol. The
+neutral result/usage types live in ``llm_client`` (``LLMResult``/``LLMUsage``); ``AnthropicResult``
+/ ``AnthropicUsage`` / ``KeyValidation`` are kept here as backward-compatible aliases so existing
+imports and tests keep working. All Anthropic-specific (de)serialization of the wire format —
+building provider ``messages`` from the neutral history, the per-provider tool serialization, the
+attachment content blocks and the persist-boundary normalization — lives INSIDE this client.
+
 Model and key come from config / per-call override; never hardcoded (02-tech-stack.md).
 """
 
 from __future__ import annotations
 
-import enum
+import json
 import logging
-from dataclasses import dataclass, field
 from typing import Any, cast
 
 import anthropic
 
-from app.chat.tools import UnknownToolNameError, to_domain_tool_name
+from app.chat.attachments import PreparedAttachments
+from app.chat.llm_client import (
+    STOP_REASON_END_TURN,
+    STOP_REASON_MAX_TOKENS,
+    STOP_REASON_TOOL_USE,
+    KeyValidation,
+    LLMResult,
+    LLMUsage,
+    NeutralMessage,
+)
+from app.chat.tools import (
+    UnknownToolNameError,
+    to_anthropic_tool_name,
+    to_domain_tool_name,
+)
 from app.config import get_settings
 from app.errors import UpstreamError, ValidationFailedError
 from app.observability.logging import get_logger, log_event
-from app.observability.metrics import anthropic_upstream_errors_total
+from app.observability.metrics import anthropic_upstream_errors_total, llm_upstream_errors_total
 
 _logger = get_logger("app.chat.anthropic")
+
+_PROVIDER = "anthropic"
+
+# Canonical stop_reason map (ADR-033 §2): Anthropic wire stop_reason → neutral value. Anything not
+# tool_use/max_tokens (end_turn, stop_sequence, None, …) collapses to end_turn (a final turn).
+_STOP_REASON_MAP: dict[str, str] = {
+    "tool_use": STOP_REASON_TOOL_USE,
+    "max_tokens": STOP_REASON_MAX_TOKENS,
+}
+
+
+def _to_neutral_stop_reason(wire_stop_reason: str | None) -> str:
+    if wire_stop_reason is None:
+        return STOP_REASON_END_TURN
+    return _STOP_REASON_MAP.get(wire_stop_reason, STOP_REASON_END_TURN)
+
+
+# Backward-compatible aliases (ADR-033): the neutral types replace the former Anthropic-specific
+# ones with identical fields. Existing imports/tests of AnthropicResult/AnthropicUsage keep working.
+AnthropicResult = LLMResult
+AnthropicUsage = LLMUsage
 
 # ADR-021: wire-valid field allowlist per content-block type for the Anthropic Messages API.
 # block.model_dump() carries non-wire SDK fields (e.g. "caller": {"type": "direct"}) that are
@@ -57,48 +98,8 @@ def _normalize_block(block: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in block.items() if k != "caller"}
 
 
-@dataclass(frozen=True)
-class AnthropicUsage:
-    input_tokens: int
-    output_tokens: int
-    model: str
-    cache_read_tokens: int
-    cache_write_tokens: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "inputTokens": self.input_tokens,
-            "outputTokens": self.output_tokens,
-            "model": self.model,
-            "cacheReadTokens": self.cache_read_tokens,
-            "cacheWriteTokens": self.cache_write_tokens,
-        }
-
-
-@dataclass(frozen=True)
-class AnthropicResult:
-    stop_reason: str | None
-    content_blocks: list[dict[str, Any]]
-    usage: AnthropicUsage
-    text: str = ""
-    tool_uses: list[dict[str, Any]] = field(default_factory=list)
-
-
 class AnthropicAuthError(Exception):
     """Raised when Anthropic rejects the (BYOK) key as unauthorized → key_status=invalid."""
-
-
-class KeyValidation(str, enum.Enum):
-    """Outcome of a BYOK key validation call (ADR-016).
-
-    valid   — Anthropic accepted the key.
-    invalid — Anthropic rejected the key with 401 Unauthorized.
-    offline — validation could not be performed (timeout/connection/non-401 status), NOT a 401.
-    """
-
-    valid = "valid"
-    invalid = "invalid"
-    offline = "offline"
 
 
 def _extract_error_body(exc: Exception) -> tuple[str | None, str | None]:
@@ -132,8 +133,9 @@ def _log_upstream_error(exc: Exception, *, model: str) -> None:
     (03-architecture.md §Логирование upstream-ошибок Anthropic, 05-security.md §Логирование).
     Correlation fields (requestId/sessionId) are attached automatically by the log formatter.
     Levels per the TD-014 matrix: WARNING for 4xx (incl. 429), ERROR for 5xx and for
-    timeout/connection errors (which carry no HTTP status). The same metric is incremented with
-    bounded-enum labels (01-architecture.md §Наблюдаемость).
+    timeout/connection errors (which carry no HTTP status). Two metrics are incremented with
+    bounded-enum labels: the legacy ``anthropic_upstream_errors_total`` (kept for existing
+    dashboards/tests) and the generalized ``llm_upstream_errors_total{provider}`` (ADR-033 §10).
     """
     status_code: int | None = getattr(exc, "status_code", None)
     error_type, error_message = _extract_error_body(exc)
@@ -160,14 +162,22 @@ def _log_upstream_error(exc: Exception, *, model: str) -> None:
         fields["anthropicRequestId"] = anthropic_request_id
 
     log_event(_logger, level, "anthropic_upstream_error", **fields)
+    status_label = str(status_code) if status_code is not None else "none"
+    type_label = error_type or "unknown"
+    # Legacy metric (existing dashboards/tests) + generalized provider-labeled metric (ADR-033 §10).
     anthropic_upstream_errors_total.labels(
-        status_code=str(status_code) if status_code is not None else "none",
-        error_type=error_type or "unknown",
+        status_code=status_label,
+        error_type=type_label,
+    ).inc()
+    llm_upstream_errors_total.labels(
+        provider=_PROVIDER,
+        status_code=status_label,
+        error_type=type_label,
     ).inc()
 
 
 class AnthropicClient:
-    """Thin async wrapper around anthropic.AsyncAnthropic.
+    """Thin async wrapper around anthropic.AsyncAnthropic, implementing LLMClient (ADR-033).
 
     The service key is read from config; BYOK callers pass api_key per call. TLS verification
     is enabled by default by the SDK (httpx). No secrets are logged.
@@ -197,9 +207,71 @@ class AnthropicClient:
         ]
 
     @staticmethod
-    def _parse_usage(message: anthropic.types.Message, model: str) -> AnthropicUsage:
+    def _build_provider_messages(
+        messages: list[NeutralMessage] | list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Translate the neutral history into Anthropic wire messages (ADR-033 §3).
+
+        Raw dicts are passed through unchanged (external e2e callers build messages directly). For
+        NeutralMessage items: user/assistant replay their wire content blocks verbatim; a tool step
+        becomes an Anthropic ``tool_result`` block carrying the RAW provider id (toolu_..., never a
+        domain UUID — ADR-008/BUG-4) so the continuation history's id pair is consistent.
+        """
+        out: list[dict[str, Any]] = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                out.append(msg)
+                continue
+            if msg.role in ("user", "assistant"):
+                out.append({"role": msg.role, "content": msg.content_blocks})
+            elif msg.role == "tool":
+                if msg.error is not None:
+                    content = str(msg.error.get("message", "tool error"))
+                    is_error = True
+                else:
+                    content = json.dumps(msg.result)
+                    is_error = False
+                out.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.provider_tool_use_id,
+                                "content": content,
+                                "is_error": is_error,
+                            }
+                        ],
+                    }
+                )
+        return out
+
+    @staticmethod
+    def _serialize_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Serialize neutral tool definitions to the Anthropic wire format (ADR-033 §4).
+
+        Neutral definition = ``{name(domain dotted), description, input_schema}``. Anthropic wants
+        underscore names (BUG-3). For backward compatibility, a definition already in the Anthropic
+        shape (underscore name, no dot) is passed through unchanged — ``anthropic_tool_definitions``
+        callers and tests still work.
+        """
+        serialized: list[dict[str, Any]] = []
+        for t in tools:
+            name = str(t.get("name", ""))
+            anthropic_name = to_anthropic_tool_name(name) if "." in name else name
+            serialized.append(
+                {
+                    "name": anthropic_name,
+                    "description": t["description"],
+                    "input_schema": t["input_schema"],
+                }
+            )
+        return serialized
+
+    @staticmethod
+    def _parse_usage(message: anthropic.types.Message, model: str) -> LLMUsage:
         usage = message.usage
-        return AnthropicUsage(
+        return LLMUsage(
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
             model=model,
@@ -211,22 +283,39 @@ class AnthropicClient:
         self,
         *,
         system_prompt: str,
-        messages: list[dict[str, Any]],
+        messages: list[NeutralMessage] | list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        attachments: PreparedAttachments | None = None,
         api_key: str | None = None,
-    ) -> AnthropicResult:
-        """Call messages.create with prompt caching and tools.
+    ) -> LLMResult:
+        """Call messages.create with prompt caching and tools (LLMClient.create_message).
 
-        api_key: optional per-call override (BYOK). When None, uses the service key.
-        Returns parsed stop_reason, content blocks, usage, text and tool_uses.
+        Builds the Anthropic wire messages from the neutral history, injects the attachment content
+        blocks (ADR-020) into the LAST user turn on the first call only, serializes tools to the
+        Anthropic format, and parses stop_reason (→ canonical), content blocks (normalized at the
+        persist boundary), usage, text and tool_uses (domain names). api_key: optional per-call
+        override (BYOK); None → service key.
         """
         model = self._default_model
         client = self._client
         if api_key is not None:
             client = client.with_options(api_key=api_key)
 
+        wire_messages = self._build_provider_messages(messages)
+        if attachments is not None and attachments.content_blocks:
+            # ADR-020: inject the FULL attachment blocks into the last user turn for this single
+            # call only (the persisted history holds placeholders, which the orchestrator already
+            # put in the neutral content; here we replace that last user content with full blocks).
+            for wm in reversed(wire_messages):
+                if wm.get("role") == "user":
+                    existing = wm.get("content")
+                    base = existing if isinstance(existing, list) else []
+                    wm["content"] = [*base, *attachments.content_blocks]
+                    break
+
+        anthropic_tools = self._serialize_tools(tools)
         # cache_control on the last tool definition caches the whole tool list + system.
-        cached_tools = [dict(t) for t in tools]
+        cached_tools = [dict(t) for t in anthropic_tools]
         if cached_tools:
             cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
 
@@ -236,7 +325,7 @@ class AnthropicClient:
                 max_tokens=self._max_tokens,
                 system=cast(Any, self._build_system(system_prompt)),
                 tools=cast(Any, cached_tools),
-                messages=cast(Any, messages),
+                messages=cast(Any, wire_messages),
             )
         except anthropic.AuthenticationError as exc:
             # BYOK/service key rejected → mapped to byok_invalid (block) or 401 upstream.
@@ -278,8 +367,8 @@ class AnthropicClient:
                     raise ValidationFailedError(str(exc)) from exc
                 tool_uses.append({"id": block.id, "name": domain_name, "input": block.input})
 
-        return AnthropicResult(
-            stop_reason=message.stop_reason,
+        return LLMResult(
+            stop_reason=_to_neutral_stop_reason(message.stop_reason),
             content_blocks=content_blocks,
             usage=self._parse_usage(message, model),
             text="".join(text_parts),
@@ -314,10 +403,19 @@ class AnthropicClient:
         return KeyValidation.valid
 
 
+# Process-wide Anthropic singleton. Kept as a module global so tests can patch it (conftest sets
+# ``anthropic_client._anthropic_singleton = fake``); ``get_llm_client()`` honors it on the anthropic
+# path so a patched fake is used uniformly (ADR-033 §8 — factory shares this singleton).
 _anthropic_singleton: AnthropicClient | None = None
 
 
 def get_anthropic_client() -> AnthropicClient:
+    """Backward-compatible accessor (ADR-033 §8): the active LLM client, asserted Anthropic.
+
+    Kept for existing imports/tests. Returns the shared process-wide singleton (``get_llm_client()``
+    delegates here on the anthropic path), so patching ``_anthropic_singleton`` in tests overrides
+    both this helper and the provider factory.
+    """
     global _anthropic_singleton
     if _anthropic_singleton is None:
         _anthropic_singleton = AnthropicClient()

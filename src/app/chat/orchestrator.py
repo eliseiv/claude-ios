@@ -25,15 +25,23 @@ from app.audit.service import (
     AuditService,
 )
 from app.byok.service import BYOKService
-from app.chat.anthropic_client import AnthropicAuthError, AnthropicClient, AnthropicResult
-from app.chat.attachments import prepare_attachments
+from app.chat.anthropic_client import AnthropicAuthError
+from app.chat.attachments import PreparedAttachments, prepare_attachments
 from app.chat.global_tools import GlobalToolHandlers
+from app.chat.llm_client import (
+    STOP_REASON_MAX_TOKENS,
+    STOP_REASON_TOOL_USE,
+    LLMClient,
+    LLMResult,
+    NeutralMessage,
+)
+from app.chat.openai_client import OpenAIAuthError
 from app.chat.repository import ChatRepository, derive_title
 from app.chat.tools import (
     GLOBAL_SERVER_SIDE_TOOLS,
     MUTATING_TOOLS,
     SERVER_SIDE_TOOLS,
-    anthropic_tool_definitions,
+    neutral_tool_definitions,
     validate_tool_args,
 )
 from app.config import get_settings
@@ -100,6 +108,11 @@ _SYSTEM_PROMPT_CODE = (
 
 def _system_prompt_for(assistant_mode: str) -> str:
     return _SYSTEM_PROMPT_CODE if assistant_mode == "code" else _SYSTEM_PROMPT_CHAT
+
+
+def _active_provider() -> str:
+    """Active LLM provider (ADR-033) for provider-aware attachment validation. Default anthropic."""
+    return get_settings().llm_provider.strip().lower()
 
 
 def _server_tool_summary(execution: ToolExecution) -> str | None:
@@ -223,7 +236,9 @@ class _Deps:
     wallet: WalletService
     byok: BYOKService
     audit: AuditService
-    anthropic: AnthropicClient
+    # ADR-033: provider-neutral LLM client (AnthropicClient | OpenAIClient). The orchestrator
+    # depends only on the LLMClient contract and neutral types — never on a concrete provider.
+    llm: LLMClient
     site_tools: SiteToolHandlers
     # ADR-026: project-independent global server-side tools (time.now), executed without a project.
     global_tools: GlobalToolHandlers
@@ -238,7 +253,7 @@ class ChatOrchestrator:
         wallet: WalletService,
         byok: BYOKService,
         audit: AuditService,
-        anthropic_client: AnthropicClient,
+        anthropic_client: LLMClient,
         site_tools: SiteToolHandlers,
         preferences: PreferencesService,
         global_tools: GlobalToolHandlers | None = None,
@@ -249,7 +264,10 @@ class ChatOrchestrator:
             wallet=wallet,
             byok=byok,
             audit=audit,
-            anthropic=anthropic_client,
+            # ADR-033: the injected client is the active provider's LLMClient. The param name is
+            # kept (anthropic_client) for caller backward compatibility; the field is provider-
+            # neutral (`llm`).
+            llm=anthropic_client,
             site_tools=site_tools,
             # Default to a SystemClock-backed handler so existing callers keep working; the DI
             # factory (deps.py) wires an explicit instance (ADR-026 §5).
@@ -293,18 +311,16 @@ class ChatOrchestrator:
         effective_mode = Mode(sess.mode)
         system_prompt = _system_prompt_for(sess.assistant_mode)
 
-        # ADR-020: validate inline attachments and split into (a) full content blocks sent to
-        # Claude ONCE on turn 0 (in-memory only) and (b) light text placeholders persisted in
-        # chat_steps.payload. Raw base64 is NEVER persisted (storage invariant). Validation runs
-        # BEFORE persisting the user step so a bad attachment is a clean 422 with no DB write.
-        first_turn_content: list[dict[str, Any]] | None = None
+        # ADR-020 / ADR-033 §3,§5: validate inline attachments (provider-aware) and split into
+        # (a) the PreparedAttachments handed to the client ONCE on turn 0 — the client builds the
+        # provider content blocks and injects them — and (b) light text placeholders persisted in
+        # chat_steps.payload (provider-agnostic). Raw base64 is NEVER persisted (storage invariant).
+        # Validation runs BEFORE persisting the user step so a bad attachment (incl. PDF-on-OpenAI)
+        # is a clean 422 with no DB write. The shared validation runs before the provider branch.
+        prepared: PreparedAttachments | None = None
         user_payload_content: list[dict[str, Any]] = [{"type": "text", "text": message}]
         if attachments:
-            prepared = prepare_attachments(attachments, get_settings())
-            first_turn_content = [
-                {"type": "text", "text": message},
-                *prepared.content_blocks,
-            ]
+            prepared = prepare_attachments(attachments, get_settings(), _active_provider())
             user_payload_content = [
                 {"type": "text", "text": message},
                 *prepared.placeholders,
@@ -335,7 +351,7 @@ class ChatOrchestrator:
             system_prompt=system_prompt,
             # ADR-022 axis A: offer site.* only when the session has a project.
             has_project=sess.project_id is not None,
-            first_turn_user_content=first_turn_content,
+            first_turn_attachments=prepared,
         )
 
     async def tool_result(
@@ -569,41 +585,33 @@ class ChatOrchestrator:
         byok_usage_share.set(0)
         return None  # service key used by AnthropicClient
 
-    async def _build_messages(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
-        """Reconstruct Anthropic messages from chat_steps (TD-002)."""
+    async def _build_messages(self, session_id: uuid.UUID) -> list[NeutralMessage]:
+        """Reconstruct the provider-NEUTRAL history from chat_steps (TD-002, ADR-033 §3).
+
+        Returns neutral messages; the active client translates them to provider wire messages
+        (Anthropic ``tool_result`` block / OpenAI ``role=tool``). user/assistant carry the wire
+        content blocks of the active provider from ``payload``; a tool step carries the domain
+        tool-result record (incl. the raw ``providerToolUseId`` — ADR-008/BUG-4 — used to align
+        tool_use ↔ tool_result on replay, never a domain UUID).
+        """
         steps = await self._deps.repo.list_steps(session_id)
-        messages: list[dict[str, Any]] = []
+        messages: list[NeutralMessage] = []
         for step in steps:
             payload = step.payload
             if step.role == "user":
-                messages.append({"role": "user", "content": payload["content"]})
+                messages.append(NeutralMessage(role="user", content_blocks=payload["content"]))
             elif step.role == "assistant":
-                messages.append({"role": "assistant", "content": payload["content"]})
+                messages.append(NeutralMessage(role="assistant", content_blocks=payload["content"]))
             elif step.role == "tool":
-                # ADR-008 / BUG-4: tool_result.tool_use_id MUST be the raw provider id
-                # (toolu_...) of the matching tool_use block, NEVER the domain toolCallId (UUID)
-                # nor a fresh uuid4. Anthropic rejects a mismatch with 400 → backend 502.
-                tool_use_id = payload["providerToolUseId"]
-                if payload.get("error") is not None:
-                    content = str(payload["error"].get("message", "tool error"))
-                    is_error = True
-                else:
-                    import json
-
-                    content = json.dumps(payload.get("result"))
-                    is_error = False
                 messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_use_id,
-                                "content": content,
-                                "is_error": is_error,
-                            }
-                        ],
-                    }
+                    NeutralMessage(
+                        role="tool",
+                        tool_call_id=payload.get("toolCallId"),
+                        provider_tool_use_id=payload["providerToolUseId"],
+                        tool_name=payload.get("toolName"),
+                        result=payload.get("result"),
+                        error=payload.get("error"),
+                    )
                 )
         return messages
 
@@ -618,10 +626,10 @@ class ChatOrchestrator:
         api_key: str | None,
         system_prompt: str,
         has_project: bool,
-        first_turn_user_content: list[dict[str, Any]] | None = None,
+        first_turn_attachments: PreparedAttachments | None = None,
     ) -> ChatRunOut:
         # ADR-011: server-side site.* tools are executed by the backend synchronously inside this
-        # loop, WITHOUT a round-trip to iOS. We keep calling Anthropic as long as the turn contains
+        # loop, WITHOUT a round-trip to iOS. We keep calling the LLM as long as the turn contains
         # ONLY server-side tools (their tool_results are produced here and fed straight back).
         # A turn with any client-side tool returns status=tool_call to iOS as before. A pure
         # assistant turn is the final step. The loop is bounded by MAX_SERVER_TOOL_ROUNDS (§2).
@@ -631,36 +639,30 @@ class ChatOrchestrator:
         # into every terminal ChatRunOut of this loop so the client sees what ran, regardless of how
         # the turn ended (assistant_message / client tool_call / max_tokens).
         server_tools: list[ServerToolExecutionOut] = []
-        # ADR-020: the FULL attachment content blocks are injected into the last user turn on the
-        # first iteration ONLY; subsequent (tool-loop) iterations replay placeholders from
-        # chat_steps. The override is consumed after the first iteration so heavy base64 is never
-        # re-sent to Anthropic.
-        turn0_override = first_turn_user_content
+        # ADR-020 / ADR-033 §3: the PreparedAttachments are handed to the client on the FIRST
+        # iteration ONLY; the client builds the provider content blocks and injects them into the
+        # last user turn. Subsequent (tool-loop) iterations replay placeholders from chat_steps —
+        # heavy base64 is never re-sent. The reference is consumed after the first call.
+        turn0_attachments = first_turn_attachments
         for _ in range(max_rounds + 1):
             messages = await self._build_messages(session_id)
-            if turn0_override is not None:
-                # Replace the last user turn's content (placeholders) with the full blocks for the
-                # single first call; then drop the override so later rounds use placeholders only.
-                for msg in reversed(messages):
-                    if msg["role"] == "user":
-                        msg["content"] = turn0_override
-                        break
-                turn0_override = None
             # MAJOR-4: commit the persisted steps + audit BEFORE the network call so the pooled DB
-            # connection is not held open for the whole Anthropic generation. Each subsequent
+            # connection is not held open for the whole LLM generation. Each subsequent
             # server-side round commits its own persisted tool_use/tool_result before re-calling.
             await self._session.commit()
             try:
-                result: AnthropicResult = await self._deps.anthropic.create_message(
+                result: LLMResult = await self._deps.llm.create_message(
                     system_prompt=system_prompt,
                     messages=messages,
                     # ADR-022 axis A: in «чистый чат» (no project) site.* (SERVER_SIDE_TOOLS) are
-                    # NOT offered to Claude. Axis B (assistant_mode, Q-012-1) is not yet
-                    # implemented; the effective set = this project gate over current behavior.
-                    tools=anthropic_tool_definitions(include_server_side=has_project),
+                    # NOT offered. Axis B (assistant_mode, Q-012-1) is not yet implemented; the
+                    # effective set = this project gate over current behavior. Neutral tool defs;
+                    # the client serializes them per provider (ADR-033 §4).
+                    tools=neutral_tool_definitions(include_server_side=has_project),
+                    attachments=turn0_attachments,
                     api_key=api_key,
                 )
-            except AnthropicAuthError:
+            except (AnthropicAuthError, OpenAIAuthError):
                 if mode is Mode.byok:
                     # ADR-016: a previously-valid BYOK key rejected with 401 on use → expired
                     # (revoked/expired), not freshly invalid. Both map to byok_invalid in policy.
@@ -668,6 +670,8 @@ class ChatOrchestrator:
                     await self._session.commit()
                     return self._blocked(session_id, BlockReason.byok_invalid)
                 raise
+            # Consume the attachment override after the first call (placeholders only afterwards).
+            turn0_attachments = None
 
             usage = result.usage.to_dict()
             token_usage_total.labels(direction="input", model=result.usage.model).inc(
@@ -679,9 +683,10 @@ class ChatOrchestrator:
 
             # ADR-025: dispatch by stop_reason, NOT by the mere presence of tool_use blocks. A
             # max_tokens-truncated turn may carry incomplete tool_use blocks in content — they are
-            # not executable and must NOT be surfaced; only stop_reason="tool_use" enters the
-            # tool branch.
-            if result.stop_reason == "max_tokens":
+            # not executable and must NOT be surfaced; only the canonical tool_use stop reason
+            # enters the tool branch. ADR-033 §2: compare against canonical (provider-neutral)
+            # values; the client already mapped its wire stop_reason to these constants.
+            if result.stop_reason == STOP_REASON_MAX_TOKENS:
                 api_key = None
                 # ADR-028: blocked+max_tokens may carry NON-empty server_tools (server-side rounds
                 # could have run before the final turn was truncated).
@@ -694,7 +699,7 @@ class ChatOrchestrator:
                     server_tools=server_tools,
                 )
 
-            if result.stop_reason == "tool_use" and result.tool_uses:
+            if result.stop_reason == STOP_REASON_TOOL_USE and result.tool_uses:
                 outcome = await self._handle_tool_use(
                     user_id=user_id,
                     session_id=session_id,
@@ -766,7 +771,7 @@ class ChatOrchestrator:
         session_id: uuid.UUID,
         message_step_id: uuid.UUID,
         billing: _BillingPlan,
-        result: AnthropicResult,
+        result: LLMResult,
         usage: dict[str, Any],
         server_tools: list[ServerToolExecutionOut],
     ) -> ChatRunOut:
@@ -839,7 +844,7 @@ class ChatOrchestrator:
         user_id: uuid.UUID,
         session_id: uuid.UUID,
         message_step_id: uuid.UUID,
-        result: AnthropicResult,
+        result: LLMResult,
         usage: dict[str, Any],
         server_tools: list[ServerToolExecutionOut],
     ) -> ChatRunOut:
@@ -901,7 +906,7 @@ class ChatOrchestrator:
         user_id: uuid.UUID,
         session_id: uuid.UUID,
         message_step_id: uuid.UUID,
-        result: AnthropicResult,
+        result: LLMResult,
         usage: dict[str, Any],
         has_project: bool,
         server_tools: list[ServerToolExecutionOut],

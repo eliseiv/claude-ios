@@ -48,10 +48,17 @@
 - `Authorization` (и весь bearer) — уже в redaction-денилисте (`authorization` ∈ `_DENY_SUBSTRINGS`); секрет не логируется и не пишется в `adapty_webhook_events.payload` (он в заголовке, не в теле).
 
 ## Секреты и ключи
-- Сервисный Anthropic API key, KMS credentials, **JWT signing keys (приватный RS256-ключ — секрет; публичный — для verify, не секрет)**, App Store credentials, **`ADMIN_API_SECRET`** (+ опц. `ADMIN_API_SECRET_PREV`), **`PREVIEW_URL_SECRET`**, **`ADAPTY_WEBHOOK_SECRET`** — только через **env / secret manager**, никогда в коде/репозитории/образе.
+- Сервисный Anthropic API key, **сервисный OpenAI API key (`OPENAI_API_KEY`, инстансы `LLM_PROVIDER=openai`, [ADR-033](adr/ADR-033-llm-provider-abstraction.md))**, KMS credentials, **JWT signing keys (приватный RS256-ключ — секрет; публичный — для verify, не секрет)**, App Store credentials, **`ADMIN_API_SECRET`** (+ опц. `ADMIN_API_SECRET_PREV`), **`PREVIEW_URL_SECRET`**, **`ADAPTY_WEBHOOK_SECRET`** — только через **env / secret manager**, никогда в коде/репозитории/образе.
 - Все перечисленные секреты **взаимно не пересекаются** (отдельные значения): JWT signing key, KMS, Anthropic, `ADMIN_API_SECRET`, `PREVIEW_URL_SECRET`, `ADAPTY_WEBHOOK_SECRET` — независимы; компрометация одного не даёт доступа к домену другого. `ADAPTY_WEBHOOK_SECRET` — per-instance (мульти-инстанс, [ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)).
 - `.env` в `.gitignore`; в prod — секрет-менеджер (конкретный — [Q-002-1](99-open-questions.md), дефолт: облачный KMS + Secrets Manager того же провайдера).
 - Запрет логировать любые секреты, BYOK plaintext, JWT (выпущенный access-token), refresh-token, приватный ключ подписи, StoreKit payload целиком.
+
+## Провайдер LLM: OpenAI (ADR-033)
+См. [ADR-033](adr/ADR-033-llm-provider-abstraction.md), [chat-orchestrator/03-architecture.md §Провайдер-абстракция LLM](modules/chat-orchestrator/03-architecture.md#провайдер-абстракция-llm-anthropic--openai-adr-033).
+- **`OPENAI_API_KEY` (сервисный, mode=credits) и BYOK OpenAI-ключ пользователя (mode=byok) — секреты под redaction.** Уже покрыты денилистом подстрок `key`/`secret` (`redaction.py` `_DENY_SUBSTRINGS`); `OPENAI_API_KEY` содержит `key`. Отдельной правки redaction не требуется. BYOK plaintext OpenAI-ключ — только in-memory на время вызова, как Anthropic-ключ ([chat-orchestrator/03 §Безопасность](modules/chat-orchestrator/03-architecture.md#безопасность)).
+- **Upstream-ошибки OpenAI** логируются по тому же контракту, что Anthropic ([§Логирование](#логирование-безопасное), [chat-orchestrator/03 §Логирование upstream-ошибок](modules/chat-orchestrator/03-architecture.md#логирование-upstream-ошибок-anthropic-td-014)): тело ошибки провайдера — да, api-key и user-content — нет.
+- **PDF-вложения при `LLM_PROVIDER=openai` отклоняются `422` (`unsupported_media_type`)** — Chat Completions vision не принимает PDF ([TD-023](100-known-tech-debt.md)). Это чистая валидационная ошибка (не `500`); прочая валидация вложений (allowlist/magic-bytes/лимиты/PDF page-guard) и модель угроз ([§Вложения](#вложения-attachments-adr-020), если применимо) не меняются. На anthropic-инстансах PDF принимается как прежде ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)).
+- **Один провайдер на инстанс:** `chat_steps.payload` инстанса хранит wire-формат только своего провайдера; смешения форматов в одной БД нет (инвариант [ADR-033](adr/ADR-033-llm-provider-abstraction.md)).
 
 ### JWT-ключи: PEM-в-env (встроенный issuer, [ADR-018](adr/ADR-018-embedded-auth-issuer.md))
 Многострочный PEM плохо переносится через `.env`. Поддержаны **оба** механизма, приоритет у файла-пути:

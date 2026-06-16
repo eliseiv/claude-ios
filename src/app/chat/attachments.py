@@ -1,9 +1,11 @@
-"""Inline base64 multimodal attachment validation and Anthropic content-block mapping.
+"""Inline base64 multimodal attachment validation and per-provider content-block mapping.
 
-Implements ADR-020 (inline base64 attachments MVP) and the attachment threat model in
-05-security.md. Attachments arrive inline in the first user message-step of /v1/chat/run.
+Implements ADR-020 (inline base64 attachments MVP), the per-provider mapping of ADR-033, and the
+attachment threat model in 05-security.md. Attachments arrive inline in the first user message-step
+of /v1/chat/run.
 
-Validation pipeline per attachment (order matters — limits BEFORE decode):
+Validation pipeline per attachment (order matters — limits BEFORE decode; SHARED across providers,
+ADR-033 §5):
 1. mediaType is on the fixed allowlist for its class (else 422 unsupported_media_type);
 2. base64-string length implies a decoded size within the per-class and total byte limits
    (checked BEFORE b64decode to bound memory — anti memory-DoS);
@@ -12,10 +14,17 @@ Validation pipeline per attachment (order matters — limits BEFORE decode):
    (anti MIME-spoof — never trust the client's mediaType);
 5. PDF: page-count guard via pypdf (anti decompression/structure bomb).
 
-The validated attachments are mapped to Anthropic content blocks IN MEMORY for the first
-messages.create call only. Raw base64 is NEVER persisted: chat_steps.payload stores a light
-text placeholder instead (ADR-020 §3 storage invariant). The PDF document-block is emitted as
-a raw dict per the Anthropic wire format because anthropic 0.39.0 has no DocumentBlockParam
+The content-block mapping is PROVIDER-AWARE (ADR-033 §5), branched AFTER the shared validation:
+- ``anthropic`` (default): image ``{type:image,source:{type:base64,...}}``, document(PDF)
+  ``{type:document,...}``, text — as before;
+- ``openai``: image → ``{type:image_url,image_url:{url:"data:<mediaType>;base64,<data>"}}``, text →
+  text block, and **PDF → ValidationFailedError (422 unsupported_media_type)** because OpenAI Chat
+  Completions vision does not accept PDF (TD-023).
+
+The validated attachments are mapped to content blocks IN MEMORY for the first messages.create call
+only. Raw base64 is NEVER persisted: chat_steps.payload stores a light text placeholder instead
+(ADR-020 §3 storage invariant; placeholders are provider-agnostic). The Anthropic PDF document-block
+is emitted as a raw dict per the wire format because anthropic 0.39.0 has no DocumentBlockParam
 (TD-016); the backend already sends messages as raw dicts.
 
 Raises ValidationFailedError (-> 422) for every rejection so attachment errors are technical
@@ -55,14 +64,19 @@ _MAGIC_PREFIXES: dict[str, tuple[bytes, ...]] = {
 }
 
 
+# Provider identifiers for the per-provider content-block builder (ADR-033 §5).
+PROVIDER_ANTHROPIC = "anthropic"
+PROVIDER_OPENAI = "openai"
+
+
 @dataclass(frozen=True)
 class PreparedAttachments:
-    """Result of validating a request's attachments (ADR-020).
+    """Result of validating a request's attachments (ADR-020 / ADR-033 §5).
 
-    - content_blocks: Anthropic content blocks (image/document/text) for the FIRST
+    - content_blocks: provider content blocks (built for the ACTIVE provider) for the FIRST
       messages.create call only — full base64 in memory, never persisted.
     - placeholders: light text blocks persisted in chat_steps.payload INSTEAD of base64
-      (storage invariant: raw base64 is never stored).
+      (storage invariant: raw base64 is never stored; provider-agnostic).
     """
 
     content_blocks: list[dict[str, object]]
@@ -158,7 +172,17 @@ def _placeholder(att: AttachmentIn, decoded_size: int) -> dict[str, str]:
     }
 
 
-def _content_block(att: AttachmentIn, decoded: bytes, text: str | None) -> dict[str, object]:
+def _text_block(att: AttachmentIn, text: str | None) -> dict[str, object]:
+    # text: inline the decoded UTF-8 with an explicit filename and a fenced code block. Same
+    # representation for both providers (a plain text block).
+    name = att.filename or "file"
+    body = text if text is not None else ""
+    return {"type": "text", "text": f"{name}\n```\n{body}\n```"}
+
+
+def _anthropic_content_block(
+    att: AttachmentIn, decoded: bytes, text: str | None
+) -> dict[str, object]:
     if att.type == "image":
         return {
             "type": "image",
@@ -174,18 +198,52 @@ def _content_block(att: AttachmentIn, decoded: bytes, text: str | None) -> dict[
                 "data": att.data,
             },
         }
-    # text: inline the decoded UTF-8 with an explicit filename and a fenced code block.
-    name = att.filename or "file"
-    body = text if text is not None else ""
-    return {"type": "text", "text": f"{name}\n```\n{body}\n```"}
+    return _text_block(att, text)
 
 
-def prepare_attachments(attachments: list[AttachmentIn], settings: Settings) -> PreparedAttachments:
-    """Validate inline attachments and build Anthropic content blocks + storage placeholders.
+def _openai_content_block(att: AttachmentIn, decoded: bytes, text: str | None) -> dict[str, object]:
+    """OpenAI Chat Completions content block (ADR-033 §5).
+
+    image → ``image_url`` with a base64 data-URI; text → text block; document (PDF) →
+    ValidationFailedError (422 unsupported_media_type) — OpenAI vision does not accept PDF (TD-023).
+    """
+    if att.type == "image":
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{att.mediaType};base64,{att.data}"},
+        }
+    if att.type == "document":
+        # TD-023: OpenAI Chat Completions vision does not accept PDF documents.
+        raise ValidationFailedError(f"unsupported_media_type: {att.mediaType} is not supported")
+    return _text_block(att, text)
+
+
+def _content_block(
+    att: AttachmentIn, decoded: bytes, text: str | None, provider: str
+) -> dict[str, object]:
+    """Build the provider content block for one validated attachment (ADR-033 §5).
+
+    Called only AFTER the shared validation. The provider branch is the single place where
+    image/document/text are mapped to the provider wire format; PDF on OpenAI is rejected here.
+    """
+    if provider == PROVIDER_OPENAI:
+        return _openai_content_block(att, decoded, text)
+    return _anthropic_content_block(att, decoded, text)
+
+
+def prepare_attachments(
+    attachments: list[AttachmentIn],
+    settings: Settings,
+    provider: str = PROVIDER_ANTHROPIC,
+) -> PreparedAttachments:
+    """Validate inline attachments and build provider content blocks + storage placeholders.
 
     Enforces (ADR-020 / 05-security.md): mediaType allowlist, size/count limits BEFORE decode,
-    base64 validity, magic-byte/UTF-8/JSON consistency, PDF page-guard. Raises
-    ValidationFailedError (-> 422) on any violation. Never logs attachment content.
+    base64 validity, magic-byte/UTF-8/JSON consistency, PDF page-guard — ALL shared across providers
+    and run BEFORE the provider branch (ADR-033 §5). The provider then selects the content-block
+    shape: ``anthropic`` (default — backward compatible) builds the native image/document/text
+    blocks; ``openai`` builds image_url/text and REJECTS PDF (422 unsupported_media_type, TD-023).
+    Raises ValidationFailedError (-> 422) on any violation. Never logs attachment content.
     """
     if len(attachments) > settings.attachment_max_count:
         raise ValidationFailedError("too many attachments")
@@ -218,7 +276,8 @@ def prepare_attachments(attachments: list[AttachmentIn], settings: Settings) -> 
         else:  # text
             text = _decode_text(att.mediaType, decoded)
 
-        content_blocks.append(_content_block(att, decoded, text))
+        # Provider branch (AFTER shared validation): PDF→422 for openai lands here, not a 500.
+        content_blocks.append(_content_block(att, decoded, text, provider))
         placeholders.append(_placeholder(att, len(decoded)))
 
     return PreparedAttachments(content_blocks=content_blocks, placeholders=placeholders)
