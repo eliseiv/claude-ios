@@ -104,6 +104,16 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Pin the in-container Apple-root path to the bind-mount target (`volumes:` below), regardless
+    # of any per-instance `.env` value. This is INFRASTRUCTURE wiring (the mount target is fixed by
+    # this compose file), so it belongs here, not in per-instance `.env`. `environment:` overrides
+    # `env_file`, guaranteeing storekit.py reads exactly the mounted dir.
+    # BACKWARD-COMPAT INVARIANT: this is a BEHAVIORAL no-op for instances with an EMPTY cert dir
+    # (broadnova/orvianix): _load_roots() globs the empty /etc/appstore-certs -> [] -> StoreKit
+    # path unchanged (test-mode / fail-closed exactly as before). Only avelyra, where the operator
+    # drops AppleRootCA-G3.cer into /opt/avelyra/certs/appstore, flips to real JWS verification.
+    environment:
+      APPSTORE_ROOT_CERT_DIR: /etc/appstore-certs
     # Embedded auth-issuer (ADR-018 §7) signs/verifies RS256 JWTs and reads its key PEMs
     # from FILE PATHS (prod-recommended over `\n`-escaped env strings):
     #   JWT_PRIVATE_KEY_PATH=/app/.secrets/jwt_private.pem  (SECRET — never in the image)
@@ -113,8 +123,21 @@ services:
     # `./.secrets` resolves against the compose project dir (/opt/claude-ios on the server),
     # where the operator placed the RSA pair; `.secrets/` is gitignored so `git pull` keeps it.
     # READ-ONLY (`:ro`) — the container only reads the keys, never writes them.
+    #
+    # Apple root CA for REAL StoreKit JWS verification (subscription/storekit.py reads
+    # APPSTORE_ROOT_CERT_DIR=/etc/appstore-certs; see `environment:` below). The source
+    # `./certs/appstore` resolves against the compose project dir (/opt/<instance>) — the same
+    # mechanism as `.secrets`. READ-ONLY (`:ro`): the non-root runtime user (uid 10001, Dockerfile)
+    # only READS the *.cer; it never writes. SAFE FOR ALL INSTANCES: the source dir always EXISTS
+    # in the repo (committed `certs/appstore/.gitkeep`), so docker bind-mounts an existing host dir
+    # and never auto-creates a root-owned path. On instances WITHOUT a real cert (broadnova /
+    # orvianix), the dir is EMPTY -> `_load_roots` returns [] -> StoreKit stays test-mode (or
+    # fail-closed 422 on the real path); the container still starts normally (empty mount is benign,
+    # the app only globs *.cer/*.pem/*.der/*.crt). The real cert is dropped ONLY on avelyra (see
+    # the §Apple root CA provisioning runbook in .env.prod.example / the deploy notes).
     volumes:
       - ./.secrets:/app/.secrets:ro
+      - ./certs/appstore:/etc/appstore-certs:ro
     # api binds inside the container to 0.0.0.0:8000 (Dockerfile CMD / Gunicorn).
     # NO `ports:` mapping — we MUST NOT publish 80/443 or any host port (ADR-017 req. 1:
     # conflict with Traefik). Only `expose` the internal 8000 so Traefik can reach it over
