@@ -64,6 +64,16 @@ class ChatRunRequest(StrictModel):
         default=None,
         description="Идентификатор сессии диалога. Если не задан — создаётся новая сессия.",
     )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Выбор модели из allowlist активного провайдера (`GET /v1/models`). Опционально: без "
+            "поля — дефолтная модель инстанса (обратная совместимость). Если указано — непустая "
+            "строка после `strip` (пустая/whitespace → 422) и должна входить в allowlist (иначе "
+            "422 unsupported_model). Фиксируется при создании сессии; при продолжении берётся из "
+            "сессии, поле запроса игнорируется."
+        ),
+    )
     message: str = Field(min_length=1, description="Текст сообщения пользователя.")
     mode: Literal["credits", "byok"] = Field(
         description=(
@@ -98,6 +108,11 @@ class ChatRunRequest(StrictModel):
         # non-empty string (a blank projectId is rejected rather than silently treated as NULL).
         if self.projectId is not None and not self.projectId.strip():
             raise ValueError("projectId must be a non-empty string when provided")
+        # ADR-034 §3: model is optional; when present it must be a non-empty string after strip
+        # (a blank model is rejected → 422, symmetric to projectId). Allowlist membership is
+        # validated in the orchestrator at session creation (needs settings.allowed_models()).
+        if self.model is not None and not self.model.strip():
+            raise ValueError("model must be a non-empty string when provided")
         settings = get_settings()
         if len(self.message.encode("utf-8")) > settings.size_limit_message:
             raise ValueError("message exceeds size limit")

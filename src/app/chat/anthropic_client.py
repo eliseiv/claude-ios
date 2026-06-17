@@ -287,6 +287,7 @@ class AnthropicClient:
         tools: list[dict[str, Any]],
         attachments: PreparedAttachments | None = None,
         api_key: str | None = None,
+        model: str | None = None,
     ) -> LLMResult:
         """Call messages.create with prompt caching and tools (LLMClient.create_message).
 
@@ -294,9 +295,10 @@ class AnthropicClient:
         blocks (ADR-020) into the LAST user turn on the first call only, serializes tools to the
         Anthropic format, and parses stop_reason (→ canonical), content blocks (normalized at the
         persist boundary), usage, text and tool_uses (domain names). api_key: optional per-call
-        override (BYOK); None → service key.
+        override (BYOK); None → service key. model (ADR-034 §4): optional model id; None → the
+        configured default (``settings.anthropic_model``) — current behavior, unchanged.
         """
-        model = self._default_model
+        model = model if model is not None else self._default_model
         client = self._client
         if api_key is not None:
             client = client.with_options(api_key=api_key)

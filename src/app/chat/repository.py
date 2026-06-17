@@ -69,7 +69,12 @@ class ChatRepository:
         )
         return row
 
-    def _is_expired(self, session: ChatSession) -> bool:
+    def is_expired(self, session: ChatSession) -> bool:
+        """True when the session has exceeded the soft TTL (Q-001-1) → a new session on resume.
+
+        Public so callers that need the same resume rule WITHOUT writing (e.g. the ADR-034 model
+        gate that must know whether get_or_create_session would create) can reuse it.
+        """
         ttl = get_settings().session_soft_ttl_seconds
         updated = session.updated_at
         if updated.tzinfo is None:
@@ -85,17 +90,20 @@ class ChatRepository:
         session_id: uuid.UUID | None,
         assistant_mode: str = "chat",
         title: str | None = None,
+        model: str | None = None,
     ) -> SessionContext:
         """Resume an owned, non-expired session or create a new one.
 
-        ``project_id`` (ADR-022), ``assistant_mode`` (ADR-012) and the auto-generated ``title``
-        (chats/03) are fixed at creation only — a single source of truth, never re-written here for
-        an existing session (rename is handled by the chats module). ``project_id=None`` creates a
-        «чистый чат» session (``chat_sessions.project_id = NULL``; ``site.*`` tools not offered).
+        ``project_id`` (ADR-022), ``assistant_mode`` (ADR-012), the auto-generated ``title``
+        (chats/03) and ``model`` (ADR-034) are fixed at creation only — a single source of truth,
+        never re-written here for an existing session (rename is handled by the chats module).
+        ``project_id=None`` creates a «чистый чат» session (``chat_sessions.project_id = NULL``;
+        ``site.*`` tools not offered). ``model=None`` stores ``chat_sessions.model = NULL`` (= the
+        instance default model, resolved by the client at generation time — ADR-034 §3).
         """
         if session_id is not None:
             existing = await self.get_session(session_id, user_id)
-            if existing is not None and not self._is_expired(existing):
+            if existing is not None and not self.is_expired(existing):
                 return SessionContext(session=existing, is_new=False)
             # Missing or expired → new session (mode/assistant_mode/title fixed at creation).
         new_session = ChatSession(
@@ -104,6 +112,7 @@ class ChatRepository:
             mode=mode,
             assistant_mode=assistant_mode,
             title=title,
+            model=model,
         )
         self._session.add(new_session)
         await self._session.flush()

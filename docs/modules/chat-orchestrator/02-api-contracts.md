@@ -12,6 +12,7 @@
   "message": "string",
   "mode": "credits | byok",
   "assistantMode": "chat | code (optional)",
+  "model": "string (optional)",
   "workspaceProjectId": "uuid (optional)",
   "attachments": [
     {
@@ -24,7 +25,13 @@
   "context": { "any": "object (optional)" }
 }
 ```
-- `sessionId` отсутствует → создаётся новая сессия. На сессию фиксируются: `mode` (billing_mode, credits|byok — **способ оплаты**, [ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)), `assistantMode` (тип ассистента chat|code), `projectId` (опц., см. ниже) и `workspaceProjectId` (привязка к рабочему пространству, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+- `sessionId` отсутствует → создаётся новая сессия. На сессию фиксируются: `mode` (billing_mode, credits|byok — **способ оплаты**, [ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)), `assistantMode` (тип ассистента chat|code), `model` (опц., см. ниже), `projectId` (опц., см. ниже) и `workspaceProjectId` (привязка к рабочему пространству, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+- **`model` (опц., session-fixed, [ADR-034](../../adr/ADR-034-user-model-selection.md)).** Выбор модели из разрешённого инстансом набора (`GET /v1/models`). Фиксируется на сессию при создании (как `mode`/`assistantMode`/`projectId`):
+  - **без `model`** → сессия создаётся с `chat_sessions.model = NULL` = «дефолтная модель инстанса» (`ANTHROPIC_MODEL`/`OPENAI_MODEL` активного провайдера) — обратная совместимость;
+  - **с `model`** → должен быть непустой строкой после `strip` (пустая/whitespace → `422`) **и** входить в allowlist активного провайдера (`GET /v1/models`); иначе → **`422 unsupported_model`** (`"model '<x>' is not available on this instance"`). Тихого фолбэка на дефолт нет — явный контракт ([ADR-034 §3](../../adr/ADR-034-user-model-selection.md)).
+  - **Resume-сессия:** `model` берётся из сессии (`chat_sessions.model`); поле запроса при resume **игнорируется** (не ошибка) — единообразно с `mode`/`assistantMode`/`projectId`. Валидация модели выполняется **только при создании** (на resume сохранённая модель уже валидна).
+  - **Биллинг от выбора модели не зависит** (1 кредит = 1 сообщение, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Возвращаемый `usage.model` отражает фактически использованную модель.
+  - Инстанс одно-провайдерный ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) → allowlist = модели активного провайдера; выбрать чужую (Claude на openai-инстансе) нельзя.
 - **`projectId` (опц., [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)).** Основной поток сервиса — **чат-агрегатор**; website-builder — **опциональная** фича. Поле фиксируется на сессию при создании (как `mode`/`assistantMode`):
   - **без `projectId`** → «чистый чат»: сессия создаётся с `project_id = NULL`; server-side `site.*` tools **НЕ предлагаются** Claude (нет проекта для записи); прочие client-side tools (`files.*`/`calendar.*`/`reminders.*`) доступны по обычным правилам;
   - **с `projectId`** → website-builder доступен: `site.*` входят в tool-набор, как сейчас.
@@ -306,5 +313,29 @@ Backend только инициирует tool-call; исполняет клие
 | time.now | **server** (global, [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)) | нет |
 
 > `time.now` — единственный **global** server-side tool ([ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)): `execution=server`, но в отличие от `site.*` **не требует проекта** и предлагается Claude всегда. domain↔anthropic: `time.now ↔ time_now`.
+
+**Коды:** `200`; `401` нет/невалидный JWT; `429` rate-limit.
+
+## GET /v1/models — список доступных моделей инстанса ([ADR-034](../../adr/ADR-034-user-model-selection.md))
+
+Источник для селектора модели в композере iOS. Возвращает модели **активного провайдера** этого инстанса из allowlist (`ANTHROPIC_MODELS`/`OPENAI_MODELS`, выбор по `LLM_PROVIDER`).
+
+### Auth
+- **JWT-protected** (как `GET /v1/tools`, [ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md)): `Authorization: Bearer <JWT>` обязателен. Список не секретен, контур авторизации единый. Per-user rate-limit как у прочих read-эндпоинтов (`enforce_other_limits`). Метод `GET` (read-only, кэшируемо).
+
+### Response (200)
+```json
+{
+  "models": [
+    { "id": "gpt-4o", "displayName": "GPT-4o", "default": true },
+    { "id": "gpt-4o-mini", "displayName": "GPT-4o mini", "default": false }
+  ]
+}
+```
+- `id` — провайдерный id модели, передаётся обратно в `POST /v1/chat/run` `model`.
+- `displayName` — человекочитаемое имя для UI (из allowlist-объекта `id→displayName`).
+- `default` (bool) — ровно одна модель `true` (дефолтная модель инстанса = `ANTHROPIC_MODEL`/`OPENAI_MODEL` активного провайдера). Дефолт всегда присутствует в списке (добавляется, если allowlist его не содержит) и идёт **первым**; остальные — в порядке вставки allowlist.
+- **Пустой allowlist** (env не задан / невалиден) ⇒ ровно один элемент = дефолтная модель инстанса (`displayName = id`, `default:true`) — обратная совместимость ([ADR-034 §1–2](../../adr/ADR-034-user-model-selection.md)).
+- Контракт ответа провайдер-агностичен (один формат); наполнение — модели активного провайдера.
 
 **Коды:** `200`; `401` нет/невалидный JWT; `429` rate-limit.

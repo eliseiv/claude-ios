@@ -2,7 +2,7 @@
 
 ## Поток /v1/chat/run
 0. Сгенерировать `messageStepId` (UUID) для нового пользовательского message-шага. Он будет записан в `chat_steps.message_step_id` и `tool_calls.message_step_id` всех записей этого шага и переиспользован при re-entry из `/chat/tool-result` вплоть до финального assistant_message. Это billing idempotency key (НЕ gateway `requestId`).
-1. Загрузить/создать `chat_session` (`mode`, `assistant_mode` и `project_id` фиксируются на сессию при создании; при resume берутся из сессии — поля запроса игнорируются, [ADR-022 §4](../../adr/ADR-022-optional-project-and-tool-gating.md)). `project_id` может быть `NULL` («чистый чат» без проекта, website-builder отключён для сессии).
+1. Загрузить/создать `chat_session` (`mode`, `assistant_mode`, `model` и `project_id` фиксируются на сессию при создании; при resume берутся из сессии — поля запроса игнорируются, [ADR-022 §4](../../adr/ADR-022-optional-project-and-tool-gating.md), [ADR-034](../../adr/ADR-034-user-model-selection.md)). `project_id` может быть `NULL` («чистый чат» без проекта, website-builder отключён для сессии). `model` может быть `NULL` (дефолтная модель инстанса). Валидация выбранной `model` по allowlist активного провайдера — при создании сессии (неизвестная → `422 unsupported_model`, [ADR-034 §3](../../adr/ADR-034-user-model-selection.md)).
 2. Вызвать **Policy Engine** `evaluate(state, mode)`.
    - `blocked` → записать audit policy_decision, вернуть `200 {status:blocked, blockReason}`. Списания нет.
 3. Разрешить источник ключа:
@@ -101,6 +101,7 @@ Orchestrator диспетчеризует **только** по канониче
 3. `tools` — **нейтральные определения** `{name(domain dotted), description, input_schema}`. Per-provider сериализацию делает клиент (см. ниже).
 4. `attachments: PreparedAttachments | None` — нейтральные вложения первого turn. **Клиент строит провайдер content-блоки** (orchestrator больше не собирает Anthropic image/document-блоки сам, см. [§Мультимодальные вложения](#мультимодальные-вложения-inline-base64-adr-020)).
 5. `api_key: str | None` — BYOK override, как сейчас.
+6. `model: str | None` — выбранная модель сессии ([ADR-034](../../adr/ADR-034-user-model-selection.md)). Orchestrator передаёт `sess.model or None`; `None` (дефолт) → **клиент берёт свою дефолтную модель** (`settings.<provider>_model`) — текущее поведение. Orchestrator сам дефолт не подставляет (единая точка дефолта в клиенте, провайдер-агностично). Аддитивный kwarg, не ломает существующие вызовы.
 
 **Что клиент ВОЗВРАЩАЕТ (`LLMResult`):**
 - `content_blocks` — **wire-формат активного провайдера** для `chat_steps.payload` (Anthropic — как сейчас; OpenAI — нормализованный assistant-message, достаточный для реплея), **уже нормализованный** клиентом на границе персиста (per-provider allowlist, [ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)).

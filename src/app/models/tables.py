@@ -159,6 +159,10 @@ class ChatSession(Base):
     # NOT to be confused with workspace_project_id (workspace, ADR-013).
     project_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     mode: Mapped[str] = mapped_column(_chat_mode_enum, nullable=False)  # billing_mode (ADR-012)
+    # ADR-034 (migration 0010): user-selected model, session-fixed at creation. nullable; NULL =
+    # «дефолтная модель инстанса» (the active provider's default, resolved by the client at
+    # generation time). Validated against allowed_models() before write; on resume not re-written.
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
     # --- Figma-gap extension (migration 0004), chats/preferences modules ---
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     # ADR-012: assistant type fixed at session creation (chat|code), distinct from `mode`.

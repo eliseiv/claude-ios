@@ -131,6 +131,9 @@ class LLMClient(Protocol):
         tools: list[dict[str, Any]],
         attachments: PreparedAttachments | None = None,
         api_key: str | None = None,
+        # ADR-034 §4: optional per-call model override. None → the client uses its provider default
+        # (settings.<provider>_model) — the current behavior, unchanged for existing callers/tests.
+        model: str | None = None,
     ) -> LLMResult: ...
 
     async def validate_key(self, api_key: str) -> KeyValidation: ...

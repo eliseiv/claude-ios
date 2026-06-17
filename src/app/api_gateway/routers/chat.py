@@ -343,6 +343,7 @@ async def chat_run(
         mode=body.mode,
         assistant_mode=body.assistantMode,
         attachments=body.attachments,
+        model=body.model,
     )
     return _to_response(out)
 

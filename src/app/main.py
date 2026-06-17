@@ -24,6 +24,7 @@ from app.api_gateway.routers import (
     chat,
     chats,
     health,
+    models,
     policy,
     preferences,
     preview,
@@ -100,6 +101,12 @@ _OPENAPI_TAGS = [
     {
         "name": "Tools",
         "description": "Каталог инструментов tool-loop: имя, описание, mutating, место исполнения.",
+    },
+    {
+        "name": "Models",
+        "description": (
+            "Доступные модели активного провайдера инстанса для селектора модели (ADR-034)."
+        ),
     },
     {
         "name": "Policy",
@@ -198,6 +205,7 @@ def create_app() -> FastAPI:
         auth,
         chat,
         tools,
+        models,
         policy,
         wallet,
         subscription,

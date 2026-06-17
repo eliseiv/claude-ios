@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     # separate instance with LLM_PROVIDER=openai + OPENAI_* (07-deployment.md §Мульти-инстанс).
     llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
 
+    # --- Model allowlist per provider (ADR-034) ---
+    # JSON object {model-id: displayName} of the models a user may pick on this instance. Parsed
+    # by allowed_models() with the SAME shape rules as token_products() (str→non-empty-str only).
+    # Default "{}" → empty allowlist → backward-compatible fallback to the single instance default
+    # model (allowed_models()). Per-provider: only the active provider's raw is read. Not secrets.
+    anthropic_models_raw: str = Field(default="{}", alias="ANTHROPIC_MODELS")
+    openai_models_raw: str = Field(default="{}", alias="OPENAI_MODELS")
+
     # --- OpenAI (ADR-033; used only when LLM_PROVIDER=openai) ---
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o", alias="OPENAI_MODEL")
@@ -288,6 +296,72 @@ class Settings(BaseSettings):
                 continue
             products[key] = value
         return products
+
+    def default_model(self) -> str:
+        """Active instance default model (ADR-034 §1): the model used when none is selected.
+
+        Provider-aware: ``openai_model`` when ``LLM_PROVIDER=openai``, otherwise ``anthropic_model``
+        (the default). This is the model the active client falls back to
+        (``settings.<provider>_model``) when ``create_message(model=None)`` — so it is, by
+        construction, ALWAYS present in
+        ``allowed_models()`` (the empty-allowlist fallback returns exactly this model; a non-empty
+        allowlist without it has it prepended at the API layer — GET /v1/models).
+        """
+        if self.llm_provider.strip().lower() == "openai":
+            return self.openai_model
+        return self.anthropic_model
+
+    def allowed_models(self) -> dict[str, str]:
+        """Parse the active provider's model allowlist into a validated {id: displayName} mapping.
+
+        Provider-aware (ADR-034 §1): reads ``openai_models_raw`` when ``LLM_PROVIDER=openai``, else
+        ``anthropic_models_raw``. Same shape rules as ``token_products()``: only ``str`` keys with a
+        non-empty ``str`` value survive (key stripped to a non-empty string; value a non-empty
+        string after no transformation beyond the emptiness check). A malformed JSON document or a
+        non-object yields an empty mapping.
+
+        Backward-compatibility fallback: when the parsed result is empty, returns
+        ``{default_model(): default_model()}`` — a single entry equal to the instance default model
+        (displayName = id). So an unset allowlist reproduces the current behavior exactly (one
+        model, the instance default).
+
+        Invariant (ADR-034 §1): ``default_model()`` is ALWAYS present in the result. When a
+        non-empty allowlist does NOT contain the default, the default is PREPENDED (displayName =
+        id, first key) so it is always selectable and the §3 allowlist validation accepts it; the
+        rest keep the allowlist insertion order. Pure (no I/O); cached via get_settings() lru_cache.
+        """
+        import json
+
+        raw = (
+            self.openai_models_raw
+            if self.llm_provider.strip().lower() == "openai"
+            else self.anthropic_models_raw
+        )
+        try:
+            parsed = json.loads(raw or "{}")
+        except (ValueError, json.JSONDecodeError):
+            parsed = {}
+        parsed_models: dict[str, str] = {}
+        if isinstance(parsed, dict):
+            for key, value in parsed.items():
+                if not isinstance(key, str):
+                    continue
+                stripped_key = key.strip()
+                if not stripped_key:
+                    continue
+                # bool is a subclass of int (not str); the isinstance(str) check excludes it.
+                if not isinstance(value, str) or not value:
+                    continue
+                parsed_models[stripped_key] = value
+        default = self.default_model()
+        if not parsed_models:
+            # Empty allowlist → backward-compatible single default entry (displayName = id).
+            return {default: default}
+        if default in parsed_models:
+            return parsed_models
+        # Non-empty allowlist missing the default → prepend the default first (invariant §1),
+        # keeping the allowlist's insertion order for the rest.
+        return {default: default, **parsed_models}
 
     @staticmethod
     def _resolve_pem(path_value: str, string_value: str) -> str:

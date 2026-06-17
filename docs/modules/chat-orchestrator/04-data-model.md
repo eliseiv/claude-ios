@@ -5,6 +5,7 @@
 ## chat_sessions
 - `mode` фиксируется при создании, неизменяем на протяжении сессии.
 - `project_id` (**nullable** с миграции `0007`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)) — external project id website-builder; фиксируется при создании, неизменяем. `NULL` → «чистый чат» без website-builder (server-side `site.*` не предлагаются). Непустая строка → website-builder доступен. При resume значение берётся из сессии; `projectId` запроса игнорируется. **НЕ** путать с `workspace_project_id` (workspace, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+- `model` (`Text`, **nullable** с миграции `0010`, [ADR-034](../../adr/ADR-034-user-model-selection.md)) — выбранная пользователем модель (provider-id из allowlist активного провайдера). Фиксируется при создании сессии, неизменяем. `NULL` → дефолтная модель инстанса (`ANTHROPIC_MODEL`/`OPENAI_MODEL`) — обратная совместимость (существующие строки и запросы без `model` остаются `NULL`). При resume значение берётся из сессии; `model` запроса игнорируется. Валидация по allowlist — при создании (неизвестная модель → `422 unsupported_model`). Orchestrator передаёт `session.model or None` в `LLMClient.create_message(..., model=...)`; `None` → клиент берёт свой дефолт. Биллинг от модели не зависит ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)).
 - `updated_at` обновляется на каждом шаге (используется для soft TTL, [Q-001-1](../../99-open-questions.md)).
 
 ## chat_steps

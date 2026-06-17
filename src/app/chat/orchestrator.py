@@ -287,8 +287,27 @@ class ChatOrchestrator:
         mode: str,
         assistant_mode: str | None = None,
         attachments: list[AttachmentIn] | None = None,
+        model: str | None = None,
     ) -> ChatRunOut:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
+        # ADR-034 §3: resolve the session-fixed model. None (no field) → NULL (= instance default,
+        # never substituted in the DB so the row stays "instance default" even if env default
+        # changes). The schema guarantees a non-empty value here, so .strip() is safe.
+        resolved_model = model.strip() if model is not None else None
+        # ADR-034 §3: validate allowlist membership ONLY when a NEW session is being created (a
+        # missing session_id, or an absent/expired one → get_or_create_session creates). On resume
+        # the request `model` is IGNORED (the stored model is already valid) — so a bad model field
+        # on a resume must NOT fail. Pre-determine «is this a create?» to gate validation; the
+        # validation itself runs BEFORE the session row is created (no invalid model is written).
+        will_create = await self._will_create_session(user_id, session_id)
+        if (
+            will_create
+            and resolved_model is not None
+            and resolved_model not in get_settings().allowed_models()
+        ):
+            raise ValidationFailedError(
+                f"model '{resolved_model}' is not available on this instance"
+            )
         # ADR-012: resolve assistant_mode for a NEW session — explicit request → preferences
         # default → 'chat'. Fixed on the session at creation; ignored when resuming a session
         # (assistant_mode is a session attribute). billing_mode (`mode`) is independent.
@@ -305,6 +324,8 @@ class ChatOrchestrator:
             assistant_mode=resolved_assistant_mode,
             # Auto-title from the first user message (chats/03); only used for a new session.
             title=derive_title(message),
+            # ADR-034 §3: session-fixed model; written only at creation, ignored on resume.
+            model=resolved_model,
         )
         sess = ctx.session
         # mode is fixed on the session; use the session's stored mode.
@@ -352,6 +373,8 @@ class ChatOrchestrator:
             # ADR-022 axis A: offer site.* only when the session has a project.
             has_project=sess.project_id is not None,
             first_turn_attachments=prepared,
+            # ADR-034 §4: pass the session-fixed model (NULL → None → client uses its default).
+            model=sess.model or None,
         )
 
     async def tool_result(
@@ -462,6 +485,8 @@ class ChatOrchestrator:
             system_prompt=_system_prompt_for(sess.assistant_mode),
             # ADR-022 axis A: project_id is session-fixed; gate site.* by the session's project.
             has_project=sess.project_id is not None,
+            # ADR-034 §4: session-fixed model from the resumed session (NULL → None → client def).
+            model=sess.model or None,
         )
 
     @staticmethod
@@ -585,6 +610,21 @@ class ChatOrchestrator:
         byok_usage_share.set(0)
         return None  # service key used by AnthropicClient
 
+    async def _will_create_session(self, user_id: uuid.UUID, session_id: uuid.UUID | None) -> bool:
+        """True when ``get_or_create_session`` would CREATE a new session (ADR-034 §3 model gate).
+
+        Mirrors the repository's resume rule: a missing ``session_id``, or an absent / expired owned
+        session, results in a create; an owned, non-expired session is a resume. Used only to gate
+        the model-allowlist validation so the request ``model`` is ignored on resume (and validated
+        before any new row is written on create). Read-only; the repository stays the single writer.
+        """
+        if session_id is None:
+            return True
+        existing = await self._deps.repo.get_session(session_id, user_id)
+        if existing is None:
+            return True
+        return self._deps.repo.is_expired(existing)
+
     async def _build_messages(self, session_id: uuid.UUID) -> list[NeutralMessage]:
         """Reconstruct the provider-NEUTRAL history from chat_steps (TD-002, ADR-033 §3).
 
@@ -627,6 +667,7 @@ class ChatOrchestrator:
         system_prompt: str,
         has_project: bool,
         first_turn_attachments: PreparedAttachments | None = None,
+        model: str | None = None,
     ) -> ChatRunOut:
         # ADR-011: server-side site.* tools are executed by the backend synchronously inside this
         # loop, WITHOUT a round-trip to iOS. We keep calling the LLM as long as the turn contains
@@ -661,6 +702,9 @@ class ChatOrchestrator:
                     tools=neutral_tool_definitions(include_server_side=has_project),
                     attachments=turn0_attachments,
                     api_key=api_key,
+                    # ADR-034 §4: session-fixed model (None → client uses its provider default;
+                    # current behavior). The orchestrator never substitutes the default itself.
+                    model=model,
                 )
             except (AnthropicAuthError, OpenAIAuthError):
                 if mode is Mode.byok:

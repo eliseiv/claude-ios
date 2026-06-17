@@ -266,9 +266,14 @@ class OpenAIClient:
         tools: list[dict[str, Any]],
         attachments: PreparedAttachments | None = None,
         api_key: str | None = None,
+        model: str | None = None,
     ) -> LLMResult:
-        """Call chat.completions.create (non-streaming) and return a neutral LLMResult."""
-        model = self._default_model
+        """Call chat.completions.create (non-streaming) and return a neutral LLMResult.
+
+        model (ADR-034 §4): optional model id; None → the configured default
+        (``settings.openai_model``) — current behavior, unchanged.
+        """
+        model = model if model is not None else self._default_model
         client = self._client
         if api_key is not None:
             client = client.with_options(api_key=api_key)

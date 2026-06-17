@@ -153,6 +153,7 @@ CREATE TABLE chat_sessions (
     -- Расширение Figma-gap, миграция 0004 (только title/assistant_mode/is_pinned):
     title                TEXT,           -- заголовок чата (автоген из 1-го сообщения или rename), nullable
     assistant_mode       assistant_mode NOT NULL DEFAULT 'chat',  -- тип ассистента, ADR-012
+    model                TEXT,           -- выбранная модель (provider-id из allowlist), NULLABLE с миграции 0010 (ADR-034): NULL = дефолтная модель инстанса (ANTHROPIC_MODEL/OPENAI_MODEL). Фиксируется при создании сессии, на resume берётся из сессии. Биллинг не зависит от модели (ADR-006).
     workspace_project_id UUID REFERENCES workspace_projects(id) ON DELETE SET NULL,  -- привязка к workspace, ADR-013, nullable; СПРИНТ 2 — НЕ в 0004 (отдельная будущая миграция)
     is_pinned            BOOLEAN NOT NULL DEFAULT FALSE,  -- закрепление в списке чатов
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),

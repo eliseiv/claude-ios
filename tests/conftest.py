@@ -348,6 +348,9 @@ class FakeAnthropicClient:
         attachments = kwargs.get("attachments")
         api_key = kwargs.get("api_key")
         system_prompt = kwargs.get("system_prompt")
+        # ADR-034: record the session-fixed model passed by the orchestrator so model-proboros
+        # tests can assert create_message(model=<session.model>) (None → client uses its default).
+        model = kwargs.get("model")
 
         # Translate neutral → Anthropic wire exactly as the real client does (ADR-033 §3/§4).
         wire_messages = AnthropicClient._build_provider_messages(neutral_messages)
@@ -369,6 +372,8 @@ class FakeAnthropicClient:
                 "system_prompt": system_prompt,
                 "api_key": api_key,
                 "attachments": attachments,
+                # ADR-034: session-fixed model handed to the client (None → provider default).
+                "model": model,
                 # Neutral kwargs preserved for tests that want to inspect the seam directly.
                 "neutral_messages": neutral_messages,
                 "neutral_tools": neutral_tools,
