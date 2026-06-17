@@ -1,7 +1,7 @@
 # Module: Workspaces (рабочие пространства чатов)
 
-- Статус: Спроектирован (backend — Спринт 2)
-- Ответственность: проекты-воркспейсы = name + description + кастомные `instructions` (system-prompt) + прикреплённые файлы-контекст + список чатов проекта. **НЕ путать** с website-builder `projects` ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+- Статус: **Реализован (Поставка 3, [ADR-036](../../adr/ADR-036-workspaces-implementation.md))** — код в `src/app/workspaces/` + роутер + миграция `0011`; offline-сьют зелёный (1286 passed); расширяет [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md).
+- Ответственность: проекты-воркспейсы = `name` + `description` + кастомные `instructions` (system-prompt проекта) + файлы-знания (контекст для всех чатов проекта) + список/группировка чатов проекта. **НЕ путать** с website-builder `projects` ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
 
 ## Документы
 - [00-overview.md](00-overview.md)
@@ -12,13 +12,13 @@
 - [07-implementation-phases.md](07-implementation-phases.md)
 - [09-testing.md](09-testing.md)
 
-> Data model — `workspace_projects` (таблица 13) + `chat_sessions.workspace_project_id`: предпосылка Спринта 2, создаётся **отдельной будущей миграцией** (НЕ `0004` — `0004` создаёт только `user_preferences` + поля `chat_sessions`/`users`). `workspace_files` (таблица 14) и `attachments` — **отложены** ([TD-015](../../100-known-tech-debt.md)), на MVP миграцией не создаются; файлы-контекст (хранение в `attachments`, [ADR-014](../../adr/ADR-014-multimodal-attachments.md)) появляются только при реализации двухшаговой модели.
+> **Data model ([ADR-036](../../adr/ADR-036-workspaces-implementation.md)):** `workspace_projects` ([03-data-model §13](../../03-data-model.md)) + `chat_sessions.workspace_project_id` (nullable FK, ON DELETE SET NULL) + **`workspace_files` ([03-data-model §14](../../03-data-model.md)) — собственное BYTEA-хранение** (образец `site_files`, [TD-027](../../100-known-tech-debt.md)), **НЕ через `attachments`**. Создаются миграцией **`0011`** (цепочка `0001`→`0011`, expand-only). Файлы-знания **самодостаточны** — фича не зависит от отложенного модуля `attachments` ([TD-015](../../100-known-tech-debt.md)).
 
 ## DoD
-- CRUD `/v1/workspaces` (name/description/instructions).
-- Add/remove файлов-контекста (через `attachments`), list файлов.
-- Привязка чатов к workspace (`chat_sessions.workspace_project_id`); список чатов workspace (через модуль chats).
-- `instructions` + `workspace_files` подаются Claude при генерации в сессии workspace ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+- **Под-фаза 3A (ядро):** CRUD `/v1/workspaces` (name/description/instructions, курсорная пагинация); изоляция по `sub` (`404`); `ChatRunRequest.workspaceProjectId` (session-fixed, валидация принадлежности); реальный `workspaceProjectId` в списке чатов + фильтр `GET /v1/chats?workspaceProjectId=`; инъекция `instructions` в system-prompt после base assistant_mode prompt; удаление workspace → файлы CASCADE, чаты SET NULL.
+- **Под-фаза 3B (файлы-знания):** `POST/GET/DELETE /v1/workspaces/{id}/files[/{fileId}]` (inline base64, BYTEA-хранение, извлечение `extracted_text`, лимиты); инъекция файлов в чаты workspace (document/text → `extracted_text`, image → vision; лимит `WORKSPACE_CONTEXT_MAX_CHARS`).
 
 ## Changelog
-- 2026-06-02: bootstrap модуля (architect, Figma-gap). [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md). Таблицы `workspace_projects`/`workspace_files`. См. [figma-gap-analysis.md](../../figma-gap-analysis.md).
+- 2026-06-17: **РЕАЛИЗОВАН** (Поставка 3, [ADR-036](../../adr/ADR-036-workspaces-implementation.md)) — backend `src/app/workspaces/` + роутер + миграция `0011` в репозитории; backend approve, offline-сьют 1286 passed. Финальный sync статус-маркеров (README модуля + таблица модулей [docs/README.md](../../README.md)).
+- 2026-06-17: **переписан под [ADR-036](../../adr/ADR-036-workspaces-implementation.md)** (Поставка 3): файлы-знания переведены на собственную таблицу `workspace_files` (BYTEA, inline base64, извлечение текста) — **снята зависимость от отложенного `attachments`** ([TD-015](../../100-known-tech-debt.md)); зафиксированы API-путь (`/v1/workspaces`), инъекция instructions/файлов, удаление (файлы CASCADE / чаты SET NULL), лимиты, пагинация, биллинг. Миграция `0011`.
+- 2026-06-02: bootstrap модуля (architect, Figma-gap). [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md).

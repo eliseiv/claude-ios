@@ -1,4 +1,4 @@
-"""SQLAlchemy models for the 11 tables (03-data-model.md)."""
+"""SQLAlchemy models for the table set (03-data-model.md)."""
 
 from app.models.base import Base
 from app.models.tables import (
@@ -15,6 +15,8 @@ from app.models.tables import (
     User,
     UserPreferences,
     Wallet,
+    WorkspaceFile,
+    WorkspaceProject,
 )
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     "Project",
     "SiteFile",
     "UserPreferences",
+    "WorkspaceProject",
+    "WorkspaceFile",
 ]

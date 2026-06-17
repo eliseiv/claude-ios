@@ -97,12 +97,11 @@
 - Реализовано: `GET /v1/chats` (список/поиск `q`/курсорная пагинация), `GET /v1/chats/{id}` (история), `GET /v1/chats/{id}/steps` (steps-view), `PATCH /v1/chats/{id}` (rename/pin), `DELETE /v1/chats/{id}`; `GET`/`PATCH /v1/profile`; `GET`/`PATCH /v1/preferences`; BYOK `keyStatus` 6 значений + `activeModel`; `assistantMode` (chat\|code) в `/chat/run` с fallback preferences→`chat`.
 - Зависимость закрыта: миграция `0004` применена (поля chat_sessions `title`/`assistant_mode`/`is_pinned` + индекс `ix_sessions_user_pinned_updated`, users.display_name, таблица user_preferences, enum assistant_mode, расширение byok_key_status). Цепочка `0001`→`0002`→`0003`→`0004`.
 - assistant_mode фиксируется на сессию в orchestrator; fallback из preferences (`defaultAssistantMode`).
-- `chat_sessions.workspace_project_id` НЕ создан в `0004` (Спринт 2); в ответе `GET /v1/chats` поле `workspaceProjectId` пока всегда `null`.
+- `chat_sessions.workspace_project_id` НЕ создан в `0004`; создаётся в миграции `0011` (Поставка 3, [ADR-036](adr/ADR-036-workspaces-implementation.md)). До `0011` в ответе `GET /v1/chats` поле `workspaceProjectId` = `null` (заглушка).
 
-### Спринт 2 — рабочие пространства и Code-режим (⏳ спроектирован, ожидает реализации)
-Модули: **workspaces**, **snippets**.
-- Зависимость: **отдельная будущая миграция** (НЕ `0004`) — `workspace_projects` + `chat_sessions.workspace_project_id` + `snippets`. `0004` создал только `user_preferences` (+ поля `chat_sessions`/`users`).
-- workspaces Phase 3–4 (файлы-контекст) зависят от `workspace_files`+`attachments` — **отложены** ([TD-015](100-known-tech-debt.md), на MVP миграцией не создаются); CRUD workspace без файлов (Phase 1–2) реализуем раньше.
+### Спринт 2 / Поставка 3 — рабочие пространства и Code-режим (⏳ спроектирован, ожидает реализации)
+Модули: **workspaces** (Поставка 3, [ADR-036](adr/ADR-036-workspaces-implementation.md)), **snippets**.
+- **workspaces:** миграция `0011` создаёт `workspace_projects` + `chat_sessions.workspace_project_id` + **`workspace_files` (BYTEA, собственное хранение)**. Файлы-знания **самодостаточны** — **сняли зависимость от отложенного `attachments`** ([ADR-036 §4](adr/ADR-036-workspaces-implementation.md), разблокирует [TD-015](100-known-tech-debt.md)-зависимость). Под-фаза 3A (ядро: CRUD + instructions + привязка) и 3B (файлы-знания) реализуемы вместе.
 - snippets — независим (только своя таблица, отдельная будущая миграция).
 
 ### Спринт 3 — ввод и интеграции (⏳ спроектирован, ожидает реализации; частично зависит от ответов пользователя)

@@ -15,7 +15,8 @@
 Ввести **отдельный модуль `workspaces`** с собственными таблицами, не переиспользуя website-builder:
 
 - `workspace_projects` — рабочее пространство: `id`, `user_id`, `name`, `description`, `instructions` (кастомный system-prompt, TEXT, nullable), таймстемпы.
-- `workspace_files` — прикреплённые файлы-контекст: `id`, `workspace_project_id`, `filename`, `content_ref` (ссылка на хранилище байтов мультимодального ввода — общая с модулем `attachments`, ADR-014), `media_type`, `size`, `extracted_text` (nullable; для PDF/текста — извлечённый текст, подаваемый Claude как контекст), таймстемпы.
+- `workspace_files` — прикреплённые файлы-контекст: `id`, `workspace_project_id`, `filename`, `media_type`, `size`, `extracted_text` (nullable; для PDF/текста — извлечённый текст, подаваемый модели как контекст), таймстемпы.
+  > **Уточнено [ADR-036 §4](ADR-036-workspaces-implementation.md) (Поставка 3, супершедит этот пункт):** хранение байтов файла переведено на **собственный BYTEA-столбец `workspace_files.content`** (образец `site_files`), а не `content_ref` на общую таблицу `attachments` ([ADR-014](ADR-014-multimodal-attachments.md)/[TD-015](../100-known-tech-debt.md), отложена). Концепция модуля (этот ADR) неизменна; меняется только реализация хранилища файлов.
 - Привязка чата к проекту: `chat_sessions.workspace_project_id` (nullable FK). Чат может не принадлежать ни одному workspace (дефолтное пространство).
 
 **Терминологическое разведение (нормативно):**

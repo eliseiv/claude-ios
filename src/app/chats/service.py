@@ -103,6 +103,7 @@ class ChatsService:
         query: str | None,
         cursor: str | None,
         limit: int,
+        workspace_project_id: uuid.UUID | None = None,
     ) -> ChatListView:
         decoded: ChatCursor | None = None
         if cursor:
@@ -112,7 +113,11 @@ class ChatsService:
                 raise ValidationFailedError("invalid cursor") from exc
 
         page = await self._repo.list_chats(
-            user_id=user_id, query=query, cursor=decoded, limit=limit
+            user_id=user_id,
+            query=query,
+            cursor=decoded,
+            limit=limit,
+            workspace_project_id=workspace_project_id,
         )
         items = [
             ChatListItemView(
@@ -123,8 +128,8 @@ class ChatsService:
                 is_pinned=item.session.is_pinned,
                 # ADR-028: website-builder project key from the session (free string, ADR-022).
                 project_id=item.session.project_id,
-                # workspace_project_id is a Sprint-2 column; not present yet → always null.
-                workspace_project_id=None,
+                # ADR-036: real workspace binding from the session (NULL = chat without workspace).
+                workspace_project_id=item.session.workspace_project_id,
                 updated_at=item.session.updated_at,
             )
             for item in page.items

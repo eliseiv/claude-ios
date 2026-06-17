@@ -1,28 +1,31 @@
 # Workspaces — Overview
 
 ## Назначение
-Рабочее пространство чатов (дизайн «Project»): контейнер с именем, описанием, кастомными инструкциями (system-prompt) и файлами-контекстом (PDF и т.п.), внутри которого ведутся чаты с общим контекстом.
+Рабочее пространство чатов (дизайн «Project»): контейнер с именем, описанием, кастомными инструкциями (system-prompt проекта) и файлами-знаниями (PDF/текст/изображения), внутри которого ведутся чаты с общим контекстом. Реализация — [ADR-036](../../adr/ADR-036-workspaces-implementation.md) (расширяет [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
 
 ## Разведение с website-builder ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md))
-- **workspace** (этот модуль) — **вход/контейнер**: контекст + инструкции для Claude, группировка чатов.
-- **website-builder `projects`** — **вывод/артефакт**: сгенерированные Claude статические сайты (`site_files`, server-side `site.*`). Другая сущность, не переиспользуется.
+- **workspace** (этот модуль) — **вход/контейнер**: контекст + инструкции для модели, группировка чатов.
+- **website-builder `projects`** — **вывод/артефакт**: сгенерированные статические сайты (`site_files`, server-side `site.*`). Другая сущность, не переиспользуется.
+- API-путь — **`/v1/workspaces`** (НЕ `/v1/projects` — слово «project» в API занято website-builder). iOS отображает «Projects», обращается к `/v1/workspaces` ([ADR-036 §1](../../adr/ADR-036-workspaces-implementation.md)).
 - `chat_sessions.workspace_project_id` (UUID FK) ≠ `chat_sessions.project_id` (TEXT, website-builder external id). Разные поля.
 
 ## Scope
-- CRUD workspace: `POST/GET/PATCH/DELETE /v1/workspaces[/{id}]`.
-- Управление `instructions` — через PATCH workspace (`instructions` — поле).
-- Файлы-контекст: `POST /v1/workspaces/{id}/files` (привязать ранее загруженный `attachmentId`), `GET` (список), `DELETE /v1/workspaces/{id}/files/{fileId}`.
-- Привязка чатов: при `/chat/run` с `workspaceProjectId`; список чатов workspace — `GET /v1/chats?workspaceProjectId=...` (модуль chats).
-- Подача `instructions` + `workspace_files` Claude при генерации в сессии workspace.
+- CRUD workspace: `POST/GET/PATCH/DELETE /v1/workspaces[/{id}]` (курсорная пагинация списка как chats).
+- Управление `instructions` — через PATCH workspace (`instructions` — поле, кастомный system-prompt).
+- Файлы-знания: `POST /v1/workspaces/{id}/files` (inline base64, BYTEA-хранение), `GET` (список), `DELETE /v1/workspaces/{id}/files/{fileId}`.
+- Привязка чатов: при `/chat/run` с `workspaceProjectId` (session-fixed); список чатов workspace — `GET /v1/chats?workspaceProjectId=...` (модуль chats).
+- Подача `instructions` (system-prompt) + файлов-знаний (контекст) модели при генерации в сессии workspace.
 
 ## Out of scope
 - Совместный доступ/шеринг workspace между пользователями.
 - Версионирование инструкций/файлов.
 - RAG/векторный поиск по файлам (на старте — вставка `extracted_text` с лимитом, [Q-013-1](../../99-open-questions.md)).
+- Object storage для файлов (на старте — BYTEA в БД, [TD-027](../../100-known-tech-debt.md)).
 
 ## Бизнес-правила
-- BR-WS-1: workspace принадлежит пользователю (`user_id == sub`); чужой → `404`.
-- BR-WS-2: `instructions` (nullable) добавляются к base-system-prompt (после assistant_mode prompt, [ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)) при генерации в сессии этого workspace.
-- BR-WS-3: файл-контекст — это `attachment` ([ADR-014](../../adr/ADR-014-multimodal-attachments.md)), привязанный к workspace через `workspace_files`. Привязываемый `attachmentId` обязан принадлежать тому же пользователю. ⚠️ **Зависимость:** workspace file-context требует таблицы `attachments`, которая на MVP **отложена** ([TD-015](../../100-known-tech-debt.md); chat-вложения на MVP — inline base64 без таблицы, [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)). Workspaces (Спринт 2) реализует двухшаговый attachments-upload как свою предпосылку, либо подаёт файлы-контекст альтернативным способом — решение при реализации модуля.
-- BR-WS-4: подача `workspace_files` Claude — `extracted_text` (document) как текстовый контекст / image как vision; суммарный размер контекста ограничен ([Q-013-1](../../99-open-questions.md)).
-- BR-WS-5: удаление workspace → `workspace_files` cascade; `chat_sessions.workspace_project_id` → NULL (чаты сохраняются).
+- BR-WS-1: workspace принадлежит пользователю (`user_id == sub`); чужой/несуществующий → `404` (никогда не раскрывать чужое существование).
+- BR-WS-2: `instructions` (nullable) добавляются к base-system-prompt **после** assistant_mode prompt ([ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)) при генерации в сессии этого workspace, на **КАЖДОМ ходе** — turn 0 И continuation (tool-loop): `system`-prompt не часть истории, instructions переинъектируются на каждый вызов LLM ([ADR-036 §3](../../adr/ADR-036-workspaces-implementation.md), helper `_system_prompt_with_workspace`). Пустые → инъекции нет (prompt cache не ломается).
+- BR-WS-3: файл-знание хранится **в собственной таблице `workspace_files`** (BYTEA, [ADR-036 §4](../../adr/ADR-036-workspaces-implementation.md)), **не** через `attachments`. Загрузка — inline base64 (reuse валидаций [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)); при загрузке извлекается `extracted_text` (pypdf для PDF, decode для текста). Файл принадлежит workspace (значит — пользователю); лимиты числа/размера/типа — [ADR-036 §4](../../adr/ADR-036-workspaces-implementation.md).
+- BR-WS-4: подача файлов-знаний модели — document/text → `extracted_text` (текстовый контекст, работает на **обоих** провайдерах [ADR-033](../../adr/ADR-033-llm-provider-abstraction.md); PDF→422 на OpenAI [TD-023](../../100-known-tech-debt.md) **не применяется** — это извлечённый текст, не нативный PDF); image → vision-блок. Суммарный размер инжектируемого текста ограничен `WORKSPACE_CONTEXT_MAX_CHARS` (усечение, [Q-013-1](../../99-open-questions.md)).
+- BR-WS-5: удаление workspace → `workspace_files` **CASCADE** (BYTEA удаляется); `chat_sessions.workspace_project_id` → **SET NULL** (чаты сохраняются как «чистые», история не теряется).
+- BR-WS-6: биллинг неизменен ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)): создание workspace и загрузка/удаление файлов — бесплатно (CRUD); генерация в чате проекта — 1 кредит = 1 сообщение.

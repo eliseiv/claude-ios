@@ -9,4 +9,4 @@
 3. **Phase 3 — резолв:** утилита `resolve_attachments` + интеграция в `/chat/run` (`attachments[]` → Anthropic content-блоки, проставление `session_id`).
 4. **Phase 4 (опц.) — orphan cleanup:** при наличии планировщика (иначе [TD-010](../../100-known-tech-debt.md)).
 
-> Workspace-файлы (`workspace_files`, модуль workspaces, Спринт 2) зависят от таблицы `attachments` (FK). Обе таблицы **отложены** ([TD-015](../../100-known-tech-debt.md)) и на MVP миграцией `0004` **не создаются** — `0004` создаёт только `user_preferences` (+ поля `chat_sessions`/`users`). При реализации двухшаговой модели таблица `attachments` создаётся отдельной будущей миграцией и должна предшествовать `workspace_files`.
+> **Обновлено ([ADR-036 §4](../../adr/ADR-036-workspaces-implementation.md)):** workspace-файлы (`workspace_files`, модуль workspaces, Поставка 3) **больше не зависят** от таблицы `attachments` — хранятся собственным BYTEA-столбцом (миграция `0011`). Таблица `attachments` (двухшаговый upload) остаётся отложенной ([TD-015](../../100-known-tech-debt.md)) и больше не является предпосылкой workspaces.

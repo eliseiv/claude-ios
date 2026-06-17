@@ -133,7 +133,7 @@ src/app/
   byok/                   # service (envelope encrypt/toggle/delete), kms (KmsClient + LocalKmsClient)
   audit/                  # service (append-only logging)
   observability/          # metrics (prometheus), logging, context (request id), redaction
-  models/                 # base, tables. На MVP активны 14 таблиц (миграции 0001=9 базовых, 0003=projects/site_files, 0004=user_preferences, 0005=auth_devices/auth_refresh_tokens). Спроектированы, миграцией ещё не созданы: workspace_projects/snippets/device_push_tokens (Спринт 2/3) + ОТЛОЖЕНЫ workspace_files/attachments (TD-015, ADR-020). Полный статус — 03-data-model.md.
+  models/                 # base, tables. На MVP активны 14 таблиц (миграции 0001=9 базовых, 0003=projects/site_files, 0004=user_preferences, 0005=auth_devices/auth_refresh_tokens). Поставка 3 (миграция 0011, ADR-036): workspace_projects + workspace_files (BYTEA, самодостаточно, НЕ через attachments) + chat_sessions.workspace_project_id. Спроектированы, миграцией ещё не созданы: snippets/device_push_tokens; ОТЛОЖЕНЫ: attachments (TD-015, ADR-020). Полный статус — 03-data-model.md.
   schemas/                # Pydantic request/response (chat, policy, wallet, subscription, byok, common)
   # Расширение Figma-gap (новые пакеты — каждый со своим router/service/repository):
   chats/                  # CRUD/список/поиск/steps-view поверх chat_sessions (модуль chats)

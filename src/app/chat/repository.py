@@ -91,15 +91,19 @@ class ChatRepository:
         assistant_mode: str = "chat",
         title: str | None = None,
         model: str | None = None,
+        workspace_project_id: uuid.UUID | None = None,
     ) -> SessionContext:
         """Resume an owned, non-expired session or create a new one.
 
         ``project_id`` (ADR-022), ``assistant_mode`` (ADR-012), the auto-generated ``title``
-        (chats/03) and ``model`` (ADR-034) are fixed at creation only — a single source of truth,
-        never re-written here for an existing session (rename is handled by the chats module).
-        ``project_id=None`` creates a «чистый чат» session (``chat_sessions.project_id = NULL``;
-        ``site.*`` tools not offered). ``model=None`` stores ``chat_sessions.model = NULL`` (= the
-        instance default model, resolved by the client at generation time — ADR-034 §3).
+        (chats/03), ``model`` (ADR-034) and ``workspace_project_id`` (ADR-036) are fixed at creation
+        only — a single source of truth, never re-written here for an existing session (rename is
+        handled by the chats module). ``project_id=None`` creates a «чистый чат» session
+        (``chat_sessions.project_id = NULL``; ``site.*`` tools not offered). ``model=None`` stores
+        ``chat_sessions.model = NULL`` (= the instance default model, resolved by the client at
+        generation time — ADR-034 §3). ``workspace_project_id=None`` creates a chat without a
+        workspace (``chat_sessions.workspace_project_id = NULL`` — ADR-036; NOT the website-builder
+        ``project_id``). Ownership of the workspace is validated by the caller before creation.
         """
         if session_id is not None:
             existing = await self.get_session(session_id, user_id)
@@ -113,6 +117,7 @@ class ChatRepository:
             assistant_mode=assistant_mode,
             title=title,
             model=model,
+            workspace_project_id=workspace_project_id,
         )
         self._session.add(new_session)
         await self._session.flush()

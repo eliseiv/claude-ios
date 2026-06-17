@@ -6,7 +6,7 @@
 
 ## Потребители
 - **chat-orchestrator** — резолвит `attachments[]` из `/chat/run` в Anthropic content-блоки ([ADR-014](../../adr/ADR-014-multimodal-attachments.md)); проставляет `attachments.session_id` при первом использовании.
-- **workspaces** — `workspace_files.attachment_id` ссылается на `attachments` (файлы-контекст проекта, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+- ~~**workspaces** — `workspace_files.attachment_id` ссылается на `attachments`~~ **(больше не актуально, [ADR-036 §4](../../adr/ADR-036-workspaces-implementation.md)):** workspace-файлы-знания хранятся в собственном BYTEA-столбце `workspace_files.content`, **не** ссылаются на `attachments`. Этот модуль больше не предпосылка для workspaces.
 
 ## Соседи
 - **website-builder** — разделяет подход «контент в БД» и общий [TD-009](../../100-known-tech-debt.md) (миграция в object-storage), но это **разные** таблицы (`site_files` ≠ `attachments`).

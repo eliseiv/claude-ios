@@ -56,6 +56,16 @@ class UserNotFoundError(NotFoundError):
     code = "user_not_found"
 
 
+class WorkspaceNotFoundError(NotFoundError):
+    """workspaceProjectId bound at /chat/run session creation is foreign/missing (ADR-036 §3).
+
+    404 with code=workspace_not_found: never reveal a foreign workspace's existence (isolation,
+    workspaces/06-rbac). Distinct code so the client can map it to a workspace-specific UI.
+    """
+
+    code = "workspace_not_found"
+
+
 class ConflictError(AppError):
     status_code = 409
     code = "conflict"

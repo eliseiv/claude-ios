@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-PostgreSQL 16. **19 таблиц спроектировано; 14 активны на MVP, 5 отложены** (`workspace_projects`, `workspace_files`, `snippets`, `attachments`, `device_push_tokens` — Sprint-2/3, миграция `0004` их **не создаёт**). Активные на MVP: 9 базовых + `projects`/`site_files` website-builder + 1 расширения Figma-gap Sprint 1 (`user_preferences`) + 2 встроенного auth-issuer (`auth_devices`, `auth_refresh_tokens`, [ADR-018](adr/ADR-018-embedded-auth-issuer.md)). Отдельно про `attachments`: таблица **спроектирована, но на MVP не создаётся** — двухшаговый transport [ADR-014](adr/ADR-014-multimodal-attachments.md) Superseded ([TD-015](100-known-tech-debt.md)), chat-вложения на MVP реализуются inline base64 без таблицы ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). UUID v4 (`gen_random_uuid()` из `pgcrypto`). Все timestamp — `timestamptz`, UTC. Деньги/кредиты — целочисленные (минимальная неделимая единица), без float.
+PostgreSQL 16. **19 таблиц спроектировано; 14 активны на MVP, 3 отложены** (`snippets`, `attachments`, `device_push_tokens` — миграция `0004` их **не создаёт**). `workspace_projects`/`workspace_files` — **Поставка 3 (миграция `0011`)**, реализуются ([ADR-036](adr/ADR-036-workspaces-implementation.md), собственное BYTEA-хранение, не зависят от `attachments`). Активные на MVP: 9 базовых + `projects`/`site_files` website-builder + 1 расширения Figma-gap Sprint 1 (`user_preferences`) + 2 встроенного auth-issuer (`auth_devices`, `auth_refresh_tokens`, [ADR-018](adr/ADR-018-embedded-auth-issuer.md)). Отдельно про `attachments`: таблица **спроектирована, но на MVP не создаётся** — двухшаговый transport [ADR-014](adr/ADR-014-multimodal-attachments.md) Superseded ([TD-015](100-known-tech-debt.md)), chat-вложения на MVP реализуются inline base64 без таблицы ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). UUID v4 (`gen_random_uuid()` из `pgcrypto`). Все timestamp — `timestamptz`, UTC. Деньги/кредиты — целочисленные (минимальная неделимая единица), без float.
 
 > Расширение (2026-06-02, Figma-gap, см. [figma-gap-analysis.md](figma-gap-analysis.md)): новые таблицы и колонки спроектированы как expand-only миграции (`0004`+). Затронутые ADR: [ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md) (`assistant_mode`), [ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md) (workspaces), [ADR-014](adr/ADR-014-multimodal-attachments.md) (attachments — **спроектирована, реализация отложена**, transport Superseded → [TD-015](100-known-tech-debt.md); MVP — inline base64 [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)), [ADR-015](adr/ADR-015-consumable-token-iap.md) (consumable IAP — без новой таблицы). На MVP миграция `0004` создаёт только Sprint-1 объекты (`user_preferences`, поля `chat_sessions`/`users`); `workspace_projects`/`workspace_files`/`snippets`/`attachments`/`device_push_tokens` — Sprint-2/3, **не созданы**.
 
@@ -24,7 +24,6 @@ erDiagram
     workspace_projects ||--o{ workspace_files : contains
     users ||--o{ snippets : owns
     users ||--o{ attachments : owns
-    attachments ||--o{ workspace_files : "referenced by"
     chat_sessions ||--o{ attachments : "may attach"
     workspace_projects ||--o{ chat_sessions : groups
     users ||--o{ device_push_tokens : registers
@@ -154,7 +153,7 @@ CREATE TABLE chat_sessions (
     title                TEXT,           -- заголовок чата (автоген из 1-го сообщения или rename), nullable
     assistant_mode       assistant_mode NOT NULL DEFAULT 'chat',  -- тип ассистента, ADR-012
     model                TEXT,           -- выбранная модель (provider-id из allowlist), NULLABLE с миграции 0010 (ADR-034): NULL = дефолтная модель инстанса (ANTHROPIC_MODEL/OPENAI_MODEL). Фиксируется при создании сессии, на resume берётся из сессии. Биллинг не зависит от модели (ADR-006).
-    workspace_project_id UUID REFERENCES workspace_projects(id) ON DELETE SET NULL,  -- привязка к workspace, ADR-013, nullable; СПРИНТ 2 — НЕ в 0004 (отдельная будущая миграция)
+    workspace_project_id UUID REFERENCES workspace_projects(id) ON DELETE SET NULL,  -- привязка к workspace, ADR-013/ADR-036, nullable; Поставка 3 (миграция 0011). До 0011 — колонки нет (workspaceProjectId в списке чатов = заглушка null).
     is_pinned            BOOLEAN NOT NULL DEFAULT FALSE,  -- закрепление в списке чатов
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -274,7 +273,8 @@ CREATE TABLE user_preferences (
 ```
 > Строка создаётся лениво (upsert при первом GET/PATCH preferences) либо отдаётся дефолтами, если отсутствует. `notifications_enabled` — единый источник настройки уведомлений; регистрация push-токенов — `device_push_tokens` (таблица 17).
 
-### 13. workspace_projects ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md), модуль `workspaces`)
+### 13. workspace_projects ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md), [ADR-036](adr/ADR-036-workspaces-implementation.md), модуль `workspaces`)
+> **Поставка 3 (миграция `0011`).** Создаётся вместе с `workspace_files` и `chat_sessions.workspace_project_id`.
 ```sql
 CREATE TABLE workspace_projects (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -287,21 +287,25 @@ CREATE TABLE workspace_projects (
 );
 CREATE INDEX ix_workspace_projects_user ON workspace_projects (user_id, updated_at DESC);
 ```
-> Рабочее пространство чатов. **Не путать** с website-builder `projects` ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). `instructions` добавляются к base-system-prompt при генерации в сессии этого workspace.
+> Рабочее пространство чатов. **Не путать** с website-builder `projects` ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). `instructions` добавляются к base-system-prompt **после** assistant_mode prompt при генерации в сессии этого workspace ([ADR-036 §3](adr/ADR-036-workspaces-implementation.md)).
 
-### 14. workspace_files ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md), [ADR-014](adr/ADR-014-multimodal-attachments.md), модуль `workspaces`)
-> ⚠️ **Отложена на MVP.** Таблица зависит от `attachments` (FK), которая на MVP **не создаётся** (двухшаговый transport [ADR-014](adr/ADR-014-multimodal-attachments.md) Superseded → [TD-015](100-known-tech-debt.md); chat-вложения MVP — inline base64 [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). Миграция `0004` `workspace_files` **не создаёт** — Sprint-2 объект. Реализуется модулем `workspaces` как предпосылка Спринта 2.
+### 14. workspace_files ([ADR-036](adr/ADR-036-workspaces-implementation.md), модуль `workspaces`)
+> **Поставка 3 (миграция `0011`).** [ADR-036 §4](adr/ADR-036-workspaces-implementation.md) перевёл хранение файлов-знаний на **собственный BYTEA** (образец `site_files`), **НЕ** через `attachments` — фича разблокирована, не зависит от отложенного `attachments` ([TD-015](100-known-tech-debt.md)). Загрузка — inline base64; при загрузке извлекается `extracted_text` (pypdf для PDF, decode для текста). Object storage — [TD-027](100-known-tech-debt.md) (как [TD-009](100-known-tech-debt.md) для `site_files`).
 ```sql
 CREATE TABLE workspace_files (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_project_id UUID NOT NULL REFERENCES workspace_projects(id) ON DELETE CASCADE,
-    attachment_id        UUID NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,  -- байты/extracted_text — в attachments (ADR-014)
-    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+    filename             TEXT NOT NULL,
+    content              BYTEA NOT NULL,                 -- сырые байты файла (BYTEA; TD-027)
+    media_type           TEXT NOT NULL,                  -- из allowlist (Q-020-1)
+    size                 BIGINT NOT NULL CHECK (size >= 0),
+    extracted_text       TEXT,                           -- извлечённый текст (document/text) или NULL (image)
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX ux_workspace_files ON workspace_files (workspace_project_id, attachment_id);
 CREATE INDEX ix_workspace_files_project ON workspace_files (workspace_project_id);
 ```
-> Прикреплённый файл-контекст workspace. Сами байты и `extracted_text` хранятся в `attachments` ([ADR-014](adr/ADR-014-multimodal-attachments.md)) — единое хранилище байтов для вложений сообщений и файлов workspace, без дублирования BYTEA-логики.
+> Прикреплённый файл-контекст workspace. Сырые байты хранятся в `workspace_files.content` (`BYTEA`, образец `site_files`), извлечённый текст — в `extracted_text`. Собственное хранилище байтов, зависимости от `attachments` нет ([ADR-036 §4](adr/ADR-036-workspaces-implementation.md), [TD-027](100-known-tech-debt.md)).
 
 ### 15. snippets (модуль `snippets`, Code-режим)
 ```sql
@@ -419,7 +423,7 @@ CREATE INDEX ix_adapty_webhook_events_user_id ON adapty_webhook_events (user_id)
 - В `meta`, `payload`, `usage`, `args`, `result` запрещено хранить API-ключи и секреты.
 - Любая FK-зависимая вставка (`subscriptions`/`wallets`/`byok_keys`/`ledger_transactions`/`chat_sessions`/`audit_logs`/`user_preferences`/`workspace_projects`/`snippets`/`attachments`/`device_push_tokens`) выполняется только после того, как строка `users` для `sub` гарантированно существует — обеспечивается ленивым провижинингом в gateway ([ADR-007](adr/ADR-007-lazy-user-provisioning.md)). Прямой FK-violation на отсутствующем `users` — дефект провижининга.
 - **`adapty_webhook_events` — исключение из lazy-provisioning:** вебхук Adapty НЕ провижинит `users` (нет доверенного JWT-`sub`). `customer_user_id` из тела события сначала проверяется по существующим `users`; отсутствующий → `200 ignored/user_not_found`, без вставки `users`/`adapty_webhook_events` ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)). FK гарантируется явной проверкой существования пользователя ДО INSERT, а не провижинингом.
-- **Изоляция расширения (Figma-gap):** `workspace_files` → `workspace_projects` → `users`; `snippets`/`attachments`/`device_push_tokens` → `users` (все FK `ON DELETE CASCADE`). Доступ только владельца (`user_id == sub`). `chat_sessions.workspace_project_id` и `attachments.session_id` — `ON DELETE SET NULL` (чат/сессия переживает удаление workspace/при отвязке).
+- **Изоляция расширения (Figma-gap):** `workspace_files` → `workspace_projects` → `users` (BYTEA-контент в `workspace_files`, [ADR-036](adr/ADR-036-workspaces-implementation.md), без FK на `attachments`); `snippets`/`attachments`/`device_push_tokens` → `users` (все FK `ON DELETE CASCADE`). Доступ только владельца (`user_id == sub`). `chat_sessions.workspace_project_id` — `ON DELETE SET NULL` (чат переживает удаление workspace, [ADR-036 §5](adr/ADR-036-workspaces-implementation.md)); `attachments.session_id` — `ON DELETE SET NULL`.
 - **Терминология mode (ADR-012):** `chat_sessions.mode` (enum `chat_mode`) = `billing_mode` (credits|byok, способ оплаты); `chat_sessions.assistant_mode` (enum `assistant_mode`) = тип ассистента (chat|code). Это **разные ортогональные** поля. `chat_sessions.project_id` (TEXT, website-builder) ≠ `chat_sessions.workspace_project_id` (UUID FK, рабочее пространство) ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)).
 - **Источники credit-tx (ADR-006 + ADR-015 + ADR-029):** `ledger_transactions.type='credit'` создаётся (а) StoreKit subscription period grant (idempotency = `sub-grant:{transactionId}`), (б) consumable token purchase (idempotency = consumable `transactionId`, `meta.source='token_purchase'`), либо (в) **Adapty subscription grant** (idempotency = `adapty-event:{event_id}`, `reason='adapty_subscription'`, [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)). Все идемпотентны по `ux_ledger_idempotency`. **Инвариант анти-double-grant:** ключи путей (а) и (в) **различны** (`sub-grant:*` vs `adapty-event:*`), поэтому одна покупка, прошедшая ОБА пути, начислится **дважды** — клиент обязан использовать ОДИН путь подписок (см. [05-security.md](05-security.md), [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)). Списание (`type='debit'`) — без изменений (1 кредит = 1 сообщение).
 

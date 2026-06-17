@@ -145,6 +145,11 @@ _TABLES = (
     "audit_logs",
     "tool_calls",
     "chat_steps",
+    # Workspaces (ADR-036, migration 0011): workspace_files → workspace_projects (CASCADE) and
+    # chat_sessions.workspace_project_id (SET NULL). Listed explicitly so RESTART IDENTITY/CASCADE
+    # resets them deterministically between tests (and ordered before chat_sessions for clarity).
+    "workspace_files",
+    "workspace_projects",
     "chat_sessions",
     "byok_keys",
     # user_preferences must be truncated between tests so preferences-integration state does

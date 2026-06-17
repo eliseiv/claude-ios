@@ -66,13 +66,18 @@ class ChatsRepository:
         query: str | None,
         cursor: ChatCursor | None,
         limit: int,
+        workspace_project_id: uuid.UUID | None = None,
     ) -> ChatListPage:
         """List the user's chats: pinned first, then by recency, keyset-paginated.
 
         Search ``query`` matches title ILIKE OR the text of the first user step ILIKE
-        (chats/03). Fetch limit+1 to compute next_cursor without a second count query.
+        (chats/03). ``workspace_project_id`` (ADR-036) filters to «чаты проекта» when provided.
+        Fetch limit+1 to compute next_cursor without a second count query.
         """
         stmt = select(ChatSession).where(ChatSession.user_id == user_id)
+
+        if workspace_project_id is not None:
+            stmt = stmt.where(ChatSession.workspace_project_id == workspace_project_id)
 
         if query:
             like = f"%{query}%"

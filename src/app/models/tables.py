@@ -169,6 +169,15 @@ class ChatSession(Base):
     assistant_mode: Mapped[str] = mapped_column(
         _assistant_mode_enum, nullable=False, server_default=sa_text("'chat'")
     )
+    # ADR-036 (migration 0011): workspace («рабочее пространство») binding, nullable. NULL = chat
+    # without a workspace (backward-compatible). Session-fixed at creation (like mode/model). FK to
+    # workspace_projects with ON DELETE SET NULL (deleting a workspace keeps its chats as «чистые»).
+    # NOT to be confused with project_id (Text, website-builder — ADR-022); different field/meaning.
+    workspace_project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace_projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     is_pinned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa_text("false")
     )
@@ -188,6 +197,8 @@ class ChatSession(Base):
             sa_text("is_pinned DESC"),
             sa_text("updated_at DESC"),
         ),
+        # ADR-036: filter «чаты проекта» (GET /v1/chats?workspaceProjectId=) and chatCount.
+        Index("ix_sessions_workspace", "workspace_project_id"),
     )
 
 
@@ -377,3 +388,73 @@ class AdaptyWebhookEvent(Base):
     )
 
     __table_args__ = (Index("ix_adapty_webhook_events_user_id", "user_id"),)
+
+
+class WorkspaceProject(Base):
+    """A workspace («рабочее пространство», iOS «Project») — ADR-036 §2.
+
+    Name + optional description + optional custom ``instructions`` (project system-prompt) +
+    knowledge files (``workspace_files``) shared as context across the project's chats. NOT the
+    website-builder ``projects`` table (ADR-013): a different entity. Owner-scoped by ``user_id``.
+    """
+
+    __tablename__ = "workspace_projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Custom project system-prompt; injected AFTER the base assistant_mode prompt (ADR-036 §3).
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        # Cursor-paginated list (updated_at DESC) scoped to the owner (ADR-036 §8).
+        Index("ix_workspace_projects_user_updated", "user_id", "updated_at"),
+    )
+
+
+class WorkspaceFile(Base):
+    """A knowledge file of a workspace (BYTEA content; ADR-036 §4, TD-027).
+
+    Stored by the same pattern as ``site_files`` (own table, raw bytes in ``content``). For
+    document/text the extracted text is kept in ``extracted_text`` at upload time (used for the
+    provider-agnostic context injection — ADR-036 §6); for images ``extracted_text`` is NULL
+    (the image is injected as a vision block). The API never returns ``content``/``extracted_text``.
+    """
+
+    __tablename__ = "workspace_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    workspace_project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace_projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    media_type: Mapped[str] = mapped_column(Text, nullable=False)
+    size: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint("size >= 0", name="ck_workspace_files_size_nonneg"),
+        Index("ix_workspace_files_project", "workspace_project_id"),
+    )

@@ -50,6 +50,7 @@ from app.errors import (
     NotFoundError,
     UpstreamError,
     ValidationFailedError,
+    WorkspaceNotFoundError,
 )
 from app.models import ChatSession, ChatStep, ToolCall
 from app.observability.logging import log_event
@@ -71,6 +72,8 @@ from app.preferences.service import PreferencesService
 from app.schemas.chat import AttachmentIn
 from app.wallet.service import WalletService
 from app.website.tools import SiteToolHandlers, ToolExecution
+from app.workspaces.repository import WorkspacesRepository
+from app.workspaces.service import WorkspacesService
 
 logger = logging.getLogger("app.chat.orchestrator")
 
@@ -108,6 +111,40 @@ _SYSTEM_PROMPT_CODE = (
 
 def _system_prompt_for(assistant_mode: str) -> str:
     return _SYSTEM_PROMPT_CODE if assistant_mode == "code" else _SYSTEM_PROMPT_CHAT
+
+
+def _system_prompt_with_workspace(assistant_mode: str, instructions: str | None) -> str:
+    """Compose the system prompt for a workspace session (ADR-036 §3).
+
+    ``base(assistant_mode)`` → ``\\n\\n`` → ``workspace.instructions`` when instructions are
+    non-empty; otherwise the base prompt unchanged (so the prompt cache is not broken for sessions
+    without instructions). Provider-agnostic (part of ``system``, identical for both providers).
+    """
+    base = _system_prompt_for(assistant_mode)
+    if instructions and instructions.strip():
+        return f"{base}\n\n{instructions.strip()}"
+    return base
+
+
+def _merge_attachments(
+    chat: PreparedAttachments | None, workspace: PreparedAttachments | None
+) -> PreparedAttachments | None:
+    """Merge workspace knowledge-file blocks with the request's inline attachment blocks (ADR-036).
+
+    Both are injected into the last user turn on the first call only. Workspace context blocks are
+    placed BEFORE the request attachments (project context first). placeholders come only from the
+    request attachments (workspace files are never persisted as user-step placeholders — they are
+    re-assembled from workspace_files on a new session's first turn).
+    """
+    if chat is None and workspace is None:
+        return None
+    chat_blocks = chat.content_blocks if chat is not None else []
+    chat_placeholders = chat.placeholders if chat is not None else []
+    ws_blocks = workspace.content_blocks if workspace is not None else []
+    return PreparedAttachments(
+        content_blocks=[*ws_blocks, *chat_blocks],
+        placeholders=list(chat_placeholders),
+    )
 
 
 def _active_provider() -> str:
@@ -243,6 +280,8 @@ class _Deps:
     # ADR-026: project-independent global server-side tools (time.now), executed without a project.
     global_tools: GlobalToolHandlers
     preferences: PreferencesService
+    # ADR-036: workspaces context provider (instructions + knowledge files) for workspace chats.
+    workspaces: WorkspacesService
 
 
 class ChatOrchestrator:
@@ -257,6 +296,7 @@ class ChatOrchestrator:
         site_tools: SiteToolHandlers,
         preferences: PreferencesService,
         global_tools: GlobalToolHandlers | None = None,
+        workspaces: WorkspacesService | None = None,
     ) -> None:
         self._session = session
         self._deps = _Deps(
@@ -273,6 +313,13 @@ class ChatOrchestrator:
             # factory (deps.py) wires an explicit instance (ADR-026 §5).
             global_tools=global_tools if global_tools is not None else GlobalToolHandlers(),
             preferences=preferences,
+            # ADR-036: default to a session-backed WorkspacesService so existing callers keep
+            # working; the DI factory (deps.py) wires the same instance explicitly.
+            workspaces=(
+                workspaces
+                if workspaces is not None
+                else WorkspacesService(WorkspacesRepository(session))
+            ),
         )
 
     # ---- public entrypoints ----
@@ -288,6 +335,7 @@ class ChatOrchestrator:
         assistant_mode: str | None = None,
         attachments: list[AttachmentIn] | None = None,
         model: str | None = None,
+        workspace_project_id: uuid.UUID | None = None,
     ) -> ChatRunOut:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
         # ADR-034 §3: resolve the session-fixed model. None (no field) → NULL (= instance default,
@@ -308,6 +356,16 @@ class ChatOrchestrator:
             raise ValidationFailedError(
                 f"model '{resolved_model}' is not available on this instance"
             )
+        # ADR-036 §3: workspaceProjectId is session-fixed (like mode/model). On CREATE validate the
+        # workspace belongs to the user (foreign/missing → 404 workspace_not_found, isolation)
+        # BEFORE the session row is written; on resume the request field is ignored (the binding is
+        # read from the session). Empty/None → a chat without a workspace (backward-compatible).
+        if (
+            will_create
+            and workspace_project_id is not None
+            and not await self._deps.workspaces.owns_workspace(workspace_project_id, user_id)
+        ):
+            raise WorkspaceNotFoundError("workspace not found")
         # ADR-012: resolve assistant_mode for a NEW session — explicit request → preferences
         # default → 'chat'. Fixed on the session at creation; ignored when resuming a session
         # (assistant_mode is a session attribute). billing_mode (`mode`) is independent.
@@ -326,11 +384,29 @@ class ChatOrchestrator:
             title=derive_title(message),
             # ADR-034 §3: session-fixed model; written only at creation, ignored on resume.
             model=resolved_model,
+            # ADR-036 §3: session-fixed workspace binding; written only at creation, ignored on
+            # resume (the request field is validated above only when a new session is created).
+            workspace_project_id=workspace_project_id if will_create else None,
         )
         sess = ctx.session
         # mode is fixed on the session; use the session's stored mode.
         effective_mode = Mode(sess.mode)
+
+        # ADR-036 §3/§6: for a workspace session, assemble (instructions, files) context ONCE on the
+        # first turn (a new session). instructions → system-prompt (after base assistant_mode
+        # prompt); knowledge files → first-turn attachments (merged with the request's inline
+        # attachments). On resume nothing is re-injected (the context is already in the history).
+        workspace_attachments: PreparedAttachments | None = None
         system_prompt = _system_prompt_for(sess.assistant_mode)
+        if ctx.is_new and sess.workspace_project_id is not None:
+            ws_context = await self._deps.workspaces.context_for_session(
+                sess.workspace_project_id, user_id, provider=_active_provider()
+            )
+            if ws_context is not None:
+                system_prompt = _system_prompt_with_workspace(
+                    sess.assistant_mode, ws_context.instructions
+                )
+                workspace_attachments = ws_context.attachments
 
         # ADR-020 / ADR-033 §3,§5: validate inline attachments (provider-aware) and split into
         # (a) the PreparedAttachments handed to the client ONCE on turn 0 — the client builds the
@@ -346,6 +422,11 @@ class ChatOrchestrator:
                 {"type": "text", "text": message},
                 *prepared.placeholders,
             ]
+
+        # ADR-036 §6: merge the workspace knowledge-file blocks with the request's inline
+        # attachment blocks (project context first). Only the request attachments leave a persisted
+        # placeholder; workspace files are re-assembled from workspace_files, never persisted here.
+        first_turn = _merge_attachments(prepared, workspace_attachments)
 
         # Persist the user message under this step (placeholders only — no base64, ADR-020 §3).
         await self._deps.repo.add_step(
@@ -372,7 +453,7 @@ class ChatOrchestrator:
             system_prompt=system_prompt,
             # ADR-022 axis A: offer site.* only when the session has a project.
             has_project=sess.project_id is not None,
-            first_turn_attachments=prepared,
+            first_turn_attachments=first_turn,
             # ADR-034 §4: pass the session-fixed model (NULL → None → client uses its default).
             model=sess.model or None,
         )
@@ -475,6 +556,18 @@ class ChatOrchestrator:
             return self._blocked(session_id, decision.block_reason)
 
         api_key = await self._resolve_api_key(user_id, mode)
+        # ADR-036 §3: knowledge files are already replayed as content blocks in the history, but
+        # `instructions` live in the `system` param (NOT in history) and are sent on EVERY LLM call.
+        # So on each continuation re-inject the workspace instructions into system via the SAME
+        # helper used on turn 0 (identical behavior). Read ONLY instructions (light single-column);
+        # do NOT re-inject knowledge files. Empty/missing instructions or a deleted workspace → base
+        # system prompt unchanged (graceful).
+        system_prompt = _system_prompt_for(sess.assistant_mode)
+        if sess.workspace_project_id is not None:
+            instructions = await self._deps.workspaces.instructions_for_session(
+                sess.workspace_project_id, user_id
+            )
+            system_prompt = _system_prompt_with_workspace(sess.assistant_mode, instructions)
         return await self._generate_loop(
             user_id=user_id,
             session_id=session_id,
@@ -482,7 +575,7 @@ class ChatOrchestrator:
             mode=mode,
             billing=_billing_plan(mode, state),
             api_key=api_key,
-            system_prompt=_system_prompt_for(sess.assistant_mode),
+            system_prompt=system_prompt,
             # ADR-022 axis A: project_id is session-fixed; gate site.* by the session's project.
             has_project=sess.project_id is not None,
             # ADR-034 §4: session-fixed model from the resumed session (NULL → None → client def).

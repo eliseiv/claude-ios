@@ -28,7 +28,7 @@ Anthropic Messages API поддерживает в content-блоках: `image`
 
 ### Жизненный цикл вложений
 - Вложение принадлежит пользователю (`attachments.user_id`), создаётся upload-шагом, может быть привязано к session/message при использовании (для истории) — `attachments.session_id` (nullable, проставляется при первом использовании).
-- Хранилище байтов вложений — общее для `attachments` и `workspace_files` (ADR-013): одна таблица `attachments` обслуживает оба (workspace_files ссылается на `attachments.id` через `content_ref`).
+- ~~Хранилище байтов вложений — общее для `attachments` и `workspace_files` (ADR-013): одна таблица `attachments` обслуживает оба (workspace_files ссылается на `attachments.id` через `content_ref`).~~ **Отменено [ADR-036 §4](ADR-036-workspaces-implementation.md):** `workspace_files` хранит байты в собственном BYTEA-столбце `content`, не ссылается на `attachments`. Общего хранилища нет.
 - Retention: неиспользованные (не привязанные к session) вложения старше `ATTACHMENT_ORPHAN_TTL` (дефолт 24h) подлежат очистке — на старте без фонового джоба, помечено как [TD-010](../100-known-tech-debt.md).
 
 ## Consequences

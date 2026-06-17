@@ -39,6 +39,8 @@ from app.token_purchase.service import TokenPurchaseService
 from app.wallet.service import WalletService
 from app.website.service import WebsiteService
 from app.website.tools import SiteToolHandlers
+from app.workspaces.repository import WorkspacesRepository
+from app.workspaces.service import WorkspacesService
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
@@ -186,6 +188,10 @@ def get_preferences_service(session: DbSession) -> PreferencesService:
     return PreferencesService(session)
 
 
+def get_workspaces_service(session: DbSession) -> WorkspacesService:
+    return WorkspacesService(WorkspacesRepository(session))
+
+
 def get_orchestrator(session: DbSession) -> ChatOrchestrator:
     audit = AuditService(session)
     website = WebsiteService(session)
@@ -202,6 +208,8 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         # independent — no WebsiteService/session-context, wired alongside site_tools.
         global_tools=GlobalToolHandlers(clock=SystemClock()),
         preferences=PreferencesService(session),
+        # ADR-036: workspace context provider (instructions + knowledge files) for workspace chats.
+        workspaces=WorkspacesService(WorkspacesRepository(session)),
     )
 
 

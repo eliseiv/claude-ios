@@ -214,6 +214,18 @@ class Settings(BaseSettings):
         default=12 * 1024 * 1024, alias="ATTACHMENT_REQUEST_BODY_LIMIT"
     )
 
+    # --- Workspaces (рабочие пространства) knowledge files (ADR-036 §4/§6) ---
+    # Limits for workspace_files (own BYTEA table; ADR-036 §4, TD-027). All defaults are the
+    # values fixed in ADR-036 (08 MB per file = the document-cap; 32 MB total per workspace; 20
+    # files per workspace). WORKSPACE_CONTEXT_MAX_CHARS bounds the total injected extracted_text
+    # (ADR-036 §6) — images are bounded by file count/size, not by this char limit.
+    workspace_file_max_count: int = Field(default=20, alias="WORKSPACE_FILE_MAX_COUNT")
+    workspace_file_max_bytes: int = Field(default=8 * 1024 * 1024, alias="WORKSPACE_FILE_MAX_BYTES")
+    workspace_files_total_bytes: int = Field(
+        default=32 * 1024 * 1024, alias="WORKSPACE_FILES_TOTAL_BYTES"
+    )
+    workspace_context_max_chars: int = Field(default=200_000, alias="WORKSPACE_CONTEXT_MAX_CHARS")
+
     # --- DB connection pool (02-tech-stack.md, sized for ~10k users / 2-3 replicas) ---
     # Per-process pool. Effective max conns ≈ (pool_size + max_overflow) * workers * replicas;
     # keep below Postgres max_connections. architect documents the sizing math in docs.

@@ -344,6 +344,7 @@ async def chat_run(
         assistant_mode=body.assistantMode,
         attachments=body.attachments,
         model=body.model,
+        workspace_project_id=body.workspaceProjectId,
     )
     return _to_response(out)
 

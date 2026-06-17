@@ -39,7 +39,7 @@ JWT, владелец = `sub`.
 ```json
 { "deleted": true }
 ```
-- Если вложение используется `workspace_files` — удаление каскадно убирает связь (`workspace_files` FK `ON DELETE CASCADE`); `attachments.session_id` references — независимы.
+- `workspace_files` больше **не** ссылается на `attachments` ([ADR-036 §4](../../adr/ADR-036-workspaces-implementation.md): workspace-файлы хранятся собственным BYTEA); связи нет. `attachments.session_id` references — независимы.
 
 ## Использование в /chat/run (chat-orchestrator)
 - В теле `/chat/run`: `attachments: [{ "id": "uuid" }]` (≤ 10). См. [chat-orchestrator/02-api-contracts.md](../chat-orchestrator/02-api-contracts.md).

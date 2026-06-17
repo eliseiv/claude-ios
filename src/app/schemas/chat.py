@@ -64,6 +64,17 @@ class ChatRunRequest(StrictModel):
         default=None,
         description="Идентификатор сессии диалога. Если не задан — создаётся новая сессия.",
     )
+    workspaceProjectId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Привязка чата к рабочему пространству (workspace, ADR-036). Опционально: без поля — "
+            "чат без workspace (обратная совместимость). Если указано — при создании сессии "
+            "валидируется принадлежность workspace пользователю (чужой/несуществующий → 404 "
+            "workspace_not_found); `instructions` и файлы-знания подаются как контекст первого "
+            "хода. Фиксируется при создании сессии; при продолжении берётся из сессии, поле "
+            "запроса игнорируется. Не путать с `projectId` (website-builder, TEXT)."
+        ),
+    )
     model: str | None = Field(
         default=None,
         description=(

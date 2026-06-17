@@ -34,6 +34,7 @@ from app.api_gateway.routers import (
     token_purchase,
     tools,
     wallet,
+    workspaces,
 )
 from app.config import get_settings
 from app.db import dispose_engine
@@ -158,6 +159,14 @@ _OPENAPI_TAGS = [
         ),
     },
     {
+        "name": "Workspaces",
+        "description": (
+            "Рабочие пространства (iOS «Projects»): имя, описание, кастомные инструкции и "
+            "файлы-знания как контекст чатов проекта. Доступ только владельца; чужой/"
+            "несуществующий workspace — 404."
+        ),
+    },
+    {
         "name": "Profile",
         "description": "Профиль пользователя: отображаемое имя и `accountId`.",
     },
@@ -220,6 +229,7 @@ def create_app() -> FastAPI:
         admin,
         preview,
         chats,
+        workspaces,
         profile,
         preferences,
         billing_adapty,

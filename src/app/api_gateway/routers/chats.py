@@ -52,9 +52,19 @@ async def list_chats(
     limit: Annotated[
         int, Query(ge=1, le=_LIST_LIMIT_MAX, description="Размер страницы (1..100).")
     ] = _LIST_LIMIT_DEFAULT,
+    workspaceProjectId: Annotated[
+        uuid.UUID | None,
+        Query(description="Фильтр «чаты проекта»: только чаты с этим workspaceProjectId."),
+    ] = None,
 ) -> ChatListResponse:
     await _rate_limit(current.user_id)
-    view = await chats.list_chats(user_id=current.user_id, query=q, cursor=cursor, limit=limit)
+    view = await chats.list_chats(
+        user_id=current.user_id,
+        query=q,
+        cursor=cursor,
+        limit=limit,
+        workspace_project_id=workspaceProjectId,
+    )
     return ChatListResponse(
         items=[
             ChatListItemSchema(

@@ -188,6 +188,16 @@
 | Q-035-1 | Редактирование пресетов оператором без деплоя (таблица БД + admin-CRUD)? | **Open (отложено)** | **НЕТ** на старте: статический реестр в коде ([ADR-035 §2](adr/ADR-035-prompt-presets-endpoint.md)). Промежуточный шаг без БД — config-JSON env ([TD-026](100-known-tech-debt.md)). БД-CRUD — пост-MVP при подтверждённой потребности; контракт `GET /v1/presets` не меняется (источник инкапсулирован). | Нет (решено дефолтом) |
 | Q-035-2 | Локализация `title`/`prompt` пресетов (per-locale наборы / `Accept-Language` / клиентский перевод по `id`)? | **Open (отложено)** | **НЕТ** i18n на старте: единый язык EN ([ADR-035 §5](adr/ADR-035-prompt-presets-endpoint.md)). Переход аддитивен (`id` стабилен) — можно добавить локализованные поля/ветвление, не ломая клиента. | Нет (решено дефолтом) |
 
+## Открытые вопросы Workspaces (2026-06-17, [ADR-036](adr/ADR-036-workspaces-implementation.md))
+
+| ID | Вопрос | Статус | Принятый дефолт (если есть) | Блокирует backend? |
+|---|---|---|---|---|
+| Q-036-1 | Точные значения лимитов файлов-знаний (`WORKSPACE_FILE_MAX_COUNT`/`WORKSPACE_FILE_MAX_BYTES`/`WORKSPACE_FILES_TOTAL_BYTES`) и лимита инжектируемого контекста (`WORKSPACE_CONTEXT_MAX_CHARS`). | Open | Дефолты ([ADR-036 §4,§6](adr/ADR-036-workspaces-implementation.md)): `WORKSPACE_FILE_MAX_COUNT=20`, `WORKSPACE_FILE_MAX_BYTES=8 MB` (= document-cap вложений), `WORKSPACE_FILES_TOTAL_BYTES=32 MB`, `WORKSPACE_CONTEXT_MAX_CHARS=200000`. Конфигурируемы; эвристические, калибровка по прод-метрикам — как [TD-004](100-known-tech-debt.md). | Нет (реализуемо на дефолтах) |
+| Q-036-2 | Стратегия усечения при превышении `WORKSPACE_CONTEXT_MAX_CHARS` (порядок файлов, частичное усечение, приоритизация). | **Перенаправлен в [Q-013-1](#)** | Старт ([ADR-036 §6](adr/ADR-036-workspaces-implementation.md)): порядок `created_at` ASC (старые первыми), усекается хвост `extracted_text`; RAG/семантический отбор — [Q-013-1](#). | Нет (дефолт-усечение) |
+| Q-036-3 | Поведение при дубликате имени файла (`filename`) в одном workspace — `409` vs разрешить дубликаты? | **Closed (дефолт)** | **Разрешены дубликаты** (нет UNIQUE по `(workspace_project_id, filename)`): `id` (uuid) — единственный ключ файла; iOS может загрузить одноимённые версии. Разметка контекста `[Файл проекта: {filename}]` допускает повторы. | Нет (решено) |
+
+> Q-036-* (детали): API-путь (`/v1/workspaces`), стратегия хранения (BYTEA, не attachments), инъекция, удаление (CASCADE/SET NULL), пагинация, биллинг — **закрыты решениями [ADR-036](adr/ADR-036-workspaces-implementation.md)**, не заводятся как открытые вопросы. Остаются только калибровка лимитов (Q-036-1) и усечение (Q-036-2 → [Q-013-1](#)).
+
 ## Блокеры (для orchestrator)
 - ~~**Q-015-1 (покупка токенов × policy)**~~ — **Closed (2026-06-02, вариант б):** покупка токенов требует активной подписки (`403 subscription_required` до grant), [ADR-002](adr/ADR-002-access-policy-state-machine.md) без изменений. Требует backend-доработки: policy-guard перед `WalletService.grant` в token-purchase. См. [ADR-015 §Доступность](adr/ADR-015-consumable-token-iap.md).
 - **Q-016-2 (web search)** — блокирует **только** фичу веб-поиска: нет выбора провайдера → нет контракта server-side tool. Остальное расширение не блокирует.

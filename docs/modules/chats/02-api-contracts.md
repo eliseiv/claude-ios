@@ -9,8 +9,7 @@
 - `q` (опц.) — поиск: ILIKE по `title` и по тексту первого user-сообщения.
 - `cursor` (опц.) — пагинация (opaque, по `updated_at`+`id`).
 - `limit` (опц., дефолт 30, max 100).
-
-> **СПРИНТ 2 (отложено).** Фильтр `workspaceProjectId` в Спринте 1 **отсутствует** (эндпоинт его не принимает) — он появится в Спринте 2 вместе с модулем `workspaces` и колонкой `chat_sessions.workspace_project_id` ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+- `workspaceProjectId` (опц., uuid, [ADR-036](../../adr/ADR-036-workspaces-implementation.md)) — **фильтр «чаты проекта»**: возвращает только чаты, привязанные к указанному workspace (`chat_sessions.workspace_project_id = :id`). Чужой/несуществующий workspace → пустой список (изоляция по `sub`, не `404` для фильтра-параметра). Без параметра — все чаты пользователя (поведение неизменно).
 
 ### Response (200)
 ```json
@@ -32,8 +31,8 @@
 ```
 - Сортировка: `is_pinned DESC, updated_at DESC` (BR-CH-3).
 - **`projectId` (свободная строка, [ADR-028](../../adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md), аддитивно):** `= chat_sessions.project_id` — тот же свободный строковый идентификатор website-builder-проекта, что клиент передал в `POST /v1/chat/run` при создании сессии ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)). Формат и семантика **идентичны** `projectId` из `/chat/run`. **`null` = «чистый чат»** — сессия создана без `projectId` (website-builder не активирован, `site.*` Claude не предлагались); это основной режим сервиса. Поле позволяет iOS в списке отличить проектные чаты от чистых без запроса истории.
-- **`projectId` ≠ `workspaceProjectId`** — независимые, не взаимозаменяемые поля ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)): `projectId` — свободная строка website-builder (есть сейчас), `workspaceProjectId` — UUID рабочего пространства (Спринт 2). Оба присутствуют в ответе одновременно.
-- Поле `workspaceProjectId` присутствует в ответе, но в **Спринте 1 всегда `null`**: колонка `chat_sessions.workspace_project_id` ещё не создана (отложена на **СПРИНТ 2**, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)). Сервис хардкодит `null` до появления колонки. **[ADR-028](../../adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md) его не трогает** — добавляется только `projectId`.
+- **`projectId` ≠ `workspaceProjectId`** — независимые, не взаимозаменяемые поля ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)): `projectId` — свободная строка website-builder, `workspaceProjectId` — UUID рабочего пространства. Оба присутствуют в ответе одновременно.
+- **`workspaceProjectId` (Поставка 3, [ADR-036](../../adr/ADR-036-workspaces-implementation.md)) — реальное значение** из `chat_sessions.workspace_project_id` (более не заглушка-null). `null` = чат без workspace. До миграции `0011` (пока колонки нет) сервис отдаёт `null`; после — фактическую привязку.
 - N+1 на `preview` (отдельный запрос на каждый чат страницы) — осознанный tech-debt [`TD-012`](../../100-known-tech-debt.md), приемлемо для текущего per-user масштаба.
 
 ## GET /v1/chats/{id}
