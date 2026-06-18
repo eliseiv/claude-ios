@@ -17,6 +17,10 @@ infra/observability/secrets/scrape_token
 # if one ever must be, add a targeted `!path/to/file` exception below.
 *.pem
 *.key
+*.p12
+*.cer
+*.der
+*.crt
 
 # ── Python ──────────────────────────────────────────────────────
 .venv/

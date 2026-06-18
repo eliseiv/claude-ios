@@ -528,7 +528,7 @@ Steps-view — агрегированные шаги одного message-шаг
 **Коды:** `200`; `401`; `404`; `429`; `5xx`.
 
 ### PATCH /v1/chats/{id}
-Переименование и/или закрепление. Требуется хотя бы одно поле.
+Переименование, закрепление и/или **перенос чата в воркспейс** ([ADR-038](adr/ADR-038-move-chat-to-workspace.md)). Требуется хотя бы одно поле.
 
 **Path:** `id` — UUID чата.
 
@@ -537,10 +537,13 @@ Steps-view — агрегированные шаги одного message-шаг
 |---|---|---|
 | `title` | string, опц. | новый заголовок (≤ 200 символов) |
 | `isPinned` | bool, опц. | закрепить/открепить |
+| `workspaceProjectId` | string (uuid) \| null, опц. | **управление привязкой к воркспейсу** ([ADR-038](adr/ADR-038-move-chat-to-workspace.md)): `uuid` = перенести/сменить, `null` = убрать (станет обычным чатом). Поле отсутствует → привязка не трогается. Целевой workspace должен принадлежать пользователю → иначе `404 workspace_not_found` (как `/chat/run`). Идемпотентно. После переноса `instructions` проекта применяются со следующего сообщения; файлы-знания ретроспективно НЕ подмешиваются ([ADR-038 §3](adr/ADR-038-move-chat-to-workspace.md), [Q-038-1](99-open-questions.md)) |
 
-**Response (200):** `{ "id": "uuid", "title": string|null, "isPinned": bool, "updatedAt": "ISO8601" }`.
+**Response (200):** `{ "id": "uuid", "title": string|null, "isPinned": bool, "workspaceProjectId": "uuid"|null, "updatedAt": "ISO8601" }`.
 
-**Коды:** `200`; `401`; `404`; `422` (ни одного поля / `title` > 200); `429`; `5xx`.
+**Коды:** `200`; `401`; `404` (чат / целевой workspace `workspace_not_found`); `422` (ни одного поля / `title` > 200); `429`; `5xx`.
+
+> `workspaceProjectId` в `/chat/run` остаётся **session-fixed** (на resume игнорируется); изменить привязку существующего чата можно **только** этим `PATCH` — единый путь записи ([ADR-038 §4](adr/ADR-038-move-chat-to-workspace.md)).
 
 ### DELETE /v1/chats/{id}
 Удаление чата (каскадно — шаги и tool-calls). Повторное удаление уже удалённого → `404`.

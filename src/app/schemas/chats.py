@@ -84,14 +84,25 @@ class ChatPatchRequest(StrictModel):
         default=None, max_length=_TITLE_MAX, description="Новый заголовок (≤ 200 символов)."
     )
     isPinned: bool | None = Field(default=None, description="Закрепить/открепить чат.")
+    workspaceProjectId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Управление привязкой чата к воркспейсу (ADR-038). Поле отсутствует → привязка не "
+            "трогается; uuid → перенести/сменить (валидируется принадлежность user, чужой → "
+            "404 workspace_not_found); null → убрать из воркспейса."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check(self) -> ChatPatchRequest:
-        # At least one field. title may be explicitly set to null only via field presence;
-        # since Pydantic cannot distinguish absent vs null here, an explicit null title with no
-        # isPinned is treated as "no change requested" → rejected (chats/02: at least one field).
-        if "title" not in self.model_fields_set and self.isPinned is None:
-            raise ValueError("at least one of title/isPinned is required")
+        # At least one field present (ADR-038: title/isPinned/workspaceProjectId — presence in
+        # model_fields_set). absent vs explicit-null is distinguished via model_fields_set: an
+        # explicit null for title/workspaceProjectId counts as a requested change (field present),
+        # whereas a field absent from the body means "no change requested" for that field.
+        has_title = "title" in self.model_fields_set
+        has_workspace = "workspaceProjectId" in self.model_fields_set
+        if not has_title and self.isPinned is None and not has_workspace:
+            raise ValueError("at least one of title/isPinned/workspaceProjectId is required")
         return self
 
 
@@ -99,6 +110,9 @@ class ChatPatchResponse(StrictModel):
     id: uuid.UUID = Field(description="Идентификатор чата.")
     title: str | None = Field(default=None, description="Актуальный заголовок.")
     isPinned: bool = Field(description="Актуальное состояние закрепления.")
+    workspaceProjectId: uuid.UUID | None = Field(
+        default=None, description="Актуальная привязка к воркспейсу после изменения (или null)."
+    )
     updatedAt: datetime.datetime = Field(description="Время обновления (ISO8601).")
 
 

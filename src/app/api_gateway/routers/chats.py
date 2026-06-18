@@ -154,8 +154,12 @@ async def get_chat_steps(
 @router.patch(
     "/{chat_id}",
     response_model=ChatPatchResponse,
-    summary="Переименовать/закрепить чат",
-    description="Переименование (`title`) и/или закрепление (`isPinned`). Хотя бы одно поле.",
+    summary="Переименовать/закрепить/перенести чат",
+    description=(
+        "Переименование (`title`), закрепление (`isPinned`) и/или перенос чата в воркспейс "
+        "(`workspaceProjectId`: uuid → перенести/сменить, null → убрать; ADR-038). Хотя бы одно "
+        "поле. Чужой/несуществующий целевой workspace → 404 workspace_not_found."
+    ),
 )
 async def patch_chat(
     body: ChatPatchRequest,
@@ -166,17 +170,23 @@ async def patch_chat(
 ) -> ChatPatchResponse:
     await _rate_limit(current.user_id)
     set_title = "title" in body.model_fields_set
+    # ADR-038: distinguish absent vs explicit-null via model_fields_set (as for title). Field
+    # absent → binding untouched; uuid → re-bind (validated); null → unbind.
+    set_workspace = "workspaceProjectId" in body.model_fields_set
     session = await chats.rename_or_pin(
         chat_id,
         current.user_id,
         title=body.title,
         set_title=set_title,
         is_pinned=body.isPinned,
+        set_workspace_project_id=set_workspace,
+        workspace_project_id=body.workspaceProjectId,
     )
     return ChatPatchResponse(
         id=session.id,
         title=session.title,
         isPinned=session.is_pinned,
+        workspaceProjectId=session.workspace_project_id,
         updatedAt=session.updated_at,
     )
 

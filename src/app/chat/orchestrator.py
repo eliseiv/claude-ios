@@ -488,21 +488,35 @@ class ChatOrchestrator:
         # mode is fixed on the session; use the session's stored mode.
         effective_mode = Mode(sess.mode)
 
-        # ADR-036 §3/§6: for a workspace session, assemble (instructions, files) context ONCE on the
-        # first turn (a new session). instructions → system-prompt (after base assistant_mode
-        # prompt); knowledge files → first-turn attachments (merged with the request's inline
-        # attachments). On resume nothing is re-injected (the context is already in the history).
+        # ADR-036 §3/§6 + ADR-038 §3: workspace `instructions` live in the `system` param (NOT in
+        # history) and MUST be injected on EVERY turn of a session with a workspace — decoupled
+        # from `ctx.is_new` so that a chat MOVED into a workspace later (PATCH, ADR-038) also gets
+        # the project instructions from its next message. Knowledge FILES stay turn-0-only (ADR-038
+        # §3.2, variant a): they are heavy user-content, persisted as history content blocks on
+        # turn 0 and replayed automatically; NOT re-injected retroactively for a moved chat
+        # (Q-038-1).
+        #   - turn 0 (new session): assemble (instructions + files) via context_for_session;
+        #   - resume/next turn (not is_new): read ONLY instructions via instructions_for_session
+        #     (light single-column) — files are NOT collected (context_for_session is not called).
+        # For a non-workspace chat the system prompt is unchanged (base) → no double-injection and
+        # the provider prompt cache stays intact.
         workspace_attachments: PreparedAttachments | None = None
         system_prompt = _system_prompt_for(sess.assistant_mode)
-        if ctx.is_new and sess.workspace_project_id is not None:
-            ws_context = await self._deps.workspaces.context_for_session(
-                sess.workspace_project_id, user_id, provider=_active_provider()
-            )
-            if ws_context is not None:
-                system_prompt = _system_prompt_with_workspace(
-                    sess.assistant_mode, ws_context.instructions
+        if sess.workspace_project_id is not None:
+            if ctx.is_new:
+                ws_context = await self._deps.workspaces.context_for_session(
+                    sess.workspace_project_id, user_id, provider=_active_provider()
                 )
-                workspace_attachments = ws_context.attachments
+                if ws_context is not None:
+                    system_prompt = _system_prompt_with_workspace(
+                        sess.assistant_mode, ws_context.instructions
+                    )
+                    workspace_attachments = ws_context.attachments
+            else:
+                instructions = await self._deps.workspaces.instructions_for_session(
+                    sess.workspace_project_id, user_id
+                )
+                system_prompt = _system_prompt_with_workspace(sess.assistant_mode, instructions)
 
         # ADR-020 / ADR-033 §3,§5: validate inline attachments (provider-aware) and split into
         # (a) the PreparedAttachments handed to the client ONCE on turn 0 — the client builds the

@@ -227,11 +227,18 @@ class ChatsRepository:
         title: str | None = None,
         set_title: bool = False,
         is_pinned: bool | None = None,
+        set_workspace_project_id: bool = False,
+        workspace_project_id: uuid.UUID | None = None,
     ) -> ChatSession:
         if set_title:
             session.title = title
         if is_pinned is not None:
             session.is_pinned = is_pinned
+        # ADR-038: partial update — only touch the workspace binding when the field was present in
+        # the PATCH body (set_workspace_project_id). A None value with the flag set means "unbind"
+        # (workspace_project_id = NULL); absent → flag False → title/is_pinned are not clobbered.
+        if set_workspace_project_id:
+            session.workspace_project_id = workspace_project_id
         session.updated_at = _now()
         await self._session.flush()
         await self._session.commit()

@@ -94,18 +94,28 @@ Steps-view для UI («N steps»): агрегированные шаги пос
 - **Parallel tool use ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** assistant-ход с несколькими `tool_use`-блоками порождает несколько строк `tool_calls` (по одной на вызов) → несколько `kind=tool_call` шагов steps-view одного `messageStepId` (по `toolName` каждого). Это согласуется с `toolCalls[]` ответа `/chat/run` — каждый элемент массива соответствует своему `tool_call`-шагу.
 
 ## PATCH /v1/chats/{id}
-Переименование и/или закрепление.
+Переименование, закрепление и/или **перенос чата в воркспейс** ([ADR-038](../../adr/ADR-038-move-chat-to-workspace.md)).
 
 ### Request
 ```json
-{ "title": "string (optional)", "isPinned": true }
+{ "title": "string (optional)", "isPinned": true, "workspaceProjectId": "uuid | null (optional)" }
 ```
-- Хотя бы одно поле. `extra='forbid'`. `title` ≤ 200 символов.
+- Хотя бы одно поле (`title` / `isPinned` / `workspaceProjectId` — присутствие любого в теле). `extra='forbid'`. `title` ≤ 200 символов.
+- **`workspaceProjectId` ([ADR-038](../../adr/ADR-038-move-chat-to-workspace.md)) — управление привязкой чата к воркспейсу:**
+  - **поле отсутствует** в теле → привязка **не трогается** (меняются только переданные `title`/`isPinned`);
+  - **`workspaceProjectId = <uuid>`** → **перенести/сменить**: `chat_sessions.workspace_project_id = uuid`. Валидируется принадлежность целевого workspace пользователю (`sub`); чужой/несуществующий → **`404 workspace_not_found`** (изоляция, **консистентно с `POST /v1/chat/run`**, [ADR-036 §3](../../adr/ADR-036-workspaces-implementation.md));
+  - **`workspaceProjectId = null`** → **убрать из воркспейса**: `chat_sessions.workspace_project_id = NULL` (чат становится обычным «чистым» чатом).
+  - Различение «поле отсутствует» vs «поле = null» — по `model_fields_set` (как для `title`). **Идемпотентно:** повторный PATCH с тем же значением (uuid или null) → `200`, без ошибки.
+- Чужой/несуществующий **чат** → `404` (как у всех `/v1/chats/*`).
+- **Связь с session-fixed семантикой ([ADR-038 §4](../../adr/ADR-038-move-chat-to-workspace.md)):** `workspaceProjectId` в `POST /v1/chat/run` остаётся **session-fixed** (устанавливается при создании сессии, на resume игнорируется, [chat-orchestrator/02-api-contracts.md](../chat-orchestrator/02-api-contracts.md#workspaceprojectid-adr-036)). Изменять привязку у существующего чата можно **только** этим `PATCH` — единый путь записи после создания, без конкуренции с `/chat/run`.
+- **Эффект переноса на генерацию ([ADR-038 §3](../../adr/ADR-038-move-chat-to-workspace.md)):** после переноса `instructions` целевого workspace начинают подмешиваться в system-prompt со **следующего** сообщения чата (orchestrator инъектирует instructions на каждом ходе сессии с workspace). **Файлы-знания ретроспективно НЕ подмешиваются** (вариант a) — они подаются только чатам, созданным в воркспейсе изначально (turn 0). Чтобы файлы участвовали с самого начала — создавайте чат уже в воркспейсе (`/chat/run` с `workspaceProjectId`). Ретроактивная подача файлов → [Q-038-1](../../99-open-questions.md).
+- Биллинг неизменен — PATCH (включая перенос) не списывает кредиты ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Миграции нет (колонка `chat_sessions.workspace_project_id` уже есть, `0011`).
 
 ### Response (200)
 ```json
-{ "id": "uuid", "title": "string | null", "isPinned": false, "updatedAt": "ISO8601" }
+{ "id": "uuid", "title": "string | null", "isPinned": false, "workspaceProjectId": "uuid | null", "updatedAt": "ISO8601" }
 ```
+- `workspaceProjectId` — актуальная привязка после изменения (или `null`). Аддитивно/обратносовместимо: старые клиенты игнорируют новое поле ([ADR-038](../../adr/ADR-038-move-chat-to-workspace.md)).
 
 ## DELETE /v1/chats/{id}
 Удаление чата.

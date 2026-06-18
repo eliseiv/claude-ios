@@ -17,8 +17,9 @@ from typing import Any
 from app.chat.tools import UnknownToolNameError, to_domain_tool_name
 from app.chats.cursor import ChatCursor, InvalidCursorError
 from app.chats.repository import ChatsRepository
-from app.errors import NotFoundError, ValidationFailedError
+from app.errors import NotFoundError, ValidationFailedError, WorkspaceNotFoundError
 from app.models import ChatSession, ChatStep, ToolCall
+from app.workspaces.service import WorkspacesService
 
 logger = logging.getLogger("app.chats.service")
 
@@ -93,8 +94,11 @@ def _text_summary(payload: dict[str, Any]) -> str:
 
 
 class ChatsService:
-    def __init__(self, repo: ChatsRepository) -> None:
+    def __init__(self, repo: ChatsRepository, workspaces: WorkspacesService | None = None) -> None:
         self._repo = repo
+        # ADR-038: read-only workspace ownership check for PATCH workspace re-binding. Optional so
+        # read-only call-sites (list/history/steps) need not wire it; required for set_workspace.
+        self._workspaces = workspaces
 
     async def list_chats(
         self,
@@ -336,10 +340,29 @@ class ChatsService:
         title: str | None,
         set_title: bool,
         is_pinned: bool | None,
+        set_workspace_project_id: bool = False,
+        workspace_project_id: uuid.UUID | None = None,
     ) -> ChatSession:
+        """Patch chat metadata: rename/pin and/or (un)bind the workspace (ADR-038).
+
+        Owner isolation: a missing/foreign chat → 404 (``_require_session``). When the workspace
+        binding is set to a uuid, the target workspace MUST belong to the same user → otherwise
+        404 ``workspace_not_found`` (consistent with ``/chat/run``, ADR-036 §3); ``null`` unbinds
+        without touching the workspaces service. Idempotent: re-setting the same value is allowed.
+        """
         session = await self._require_session(session_id, user_id)
+        if set_workspace_project_id and workspace_project_id is not None:
+            if self._workspaces is None:  # pragma: no cover - always wired via DI for PATCH
+                raise RuntimeError("workspaces service not configured for workspace re-binding")
+            if not await self._workspaces.owns_workspace(workspace_project_id, user_id):
+                raise WorkspaceNotFoundError("workspace not found")
         return await self._repo.update_metadata(
-            session, title=title, set_title=set_title, is_pinned=is_pinned
+            session,
+            title=title,
+            set_title=set_title,
+            is_pinned=is_pinned,
+            set_workspace_project_id=set_workspace_project_id,
+            workspace_project_id=workspace_project_id,
         )
 
     async def delete_chat(self, session_id: uuid.UUID, user_id: uuid.UUID) -> None:

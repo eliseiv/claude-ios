@@ -177,7 +177,12 @@ def get_admin_service(session: DbSession) -> AdminService:
 
 
 def get_chats_service(session: DbSession) -> ChatsService:
-    return ChatsService(ChatsRepository(session))
+    # ADR-038: chats depends on the workspaces service (read-only owns_workspace) to validate the
+    # target workspace when PATCH /v1/chats/{id} re-binds a chat to a workspace.
+    return ChatsService(
+        ChatsRepository(session),
+        WorkspacesService(WorkspacesRepository(session)),
+    )
 
 
 def get_profile_service(session: DbSession) -> ProfileService:
