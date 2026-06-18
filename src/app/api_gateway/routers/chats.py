@@ -157,8 +157,9 @@ async def get_chat_steps(
     summary="Переименовать/закрепить/перенести чат",
     description=(
         "Переименование (`title`), закрепление (`isPinned`) и/или перенос чата в воркспейс "
-        "(`workspaceProjectId`: uuid → перенести/сменить, null → убрать; ADR-038). Хотя бы одно "
-        "поле. Чужой/несуществующий целевой workspace → 404 workspace_not_found."
+        "(`workspaceProjectId`: uuid — перенести/сменить, null — убрать привязку; отсутствие "
+        "поля — не менять). Хотя бы одно поле. Чужой/несуществующий целевой workspace → "
+        "404 workspace_not_found."
     ),
 )
 async def patch_chat(

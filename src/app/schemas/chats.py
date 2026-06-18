@@ -24,9 +24,8 @@ class ChatListItemSchema(StrictModel):
     projectId: str | None = Field(
         default=None,
         description=(
-            "Идентификатор website-builder-проекта (= chat_sessions.project_id, ADR-022): "
-            "свободная строка, заданная при создании сессии. null = «чистый чат» (проект не "
-            "активирован). Независим от workspaceProjectId."
+            "Идентификатор website-builder-проекта: свободная строка, заданная при создании "
+            "сессии. null = «чистый чат» (проект не активирован). Независим от workspaceProjectId."
         ),
     )
     workspaceProjectId: uuid.UUID | None = Field(
@@ -87,8 +86,8 @@ class ChatPatchRequest(StrictModel):
     workspaceProjectId: uuid.UUID | None = Field(
         default=None,
         description=(
-            "Управление привязкой чата к воркспейсу (ADR-038). Поле отсутствует → привязка не "
-            "трогается; uuid → перенести/сменить (валидируется принадлежность user, чужой → "
+            "Управление привязкой чата к воркспейсу. Поле отсутствует → привязка не трогается; "
+            "uuid → перенести/сменить (валидируется принадлежность пользователю, чужой → "
             "404 workspace_not_found); null → убрать из воркспейса."
         ),
     )

@@ -67,7 +67,7 @@ class ChatRunRequest(StrictModel):
     workspaceProjectId: uuid.UUID | None = Field(
         default=None,
         description=(
-            "Привязка чата к рабочему пространству (workspace, ADR-036). Опционально: без поля — "
+            "Привязка чата к рабочему пространству (workspace). Опционально: без поля — "
             "чат без workspace (обратная совместимость). Если указано — при создании сессии "
             "валидируется принадлежность workspace пользователю (чужой/несуществующий → 404 "
             "workspace_not_found); `instructions` и файлы-знания подаются как контекст первого "
@@ -141,7 +141,7 @@ class ToolErrorBody(StrictModel):
 
 
 class ToolResultItem(StrictModel):
-    """Один элемент батча tool-результатов (ADR-025)."""
+    """Один элемент батча tool-результатов."""
 
     toolCallId: uuid.UUID = Field(
         description="Идентификатор вызова инструмента — равен `toolCalls[].id` из `/v1/chat/run`."
@@ -169,7 +169,7 @@ class ToolResultItem(StrictModel):
 
 
 class ChatToolResultRequest(StrictModel):
-    """Приём результата(ов) tools (ADR-025).
+    """Приём результата(ов) tools.
 
     Батч-форма (`results[]`) — рекомендуемая: результаты на все `toolCalls[]` одного хода.
     Одиночная форма (`toolCallId` + `result|error` на верхнем уровне) — **deprecated**,
@@ -261,15 +261,14 @@ class ToolCallSchema(StrictModel):
 
 
 class ServerToolExecutionSchema(StrictModel):
-    """Одно server-side выполнение, выполненное backend за этот вызов /chat/run (ADR-028)."""
+    """Одно server-side выполнение, выполненное backend за этот вызов /chat/run."""
 
     toolCallId: str = Field(
         description=(
-            "Доменный идентификатор вызова инструмента (uuid4 = `tool_calls.id`) этого "
-            "server-side выполнения (ADR-030). Совпадает с `toolCallId` соответствующего "
-            "tool-шага в `GET /v1/chats/{id}` → `steps[].payload.toolCallId` (нормативный "
-            "инвариант корреляции). Тот же домен id, что у client-side `toolCalls[].id`; "
-            "НЕ provider-`toolu_...` (ADR-008)."
+            "Доменный идентификатор вызова инструмента (uuid4) этого server-side выполнения. "
+            "Совпадает с `toolCallId` соответствующего tool-шага в `GET /v1/chats/{id}` → "
+            "`steps[].payload.toolCallId` (нормативный инвариант корреляции). Тот же домен id, "
+            "что у client-side `toolCalls[].id`; НЕ provider-`toolu_...`."
         )
     )
     toolName: str = Field(
@@ -289,7 +288,7 @@ class ServerToolExecutionSchema(StrictModel):
         description=(
             "Компактный человекочитаемый итог (≤120 символов). НЕ raw-результат: без путей, URL, "
             "имён превью-файлов со signed-token и иных чувствительных данных. Полный результат — "
-            "только в истории `GET /v1/chats/{id}` (ADR-024)."
+            "только в истории `GET /v1/chats/{id}`."
         ),
     )
 
@@ -324,13 +323,13 @@ class ChatResponse(StrictModel):
       (= `toolCalls[0]`, deprecated), `usage`; `assistantMessage` опционален — присутствует, если
       модель выдала текст вместе с tool_use (текст того же шага); нет `blockReason`.
     - `status=blocked`: есть `blockReason`; нет `toolCall(s)`. При `blockReason=max_tokens`
-      (ADR-025) `usage`/`messageStepId`/`stepId`/`assistantMessage` присутствуют (ход обрезан после
+      `usage`/`messageStepId`/`stepId`/`assistantMessage` присутствуют (ход обрезан после
       начала генерации); при policy-blocked все они `null`.
 
     `messageStepId`/`stepId` присутствуют при `assistant_message`/`tool_call` и при
     `blocked`+`max_tokens`; `null` при policy-`blocked` (шаг/ход не создаются).
 
-    `serverTools` (ADR-028) — server-side выполнения (`site.*`/`time.now`) этого вызова; всегда
+    `serverTools` — server-side выполнения (`site.*`/`time.now`) этого вызова; всегда
     присутствует (возможно `[]`). Пустой при policy-`blocked`; может быть НЕпустым при
     `blocked`+`max_tokens`.
     """
@@ -367,7 +366,7 @@ class ChatResponse(StrictModel):
     toolCalls: list[ToolCallSchema] | None = Field(
         default=None,
         description=(
-            "ВСЕ client-side вызовы инструментов текущего хода (parallel tool use, ADR-025). "
+            "ВСЕ client-side вызовы инструментов текущего хода (parallel tool use). "
             "Присутствует только при `status=tool_call`. Клиент обязан исполнить и вернуть "
             "результаты на все элементы через `/v1/chat/tool-result`. Server-side `site.*` сюда "
             "не входят."
@@ -390,10 +389,10 @@ class ChatResponse(StrictModel):
         default_factory=list,
         description=(
             "Server-side инструменты (`site.*`, `time.now`), выполненные backend за ЭТОТ вызов "
-            "`/chat/run` (или один `/chat/tool-result`-continuation), в порядке выполнения "
-            "(ADR-028). Присутствует всегда: пустой `[]` — server-side не выполнялись (в т.ч. "
+            "`/chat/run` (или один `/chat/tool-result`-continuation), в порядке выполнения. "
+            "Присутствует всегда: пустой `[]` — server-side не выполнялись (в т.ч. "
             "policy-`blocked`, где tool-loop не запускался); при `blocked=max_tokens` может быть "
             "НЕпустым (раунды до обрыва). client-side вызовы здесь НЕ перечисляются — они в "
-            "`toolCalls[]`. Информационное поле: на биллинг не влияет (ADR-006)."
+            "`toolCalls[]`. Информационное поле: на биллинг не влияет."
         ),
     )

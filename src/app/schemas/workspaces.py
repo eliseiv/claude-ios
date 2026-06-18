@@ -128,7 +128,7 @@ class WorkspaceListResponse(StrictModel):
 
 
 class WorkspaceFileUploadRequest(StrictModel):
-    """Загрузка файла-знания (inline base64). Поля/валидации как у chat-вложений (ADR-020)."""
+    """Загрузка файла-знания (inline base64). Поля/валидации как у chat-вложений."""
 
     type: Literal["image", "document", "text"] = Field(
         description="Класс файла: `image` (фото), `document` (PDF) или `text` (текстовый файл)."
