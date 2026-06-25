@@ -1,8 +1,10 @@
 # ADR-016 — Расширенные BYOK-статусы + активная модель в ответе
 
-- Статус: Accepted
+- Статус: Accepted (ревизия 2026-06-25 — мульти-провайдерный BYOK, [ADR-044](ADR-044-multi-provider-byok.md))
 - Дата: 2026-06-02
-- Связан с: ADR-003 (BYOK envelope encryption), модуль `byok`.
+- Связан с: ADR-003 (BYOK envelope encryption), [ADR-033](ADR-033-llm-provider-abstraction.md) (провайдер-абстракция), [ADR-044](ADR-044-multi-provider-byok.md) (мульти-провайдерный BYOK), модуль `byok`.
+
+> **Ревизия 2026-06-25 ([ADR-044](ADR-044-multi-provider-byok.md)).** Статусы и переходы ниже **сохраняются дословно**. Меняется источник провайдера для валидации и для `activeModel`: ранее — провайдер инстанса (`LLM_PROVIDER`); теперь — провайдер, **определённый по самому ключу** (детектор префиксов `sk-ant-`→anthropic / `sk-`/`sk-proj-`→openai). `activeModel` = BYOK-дефолт определённого провайдера (`BYOK_DEFAULT_MODEL` / `OPENAI_BYOK_DEFAULT_MODEL`), хранится через новую колонку `byok_keys.provider` (миграция `0013`). Контракт ответа `{byokEnabled, keyStatus, activeModel}` не меняется. Детали — [ADR-044](ADR-044-multi-provider-byok.md).
 
 ## Context
 Дизайн различает больше состояний BYOK-ключа, чем текущие `valid | invalid | missing`:

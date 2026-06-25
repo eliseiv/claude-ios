@@ -5,7 +5,7 @@
 |---|---|
 | KMS (или эквивалент) | encrypt/decrypt DEK (envelope) |
 | `cryptography` (AES-GCM) | шифрование ключа |
-| Anthropic API | валидация ключа при set |
+| LLMClient-фабрика (`llm_client_for`) | валидация ключа при set + генерация byok через провайдера, **определённого по ключу** ([ADR-044](../../adr/ADR-044-multi-provider-byok.md)); Anthropic ИЛИ OpenAI |
 | PostgreSQL | byok_keys |
 | Audit | byok_change события |
 

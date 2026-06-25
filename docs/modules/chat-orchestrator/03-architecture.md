@@ -2,12 +2,12 @@
 
 ## Поток /v1/chat/run
 0. Сгенерировать `messageStepId` (UUID) для нового пользовательского message-шага. Он будет записан в `chat_steps.message_step_id` и `tool_calls.message_step_id` всех записей этого шага и переиспользован при re-entry из `/chat/tool-result` вплоть до финального assistant_message. Это billing idempotency key (НЕ gateway `requestId`).
-1. Загрузить/создать `chat_session` (`mode`, `assistant_mode`, `model` и `project_id` фиксируются на сессию при создании; при resume берутся из сессии — поля запроса игнорируются, [ADR-022 §4](../../adr/ADR-022-optional-project-and-tool-gating.md), [ADR-034](../../adr/ADR-034-user-model-selection.md)). `project_id` может быть `NULL` («чистый чат» без проекта, website-builder отключён для сессии). `model` может быть `NULL` (дефолтная модель инстанса). Валидация выбранной `model` по allowlist активного провайдера — при создании сессии (неизвестная → `422 unsupported_model`, [ADR-034 §3](../../adr/ADR-034-user-model-selection.md)).
+1. Загрузить/создать `chat_session` (`mode`, `assistant_mode`, `model` и `project_id` фиксируются на сессию при создании; при resume берутся из сессии — поля запроса игнорируются, [ADR-022 §4](../../adr/ADR-022-optional-project-and-tool-gating.md), [ADR-034](../../adr/ADR-034-user-model-selection.md)). `project_id` может быть `NULL` («чистый чат» без проекта, website-builder отключён для сессии). `model` может быть `NULL` (дефолтная модель инстанса). Валидация выбранной `model` по allowlist активного провайдера — при создании сессии (неизвестная → `422 unsupported_model`, [ADR-034 §3](../../adr/ADR-034-user-model-selection.md)). **На resume ([ADR-044 §Связанное](../../adr/ADR-044-multi-provider-byok.md)):** если ранее зафиксированная `sess.model` НЕ в allowlist фактически используемого провайдера (например `claude-*` после перевода инстанса на `LLM_PROVIDER=openai`) → передать клиенту `model=None` (дефолт провайдера), **не падать**; БД `chat_sessions.model` не переписывается. См. [§Stale-model фолбэк](#stale-model-фолбэк-при-переводе-инстанса-на-другой-провайдер-adr-044).
 2. Вызвать **Policy Engine** `evaluate(state, mode)`.
    - `blocked` → записать audit policy_decision, вернуть `200 {status:blocked, blockReason}`. Списания нет.
-3. Разрешить источник ключа:
-   - `mode=credits` → сервисный `ANTHROPIC_API_KEY`.
-   - `mode=byok` → запросить plaintext ключ у **BYOK Service** (in-memory).
+3. Разрешить источник ключа и провайдер генерации:
+   - `mode=credits` → сервисный ключ активного провайдера инстанса (`get_llm_client()`, `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`).
+   - `mode=byok` → запросить plaintext ключ у **BYOK Service** (in-memory) + провайдер ключа из `byok_keys.provider` (fallback — `detect_byok_provider(plaintext)`); генерация идёт клиентом `llm_client_for(byok_provider)` **независимо** от `LLM_PROVIDER` ([ADR-044](../../adr/ADR-044-multi-provider-byok.md), см. [§Мульти-провайдерный BYOK-роутинг](#мульти-провайдерный-byok-роутинг-adr-044)).
 4. Реконструировать контекст: системный промт (с `cache_control`) + история из `chat_steps` (`list_steps`, **сортировка по `seq` ASC** — монотонный порядок вставки, НЕ `(created_at, id)`; [ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)) + новое сообщение. **При наличии `attachments[]` ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)):** валидировать (allowlist `mediaType`, magic bytes, лимиты до декодирования, base64-валидность, PDF page-guard); собрать Anthropic content-блоки нового user-turn (image/document/text — полные, in-memory); в `chat_steps.payload` записать **лёгкий текстовый плейсхолдер вложения**, НЕ base64 (см. [§ Мультимодальные вложения](#мультимодальные-вложения-inline-base64-adr-020)).
 5. Вызвать **Anthropic** `messages.create` с определением tools и prompt caching. Tool definitions строятся `anthropic_tool_definitions()` с **anthropic-именами** (`files_read`, `calendar_create_events`, …) — см. [02-api-contracts.md §Имена tools](02-api-contracts.md#имена-tools-доменный-ios-vs-anthropic-формат). Anthropic API требует `^[a-zA-Z0-9_-]{1,128}$`; dotted-имя → `400` (BUG-3). **Набор tools фильтруется по наличию `chat_sessions.project_id` ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)):** `project_id IS NULL` → `site.*` (`SERVER_SIDE_TOOLS`) исключаются; `project_id IS NOT NULL` → полный набор. См. [§Гейтинг site.* tools](#гейтинг-site-tools-по-наличию-проекта-adr-022).
 6. Обработать ответ (диспетчеризация по `stop_reason`, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):
@@ -136,6 +136,31 @@ Orchestrator диспетчеризует **только** по канониче
 ### Observability per-provider
 
 Вводится обобщённая метрика **`llm_upstream_errors_total`** с label `provider ∈ {anthropic, openai}` (+ `status_code`/`error_type`). **Факт реализации (`metrics.py`):** legacy `anthropic_upstream_errors_total` **сохранена ПАРАЛЛЕЛЬНО** с `llm_upstream_errors_total{provider}` — обе инкрементируются на anthropic-пути (`anthropic_client.py`), OpenAI-путь (`openai_client.py`) пишет только `llm_upstream_errors_total{provider="openai"}`. Legacy-имя оставлено осознанно для обратной совместимости дашбордов/тестов ([ADR-033 §10](../../adr/ADR-033-llm-provider-abstraction.md)). Контракт логирования upstream-ошибок ([§Логирование upstream-ошибок](#логирование-upstream-ошибок-anthropic-td-014)) применяется к обоим клиентам (OpenAI: `openai.AuthenticationError`/`APITimeoutError`/`APIConnectionError`/`APIStatusError` → те же доменные `AuthError`/`UpstreamError`; событие лога `llm_upstream_error`). OpenAI-ключ — под redaction (покрыт денилистом `key`/`secret`).
+
+## Мульти-провайдерный BYOK-роутинг (ADR-044)
+
+В **byok-режиме** генерация идёт через провайдера, **определённого по самому ключу** ([ADR-044](../../adr/ADR-044-multi-provider-byok.md)), а НЕ через активный провайдер инстанса (`self._deps.llm`). Credits-режим не меняется (сервисный провайдер инстанса).
+
+**Поток byok-генерации:**
+1. `_resolve_api_key(mode=byok)`: `byok.get_plaintext_key(user_id)` (in-memory, не логируется) + провайдер ключа = `byok_keys.provider` (одно чтение, **без** расшифровки ради провайдера); `provider IS NULL` (легаси-строка) → fallback `detect_byok_provider(plaintext_key)`. Провайдер `None` после fallback → defensive-block `byok_invalid` (не достигается при `valid`-ключе).
+2. Клиент генерации = `llm_client_for(byok_provider)` (детектор → фабрика; оба синглтона доступны на любом инстансе). Ключ пользователя — per-call `with_options(api_key=...)`.
+3. **Модель byok-генерации:** `sess.model`, **только если** она в allowlist провайдера **ключа** (provider-aware `allowed_models_for(byok_provider)`); иначе orchestrator **ЯВНО** подставляет BYOK-дефолт провайдера ключа `byok_default_model_for(byok_provider)` (`BYOK_DEFAULT_MODEL`/`OPENAI_BYOK_DEFAULT_MODEL`) и передаёт его в `create_message(model=…)`. **`model=None` клиенту в byok-ветке НЕ передаётся:** при `model=None` клиент взял бы свой **сервисный** дефолт (`settings.<provider>_model`, как для credits), а НЕ BYOK-дефолт — поэтому BYOK-дефолт подставляется явно (факт `orchestrator.py::_generate_loop`). Сессионная модель чужого провайдера клиенту другого провайдера **не передаётся** (нет `create_message(model=чужая)`-ошибки).
+4. Runtime-401 (`AnthropicAuthError`/`OpenAIAuthError`) на byok → `mark_expired` ([ADR-016](../../adr/ADR-016-extended-byok-statuses.md)) — оба типа уже ловятся в `_generate_loop`, без изменений.
+5. Биллинг byok — бесплатно ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)).
+
+tool-loop / server-side tools / attachments / нормализация payload / барьер хода / `seq` — провайдер-агностичны ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)), работают для byok-провайдера как для сервисного. byok-сессия одно-провайдерна по построению (провайдер ключа стабилен) → кросс-провайдерного реплея в одной сессии не возникает ([TD-024](../../100-known-tech-debt.md) не материализуется).
+
+## Stale-model фолбэк при переводе инстанса на другой провайдер (ADR-044)
+
+При смене `LLM_PROVIDER` инстанса существующие `chat_sessions.model` могут быть от другого провайдера (`claude-*` на ставшем-OpenAI инстансе). На resume в **credits-режиме** прямая передача такой модели активному клиенту → `create_message(model=claude-*)` на OpenAI → ошибка провайдера → `502`.
+
+**Политика-фикс (credits-режим):**
+- Перед передачей `model` клиенту проверять членство `sess.model` в `allowed_models()` **активного** провайдера.
+- Не в allowlist → `create_message(model=None)` (клиент возьмёт свой провайдерный дефолт), **не падать**.
+- `chat_sessions.model` в БД **не переписывается** (историческая отметка выбора; expand-only).
+- Точка реализации: где сейчас `model=sess.model or None` передаётся в `_generate_loop` — заменить на helper «`sess.model` если в `allowed_models()` активного провайдера, иначе `None`». Применять к обоим входам: `run` (resume) и `tool_result` (continuation).
+- Создание новой сессии не затронуто: allowlist-валидация на create ([ADR-034 §3](../../adr/ADR-034-user-model-selection.md)) уже отвергает чужую модель → `422`. Фолбэк нужен для **resume** ранее зафиксированных сессий.
+- В byok-режиме аналог — проверка против allowlist провайдера **ключа** (см. [§Мульти-провайдерный BYOK-роутинг](#мульти-провайдерный-byok-роутинг-adr-044) п.3). Credits проверяет против активного провайдера, byok — против провайдера ключа.
 
 ## Параллельные client-side tool-вызовы и барьер хода (ADR-025)
 

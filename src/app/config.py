@@ -341,32 +341,50 @@ class Settings(BaseSettings):
             return self.openai_model
         return self.anthropic_model
 
-    def allowed_models(self) -> dict[str, str]:
-        """Parse the active provider's model allowlist into a validated {id: displayName} mapping.
+    def byok_default_model_for(self, provider: str) -> str:
+        """BYOK default model for a SPECIFIC provider (ADR-044 §5/§6, ADR-016).
 
-        Provider-aware (ADR-034 §1): reads ``openai_models_raw`` when ``LLM_PROVIDER=openai``, else
-        ``anthropic_models_raw``. Same shape rules as ``token_products()``: only ``str`` keys with a
-        non-empty ``str`` value survive (key stripped to a non-empty string; value a non-empty
-        string after no transformation beyond the emptiness check). A malformed JSON document or a
-        non-object yields an empty mapping.
+        ``"openai"`` → ``openai_byok_default_model``; any non-openai value (incl. ``"anthropic"``) →
+        ``byok_default_model``. This is the model reported as ``activeModel`` when keyStatus=valid
+        and the model used for BYOK generation when the session model is absent / belongs to another
+        provider (ADR-044 §5.3). Provider-aware, independent of ``LLM_PROVIDER``.
+        """
+        if provider.strip().lower() == "openai":
+            return self.openai_byok_default_model
+        return self.byok_default_model
+
+    def allowed_models(self) -> dict[str, str]:
+        """Active provider's model allowlist as a validated {id: displayName} mapping (ADR-034 §1).
+
+        Thin wrapper over :meth:`allowed_models_for` for the ACTIVE provider (``LLM_PROVIDER``,
+        default anthropic). Signature and behavior are unchanged — existing callers keep working.
+        """
+        return self.allowed_models_for(self.llm_provider.strip().lower())
+
+    def allowed_models_for(self, provider: str) -> dict[str, str]:
+        """Parse a SPECIFIC provider's model allowlist into a validated {id: displayName} mapping.
+
+        Provider-aware (ADR-034 §1, generalized for ADR-044 §5): reads ``openai_models_raw`` for
+        ``"openai"``, else ``anthropic_models_raw`` (any non-openai value, incl. ``"anthropic"``).
+        Used by the multi-provider BYOK path to check a session model against the allowlist of the
+        KEY's provider (not the active one). Same shape rules as ``token_products()``: only ``str``
+        keys with a non-empty ``str`` value survive (key stripped to a non-empty string; value a
+        non-empty string after the emptiness check). A malformed JSON document or a non-object
+        yields an empty mapping.
 
         Backward-compatibility fallback: when the parsed result is empty, returns
-        ``{default_model(): default_model()}`` — a single entry equal to the instance default model
-        (displayName = id). So an unset allowlist reproduces the current behavior exactly (one
-        model, the instance default).
+        ``{default: default}`` — a single entry equal to that provider's default model
+        (``<provider>_model``, displayName = id). So an unset allowlist reproduces the current
+        behavior exactly (one model, the provider default).
 
-        Invariant (ADR-034 §1): ``default_model()`` is ALWAYS present in the result. When a
-        non-empty allowlist does NOT contain the default, the default is PREPENDED (displayName =
-        id, first key) so it is always selectable and the §3 allowlist validation accepts it; the
-        rest keep the allowlist insertion order. Pure (no I/O); cached via get_settings() lru_cache.
+        Invariant (ADR-034 §1): the provider's default model is ALWAYS present in the result. When a
+        non-empty allowlist does NOT contain it, the default is PREPENDED (displayName = id, first
+        key); the rest keep the allowlist insertion order. Pure (no I/O); cached via get_settings().
         """
         import json
 
-        raw = (
-            self.openai_models_raw
-            if self.llm_provider.strip().lower() == "openai"
-            else self.anthropic_models_raw
-        )
+        is_openai = provider.strip().lower() == "openai"
+        raw = self.openai_models_raw if is_openai else self.anthropic_models_raw
         try:
             parsed = json.loads(raw or "{}")
         except (ValueError, json.JSONDecodeError):
@@ -383,7 +401,7 @@ class Settings(BaseSettings):
                 if not isinstance(value, str) or not value:
                     continue
                 parsed_models[stripped_key] = value
-        default = self.default_model()
+        default = self.openai_model if is_openai else self.anthropic_model
         if not parsed_models:
             # Empty allowlist → backward-compatible single default entry (displayName = id).
             return {default: default}

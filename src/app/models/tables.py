@@ -139,6 +139,11 @@ class BYOKKey(Base):
         _byok_key_status_enum, nullable=False, server_default=sa_text("'missing'")
     )
     enabled: Mapped[bool] = mapped_column(nullable=False, server_default=sa_text("false"))
+    # ADR-044 §4 (migration 0013): provider detected from the key prefix at set time. NULL = legacy
+    # row (pre-migration) or an unrecognized key format; the service detects on the fly from the
+    # decrypted key as a fallback (ADR-044 §5/§6) and writes the fresh value on the next set. TEXT,
+    # not an enum — allowed values {anthropic, openai} are enforced by the detector, not the DB.
+    provider: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )

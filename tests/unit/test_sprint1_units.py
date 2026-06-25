@@ -93,14 +93,19 @@ def test_cursor_decode_garbage_raises() -> None:
         ChatCursor.decode("dG9vLWZldy1maWVsZHM=")  # "too-few-fields" decoded, no pipes
 
 
-# --------------------------- BYOK activeModel (ADR-016) ---------------------------
+# --------------------------- BYOK activeModel (ADR-016 / ADR-044 §6) ---------------------------
+# ADR-044 §6 extended the signature to ``_active_model_for(key_status, provider)`` (the BYOK default
+# is per-provider). A non-valid status → None regardless of provider; a valid status → that
+# provider's BYOK default. provider=None (legacy row) falls back to the active-instance default.
 @pytest.mark.parametrize("status", ["invalid", "missing", "validating", "offline", "expired"])
-def test_active_model_none_unless_valid(status: str) -> None:
-    assert _active_model_for(status) is None
+@pytest.mark.parametrize("provider", ["anthropic", "openai", None])
+def test_active_model_none_unless_valid(status: str, provider: str | None) -> None:
+    assert _active_model_for(status, provider) is None
 
 
-def test_active_model_present_when_valid() -> None:
-    assert _active_model_for("valid") is not None
+@pytest.mark.parametrize("provider", ["anthropic", "openai", None])
+def test_active_model_present_when_valid(provider: str | None) -> None:
+    assert _active_model_for("valid", provider) is not None
 
 
 # --------------------------- assistant_mode → system prompt (ADR-012) ---------------------------

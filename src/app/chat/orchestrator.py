@@ -34,6 +34,7 @@ from app.chat.llm_client import (
     LLMClient,
     LLMResult,
     NeutralMessage,
+    llm_client_for,
 )
 from app.chat.openai_client import OpenAIAuthError
 from app.chat.repository import ChatRepository, derive_title
@@ -262,6 +263,25 @@ def _merge_attachments(
 def _active_provider() -> str:
     """Active LLM provider (ADR-033) for provider-aware attachment validation. Default anthropic."""
     return get_settings().llm_provider.strip().lower()
+
+
+def _model_for_provider(model: str | None, provider: str) -> str | None:
+    """Return ``model`` only if it is in ``provider``'s allowlist, else ``None`` (ADR-044).
+
+    Shared stale-model guard for both billing modes:
+    - credits (ADR-044 §Связанное / orchestrator §Stale-model): ``provider`` = the ACTIVE instance
+      provider. A session model fixed for another provider (e.g. ``claude-*`` after the instance was
+      switched to ``LLM_PROVIDER=openai``) is NOT in the active allowlist → ``None`` → the client
+      uses its provider default instead of failing with ``create_message(model=foreign)``.
+    - byok (ADR-044 §5.3): ``provider`` = the KEY's provider. A session model of another provider is
+      never forwarded to the key's client.
+
+    ``model is None`` (instance default) stays ``None``. The DB ``chat_sessions.model`` is never
+    rewritten — only the value passed to the client on this call changes (expand-only, ADR-034).
+    """
+    if model is None:
+        return None
+    return model if model in get_settings().allowed_models_for(provider) else None
 
 
 def _server_tool_summary(execution: ToolExecution) -> str | None:
@@ -605,8 +625,8 @@ class ChatOrchestrator:
         if not decision_allow(decision):
             return self._blocked(sess.id, decision.block_reason)
 
-        # mode=byok: resolve plaintext key in-memory (CO-6).
-        api_key = await self._resolve_api_key(user_id, effective_mode)
+        # mode=byok: resolve plaintext key in-memory + its provider (CO-6, ADR-044 §5).
+        api_key, byok_provider = await self._resolve_api_key(user_id, effective_mode)
 
         return await self._generate_loop(
             user_id=user_id,
@@ -615,11 +635,14 @@ class ChatOrchestrator:
             mode=effective_mode,
             billing=_billing_plan(effective_mode, state),
             api_key=api_key,
+            byok_provider=byok_provider,
             system_prompt=system_prompt,
             # ADR-022 axis A: offer site.* only when the session has a project.
             has_project=sess.project_id is not None,
             first_turn_attachments=first_turn,
-            # ADR-034 §4: pass the session-fixed model (NULL → None → client uses its default).
+            # ADR-034 §4 / ADR-044: session-fixed model (NULL → None). The effective model is
+            # resolved inside _generate_loop against the right provider's allowlist (stale-model
+            # fallback): credits → active provider, byok → key provider.
             model=sess.model or None,
         )
 
@@ -720,7 +743,7 @@ class ChatOrchestrator:
         if not decision_allow(decision):
             return self._blocked(session_id, decision.block_reason)
 
-        api_key = await self._resolve_api_key(user_id, mode)
+        api_key, byok_provider = await self._resolve_api_key(user_id, mode)
         # ADR-036 §3: knowledge files are already replayed as content blocks in the history, but
         # `instructions` live in the `system` param (NOT in history) and are sent on EVERY LLM call.
         # So on each continuation re-inject the workspace instructions into system via the SAME
@@ -740,10 +763,12 @@ class ChatOrchestrator:
             mode=mode,
             billing=_billing_plan(mode, state),
             api_key=api_key,
+            byok_provider=byok_provider,
             system_prompt=system_prompt,
             # ADR-022 axis A: project_id is session-fixed; gate site.* by the session's project.
             has_project=sess.project_id is not None,
-            # ADR-034 §4: session-fixed model from the resumed session (NULL → None → client def).
+            # ADR-034 §4 / ADR-044: session-fixed model; effective model resolved in _generate_loop
+            # against the right provider's allowlist (credits → active, byok → key provider).
             model=sess.model or None,
         )
 
@@ -857,16 +882,28 @@ class ChatOrchestrator:
         blocked_requests_total.labels(reason=resolved.value).inc()
         return ChatRunOut(status="blocked", session_id=session_id, block_reason=resolved.value)
 
-    async def _resolve_api_key(self, user_id: uuid.UUID, mode: Mode) -> str | None:
+    async def _resolve_api_key(
+        self, user_id: uuid.UUID, mode: Mode
+    ) -> tuple[str | None, str | None]:
+        """Resolve (plaintext api_key, byok_provider) for this turn (ADR-044 §5).
+
+        - credits → ``(None, None)``: the service key of the active provider is used by the injected
+          client; no provider routing.
+        - byok → ``(plaintext_key, provider)``: the key is decrypted in-memory (never logged) and
+          the provider is read from ``byok_keys.provider`` (fallback: detected from the plaintext
+          for a legacy NULL row, ADR-044 §4). The provider routes generation to ``llm_client_for``
+          in ``_generate_loop``. ``provider`` may be ``None`` only for a legacy key of unrecognized
+          format → a defensive ``byok_invalid`` block downstream (unreachable for a valid key).
+        """
         if mode is Mode.byok:
             byok_usage_share.set(1)
-            key = await self._deps.byok.get_plaintext_key(user_id)
-            if key is None:
+            resolved = await self._deps.byok.get_plaintext_key_with_provider(user_id)
+            if resolved is None:
                 # Policy should have blocked this; defensive.
                 raise ValidationFailedError("byok key unavailable")
-            return key
+            return resolved
         byok_usage_share.set(0)
-        return None  # service key used by AnthropicClient
+        return None, None  # service key used by the active provider's client
 
     async def _will_create_session(self, user_id: uuid.UUID, session_id: uuid.UUID | None) -> bool:
         """True when ``get_or_create_session`` would CREATE a new session (ADR-034 §3 model gate).
@@ -924,9 +961,32 @@ class ChatOrchestrator:
         api_key: str | None,
         system_prompt: str,
         has_project: bool,
+        byok_provider: str | None = None,
         first_turn_attachments: PreparedAttachments | None = None,
         model: str | None = None,
     ) -> ChatRunOut:
+        # ADR-044 §5: select the generation client + the effective model by mode.
+        # - credits → the injected active-provider client (self._deps.llm); stale-model guard
+        #   against the ACTIVE provider allowlist (a session model fixed for another provider after
+        #   an LLM_PROVIDER switch → None → client default, not a 502).
+        # - byok → the client of the KEY's provider (llm_client_for), independent of LLM_PROVIDER;
+        #   the session model is forwarded only if it is in the KEY provider's allowlist, else the
+        #   BYOK default of that provider (a foreign model is never sent to the key's client).
+        if mode is Mode.byok:
+            if byok_provider is None:
+                # Defensive (ADR-044 §5.1): a valid/enabled key always has a detectable provider.
+                # An unrecognized legacy key reached generation → block, do not call any provider.
+                await self._session.commit()
+                return self._blocked(session_id, BlockReason.byok_invalid)
+            llm = llm_client_for(byok_provider)
+            effective_model = _model_for_provider(model, byok_provider)
+            if effective_model is None:
+                # §5.3: foreign/absent session model → the BYOK default of the key's provider.
+                effective_model = get_settings().byok_default_model_for(byok_provider)
+        else:
+            llm = self._deps.llm
+            # §Stale-model: guard the session model against the active provider's allowlist.
+            effective_model = _model_for_provider(model, _active_provider())
         # ADR-011: server-side site.* tools are executed by the backend synchronously inside this
         # loop, WITHOUT a round-trip to iOS. We keep calling the LLM as long as the turn contains
         # ONLY server-side tools (their tool_results are produced here and fed straight back).
@@ -950,7 +1010,7 @@ class ChatOrchestrator:
             # server-side round commits its own persisted tool_use/tool_result before re-calling.
             await self._session.commit()
             try:
-                result: LLMResult = await self._deps.llm.create_message(
+                result: LLMResult = await llm.create_message(
                     system_prompt=system_prompt,
                     messages=messages,
                     # ADR-022 axis A: in «чистый чат» (no project) site.* (SERVER_SIDE_TOOLS) are
@@ -960,9 +1020,11 @@ class ChatOrchestrator:
                     tools=neutral_tool_definitions(include_server_side=has_project),
                     attachments=turn0_attachments,
                     api_key=api_key,
-                    # ADR-034 §4: session-fixed model (None → client uses its provider default;
-                    # current behavior). The orchestrator never substitutes the default itself.
-                    model=model,
+                    # ADR-034 §4 / ADR-044 §5: the effective model resolved above (stale-model
+                    # guard for credits; key-provider allowlist + BYOK default for byok). None → the
+                    # client uses its provider default; the orchestrator never blindly forwards a
+                    # foreign model.
+                    model=effective_model,
                 )
             except (AnthropicAuthError, OpenAIAuthError):
                 if mode is Mode.byok:

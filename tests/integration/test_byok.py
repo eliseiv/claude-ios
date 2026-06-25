@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.byok.service as byok_service
 from app.audit.service import AuditService
 from app.byok.kms import get_kms_client
 from app.byok.service import BYOKService
@@ -25,6 +26,22 @@ class _FakeAnthropic:
         return self._outcome
 
 
+# ADR-044 §3.2: set_key validates via the module-level ``llm_client_for(provider)`` (the provider
+# DETECTED from the key prefix), NOT the constructor-injected client. So the per-test outcome must
+# be installed at THAT seam. A mutable holder lets each _svc(...) pin the outcome the patched
+# factory returns (all keys here are sk-ant- → detector routes to "anthropic"). Without this patch
+# the real AnthropicClient would hit the network and a fake sk-ant-x would validate as invalid.
+_OUTCOME_HOLDER: dict[str, KeyValidation] = {"outcome": KeyValidation.valid}
+
+
+@pytest.fixture(autouse=True)
+def _patch_llm_client_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_llm_client_for(provider: str) -> _FakeAnthropic:
+        return _FakeAnthropic(_OUTCOME_HOLDER["outcome"])
+
+    monkeypatch.setattr(byok_service, "llm_client_for", _fake_llm_client_for)
+
+
 def _svc(
     session: AsyncSession,
     *,
@@ -36,6 +53,8 @@ def _svc(
         if outcome is not None
         else (KeyValidation.valid if valid else KeyValidation.invalid)
     )
+    # Pin the outcome the patched ``llm_client_for`` (the real validation seam) will return.
+    _OUTCOME_HOLDER["outcome"] = resolved
     return BYOKService(session, get_kms_client(), _FakeAnthropic(resolved), AuditService(session))  # type: ignore[arg-type]
 
 

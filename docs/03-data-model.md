@@ -139,10 +139,12 @@ CREATE TABLE byok_keys (
     nonce           BYTEA NOT NULL,                 -- AES-GCM nonce
     key_status      byok_key_status NOT NULL DEFAULT 'missing',
     enabled         BOOLEAN NOT NULL DEFAULT FALSE,
+    provider        TEXT NULL,                       -- ADR-044 (миграция 0013): провайдер ключа ('anthropic'/'openai'), определён детектором префиксов; NULL=легаси/нераспознан
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 > Plaintext ключ никогда не хранится. См. [ADR-003](adr/ADR-003-byok-envelope-encryption.md). Поля `encrypted_dek`, `nonce` добавлены к минимальной модели ТЗ для envelope encryption.
+> **Колонка `provider` ([ADR-044](adr/ADR-044-multi-provider-byok.md), миграция `0013`, expand-only без backfill):** провайдер BYOK-ключа определяется **по самому ключу** (детектор префиксов `sk-ant-`→anthropic / `sk-`/`sk-proj-`→openai), независимо от `LLM_PROVIDER` инстанса. `TEXT` (не enum) — расширяемость без `ALTER TYPE`; значения `{anthropic, openai}` валидируются приложением. `NULL` = легаси-строка до миграции или нераспознанный формат → fallback-детект по расшифрованному ключу на генерации. Позволяет отдавать `activeModel`/статус без расшифровки ключа.
 
 ### 6. chat_sessions
 ```sql
@@ -429,6 +431,12 @@ CREATE UNIQUE INDEX ux_auth_identities_provider_subject ON auth_identities (prov
 CREATE INDEX ix_auth_identities_user ON auth_identities (user_id);
 ```
 > Внешние identity-провайдеры (Sign in with Apple на старте, [ADR-043](adr/ADR-043-sign-in-with-apple.md)). `UNIQUE(provider, subject)` — кросс-девайс резолв (один Apple-аккаунт = один `userId`) и гонко-безопасность (`ON CONFLICT (provider, subject) DO NOTHING` + повторное чтение, образец `auth_devices`). Apple identity token верифицируется (`AppleIdentityVerifier`), но **не хранится**; в БД попадают только `subject`/`email`. Связывание apple_sub↔userId, конфликты — [ADR-043 §5](adr/ADR-043-sign-in-with-apple.md), [modules/auth/03-architecture.md](modules/auth/03-architecture.md#sign-in-with-apple-adr-043). Миграция `0012` (expand-only, цепочка `0011`→`0012`, single head).
+
+## Колонка `byok_keys.provider` (миграция `0013`, [ADR-044](adr/ADR-044-multi-provider-byok.md), модуль `byok`)
+```sql
+ALTER TABLE byok_keys ADD COLUMN provider TEXT NULL;
+```
+> Мульти-провайдерный BYOK ([ADR-044](adr/ADR-044-multi-provider-byok.md)): провайдер BYOK-ключа (`anthropic`/`openai`) определяется детектором префиксов по самому ключу, независимо от `LLM_PROVIDER`. Expand-only, **без backfill** (легаси-строки → `NULL` → fallback-детект по plaintext на генерации). Цепочка `0012`→`0013`, single head (`down_revision='0012'`). DDL колонки — [§5 byok_keys](#5-byok_keys).
 
 ## Инварианты
 - `wallets.balance >= 0` — БД CHECK + проверка в Wallet (двойная защита).

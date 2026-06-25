@@ -142,26 +142,63 @@ class LLMClient(Protocol):
 _openai_singleton: OpenAIClient | None = None
 
 
+def _get_openai_singleton() -> LLMClient:
+    """Process-wide OpenAI client singleton (shared by ``get_llm_client`` and ``llm_client_for``).
+
+    Lazily constructed once per process. The OpenAI client constructor reads only config
+    (``OPENAI_API_KEY``/``OPENAI_MODEL``) and does NOT depend on ``LLM_PROVIDER`` — so it can be
+    created on any instance (e.g. an OpenAI-BYOK call on an Anthropic instance, ADR-044 §2).
+    """
+    global _openai_singleton
+    if _openai_singleton is None:
+        from app.chat.openai_client import OpenAIClient
+
+        _openai_singleton = OpenAIClient()
+    return _openai_singleton
+
+
+def llm_client_for(provider: str) -> LLMClient:
+    """Return the LLMClient for an EXPLICIT provider, independent of ``LLM_PROVIDER`` (ADR-044 §2).
+
+    Used by the multi-provider BYOK path (validation + generation) so a key is always handled by the
+    provider DETECTED from the key itself (``detect_byok_provider``), not by the instance's active
+    provider. Both clients are process-wide singletons available on any instance:
+
+    - ``"anthropic"`` → the shared ``anthropic_client`` module singleton (same as
+      ``get_anthropic_client()``), so a conftest patch of ``_anthropic_singleton`` overrides this
+      path too.
+    - ``"openai"`` → the shared OpenAI singleton (same instance ``get_llm_client()`` uses on the
+      openai path).
+    - any other value → ``ValueError`` (internal caller error; ``detect_byok_provider`` guarantees
+      only ``{"anthropic", "openai"}`` before this is called).
+
+    The imports are local to avoid an import cycle (clients import the neutral types here).
+    """
+    normalized = provider.strip().lower()
+    if normalized == "openai":
+        return _get_openai_singleton()
+    if normalized == "anthropic":
+        from app.chat.anthropic_client import get_anthropic_client
+
+        return get_anthropic_client()
+    raise ValueError(f"unknown LLM provider: {provider!r}")
+
+
 def get_llm_client() -> LLMClient:
     """Process-wide LLMClient selected by ``LLM_PROVIDER`` (default ``anthropic``, ADR-033 §8).
 
     Replaces the former ``get_anthropic_client()`` singleton. ``LLM_PROVIDER=anthropic`` (the
     default) returns the unchanged ``AnthropicClient`` so existing instances keep their exact
     behavior; ``LLM_PROVIDER=openai`` returns ``OpenAIClient``. Each client is created once per
-    process. The imports are local to avoid an import cycle (clients import the neutral types here).
+    process.
 
-    On the anthropic path the shared ``anthropic_client`` module singleton is used, so a test that
+    Refactored to delegate to ``llm_client_for(active_provider)`` (single source of singletons,
+    ADR-044 §2) — the public signature and behavior are UNCHANGED (still reads ``LLM_PROVIDER``). On
+    the anthropic path the shared ``anthropic_client`` module singleton is used, so a test that
     patches ``anthropic_client._anthropic_singleton`` overrides the factory too (conftest).
     """
-    global _openai_singleton
     provider = get_settings().llm_provider.strip().lower()
     if provider == "openai":
-        if _openai_singleton is None:
-            from app.chat.openai_client import OpenAIClient
-
-            _openai_singleton = OpenAIClient()
-        return _openai_singleton
+        return llm_client_for("openai")
     # Default (and explicit "anthropic"): reuse the anthropic_client module singleton.
-    from app.chat.anthropic_client import get_anthropic_client
-
-    return get_anthropic_client()
+    return llm_client_for("anthropic")
