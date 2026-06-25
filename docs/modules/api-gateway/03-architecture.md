@@ -20,8 +20,24 @@ flowchart LR
 - Лимиты из config/env (дефолты — [05-security.md](../../05-security.md), значения — [Q-003-1](../../99-open-questions.md)).
 
 ## Size-лимиты
-- Глобальный body-лимит на ASGI-уровне.
+- Глобальный body-лимит на ASGI-уровне (`SIZE_LIMIT_BODY`, дефолт 512 KB).
 - Поле-специфичные лимиты (`message`, `context`, `result`) проверяются в Pydantic-валидаторах соответствующих схем.
+
+### Per-path transport body-limit (`SizeLimitMiddleware._limit_for`)
+`SizeLimitMiddleware` применяет общий `SIZE_LIMIT_BODY` ко всем путям, **кроме** upload-роутов с inline base64, которым нужен повышенный лимит (крупный файл в base64 превышает 512 KB). Метод `_limit_for(path)` выбирает лимит по пути:
+
+| Правило сопоставления пути | Лимит (конфиг) | Дефолт | Роут | ADR |
+|---|---|---|---|---|
+| `path == "/v1/chat/run"` (точное) | `attachment_request_body_limit` (`ATTACHMENT_REQUEST_BODY_LIMIT`) | 12 MB | `POST /v1/chat/run` | [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md) |
+| `path.startswith("/v1/workspaces/") and path.endswith("/files")` | `workspace_request_body_limit` (`WORKSPACE_REQUEST_BODY_LIMIT`) | 12 MB | `POST /v1/workspaces/{id}/files` | [ADR-045](../../adr/ADR-045-per-path-body-limit-workspace-files.md) |
+| иначе | `size_limit_body` (`SIZE_LIMIT_BODY`) | 512 KB | все прочие | — |
+
+**Точность правила workspace-files (важно):** префикс+суффикс матчит **именно** upload (`POST …/files`). НЕ задеты:
+- CRUD `/v1/workspaces`, `/v1/workspaces/{id}` — нет суффикса `/files` → 512 KB (корректно, тела мелкие);
+- `DELETE /v1/workspaces/{id}/files/{file_id}` — оканчивается на `/{file_id}`, не на `/files` → 512 KB;
+- `GET /v1/workspaces/{id}/files` (список) — оканчивается на `/files`, попадает под повышенный лимит, но безвредно (GET-тело пустое). Матч метод-агностичен (как и `/v1/chat/run`); проверка метода не вводится — единственный путь с непустым телом под суффиксом `/files` — POST upload.
+
+**Инвариант источника истины** ([ADR-045 §1](../../adr/ADR-045-per-path-body-limit-workspace-files.md)): `WORKSPACE_REQUEST_BODY_LIMIT ≥ WORKSPACE_FILE_MAX_BYTES*4/3 + JSON-запас(≥256 KB)`. Per-file потолок — единственный источник истины (`WORKSPACE_FILE_MAX_BYTES`=8 MB, [ADR-036 §4](../../adr/ADR-036-workspaces-implementation.md)); транспортный лимит производен от него (симметрично `ATTACHMENT_MAX_BYTES_DOCUMENT` ↔ `ATTACHMENT_REQUEST_BODY_LIMIT`). Memory-DoS guard сохранён: повышение точечно, прикладной size-cap (`validate_and_extract`) режет до 8 MB **до** base64-decode. Реализация — `src/app/api_gateway/middleware.py::SizeLimitMiddleware._limit_for`. Остаточная `Content-Length`-зависимость — [TD-017](../../100-known-tech-debt.md).
 
 ## Зависимости реализации
 - FastAPI dependencies: `get_current_user`, `get_db`, `get_redis`, `require_owner`.

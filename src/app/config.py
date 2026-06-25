@@ -243,6 +243,18 @@ class Settings(BaseSettings):
         default=32 * 1024 * 1024, alias="WORKSPACE_FILES_TOTAL_BYTES"
     )
     workspace_context_max_chars: int = Field(default=200_000, alias="WORKSPACE_CONTEXT_MAX_CHARS")
+    # Raised transport body limit applied ONLY to the workspace files-upload route
+    # (POST /v1/workspaces/{id}/files) — other routes keep size_limit_body (ADR-045).
+    # INVARIANT (single source of truth = WORKSPACE_FILE_MAX_BYTES, this limit is derived):
+    #   workspace_request_body_limit >= ceil(workspace_file_max_bytes * 4/3) + JSON_OVERHEAD
+    # where *4/3 is the base64 inflation of an 8 MB file (≈10.67 MB) and JSON_OVERHEAD is the
+    # JSON-envelope slack ({"type","mediaType","filename","data":"..."}, escaping, field headers;
+    # recommended >=256 KB). Default 12 MB satisfies it: 10.67 MB + ~1.33 MB slack > 256 KB. Must
+    # stay >= the invariant under any operator calibration (TD-004), symmetric to the
+    # ATTACHMENT_MAX_BYTES_DOCUMENT <-> ATTACHMENT_REQUEST_BODY_LIMIT relation for /v1/chat/run.
+    workspace_request_body_limit: int = Field(
+        default=12 * 1024 * 1024, alias="WORKSPACE_REQUEST_BODY_LIMIT"
+    )
 
     # --- DB connection pool (02-tech-stack.md, sized for ~10k users / 2-3 replicas) ---
     # Per-process pool. Effective max conns ≈ (pool_size + max_overflow) * workers * replicas;

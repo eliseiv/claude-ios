@@ -36,7 +36,8 @@
 | Рассогласование `type`/`mediaType` ↔ magic bytes (бинарь под видом image/png) → `422` | unit |
 | Невалидный/обрезанный base64 → `422` (не 500) | unit |
 | Лимит размера одного вложения / суммарного / числа — проверка ДО декодирования → `413`/`422` | unit+integration |
-| Повышенный body-лимит применяется **только** к `/v1/chat/run`; прочие роуты сохраняют `≤512KB` | integration |
+| Повышенный body-лимит применяется **только** к upload-роутам `/v1/chat/run` (ADR-020) и `POST /v1/workspaces/{id}/files` (ADR-045); прочие роуты (включая CRUD `/v1/workspaces/{id}` и `DELETE …/files/{file_id}`) сохраняют `≤512KB` | integration |
+| Workspace upload (ADR-045): файл ровно 8 MB (`WORKSPACE_FILE_MAX_BYTES`) в base64 проходит gateway (не 413 на транспорте); тело > `WORKSPACE_REQUEST_BODY_LIMIT` → `413`; инвариант `WORKSPACE_REQUEST_BODY_LIMIT ≥ WORKSPACE_FILE_MAX_BYTES*4/3 + JSON-запас` | unit+integration |
 | PDF page-guard: PDF с числом страниц > `ATTACHMENT_PDF_MAX_PAGES` → `422` (анти-bomb) | unit |
 | URL-вложение / `source.type=url` → отвергается (нет backend-fetch, анти-SSRF) | unit |
 | Реплей: `chat_steps.payload` user-turn содержит плейсхолдер, НЕ base64; на витке ≥1 tool-loop тяжёлый контент не реплеится | integration |

@@ -30,23 +30,32 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 class SizeLimitMiddleware(BaseHTTPMiddleware):
     """Rejects bodies exceeding the limit before parsing (413).
 
-    The general limit applies to all routes. /v1/chat/run gets a RAISED transport limit for
-    inline base64 attachments (ADR-020, 05-security.md): heavy multimodal payloads exceed the
-    general ≤512KB cap, so the raise is scoped to exactly that one route — the attack surface for
-    accepting a large payload is not widened globally.
+    The general limit applies to all routes. Two routes get a RAISED transport limit because they
+    accept large base64 payloads that exceed the general ≤512KB cap; each raise is scoped to its
+    own route so the attack surface for accepting a large payload is not widened globally:
+      - /v1/chat/run — inline base64 attachments (ADR-020, 05-security.md);
+      - POST /v1/workspaces/{id}/files — base64 workspace knowledge-file upload (ADR-045). Matched
+        by path prefix+suffix (the path carries the workspace id), method-agnostic like the
+        /v1/chat/run rule: GET /v1/workspaces/{id}/files also matches but carries no body, so the
+        raised limit is harmless for it.
     """
 
     _CHAT_RUN_PATH = "/v1/chat/run"
+    _WORKSPACES_PREFIX = "/v1/workspaces/"
+    _FILES_SUFFIX = "/files"
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
         settings = get_settings()
         self._limit = settings.size_limit_body
         self._chat_run_limit = settings.attachment_request_body_limit
+        self._workspace_files_limit = settings.workspace_request_body_limit
 
     def _limit_for(self, path: str) -> int:
         if path == self._CHAT_RUN_PATH:
             return self._chat_run_limit
+        if path.startswith(self._WORKSPACES_PREFIX) and path.endswith(self._FILES_SUFFIX):
+            return self._workspace_files_limit
         return self._limit
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:

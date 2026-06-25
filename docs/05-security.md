@@ -104,7 +104,7 @@
 Два разных уровня контроля размера с **разной HTTP-семантикой** (не путать):
 
 1. **Transport-уровень — общий размер тела запроса (`413`).** Enforced `SizeLimitMiddleware` на API Gateway **до парсинга** тела, по заголовку `Content-Length`. Превышение → `413 Payload Too Large`. Это защита от приёма крупного payload как такового. **Ограничение (на 2026-06-03):** проверка опирается на `Content-Length`; при его отсутствии (chunked-запрос без заголовка) transport-guard пропускается — streaming-устойчивая проверка по фактическому объёму потока **не реализована** ([TD-017](100-known-tech-debt.md); на MVP за внешним Traefik не эксплуатируется).
-   - Общий request body: ≤ 512 KB. Повышенный лимит только роута `/v1/chat/run` (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB) под inline base64-вложения (ADR-020).
+   - Общий request body: ≤ 512 KB. Повышенный лимит для двух upload-роутов: `/v1/chat/run` (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB) под inline base64-вложения (ADR-020) и `POST /v1/workspaces/{id}/files` (`WORKSPACE_REQUEST_BODY_LIMIT`, дефолт 12 MB) под inline base64 workspace-файлов ([ADR-045](adr/ADR-045-per-path-body-limit-workspace-files.md)).
 
 2. **Schema-уровень — лимиты отдельных полей (`422`).** Enforced Pydantic v2 валидаторами (`max_length`) после парсинга. Нарушение лимита конкретного поля при допустимом размере тела → `422 Unprocessable Entity` (стандартная семантика per-field schema violation, согласована с прочей валидацией ввода ниже). Это **не** `413`: тело прошло transport-лимит, отклонено уже на валидации схемы.
    - `message`: ≤ 32 KB.
@@ -122,8 +122,13 @@
 
 Дефолты конкретных значений — [Q-003-2](99-open-questions.md). Оба пути — валидный технический reject 4xx; различие 413 vs 422 отражает уровень, на котором сработал лимит (transport до парсинга vs schema поля).
 
-### Повышенный transport-лимит для `/v1/chat/run` (inline base64-вложения, ADR-020)
-Inline base64-вложения ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) превышают общий `≤512KB`. Поэтому `SizeLimitMiddleware` применяет **повышенный лимит только к роуту `/v1/chat/run`** (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB); все прочие роуты сохраняют общий `≤512KB`. Превышение per-route лимита → `413` (до парсинга). Повышение НЕ глобальное — поверхность приёма крупного payload ограничена одним роутом.
+### Повышенный transport-лимит для upload-роутов (inline base64)
+Inline base64-payload крупного файла превышает общий `≤512KB`. Поэтому `SizeLimitMiddleware` применяет **повышенный лимит точечно** к upload-роутам, остальные роуты сохраняют общий `≤512KB`. Превышение per-route лимита → `413` (до парсинга). Повышение НЕ глобальное — поверхность приёма крупного payload ограничена двумя upload-роутами:
+
+1. **`/v1/chat/run`** ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) — `ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB; точное сравнение пути (`path == "/v1/chat/run"`).
+2. **`POST /v1/workspaces/{id}/files`** ([ADR-045](adr/ADR-045-per-path-body-limit-workspace-files.md)) — `WORKSPACE_REQUEST_BODY_LIMIT`, дефолт 12 MB; сопоставление пути по правилу `path.startswith("/v1/workspaces/") and path.endswith("/files")`. Корень фикса: до ADR-045 этот путь резался на общий 512 KB **в gateway**, до прикладного валидатора (8 MB по [ADR-036 §4](adr/ADR-036-workspaces-implementation.md)) → заявленный `WORKSPACE_FILE_MAX_BYTES`=8 MB был недостижим.
+
+**Memory-DoS guard.** Повышение точечно (на один дополнительный роут), не глобально; прикладная валидация (`workspaces/text_extract.py::validate_and_extract`) режет payload до `WORKSPACE_FILE_MAX_BYTES`=8 MB **до** base64-decode (size-cap из длины base64), сохраняя bound на память внутри поднятого транспортного окна. Правило матча точное: CRUD `/v1/workspaces/{id}` и `DELETE …/files/{file_id}` НЕ попадают под повышенный лимит (нет суффикса `/files` либо оканчивается на `{file_id}`) → 512 KB сохранён; `GET …/files` (список) формально матчится, но безвреден (пустое тело). Инвариант источника истины: `WORKSPACE_REQUEST_BODY_LIMIT ≥ WORKSPACE_FILE_MAX_BYTES*4/3 + JSON-запас(≥256 KB)`. Остаточная `Content-Length`-зависимость guard'а — [TD-017](100-known-tech-debt.md).
 
 ## Мультимодальные вложения — валидация и модель угроз (ADR-020)
 Критично: `/v1/chat/run` принимает в `attachments[]` загруженный пользователем бинарный контент (фото/PDF/текст) в base64 и передаёт его Claude ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). Правила валидации (фокус ревью):
@@ -213,7 +218,7 @@ Inline base64-вложения ([ADR-020](adr/ADR-020-inline-base64-attachments-
 | Кража refresh-token | Single-use rotation + reuse-детект → ревокация цепочки устройства; hashed-store, не plaintext (ADR-018). |
 | Подмена чужого `userId` при register | `userId` назначает backend (uuid4/find-by-device); `register`/`token` не принимают `userId` в теле (ADR-018). |
 | Подделка MIME вложения (выдать бинарь за image) | Сверка `type`/`mediaType` с magic bytes декодированного содержимого; рассогласование → `422` (ADR-020). |
-| Memory-DoS через гигантское base64-вложение | Лимиты размера/числа проверяются ДО `b64decode`; повышенный body-лимит только на `/v1/chat/run`; `413`/`422` (ADR-020). Остаточный риск: transport-guard опирается на `Content-Length` ([TD-017](100-known-tech-debt.md)). |
+| Memory-DoS через гигантское base64-вложение/файл | Лимиты размера/числа проверяются ДО `b64decode`; повышенный body-лимит точечно только на `/v1/chat/run` (ADR-020) и `POST /v1/workspaces/{id}/files` ([ADR-045](adr/ADR-045-per-path-body-limit-workspace-files.md)), не глобально; `413`/`422`. Остаточный риск: transport-guard опирается на `Content-Length` ([TD-017](100-known-tech-debt.md)). |
 | PDF decompression/structure bomb | Guard числа страниц PDF (`pypdf`, без полного рендера); подозрительный/защищённый PDF → `422` (ADR-020). Остаточный риск: CPU-spike при парсинге злонамеренного PDF в рамках 8 MB-cap ([TD-004](100-known-tech-debt.md) §TD-004a). |
 | SSRF через URL-вложение | URL-вложения запрещены; backend не фетчит внешний контент, только inline base64 (ADR-020). |
 | Утечка содержимого вложений в логах | Redaction `attachments[].data` и декодированных байт/текста; в логах только метаданные (ADR-020). |
