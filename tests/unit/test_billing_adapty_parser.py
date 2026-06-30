@@ -46,8 +46,14 @@ def test_parse_event_id_empty_string_is_none() -> None:
     assert parser.parse_event_id({"event_id": "", "id": ""}) is None
 
 
-def test_parse_event_id_non_string_is_none() -> None:
-    assert parser.parse_event_id({"event_id": 123}) is None
+def test_parse_event_id_numeric_is_coerced_to_str() -> None:
+    # ADR-047: id-like fields may arrive as a bare int -> coerced to str (was None before).
+    assert parser.parse_event_id({"event_id": 123}) == "123"
+
+
+def test_parse_event_id_list_value_is_none() -> None:
+    # A non-string / non-int value (list) is still ignored -> None.
+    assert parser.parse_event_id({"event_id": [1, 2]}) is None
 
 
 # --------------------------- event_type ---------------------------
@@ -61,8 +67,14 @@ def test_parse_event_type_missing_returns_empty() -> None:
     assert parser.parse_event_type({}) == ""
 
 
-def test_parse_event_type_non_string_returns_empty() -> None:
-    assert parser.parse_event_type({"event_type": 5}) == ""
+def test_parse_event_type_numeric_is_coerced_and_lowered() -> None:
+    # ADR-047: the shared _first_str helper now coerces a bare int; event_type=5 -> "5"
+    # (harmless: "5" is not in KNOWN_EVENTS so it still echoes as ignored).
+    assert parser.parse_event_type({"event_type": 5}) == "5"
+
+
+def test_parse_event_type_list_value_returns_empty() -> None:
+    assert parser.parse_event_type({"event_type": [1]}) == ""
 
 
 # --------------------------- customer_user_id ---------------------------
@@ -168,14 +180,29 @@ def test_parse_expires_at_missing_returns_none() -> None:
 
 
 def test_known_events_set_contents() -> None:
+    # ADR-047 reworked the event sets: trial_started joins GRANTING, *_renewal_cancelled form NOOP,
+    # and access_level_updated is the conditional event. KNOWN_EVENTS is their union.
     assert set(parser.KNOWN_EVENTS) == {
+        "trial_started",
         "subscription_started",
         "subscription_renewed",
         "subscription_cancelled",
         "subscription_expired",
+        "subscription_renewal_cancelled",
+        "trial_renewal_cancelled",
+        "access_level_updated",
     }
-    assert set(parser.GRANTING_EVENTS) == {"subscription_started", "subscription_renewed"}
+    assert set(parser.GRANTING_EVENTS) == {
+        "trial_started",
+        "subscription_started",
+        "subscription_renewed",
+    }
     assert set(parser.EXPIRING_EVENTS) == {"subscription_cancelled", "subscription_expired"}
+    assert set(parser.NOOP_EVENTS) == {
+        "subscription_renewal_cancelled",
+        "trial_renewal_cancelled",
+    }
+    assert set(parser.CONDITIONAL_EVENTS) == {"access_level_updated"}
 
 
 # --------------------------- product-tier resolution (_tier_for) ---------------------------

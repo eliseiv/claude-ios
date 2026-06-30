@@ -312,9 +312,9 @@
 | 200 | `duplicate` | повтор `event_id` |
 | 200 | `applied` | событие применено |
 
-**События (4):** `subscription_started`/`subscription_renewed` → `subscriptions.status=active` (+`plan`,`expiresAt`) + грант кредитов по тиру (идемпотентно `adapty-event:{event_id}`); `subscription_cancelled`/`subscription_expired` → `status=expired`, кредиты не трогаются.
+**События (реальный формат Adapty, ADR-047):** GRANTING (`trial_started`/`subscription_started`/`subscription_renewed`/`access_level_updated`@`is_active=true,premium`) → `subscriptions.status=active` (+`plan`,`expiresAt` из `subscription_expires_at`) + грант кредитов по тиру; EXPIRING (`subscription_expired`/`subscription_cancelled`/`access_level_updated`@`is_active=false`) → `status=expired`, кредиты не трогаются; NOOP (`subscription_renewal_cancelled`/`trial_renewal_cancelled`) → доступ НЕ отзывается, кредиты не трогаются.
 
-**Идемпотентность:** UNIQUE `adapty_webhook_events.event_id` + UNIQUE ledger `idempotency_key` в одной транзакции; сбой → откат → `5xx` → ретрай Adapty → чистая переобработка. Детали — [modules/billing-adapty/02-api-contracts.md](modules/billing-adapty/02-api-contracts.md).
+**Идемпотентность (ADR-047):** дедуп события — UNIQUE `adapty_webhook_events.event_id` (=`profile_event_id`); грант — **один на период** через ledger `adapty-txn:{transaction_id}` (не по `event_id`: одна покупка = несколько событий с одним `transaction_id`). Одна транзакция; сбой → откат → `5xx` → ретрай Adapty → чистая переобработка. Детали — [modules/billing-adapty/02-api-contracts.md](modules/billing-adapty/02-api-contracts.md).
 
 ---
 

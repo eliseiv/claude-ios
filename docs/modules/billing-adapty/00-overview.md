@@ -7,8 +7,8 @@
 - Эндпоинт `POST /v1/billing/adapty/webhook`.
 - Статическая bearer-авторизация (constant-time), изолированный per-instance секрет.
 - Дефенсивный приём сырого тела + ручной парсинг (без Pydantic-валидации тела).
-- 4 типа событий: `subscription_started`, `subscription_renewed`, `subscription_cancelled`, `subscription_expired`.
-- Идемпотентность через таблицу `adapty_webhook_events` (UNIQUE `event_id`) + ledger idempotency-key.
+- События (реальный набор Adapty, [ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)): GRANTING (`trial_started`/`subscription_started`/`subscription_renewed`/`access_level_updated`@premium), EXPIRING (`subscription_expired`/`subscription_cancelled`/`access_level_updated`@is_active=false), NOOP (`subscription_renewal_cancelled`/`trial_renewal_cancelled` — доступ не отзывается).
+- Идемпотентность ([ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)): дедуп события (`adapty_webhook_events.event_id`=`profile_event_id`) + грант **один на период** (ledger `adapty-txn:{transaction_id}`).
 - Тир `vendor_product_id → tokens` (config-карта + fallback).
 - Audit `adapty_subscription`.
 

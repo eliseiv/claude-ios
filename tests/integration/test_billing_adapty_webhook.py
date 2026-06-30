@@ -369,10 +369,13 @@ async def test_subscription_started_grant_uses_exact_idempotency_key_and_meta(
         ).one()
     assert row.type == "credit"
     assert int(row.amount) == 12000
-    assert row.idempotency_key == "adapty-event:evt-key-1"
-    # The grant meta carries the adapty event provenance (the wallet records `reason` in the
-    # billing_credit audit row, not in the ledger meta).
-    assert row.meta["adaptyEventId"] == "evt-key-1"
+    # ADR-047: grant idempotency key is adapty-txn:{txn}, txn = transaction_id ‖
+    # original_transaction_id ‖ event_id. This payload carries no transaction id -> txn falls back
+    # to the event_id ("evt-key-1").
+    assert row.idempotency_key == "adapty-txn:evt-key-1"
+    # The grant meta carries the per-period transaction id + event provenance (the wallet records
+    # `reason` in the billing_credit audit row, not in the ledger meta).
+    assert row.meta["transactionId"] == "evt-key-1"
     assert row.meta["eventType"] == "subscription_started"
     assert row.meta["vendorProductId"] == "pro_yearly"
 
