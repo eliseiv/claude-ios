@@ -7,6 +7,7 @@ Strict Pydantic schemas (extra='forbid'). The admin secret is never logged.
 
 from __future__ import annotations
 
+import datetime
 import uuid
 from typing import Annotated
 
@@ -22,6 +23,8 @@ from app.schemas.admin import (
     AdminGrantRequest,
     AdminGrantResponse,
     AdminLedgerTxView,
+    AdminSubscriptionGrantRequest,
+    AdminSubscriptionGrantResponse,
     AdminWalletResponse,
 )
 
@@ -78,6 +81,50 @@ async def admin_wallet_grant(
         reason=body.reason,
     )
     return AdminGrantResponse(
+        newBalance=result.new_balance,
+        ledgerTxId=result.ledger_tx_id,
+        idempotentReplay=result.idempotent_replay,
+    )
+
+
+@router.post(
+    "/subscription/grant",
+    response_model=AdminSubscriptionGrantResponse,
+    summary="Активировать подписку пользователю",
+    description=(
+        "Активирует или продлевает подписку пользователю без покупки в App Store "
+        "(саппорт/компенсация/тестирование) и по умолчанию начисляет стандартный пакет кредитов "
+        "того же запроса. Авторизация — заголовок `X-Admin-Token`. Срок задаётся ровно одним из "
+        "полей: `expiresAt` (точная дата, строго в будущем) либо `days` (число дней от текущего "
+        "момента). Начисление идемпотентно по `idempotencyKey`; тот же ключ с другим значением "
+        "`credits` — `409`. Несуществующий `userId` — `404 user_not_found`."
+    ),
+)
+async def admin_subscription_grant(
+    request: Request,
+    admin: Annotated[AdminService, Depends(get_admin_service)],
+    body: Annotated[AdminSubscriptionGrantRequest, Body()],
+) -> AdminSubscriptionGrantResponse:
+    _enforce_admin_body_size(request)
+    await _enforce_admin_rate_limit(request)
+    expires_at = body.expiresAt
+    if expires_at is None:
+        days = body.days
+        if days is None:  # pragma: no cover - request validator guarantees exactly one is set
+            raise ValueError("either 'expiresAt' or 'days' must be provided")
+        expires_at = datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=days)
+    result = await admin.grant_subscription(
+        user_id=body.userId,
+        expires_at=expires_at,
+        plan=body.plan if body.plan is not None else "manual_grant",
+        idempotency_key=body.idempotencyKey,
+        credits=body.credits,
+    )
+    return AdminSubscriptionGrantResponse(
+        status=result.status,
+        expiresAt=result.expires_at,
+        plan=result.plan,
+        creditsGranted=result.credits_granted,
         newBalance=result.new_balance,
         ledgerTxId=result.ledger_tx_id,
         idempotentReplay=result.idempotent_replay,

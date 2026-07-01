@@ -11,7 +11,7 @@ AuditEvent = {
   eventType: str,          # tool_mutation | billing_debit | billing_credit |
                            # policy_decision | byok_change | subscription_change |
                            # chat_step | tool_call_initiated | tool_call_completed |
-                           # admin_grant
+                           # admin_grant | admin_subscription_grant
   payload: dict            # без секретов
 }
 ```
@@ -30,3 +30,4 @@ AuditEvent = {
 | `chat_step` | Orchestrator | — |
 | `tool_call_initiated` / `tool_call_completed` | Orchestrator | — |
 | `admin_grant` | Admin (начисление кредитов оператором; actor=admin, reason, без секрета) | — |
+| `admin_subscription_grant` | Admin (ручная активация/продление подписки; actor=admin, plan/status/expiresAt/creditsGranted, без секрета; [ADR-048](../../adr/ADR-048-admin-subscription-grant.md)) | — |

@@ -43,6 +43,46 @@ sequenceDiagram
     end
 ```
 
+## Поток subscription/grant (ADR-048)
+Активация/продление подписки **без** StoreKit-транзакции — для саппорта/компенсации/теста ([ADR-048](../../adr/ADR-048-admin-subscription-grant.md)).
+Мотивация: по [ADR-002](../../adr/ADR-002-access-policy-state-machine.md) при `subscription_status=none` кредиты не проверяются (блок `trial_used` при ненулевом балансе) — начисления кредитов мало, нужна активная подписка.
+```mermaid
+sequenceDiagram
+    participant OP as Operator
+    participant GW as API Gateway (/v1/admin)
+    participant ADM as Admin Service
+    participant DB as subscriptions
+    participant W as Wallet
+    participant AU as Audit
+
+    OP->>GW: POST /v1/admin/subscription/grant (X-Admin-Token, {userId, expiresAt|days, plan?, idempotencyKey, credits?})
+    GW->>GW: require_admin (constant-time); admin rate limit; body <= 8 KB; extra=forbid; ровно один из expiresAt/days; expiresAt > now()
+    alt токен невалиден
+        GW-->>OP: 401
+    else токен валиден
+        GW->>ADM: grant_subscription(userId, expires_at, plan, idempotencyKey, credits)
+        ADM->>ADM: _require_user_exists(userId)
+        alt userId не существует
+            ADM-->>OP: 404 user_not_found
+        else существует
+            ADM->>DB: upsert subscriptions (status='active', plan, expires_at) — без StoreKit-verify
+            opt эффективные credits > 0 (по умолчанию SUBSCRIPTION_CREDITS_PER_PERIOD)
+                ADM->>W: WalletService.grant(user_id, credits, key="admin-sub-grant:{idempotencyKey}", meta{reason})
+                W->>AU: audit billing_credit (idempotent)
+            end
+            ADM->>AU: audit admin_subscription_grant (actor=admin, plan, status, expiresAt, creditsGranted; БЕЗ секрета)
+            ADM-->>OP: 200 {status, expiresAt, plan, creditsGranted, newBalance?, ledgerTxId?, idempotentReplay?}
+        end
+    end
+```
+- **Upsert напрямую в AdminService** (ORM `Subscription`, `self._session`), **не** через `SubscriptionService` (тот неразрывно связывает upsert с StoreKit-verify — единая ответственность verify→normalize→upsert→grant→audit). Небольшое дублирование трёх присваиваний — сознательный размен ради изоляции verify-less admin-пути; [Q-048-2](../../99-open-questions.md) (не блокер).
+- **lazy-expiry учтён:** `expiresAt` требуется строго в будущем — иначе policy-loader (`_effective_subscription_status`) трактовал бы `active` с прошлой датой как `expired`, и грант не снял бы блок.
+- **Дефолт `credits`** = `SUBSCRIPTION_CREDITS_PER_PERIOD` (не 0): подписка `active` + баланс 0 = блок `credits_empty`; дефолт-0 не дал бы рабочего доступа «одним запросом». Явный `0` = активировать без начисления.
+- Всё в одной транзакции запроса; частичного применения нет.
+
+## Рост admin-surface (ADR-048)
+Теперь **две** мутирующие admin-операции (`wallet/grant`, `subscription/grant`) под одним общим `ADMIN_API_SECRET` без scope/least-privilege ([ADR-009](../../adr/ADR-009-admin-token-auth.md) §Consequences). Приемлемо при узком круге операторов; атрибуция/least-privilege — [Q-009-1](../../99-open-questions.md) при дальнейшем росте surface.
+
 ## Несуществующий userId — решение
 Admin-grant **не создаёт** пользователей (обоснование — [02-api-contracts.md §Обоснование](02-api-contracts.md#обоснование-404-на-несуществующем-userid-не-admin-provisioning)).
 Проверка существования `users(userId)` выполняется **до** вызова `WalletService.grant` (который сам делает `_ensure_wallet`,

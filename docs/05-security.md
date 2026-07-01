@@ -45,6 +45,7 @@
 - **Ротация:** два активных секрета на grace-период — `ADMIN_API_SECRET` (основной) + опц. `ADMIN_API_SECRET_PREV`.
 - Защита admin-API: отдельный rate limit (дефолт 10 req/min per source IP), `extra='forbid'`, тело ≤ 8 KB.
 - `X-Admin-Token` — в redaction allowlist (никогда не логируется).
+- **Admin-surface ([ADR-048](adr/ADR-048-admin-subscription-grant.md)):** мутирующих admin-операций теперь **две** — `POST /v1/admin/wallet/grant` (кредиты) и `POST /v1/admin/subscription/grant` (активация подписки без StoreKit) — под одним общим `ADMIN_API_SECRET` без scope/least-privilege. Обе пишут admin-audit (`admin_grant` / `admin_subscription_grant`, actor=admin, **без** секрета), обе под тем же rate-limit / 8 KB-cap / `require_admin` / user-not-found-404. Изоляция от пользовательского JWT сохранена. Least-privilege/атрибуция при дальнейшем росте surface — [Q-009-1](99-open-questions.md).
 
 ## Adapty webhook-авторизация (изолированная, без HMAC-подписи payload, ADR-029)
 См. [ADR-029](adr/ADR-029-adapty-subscription-webhook.md), [ADR-047](adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md) (реальный формат payload/маппинг/идемпотентность), [modules/billing-adapty](modules/billing-adapty/README.md).
@@ -208,7 +209,7 @@ Inline base64-payload крупного файла превышает общий 
 | Абуз ретраями Adapty (шторм не-2xx) | После авторизации любой кривой payload → `2xx ignored`; `5xx` только при реальном сбое. Сырое тело без Pydantic (нет `422` на пинг/дрейф). |
 | Двойное начисление подписки (Adapty + StoreKit sync) | Разные idempotency-ключи (`adapty-txn:*` ([ADR-047](adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)) vs `sub-grant:*`) НЕ защищают между путями. Митигация контрактом: клиент использует ОДИН путь подписок ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)). В пределах Adapty-пути: дедуп события (`profile_event_id`) + ledger `adapty-txn:{transaction_id}` = **один грант на период** ([ADR-047](adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)). |
 | Эскалация до admin через пользовательский JWT | Изолированный `ADMIN_API_SECRET`/`X-Admin-Token`, отдельная `require_admin`; нет роли admin в JWT; разные секреты (ADR-009). |
-| Утечка/подделка admin-секрета | Constant-time compare, ротация (PREV-секрет), redaction `X-Admin-Token`, отдельный rate limit, audit `admin_grant`. |
+| Утечка/подделка admin-секрета | Constant-time compare, ротация (PREV-секрет), redaction `X-Admin-Token`, отдельный rate limit, audit `admin_grant` / `admin_subscription_grant` ([ADR-048](adr/ADR-048-admin-subscription-grant.md)). |
 | Начисление на «фантомный» userId (опечатка) | Admin-grant не создаёт пользователей: несуществующий `userId` → `404` (ADR-009 / [Q-009-2](99-open-questions.md)). |
 | Подделка/истечение preview URL | HMAC под `PREVIEW_URL_SECRET` + TTL, constant-time проверка → `403` (ADR-010). |
 | Доступ к чужому проекту через превью | `ownerUserId` в подписи + сверка с `projects.user_id`; чужой → `404`. |

@@ -47,6 +47,60 @@ per source IP, конфигурируемо), `extra='forbid'`, тело ≤ 8 K
 - **Несуществующий userId → `404 {error.code:"user_not_found"}`** (admin-grant **не создаёт** пользователей — см. 03-architecture; обоснование ниже).
 - `reason` отсутствует/пустой → `422`.
 
+## POST /v1/admin/subscription/grant
+Ручная активация/продление подписки пользователю (саппорт/компенсация/тестирование) — **без** StoreKit-транзакции ([ADR-048](../../adr/ADR-048-admin-subscription-grant.md)).
+Зачем отдельно от `wallet/grant`: по [ADR-002](../../adr/ADR-002-access-policy-state-machine.md) при `subscription_status=none` кредиты **не проверяются** — пользователь блокируется по `trial_used`
+**даже с ненулевым балансом**, поэтому одного начисления кредитов недостаточно, нужна активная подписка.
+
+### Headers
+- `X-Admin-Token: <ADMIN_API_SECRET>` (обязателен).
+
+### Request
+```json
+{
+  "userId": "uuid",
+  "expiresAt": "2026-12-31T23:59:59Z",
+  "days": 30,
+  "plan": "manual_grant",
+  "idempotencyKey": "string",
+  "credits": 1000
+}
+```
+- `userId` — UUID существующего пользователя. Отсутствует → `404 user_not_found` (admin **не создаёт** пользователей, [ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)).
+- Срок — **ровно одно** из `expiresAt` / `days` (оба или ни одного → `422`):
+  - `expiresAt` — ISO8601 datetime, **tz-aware** и **строго в будущем** (`> now()`). В прошлом/naive → `422`. Требование «в будущем» обязательно: policy-loader (`src/app/policy/loader.py`) применяет lazy-expiry — `active` c `expires_at <= now()` трактуется как `expired`, т.е. грант в прошлое не дал бы доступа.
+  - `days` — положительный int (`> 0`); сервер вычисляет `expires_at = now() + days`. `≤ 0` → `422`.
+- `plan` — опц. строка (`max_length` 128), метка плана. Дефолт `"manual_grant"`.
+- `idempotencyKey` — **обязателен**, непустая строка (`max_length` 128). Ключ идемпотентности начисления кредитов.
+- `credits` — опц. int `≥ 0`. **Опущено (null) → `SUBSCRIPTION_CREDITS_PER_PERIOD`** (тот же пакет, что даёт реальный период — активированная подписка сразу рабочая). Явный `0` → активировать подписку **без** начисления (у пользователя уже есть баланс). `< 0` → `422`.
+
+### Response (200)
+```json
+{
+  "status": "active",
+  "expiresAt": "2026-12-31T23:59:59Z",
+  "plan": "manual_grant",
+  "creditsGranted": 1000,
+  "newBalance": 1100,
+  "ledgerTxId": "uuid",
+  "idempotentReplay": false
+}
+```
+- `status` — новый статус подписки (`"active"`).
+- `expiresAt` — эффективный момент истечения (из `expiresAt` или `now()+days`), ISO8601 | `null`.
+- `plan` — записанный план | `null`.
+- `creditsGranted` — эффективно начисленная сумма (0, если не начислялось).
+- `newBalance` / `ledgerTxId` / `idempotentReplay` — присутствуют (не `null`) **только** при `creditsGranted > 0`; иначе `null` (ledger-транзакции нет).
+
+### Правила
+- Upsert строки `subscriptions` (PK `user_id`): `status='active'`, `plan`, `expires_at`. Прямая запись через ORM `Subscription`, **без** StoreKit-верификации (в отличие от `/v1/subscription/sync`). Idempotent по PK: повтор перезаписывает те же значения.
+- При эффективной сумме `> 0` — начисление через `WalletService.grant(...)` **как есть** (`src/app/wallet/service.py:174`): атомарно, идемпотентно по `(user_id, idempotency_key)`, ledger `credit` + audit `billing_credit`. Ledger-ключ **производный с namespace**: `admin-sub-grant:{idempotencyKey}` (не коллидирует с `admin/wallet/grant` и `sub-grant:{transaction_id}`).
+- Тот же `idempotencyKey` c **другим** `credits` → `409` (из `WalletService.grant`), активации/начисления нет.
+- **Дополнительно** пишется audit-событие `admin_subscription_grant` (actor=admin, `userId`, `plan`, `status`, `expiresAt`, `creditsGranted`, `idempotencyKey`, `ledgerTxId` при наличии). **Секрет `X-Admin-Token` не логируется/не в audit.**
+- Всё (upsert + grant + оба audit) — в **одной** транзакции запроса.
+- **Коды:** `200`; `401`; `404` (`user_not_found`); `409` (тот же `idempotencyKey`, другой `credits`); `422` (нет `userId` / оба|ни одного из `expiresAt`/`days` / `expiresAt` не tz-aware|в прошлом / `days ≤ 0` / `credits < 0` / схема); `429`; `5xx`.
+- **OpenAPI-тексты** (`summary`, `description` роута, `Field(description=...)`, тег `Admin`) — по [08-api-documentation §R2ter](../../08-api-documentation.md#r2ter-лаконичность-user-facing-текстов-для-тестировщиков): лаконичные профессиональные формулировки для оператора, **без** ссылок `ADR-`/`Q-`/`TD-` и расшифровок-аббревиатур в скобках. Внутренняя мотивация (root-cause ADR-002, обоснование дефолтов, namespace-ключ) — только здесь и в [ADR-048](../../adr/ADR-048-admin-subscription-grant.md), **не** в OpenAPI-строках.
+
 ## GET /v1/admin/wallet/{userId}
 Read-only просмотр кошелька для саппорта.
 
