@@ -65,7 +65,12 @@ def _columns(url: str, table: str) -> dict[str, bool]:
 
 
 def test_migrations_single_head() -> None:
-    """The chain has exactly ONE head; 0013 extends 0012 with its FULL revision id (ADR-044 §4)."""
+    """The chain has exactly ONE head and 0013 exists with its FULL revision id (ADR-044 §4).
+
+    Do NOT assert the head equals 0013: the head advances with every new migration (0014+). The
+    single-head invariant plus the presence of 0013's full (non-truncated) id is what this test
+    guards — independent of which revision is currently latest.
+    """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
@@ -73,7 +78,7 @@ def test_migrations_single_head() -> None:
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"expected single head, got {heads}"
-    assert heads[0] == "0013_byok_provider"
+    assert script.get_revision("0013_byok_provider").revision == "0013_byok_provider"
 
 
 def test_migration_0013_adds_nullable_provider_column(isolated_pg: str) -> None:
