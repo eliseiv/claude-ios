@@ -75,6 +75,31 @@
 - **policy-blocked не регрессировал:** policy-deny (например `credits_empty`) по-прежнему `messageStepId=null`/`stepId=null`/без `usage`.
 - **Дефолт max_tokens:** `ANTHROPIC_MAX_TOKENS` дефолт = `16000` (проверка config-дефолта); `ANTHROPIC_TIMEOUT_SECONDS` дефолт = `120`.
 
+## Unit + Integration — локализация пресетов (ADR-049)
+Реестр `chat/presets.py` и роутер `GET /v1/presets`. Ключи-хелперы: `preset_catalog(locale)`, резолвинг локали, config `presets_default_locale`.
+
+**Реестр (`preset_catalog`, pure):**
+- `preset_catalog("en")` и `preset_catalog("ru")` возвращают **7** пресетов в одинаковом порядке (declaration order); `id`/`icon` **идентичны** между локалями (не переводятся), `title`/`prompt` — различаются.
+- Паритет наборов: каждый пресет имеет непустые `title["en"]`/`prompt["en"]` (канон обязателен) и `title["ru"]`/`prompt["ru"]`.
+- **Per-field fallback:** неизвестная локаль (`preset_catalog("de")`) → EN-каталог (каждое поле = EN). (При частично заполненной локали недостающее поле берётся из EN.)
+- Все 4 поля каждого элемента непусты; `id` уникален.
+
+**Резолвинг локали (helper, чистый):**
+- query `?locale=ru` → `ru`; `?locale=en` → `en`; `?locale=RU`/` ru ` (нормализация) → `ru`.
+- явный `?locale=de` (вне набора) → **`422`** (`unsupported`), НЕ тихий fallback.
+- нет query, `Accept-Language: ru-RU,en;q=0.8` → `ru`; `en-US` → `en`; `fr` (нет поддерживаемого) → следующий шаг (тихо).
+- нет query, `Accept-Language` пуст/нераспознан + `PRESETS_DEFAULT_LOCALE=ru` → `ru`; без env → `en`.
+- приоритет: query важнее `Accept-Language` важнее env важнее `en`.
+
+**Config (`presets_default_locale`):**
+- `PRESETS_DEFAULT_LOCALE=ru` → дефолт `ru`; не задан → `en`; вне набора (`PRESETS_DEFAULT_LOCALE=zz`) → graceful `en` (+ WARNING), НЕ исключение на старте.
+
+**Роутер (`GET /v1/presets`, integration):**
+- ответ содержит поле `locale` = фактически отданная локаль; при `?locale=ru` → `locale:"ru"` и русские `title`/`prompt`.
+- без параметров и без env → `locale:"en"` + EN-тексты (обратная совместимость с ADR-035).
+- `422` на `?locale=<вне набора>`; `401` без JWT; `429` rate-limit (как ADR-035).
+- порядок элементов стабилен во всех локалях.
+
 ## E2E (AC-4)
 - Полный tool-loop: run → tool_call → tool-result → tool_call → ... → assistant_message (≥2 итерации).
 - **Server-side tool-loop continuation (BUG-5 регресс, live):** website-builder `site.*` multi-round tool-loop с реальным Claude → реконструкция диалога корректна (нет orphan tool_result, нет Anthropic 400/502). Покрывается live e2e website-builder после восстановления org Anthropic (см. memory/deployment-state).

@@ -278,6 +278,13 @@ class Settings(BaseSettings):
     # false in prod so the API surface is not publicly exposed (05-security.md).
     docs_enabled: bool = Field(default=True, alias="DOCS_ENABLED")
 
+    # --- Prompt presets localization (ADR-049) ---
+    # Per-instance default locale for GET /v1/presets (avelyra=ru, others=en). Public, not a
+    # secret (ADR-017). Default "en" = current behavior (unset env → EN, backward-compatible).
+    # A value outside SUPPORTED_PRESET_LOCALES degrades gracefully to "en" (+ WARNING log), never
+    # a startup crash — read via resolved_presets_default_locale(), not the raw field.
+    presets_default_locale: str = Field(default="en", alias="PRESETS_DEFAULT_LOCALE")
+
     # --- Observability ---
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     otel_exporter_otlp_endpoint: str = Field(default="", alias="OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -477,6 +484,28 @@ class Settings(BaseSettings):
             value = value[len("http://") :]
         value = value.strip("/")
         return value
+
+    def resolved_presets_default_locale(self) -> str:
+        """Per-instance default locale for GET /v1/presets, validated gracefully (ADR-049 §4).
+
+        Normalizes ``presets_default_locale`` (``strip().lower()``) and returns it if it is in
+        ``SUPPORTED_PRESET_LOCALES``. A value outside the set degrades to ``DEFAULT_PRESET_LOCALE``
+        (``"en"``) and logs a WARNING — mis-configured env falls back to a safe default instead of
+        crashing the process, mirroring ``token_products()``/``allowed_models_for()`` (ADR-034 §1).
+        Pure (no I/O). Cached via get_settings()'s lru_cache; the WARNING fires once per process.
+        """
+        from app.chat.presets import DEFAULT_PRESET_LOCALE, SUPPORTED_PRESET_LOCALES
+        from app.observability.logging import get_logger
+
+        normalized = self.presets_default_locale.strip().lower()
+        if normalized in SUPPORTED_PRESET_LOCALES:
+            return normalized
+        get_logger("app.config").warning(
+            "PRESETS_DEFAULT_LOCALE=%r is not a supported locale; falling back to %r",
+            self.presets_default_locale,
+            DEFAULT_PRESET_LOCALE,
+        )
+        return DEFAULT_PRESET_LOCALE
 
     def trusted_proxy_networks(self) -> tuple[_IpNetwork, ...]:
         """Parse TRUSTED_PROXY_IPS (comma-separated IPs/CIDRs) into networks.

@@ -389,26 +389,40 @@ Backend только инициирует tool-call; исполняет клие
 ### Auth
 - **JWT-protected** (как `GET /v1/tools`/`GET /v1/models`): `Authorization: Bearer <JWT>` обязателен. Каталог не секретен, контур авторизации единый. Per-user rate-limit как у прочих read-эндпоинтов (`enforce_other_limits`). Метод `GET` (read-only, без побочных эффектов: не создаёт сессию, не пишет ledger/audit).
 
+### Query-параметры (локализация, [ADR-049](../../adr/ADR-049-presets-localization.md))
+- **`locale` (опц., str).** Явный выбор локали каталога. Допустимый набор — поддерживаемые локали (`en`, `ru`; расширяется). Нормализуется `strip().lower()`. **Явно указанное значение вне набора → `422`** (`"locale '<x>' is not supported"`) — симметрично строгому `422 unsupported_model` ([ADR-034 §3](#model-опц-session-fixed-adr-034)); молчаливой подмены явного запроса нет.
+
+### Резолвинг локали (порядок, [ADR-049 §3](../../adr/ADR-049-presets-localization.md))
+Первый сработавший шаг выигрывает:
+1. **Query `?locale=`** — валидное значение из набора; невалидное → `422` (см. выше).
+2. **`Accept-Language`** (если query нет) — первый **поддерживаемый** primary-subtag: значение делится по `,`, отбрасывается `;q=...`, берётся часть до `-` в lower (`ru-RU`→`ru`, `en-US`→`en`); первый subtag из набора — результат. Ни одного поддерживаемого / пусто / нераспознано → **тихий fallback** к шагу 3 (заголовок не строго клиент-контролируем → без `422`).
+3. **`PRESETS_DEFAULT_LOCALE`** — per-instance дефолт (env, [07-deployment.md](../../07-deployment.md#конфигурация-env); avelyra=`ru`, остальные=`en`). Значение env вне набора → graceful fallback `en` + WARNING (не startup-crash).
+4. **`en`** — финальный fallback (канон).
+
 ### Response (200)
 ```json
 {
+  "locale": "ru",
   "presets": [
     {
       "id": "plan_week",
-      "title": "Plan Week",
+      "title": "Планирование недели",
       "icon": "calendar",
-      "prompt": "Help me plan my upcoming week. Ask me about my priorities, deadlines, and commitments, then propose a balanced day-by-day schedule."
+      "prompt": "Помоги спланировать предстоящую неделю. Расспроси меня о приоритетах, сроках и обязательствах, а затем предложи сбалансированное расписание по дням."
     }
   ]
 }
 ```
-- `id` — стабильный slug (`[a-z0-9_]`, snake_case), уникален в наборе; стабилен между релизами.
-- `title` — отображаемое имя чипа.
-- `icon` — имя **SF Symbol** (например `calendar`, `doc.text`, `camera`); клиент рендерит `Image(systemName:)`, при отсутствии символа — клиентский fallback. Не emoji ([ADR-035 §4](../../adr/ADR-035-prompt-presets-endpoint.md)).
-- `prompt` — plain-text, подставляется в композер при тапе (без шаблонов/плейсхолдеров на старте).
-- Порядок элементов = порядок чипов на экране (детерминированный, порядок объявления в реестре). Все 4 поля обязательны и непусты.
-- Локализация отсутствует на старте — единый язык (EN), без `Accept-Language`-ветвления ([ADR-035 §5](../../adr/ADR-035-prompt-presets-endpoint.md), [Q-035-2](../../99-open-questions.md)).
+- `locale` ([ADR-049 §5](../../adr/ADR-049-presets-localization.md), **аддитивно**) — фактически отданная локаль (из поддерживаемого набора; результат резолвинга). Старые клиенты игнорируют поле.
+- `id` — стабильный slug (`[a-z0-9_]`, snake_case), уникален в наборе; стабилен между релизами. **Не локализуется** (общий для всех локалей).
+- `title` — отображаемое имя чипа (на выбранной локали).
+- `icon` — имя **SF Symbol** (например `calendar`, `doc.text`, `camera`); клиент рендерит `Image(systemName:)`, при отсутствии символа — клиентский fallback. Не emoji ([ADR-035 §4](../../adr/ADR-035-prompt-presets-endpoint.md)). **Не локализуется** (стабильный ресурс iOS).
+- `prompt` — plain-text (на выбранной локали), подставляется в композер при тапе (без шаблонов/плейсхолдеров на старте).
+- Порядок элементов = порядок чипов на экране (детерминированный, порядок объявления в реестре) — **един во всех локалях**. Все 4 поля пресета обязательны и непусты.
+- **Per-field EN-fallback:** если у выбранной локали не заполнено какое-то поле пресета, оно берётся из EN (канон); незаполненная/неизвестная локаль целиком → EN-каталог.
 
-**Дефолтный набор (7, со скрина):** `plan_week` (Plan Week), `meeting_notes` (Meeting Notes), `tasks_from_photo` (Tasks from Photo), `design_brief` (Design Brief), `daily_review` (Daily Review), `summarize_text` (Summarize Text), `project_structure` (Project Structure) — тексты/иконки в [ADR-035 §3](../../adr/ADR-035-prompt-presets-endpoint.md).
+**Дефолтный набор (7, со скрина):** `plan_week`, `meeting_notes`, `tasks_from_photo`, `design_brief`, `daily_review`, `summarize_text`, `project_structure` — EN-тексты в [ADR-035 §3](../../adr/ADR-035-prompt-presets-endpoint.md), RU-тексты в [ADR-049 §1.1](../../adr/ADR-049-presets-localization.md).
 
-**Коды:** `200`; `401` нет/невалидный JWT; `429` rate-limit.
+**Совместимость:** без env и без запроса локали (`locale` отсутствует, `Accept-Language` без поддерживаемых, дефолт `en`) → EN-ответ как раньше; поле `locale` при этом = `"en"`. Без миграции; провайдер-агностично ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)).
+
+**Коды:** `200`; `401` нет/невалидный JWT; `422` явный `?locale=` вне набора; `429` rate-limit.

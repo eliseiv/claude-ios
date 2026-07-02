@@ -1,7 +1,8 @@
 # ADR-035 — Пресеты промтов: статический реестр + `GET /v1/presets`
 
-- **Статус:** Accepted
+- **Статус:** Accepted (локализация — ревизия 2026-07-02 → [ADR-049](ADR-049-presets-localization.md))
 - **Дата:** 2026-06-17
+- **Ревизия:** §5 «Локализация — без i18n на старте» **пересмотрена** [ADR-049](ADR-049-presets-localization.md) (2026-07-02): `GET /v1/presets` локализуется (per-locale `title`/`prompt`, per-instance `PRESETS_DEFAULT_LOCALE` + `?locale=`/`Accept-Language`; `id`/`icon` не переводятся). Тело ADR-035 ниже не переписано (immutability) — актуальная локализация в [ADR-049](ADR-049-presets-localization.md).
 - **Связано:** [ADR-019](ADR-019-tools-catalog-endpoint.md) (паттерн JWT-protected статического каталога — образец), [ADR-034](ADR-034-user-model-selection.md) (Поставка 1 плана model/presets; паттерн `GET /v1/models`), [ADR-001](ADR-001-stack-choice.md) (стек/модульный монолит), [ADR-033](ADR-033-llm-provider-abstraction.md) (провайдер-агностичность инстансов), [ADR-017](ADR-017-shared-server-traefik-deploy.md) (мульти-инстанс), [Q-016-1](../99-open-questions.md) (Actions/styles — клиентские пресеты), [Q-034-2](../99-open-questions.md) (presets как надстройка)
 
 ## Контекст

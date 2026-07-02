@@ -1,7 +1,9 @@
-"""Presets-catalog schema for GET /v1/presets (chat-orchestrator/02, ADR-035).
+"""Presets-catalog schema for GET /v1/presets (chat-orchestrator/02, ADR-035, ADR-049).
 
 Provider-agnostic, read-only contract: the static prompt-preset registry as a list of
-``{id, title, icon, prompt}`` items. No state, no DB; identical on every instance (ADR-033).
+``{id, title, icon, prompt}`` items plus the resolved ``locale``. No state, no DB; identical on
+every instance for a given locale (ADR-033). ``title``/``prompt`` are localized (ADR-049); ``id``/
+``icon`` are stable across locales.
 """
 
 from __future__ import annotations
@@ -30,6 +32,13 @@ class PresetInfo(StrictModel):
 
 
 class PresetsResponse(StrictModel):
+    locale: str = Field(
+        description=(
+            "Язык каталога, фактически применённый к текстам `title` и `prompt` "
+            "(из числа поддерживаемых, например `en` или `ru`)."
+        ),
+        examples=["en"],
+    )
     presets: list[PresetInfo] = Field(
         description=(
             "Каталог пресетов промтов для чипов на главном экране чата (порядок = порядок чипов)."
