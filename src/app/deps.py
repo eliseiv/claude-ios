@@ -20,6 +20,7 @@ from app.auth.apple import get_apple_verifier
 from app.auth.issuer import TokenIssuer
 from app.auth.service import AuthService
 from app.billing_adapty.service import AdaptyWebhookService
+from app.billing_cloudpayments.service import CloudPaymentsWebhookService
 from app.byok.kms import get_kms_client
 from app.byok.service import BYOKService
 from app.chat.global_tools import GlobalToolHandlers, SystemClock
@@ -165,6 +166,16 @@ def get_token_purchase_service(session: DbSession) -> TokenPurchaseService:
 def get_adapty_webhook_service(session: DbSession) -> AdaptyWebhookService:
     audit = AuditService(session)
     return AdaptyWebhookService(
+        session,
+        WalletService(session, audit),
+        audit,
+        get_settings(),
+    )
+
+
+def get_cloudpayments_webhook_service(session: DbSession) -> CloudPaymentsWebhookService:
+    audit = AuditService(session)
+    return CloudPaymentsWebhookService(
         session,
         WalletService(session, audit),
         audit,

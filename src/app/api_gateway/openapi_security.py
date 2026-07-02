@@ -56,3 +56,16 @@ adapty_webhook_scheme = HTTPBearer(
         "JWT и НЕ admin-токен. Реальная constant-time проверка — на сервере."
     ),
 )
+
+# scheme_name fixes the OpenAPI components.securitySchemes key to `cloudPaymentsWebhook`.
+# HTTP Bearer documents the static webhook secret; the real constant-time check stays in
+# require_cloudpayments_webhook (ADR-050). Separate from bearerAuth / adminToken / adaptyWebhook.
+cloudpayments_webhook_scheme = HTTPBearer(
+    scheme_name="cloudPaymentsWebhook",
+    auto_error=False,
+    description=(
+        "Статический bearer-секрет платёжного вебхука (`CLOUDPAYMENTS_WEBHOOK_TOKEN`). Вызывает "
+        "платёжный агрегатор, не клиент. Введите секрет как `Bearer <secret>` через Authorize. НЕ "
+        "пользовательский JWT и НЕ admin-токен. Реальная constant-time проверка — на сервере."
+    ),
+)

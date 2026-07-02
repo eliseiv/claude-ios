@@ -20,6 +20,7 @@ from app.api_gateway.routers import (
     admin,
     auth,
     billing_adapty,
+    billing_cloudpayments,
     byok,
     chat,
     chats,
@@ -231,6 +232,7 @@ def create_app() -> FastAPI:
         profile,
         preferences,
         billing_adapty,
+        billing_cloudpayments,
     ):
         app.include_router(module.router)
     app.include_router(health.router)

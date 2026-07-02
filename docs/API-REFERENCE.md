@@ -43,6 +43,7 @@
 | **Admin** | Операторские/саппорт-инструменты, `/v1/admin/*` | статический секрет | `X-Admin-Token: <ADMIN_API_SECRET>` | `adminToken` (apiKey, header `X-Admin-Token`) |
 | **Preview** | Браузер (открывает превью сайта) | подпись внутри URL (HMAC+TTL) | нет — авторизация в самой ссылке | — (публичный по signed URL) |
 | **Adapty webhook** | Сервис Adapty (M2M), `/v1/billing/adapty/webhook` | статический bearer-секрет (без HMAC-подписи payload) | `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` | отдельная http-bearer схема ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)) |
+| **CloudPayments webhook** | Агрегатор broadapps/YooKassa (M2M, RU-путь), `/v1/billing/cloudpayments/webhook` | статический bearer-секрет (без HMAC-подписи payload) | `Authorization: Bearer <CLOUDPAYMENTS_WEBHOOK_TOKEN>` | отдельная http-bearer схема ([ADR-050](adr/ADR-050-cloudpayments-webhook.md)); активен только на avelyra |
 
 > Эндпоинты выпуска токена `/v1/auth/register|token|refresh|apple` и `GET /v1/auth/jwks` — **public** (без `Authorization`): это точка получения JWT. Защита — per-IP rate-limit. См. [§21](#21-auth-выпуск-токена).
 
@@ -315,6 +316,29 @@
 **События (реальный формат Adapty, ADR-047):** GRANTING (`trial_started`/`subscription_started`/`subscription_renewed`/`access_level_updated`@`is_active=true,premium`) → `subscriptions.status=active` (+`plan`,`expiresAt` из `subscription_expires_at`) + грант кредитов по тиру; EXPIRING (`subscription_expired`/`subscription_cancelled`/`access_level_updated`@`is_active=false`) → `status=expired`, кредиты не трогаются; NOOP (`subscription_renewal_cancelled`/`trial_renewal_cancelled`) → доступ НЕ отзывается, кредиты не трогаются.
 
 **Идемпотентность (ADR-047):** дедуп события — UNIQUE `adapty_webhook_events.event_id` (=`profile_event_id`); грант — **один на период** через ledger `adapty-txn:{transaction_id}` (не по `event_id`: одна покупка = несколько событий с одним `transaction_id`). Одна транзакция; сбой → откат → `5xx` → ретрай Adapty → чистая переобработка. Детали — [modules/billing-adapty/02-api-contracts.md](modules/billing-adapty/02-api-contracts.md).
+
+---
+
+## 7b. Billing — CloudPayments/broadapps webhook (RU-путь, [ADR-050](adr/ADR-050-cloudpayments-webhook.md))
+
+### POST /v1/billing/cloudpayments/webhook
+Серверный вебхук агрегатора **broadapps** (`pay.broadapps.dev`, фронтит YooKassa) в формате **CloudPayments** (M2M, **вызывает broadapps, не iOS**) — **отдельный RU-путь**: по успешному платежу активирует подписку или начисляет token-пакет и идемпотентно начисляет кредиты. Активен **только на avelyra** (где задан секрет).
+
+**Авторизация:** `Authorization: Bearer <CLOUDPAYMENTS_WEBHOOK_TOKEN>` (= app API key broadapps, constant-time). **Нет HMAC-подписи payload.** Неверный/нет токена → `401`; секрет не сконфигурирован → `500`.
+
+**Тело:** читается **сырым**, **без Pydantic-валидации**. Плоские поля PascalCase; **`Data` — JSON-строка** (парсится отдельно). Распознаётся: `AccountId`(=наш `userId`, **верхний регистр → lower** → UUID)‖`Data.user_id`; `TransactionId` (дедуп/идемпотентность); гейт `Status=="Completed"`&`OperationType=="Payment"` (ci); из `Data` — `product_id`, `billing_interval_unit`/`count`, trial-флаги. **Карт-данные (`CardFirstSix`/`CardLastFour`/`Issuer`/`CardType`) не читаются/не логируются/не хранятся.**
+
+**После успешной авторизации любое тело → `200` c телом `{"code": 0}`** (агрегатор не ретраит). Внутренний исход (applied/duplicate/ignored+reason) — в лог/audit, не в теле:
+
+| HTTP | Тело | Когда |
+|---|---|---|
+| 401 | — | нет/неверный bearer |
+| 500 | — | секрет не задан **или** реальный внутренний сбой (БД) → агрегатор ретраит |
+| 200 | `{"code":0}` | всё принятое: `applied` / `duplicate` / `ignored` (`empty_body`/`invalid_json`/`not_an_object`/`not_a_completed_payment`/`missing_transaction_id`/`invalid_data`/`missing_product_id`/`invalid_account_id`/`user_not_found`/`unknown_product`) |
+
+**Маппинг:** классификация продукта → **subscription** (интервал в `Data` или паттерн имени → `subscriptions.status=active`+`plan`+`expires_at`=now+интервал + грант per-tier `CLOUDPAYMENTS_PRODUCT_TOKENS`/fallback) \| **tokens** (в `TOKEN_PRODUCTS` или паттерн `NNN_tokens` → разовый грант `N` строго из `TOKEN_PRODUCTS`) \| **unknown** (`ignored`, WARNING).
+
+**Идемпотентность:** дедуп события — UNIQUE `cloudpayments_webhook_events.transaction_id` (=`TransactionId`); грант — **один на платёж** через ledger `cp-txn:{transaction_id}` (namespace изолирован от Apple-путей). Продление приходит новым `TransactionId` → новый грант. Одна транзакция; сбой → откат → `5xx` → ретрай. Формат ответа `{"code":0}` — **допущение к живой проверке** ([Q-050-1](99-open-questions.md)). Детали — [modules/billing-cloudpayments/02-api-contracts.md](modules/billing-cloudpayments/02-api-contracts.md).
 
 ---
 

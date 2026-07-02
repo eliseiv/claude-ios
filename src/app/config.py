@@ -152,6 +152,25 @@ class Settings(BaseSettings):
         default=1000, alias="ADAPTY_SUBSCRIPTION_TOKENS_GRANT"
     )
 
+    # --- CloudPayments (broadapps/YooKassa) RU webhook (ADR-050, billing-cloudpayments/07) ---
+    # Isolated static bearer secret for POST /v1/billing/cloudpayments/webhook (on avelyra = the
+    # broadapps app API key). Compared constant-time (hmac.compare_digest); separate from JWT /
+    # admin / Adapty / KMS / preview secrets and per-instance (ADR-017). Empty (default) => the
+    # endpoint returns 500 (misconfiguration) so it is active only where the secret is set.
+    cloudpayments_webhook_token: str = Field(default="", alias="CLOUDPAYMENTS_WEBHOOK_TOKEN")
+    # JSON object productId -> tokens: per-tier credits granted on a subscription payment. Parsed
+    # by cloudpayments_product_tokens() (same shape as token_products()). Malformed/non-object =>
+    # {} => every subscription falls back to the fixed grant below.
+    cloudpayments_product_tokens_raw: str = Field(
+        default="{}", alias="CLOUDPAYMENTS_PRODUCT_TOKENS"
+    )
+    # Fixed fallback grant (tokens) for a subscription product absent from the per-tier map above.
+    # Isolated from SUBSCRIPTION_CREDITS_PER_PERIOD / the Adapty path so the RU path is calibrated
+    # independently (ADR-050 §3a).
+    cloudpayments_subscription_tokens_grant: int = Field(
+        default=1000, alias="CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT"
+    )
+
     # --- Token purchase (ADR-015, token-purchase/03) ---
     # Server-side mapping consumable productId -> credits (JSON object). Source of truth for
     # how many credits a token-package purchase grants; never taken from the client body
@@ -330,6 +349,34 @@ class Settings(BaseSettings):
 
         try:
             parsed = json.loads(self.adapty_product_tokens_raw or "{}")
+        except (ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        products: dict[str, int] = {}
+        for key, value in parsed.items():
+            if not isinstance(key, str):
+                continue
+            # bool is a subclass of int; exclude it explicitly to avoid True->1 surprises.
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            if value <= 0:
+                continue
+            products[key] = value
+        return products
+
+    def cloudpayments_product_tokens(self) -> dict[str, int]:
+        """Parse CLOUDPAYMENTS_PRODUCT_TOKENS (JSON object productId->credits) (ADR-050 §3a).
+
+        Mirrors token_products()/adapty_product_tokens(): only string keys with positive-int values
+        survive (bool is a subclass of int and is excluded). A malformed JSON document or non-object
+        yields an empty mapping, in which case every subscription product falls back to
+        cloudpayments_subscription_tokens_grant. Pure (no I/O); cached via get_settings()'s cache.
+        """
+        import json
+
+        try:
+            parsed = json.loads(self.cloudpayments_product_tokens_raw or "{}")
         except (ValueError, json.JSONDecodeError):
             return {}
         if not isinstance(parsed, dict):

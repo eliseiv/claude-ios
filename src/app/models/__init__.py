@@ -7,6 +7,7 @@ from app.models.tables import (
     BYOKKey,
     ChatSession,
     ChatStep,
+    CloudPaymentsWebhookEvent,
     LedgerTransaction,
     Project,
     SiteFile,
@@ -22,6 +23,7 @@ from app.models.tables import (
 __all__ = [
     "Base",
     "AdaptyWebhookEvent",
+    "CloudPaymentsWebhookEvent",
     "User",
     "Subscription",
     "Wallet",

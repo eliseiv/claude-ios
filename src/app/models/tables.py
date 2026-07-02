@@ -395,6 +395,33 @@ class AdaptyWebhookEvent(Base):
     __table_args__ = (Index("ix_adapty_webhook_events_user_id", "user_id"),)
 
 
+class CloudPaymentsWebhookEvent(Base):
+    """Processed RU (broadapps/CloudPayments) payment events (ADR-050, billing-cloudpayments/04,
+    migration 0014).
+
+    Single deduplication point: ``transaction_id`` (CloudPayments ``TransactionId``) is the PRIMARY
+    KEY, enabling ``INSERT ... ON CONFLICT (transaction_id) DO NOTHING RETURNING transaction_id`` so
+    a replayed callback is detected and short-circuited to ``duplicate`` with no side effects.
+    ``payload`` stores ONLY a SANITIZED allowlist projection (no card PAN/issuer/type, no bearer) —
+    unlike ``adapty_webhook_events`` (which has no card data and stores the full parsed object).
+    """
+
+    __tablename__ = "cloudpayments_webhook_events"
+
+    transaction_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    product_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    processed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (Index("ix_cloudpayments_webhook_events_user_id", "user_id"),)
+
+
 class WorkspaceProject(Base):
     """A workspace («рабочее пространство», iOS «Project») — ADR-036 §2.
 
