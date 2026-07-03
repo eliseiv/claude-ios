@@ -1,6 +1,20 @@
 # billing-cloudpayments / 06 — RBAC / Authorization
 
-## Контур авторизации
+## Checkout — пользовательский JWT ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md))
+Эндпоинт `POST /v1/billing/cloudpayments/checkout` — **обычный пользовательский `/v1/*` контур** (`bearerAuth`, `CurrentUser`), НЕ machine-to-machine.
+
+| Аспект | Значение |
+|---|---|
+| Механизм | Пользовательский JWT (RS256), `Authorization: Bearer <JWT>`; нет/невалидный → `401` |
+| Идентичность | **`userId` = JWT `sub`** (`current.user_id`), **НЕ из тела** — ключевая мера (устраняет клиент-контролируемый `user_id`). Тело не содержит `userId`/`appId` |
+| Провижининг | `get_current_user` лениво provision `users[sub]` ([ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)) → до оплаты гарантирует, что колбэк найдёт пользователя |
+| Rate-limit | `enforce_other_limits(user_id=sub)` → `429` |
+| Исходящая авторизация | к broadapps — серверный `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>` (**отдельный** от входящего `CLOUDPAYMENTS_WEBHOOK_TOKEN`; разные роли: мы→broadapps vs broadapps→мы) |
+| Секреты | `CLOUDPAYMENTS_API_TOKEN` (секрет) и `CLOUDPAYMENTS_APP_ID` — серверные, не в клиенте, не в логах/ответе. `customer_email` — PII, не логируется |
+| Не сконфигурировано | `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN` пусты → `503` ⇒ активен только на avelyra |
+| SSRF | исходящий вызов только к фиксированному `CLOUDPAYMENTS_API_BASE` (config), не из тела клиента |
+
+## Webhook — machine-to-machine bearer
 Эндпоинт `POST /v1/billing/cloudpayments/webhook` — **пятый** machine-to-machine контур (наряду с пользовательским JWT, admin-токеном, preview signed URL, Adapty-webhook). Вызывается только агрегатором broadapps.
 
 | Аспект | Значение |

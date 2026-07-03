@@ -2,10 +2,12 @@
 
 Тесты по [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md), герметичные (без сети/реального broadapps). Стек/команды — [docs/02-tech-stack.md](../../02-tech-stack.md), [docs/06-testing-strategy.md](../../06-testing-strategy.md). Плейсхолдер-секрет `CLOUDPAYMENTS_WEBHOOK_TOKEN` в тестах.
 
-## Авторизация
-- Нет заголовка / неверный bearer → `401`.
-- `CLOUDPAYMENTS_WEBHOOK_TOKEN==""` → `500` (мис-конфигурация) на любой запрос.
-- Верный bearer → доходит до парсинга.
+## Авторизация ([ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md) — терпимый формат)
+- **Верный секрет во ВСЕХ формах → проходит** (доходит до парсинга): `Authorization: Bearer <token>`, `bearer <token>` (ci к слову), `Token <token>`, сырой `Authorization: <token>` (без схемы).
+- Нет заголовка / неверный токен / нераспознанная схема с верным значением после неё (`Basic <token>`) → `401`.
+- `CLOUDPAYMENTS_WEBHOOK_TOKEN==""` → `500` (мис-конфигурация) на любой запрос (лога auth_denied нет).
+- **На каждый 401** — ровно один WARNING `"cloudpayments_webhook_auth_denied"` с `matched=false`, корректным `authScheme` (`bearer`/`token`/`raw`/`none`/`empty`) и `presentAuthHeaders` (имена); в записи **нет** значения токена/полного заголовка. См. [08-observability §Auth-denied](08-observability.md).
+- constant-time: и «нет заголовка», и «неверный токен» → одинаковый `401` (оба проходят `compare_digest`).
 
 ## HTTP-контракт (всё `200 {"code":0}` кроме 401/500)
 - Пустое тело → `200 {"code":0}` (лог `ignored/empty_body`, DEBUG).

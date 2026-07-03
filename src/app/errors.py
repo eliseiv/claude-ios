@@ -123,3 +123,17 @@ class ServiceUnavailableError(AppError):
 
     status_code = 503
     code = "service_unavailable"
+
+
+class CloudPaymentsCheckoutNotConfiguredError(ServiceUnavailableError):
+    """RU checkout is not configured on this instance (ADR-051 §5).
+
+    503 with code=cloudpayments_checkout_not_configured: CLOUDPAYMENTS_APP_ID /
+    CLOUDPAYMENTS_API_TOKEN are unset (the endpoint is active only where the operator sets both,
+    i.e. avelyra). Distinct
+    machine-readable code so the iOS client can tell "feature not available on this instance" apart
+    from a broadapps outage (502) — consistent with other not-configured user-facing endpoints
+    (Apple sign-in / embedded auth-issuer return 503).
+    """
+
+    code = "cloudpayments_checkout_not_configured"

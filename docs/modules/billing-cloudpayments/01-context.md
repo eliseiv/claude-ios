@@ -14,7 +14,16 @@
 | Router registration | `app.include_router(...)`, глобального auth-middleware нет | `src/app/main.py` |
 
 ## Кто вызывает
-- **broadapps (внешний агрегатор)** — серверный HTTP POST в формате CloudPayments (фронтит YooKassa). Не наш iOS-клиент. Аутентификация — статический bearer, заданный оператором в панели broadapps (= `CLOUDPAYMENTS_WEBHOOK_TOKEN` инстанса).
+- **Входящий вебхук** (`/webhook`): **broadapps (внешний агрегатор)** — серверный HTTP POST в формате CloudPayments (фронтит YooKassa). Не наш iOS-клиент. Аутентификация — статический bearer, заданный оператором в панели broadapps (= `CLOUDPAYMENTS_WEBHOOK_TOKEN` инстанса).
+- **Исходящий checkout** (`/checkout`, [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)): **наш iOS-клиент** (JWT). Мы, в свою очередь, **вызываем broadapps** `POST /payments/link` (исходящий httpx, `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>`).
+
+## Исходящая зависимость (checkout)
+| Зависимость | Что используется | Источник |
+|---|---|---|
+| httpx-клиент к внешнему API | `httpx.AsyncClient` POST multipart, таймаут, маппинг ошибок → `UpstreamError` (502) | образец исходящих клиентов `src/app/chat/openai_client.py` ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) |
+| Валидация продукта | `parser.classify_product` (переиспользуется как allowlist-предикат) | `src/app/billing_cloudpayments/parser.py` ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)) |
+| JWT / провижининг | `CurrentUser` → `user_id=sub`, ленивый provision `users` | `src/app/deps.py` ([ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)) |
+| Rate-limit | `enforce_other_limits(user_id)` | `src/app/api_gateway/rate_limit.py` |
 
 ## Соотношение с существующими путями биллинга
 - `POST /v1/billing/adapty/webhook` (модуль [billing-adapty](../billing-adapty/README.md)) — Adapty (Apple), **остаётся**, не пересекается.

@@ -1,11 +1,80 @@
 # billing-cloudpayments / 03 — Architecture
 
-Реализует [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md). Ниже — точные детали для backend (без додумывания). Образец структуры — модуль [billing-adapty](../billing-adapty/README.md).
+Реализует [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md) (входящий вебхук) и [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md) (исходящий checkout). Ниже — точные детали для backend (без додумывания). Образец структуры — модуль [billing-adapty](../billing-adapty/README.md).
+
+## Checkout — исходящий вызов broadapps ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md))
+
+### Файлы (checkout)
+- `src/app/billing_cloudpayments/checkout.py` — **новый**: `CloudPaymentsCheckoutClient` (исходящий httpx-вызов + маппинг ошибок) + `CheckoutResult` (dataclass: `payment_id`, `payment_url`, `status`, `expires_at`) + `_CHECKOUT_TIMEOUT_SECONDS = 15.0`. Метод `async def create_payment_link(*, user_id: uuid.UUID, product_id: str, customer_email: str) -> CheckoutResult`. Валидацию `productId` (`validate_product` через `parser.classify_product`) держать здесь **или** в роутере — единая точка; сумму гранта НЕ считает.
+- `src/app/schemas/billing_cloudpayments.py` — **добавить** `CloudPaymentsCheckoutRequest` (`productId: str`, `customerEmail: EmailStr`, StrictModel) + `CloudPaymentsCheckoutResponse` (`paymentId`, `paymentUrl: str`, `status`, `expiresAt: str | None`). Существующий `CloudPaymentsWebhookResponse` не трогать.
+- `src/app/api_gateway/routers/billing_cloudpayments.py` — **добавить** роут `POST /v1/billing/cloudpayments/checkout` в тот же `router` (prefix `/v1/billing/cloudpayments`), но с `CurrentUser` + rate-limit (per-route, изолированно от webhook-bearer).
+- `src/app/config.py` — **3 новых поля** (`cloudpayments_api_base`/`cloudpayments_app_id`/`cloudpayments_api_token`) рядом с блоком CloudPayments-вебхука.
+- `src/app/deps.py` — фабрика `get_cloudpayments_checkout_client() -> CloudPaymentsCheckoutClient` (нужен только `get_settings()`, **без** DbSession — passthrough без БД).
+- `src/app/errors.py` — `CloudPaymentsCheckoutNotConfiguredError(ServiceUnavailableError)` (`status_code=503`, `code="cloudpayments_checkout_not_configured"`). `UpstreamError` (502) переиспользуется.
+- `src/app/main.py` — **без изменений** (router уже зарегистрирован; добавляется лишь новый роут в существующий `router`).
+- **Миграции — НЕТ** (passthrough).
+- **Зависимость:** `EmailStr` требует `email-validator` — добавить в `pyproject.toml` dependencies (напр. `email-validator>=2,<3`) как явную (сейчас присутствует лишь транзитивно).
+
+### Поток checkout
+```mermaid
+sequenceDiagram
+    participant C as iOS (JWT)
+    participant R as Router (/checkout)
+    participant K as CloudPaymentsCheckoutClient
+    participant B as broadapps (/payments/link)
+    C->>R: POST + Bearer <JWT> + {productId, customerEmail}
+    R->>R: get_current_user → userId=sub (+ lazy provision users)
+    R->>R: config gate: app_id&api_token заданы? иначе 503
+    R->>R: rate-limit (enforce_other_limits) иначе 429
+    R->>R: validate_product(productId) иначе 422
+    R->>K: create_payment_link(user_id=sub, product_id, customer_email)
+    K->>B: POST multipart {app_id,product_id,user_id,customer_email} + Bearer <api_token>
+    alt timeout / connect / не-2xx / malformed
+        K-->>R: raise UpstreamError → 502 (без утечки токена/деталей)
+    else 201 OK
+        B-->>K: {payment_id, payment_url, status, expires_at}
+        K-->>R: CheckoutResult
+        R-->>C: 200 {paymentId, paymentUrl, status, expiresAt}
+    end
+    Note over R,K: log "cloudpayments_checkout_outcome" (allowlist; без email/токена)
+```
+
+### Исходящий вызов (детали для backend)
+- `httpx.AsyncClient` per-call (`async with`), `POST {settings.cloudpayments_api_base}/payments/link`.
+- **multipart/form-data** — через `files=` (НЕ `data=`, тот даёт urlencoded):
+  ```
+  files = {
+      "app_id":         (None, settings.cloudpayments_app_id),
+      "product_id":     (None, product_id),
+      "user_id":        (None, str(user_id)),
+      "customer_email": (None, customer_email),
+  }
+  headers = {"Authorization": f"Bearer {settings.cloudpayments_api_token}", "Accept": "application/json"}
+  ```
+  **Content-Type руками НЕ ставить** (httpx выставит boundary).
+- Таймаут `_CHECKOUT_TIMEOUT_SECONDS = 15.0`.
+- Маппинг ошибок → `UpstreamError` (502): `httpx.TimeoutException`→`timeout`; `httpx.RequestError`→`connect_error`; статус не `2xx` (success=`201`; принять `200`/`201`)→`upstream_status`; `2xx` без `payment_url`/не-JSON→`malformed_response`. Наружу — generic 502, **без** upstream-тела/статуса/токена.
+
+### Валидация productId (`validate_product`)
+Переиспользует `parser.classify_product` как allowlist-предикат (checkout не знает `billing_interval_unit` — он приходит только в колбэке, поэтому передаётся `None`, классификация по имени):
+```
+kind = classify_product(product_id, None, frozenset(settings.token_products()))
+if kind == KIND_UNKNOWN:                                   raise ValidationFailedError("unknown_product")  # 422
+if kind == KIND_TOKENS and settings.token_products().get(product_id, 0) <= 0:  raise ValidationFailedError("unknown_product")  # 422
+```
+Гарантирует симметрию: checkout выдаёт ссылку только на продукт, который вебхук ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)) сможет начислить.
+
+### Наблюдаемость checkout
+Ровно один структурный лог `"cloudpayments_checkout_outcome"` на вызов. **Allowlist:** `result` (`created`|`error`), `reason` (на ошибке), `userId` (наш UUID), `productId`, `status` (broadapps-статус на успехе), `paymentId` (на успехе). **ЗАПРЕЩЕНО:** `customer_email` (PII), `CLOUDPAYMENTS_API_TOKEN`/Bearer, `app_id`, upstream-тело. Без persist/audit-строки (log-only, [ADR-051 §6](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)).
+
+---
+
+## Webhook — входящий вызов ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md))
 
 ## Файлы (целевая раскладка)
 - `src/app/billing_cloudpayments/__init__.py`
 - `src/app/api_gateway/routers/billing_cloudpayments.py` — эндпоинт `POST /v1/billing/cloudpayments/webhook` (`router`, prefix `/v1/billing/cloudpayments`, tag `Billing (CloudPayments)`), per-route bearer-dependency, сырое тело, делегирование в `CloudPaymentsWebhookService`, ответ `{"code": 0}`. (Роутеры проекта — в `api_gateway/routers/`, не в пакете модуля.)
-- `src/app/billing_cloudpayments/auth.py` — `require_cloudpayments_webhook` (constant-time bearer) + `CloudPaymentsWebhookMisconfiguredError` (override `status_code = 500`, code `cloudpayments_webhook_misconfigured`). 401 при mismatch/нет токена, 500 при незаданном секрете.
+- `src/app/billing_cloudpayments/auth.py` — `require_cloudpayments_webhook` (терпимый разбор `Authorization` из сырого заголовка + constant-time сравнение, [ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md)) + `_extract_webhook_credential`/`_auth_scheme_label`/`_log_auth_denied` + `CloudPaymentsWebhookMisconfiguredError` (override `status_code = 500`, code `cloudpayments_webhook_misconfigured`). 401 при mismatch/нет токена (+ WARNING `cloudpayments_webhook_auth_denied`), 500 при незаданном секрете. См. §Авторизация ниже.
 - `src/app/billing_cloudpayments/parser.py` — чистые функции дефенсивного парсинга + `ParsedPayment` (dataclass), `classify_product`, санитизация payload, константы паттернов.
 - `src/app/billing_cloudpayments/service.py` — `CloudPaymentsWebhookService` + `WebhookOutcome`: дедуп, классификация, транзакция (upsert subscription | грант tokens + audit), `_log_outcome`/`_level_for`.
 - `src/app/schemas/billing_cloudpayments.py` — `CloudPaymentsWebhookResponse` (`{code: int}`, только для OpenAPI; тела запроса нет).
@@ -25,8 +94,8 @@ sequenceDiagram
     participant R as Router (/v1/billing/cloudpayments/webhook)
     participant S as CloudPaymentsWebhookService
     participant DB as PostgreSQL (1 транзакция)
-    B->>R: POST + Authorization: Bearer <token>
-    R->>R: constant-time compare (401 / 500-if-unset)
+    B->>R: POST + Authorization (Bearer/Token/сырой <token>)
+    R->>R: lenient-parse header → constant-time compare (401 + WARNING auth_denied / 500-if-unset)
     R->>R: raw = await request.body()  (без Pydantic)
     R->>S: handle(raw)
     S->>S: parse: empty/json/object → gate(Status,OperationType) → TransactionId → Data(json.loads) → product_id → AccountId(UUID,lower)
@@ -49,12 +118,80 @@ sequenceDiagram
     Note over S,DB: любой сбой → ROLLBACK → 500 → агрегатор ретраит → чистая переобработка
 ```
 
-## Авторизация (детали для backend)
-- Заголовок `Authorization: Bearer <token>`. Извлечь токен (после `Bearer `), `hmac.compare_digest(token, settings.cloudpayments_webhook_token)`.
-- `settings.cloudpayments_webhook_token == ""` → **500** (мис-конфигурация, текст `"cloudpayments webhook token not configured"`). Пустой секрет не матчит presented-токен.
-- Mismatch / нет заголовка → **401** (`UnauthorizedError`, без раскрытия причины).
-- Реализовать **per-route** (Depends), не глобальным middleware. Эндпоинт изолирован от JWT / admin / Adapty-контуров.
-- OpenAPI: отдельная security-схема (http bearer, `auto_error=False`), образец `adapty_webhook_scheme`.
+## Авторизация (детали для backend) — терпимый разбор заголовка ([ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md))
+
+Файл: `src/app/billing_cloudpayments/auth.py`. Дополнительно правится описание схемы в `src/app/api_gateway/openapi_security.py`. **Роутер `billing_cloudpayments.py` не меняется** (`dependencies=[Depends(require_cloudpayments_webhook)]` остаётся). **`deps.py` не меняется** (`Request` инъектируется FastAPI автоматически).
+
+### Сигнатура зависимости
+```python
+def require_cloudpayments_webhook(
+    request: Request,
+    _scheme: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(cloudpayments_webhook_scheme)
+    ] = None,
+) -> None:
+    ...
+```
+- `request: Request` — **новый** параметр, чтобы читать сырой заголовок и имена заголовков для диагностики.
+- `_scheme` — **декоративный** (неиспользуемый) параметр: сохраняет вклад `cloudPaymentsWebhook` в OpenAPI (замок/Authorize). Его извлечённый credential **НЕ используется** для проверки (именно `HTTPBearer` и отбивал сырой токен). Реальная проверка — из сырого заголовка.
+
+### Терпимое извлечение (чистая функция)
+```python
+def _extract_webhook_credential(authorization: str | None) -> str | None:
+    if authorization is None:
+        return None
+    value = authorization.strip()
+    if not value:
+        return None
+    parts = value.split(None, 1)          # первая группа пробелов
+    if len(parts) == 2 and parts[0].lower() in ("bearer", "token"):
+        rest = parts[1].strip()
+        return rest or None               # "Bearer <token>" / "Token <token>" (ci к слову)
+    return value                          # «сырой» <token> ИЛИ нераспознанная схема → весь заголовок
+```
+- `Bearer <token>` (регистронезависимо), `Token <token>` → вторая часть.
+- `Authorization: <token>` (одна часть, без пробелов) → весь заголовок.
+- Нераспознанная схема (`Basic xxx`) → весь заголовок (не совпадёт → 401, fail-closed).
+
+### Проверка (semantics сохранены)
+```python
+secret = get_settings().cloudpayments_webhook_token
+if not secret:
+    raise CloudPaymentsWebhookMisconfiguredError("cloudpayments webhook token not configured")  # 500
+candidate = _extract_webhook_credential(request.headers.get("authorization")) or ""
+matched = hmac.compare_digest(candidate, secret)   # ОБА пути (нет заголовка / неверный токен) проходят compare
+if not matched:
+    _log_auth_denied(request)                       # WARNING, безопасный allowlist (ниже)
+    raise UnauthorizedError("invalid cloudpayments webhook token")  # 401, причина не раскрыта
+```
+- `candidate or ""` + всегда-`compare_digest` → нет ветвевого timing-leak между «нет заголовка» и «неверный токен»; оба → `401`.
+- `settings.cloudpayments_webhook_token == ""` → **500** (текст `"cloudpayments webhook token not configured"`).
+- **Per-route** (Depends), не глобальный middleware. Изолировано от JWT / admin / Adapty-контуров.
+- Секрет/токен **никогда** не логируются.
+
+### Диагностический лог на 401 ([ADR-052 §3](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md))
+Ровно один WARNING-лог `"cloudpayments_webhook_auth_denied"` **только на 401** (mismatch/нет заголовка). Логгер `app.billing_cloudpayments.auth`, `log_event` (образец [ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md)). Allowlist полей:
+```python
+_AUTH_HEADER_ALLOWLIST = (
+    "authorization", "x-api-key", "x-signature", "x-sign",
+    "x-webhook-signature", "x-content-hmac", "content-hmac", "signature",
+)
+
+def _auth_scheme_label(authorization: str | None) -> str:
+    if authorization is None:
+        return "none"
+    value = authorization.strip()
+    if not value:
+        return "empty"
+    parts = value.split(None, 1)
+    return parts[0].lower() if len(parts) == 2 else "raw"   # НИКОГДА не значение токена
+```
+- `matched=False` (bool), `authScheme=_auth_scheme_label(header)`, `presentAuthHeaders=[n for n in _AUTH_HEADER_ALLOWLIST if n in request.headers]`.
+- **ЗАПРЕЩЕНО:** значение токена/секрета, полный заголовок `Authorization`, значения любых заголовков, сырое тело. Только имена + слово-схема + `matched`.
+- Цель: если broadapps шлёт секрет в другом заголовке (`x-api-key`) или как подпись — увидим в `presentAuthHeaders`/`authScheme` и доработаем ([Q-052-1](../../99-open-questions.md)).
+
+### OpenAPI
+- Схема `cloudpayments_webhook_scheme` (`HTTPBearer`, `auto_error=False`, `scheme_name="cloudPaymentsWebhook"`) — **остаётся** (декоративно), образец `adapty_webhook_scheme`. Обновить **только `description`**: секрет можно ввести с префиксом `Bearer`/`Token` **или** сырым.
 
 ## Дефенсивный парсинг (точный порядок источников)
 

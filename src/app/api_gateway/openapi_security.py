@@ -64,8 +64,10 @@ cloudpayments_webhook_scheme = HTTPBearer(
     scheme_name="cloudPaymentsWebhook",
     auto_error=False,
     description=(
-        "Статический bearer-секрет платёжного вебхука (`CLOUDPAYMENTS_WEBHOOK_TOKEN`). Вызывает "
-        "платёжный агрегатор, не клиент. Введите секрет как `Bearer <secret>` через Authorize. НЕ "
-        "пользовательский JWT и НЕ admin-токен. Реальная constant-time проверка — на сервере."
+        "Статический секрет платёжного вебхука (`CLOUDPAYMENTS_WEBHOOK_TOKEN`). Вызывает "
+        "платёжный агрегатор, не клиент. Формат заголовка `Authorization` терпимый: секрет "
+        "принимается с префиксом `Bearer <secret>` или `Token <secret>`, либо сырым значением "
+        "без схемы. НЕ пользовательский JWT и НЕ admin-токен. Реальная constant-time проверка — "
+        "на сервере."
     ),
 )

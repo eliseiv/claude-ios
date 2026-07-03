@@ -2,11 +2,31 @@
 
 Реализует [ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md). Образец — [billing-adapty/08-observability.md](../billing-adapty/08-observability.md) ([ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md)). Точное ТЗ для backend — без додумывания. HTTP-семантику (`{"code":0}`/401/500), начисление, дедуп и контракт **не меняет**.
 
+Два независимых лога:
+- `"cloudpayments_webhook_auth_denied"` — **только на 401**, эмитится в `require_cloudpayments_webhook` (`src/app/billing_cloudpayments/auth.py`), см. §Auth-denied ниже ([ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md)).
+- `"cloudpayments_webhook_outcome"` — после успешной авторизации, эмитится в `CloudPaymentsWebhookService.handle()` (`service.py`), см. ниже ([ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md)).
+
+## Auth-denied лог (401, [ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md))
+**Файл:** `src/app/billing_cloudpayments/auth.py` (логгер `app.billing_cloudpayments.auth`, `log_event`). Ровно один WARNING `"cloudpayments_webhook_auth_denied"` на каждый `401` (mismatch/нет заголовка). На `500` (secret не задан) и на успех — **не** эмитится.
+
+**Allowlist полей:**
+| Поле | Значение |
+|---|---|
+| `matched` | `false` (bool; всегда на этом пути) |
+| `authScheme` | слово-схема в lower при «схема + значение» (`bearer`/`token`/`basic`/…), иначе `none` (нет заголовка) / `empty` (пустой) / `raw` (одиночный токен без пробелов — **значение НЕ логируется**) |
+| `presentAuthHeaders` | список **имён** присутствующих заголовков из allowlist `("authorization","x-api-key","x-signature","x-sign","x-webhook-signature","x-content-hmac","content-hmac","signature")` |
+
+**ЗАПРЕЩЕНО:** значение токена/секрета, полный заголовок `Authorization`, значения любых заголовков, сырое тело.
+
+**Ориентиры для qa:** валидный секрет в формах `Bearer <t>`/`Token <t>`/сырой `<t>` → **нет** auth_denied-лога (проходит); неверный токен и отсутствие заголовка → ровно один WARNING с `matched=false` и корректными `authScheme`/`presentAuthHeaders`; в записи **нет** значения токена/заголовка.
+
+## Outcome лог (после авторизации, [ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md))
+
 ## Цель
 Каждый вызов `CloudPaymentsWebhookService.handle()` пишет **ровно одну** структурную запись `"cloudpayments_webhook_outcome"`, чтобы исход (в т.ч. `user_not_found`/`unknown_product`) был виден оператору. Тело HTTP-ответа несёт только `{"code":0}` — причина исхода живёт **в логе**, не в ответе.
 
-## Файл для правки
-Только `src/app/billing_cloudpayments/service.py`. **Роутер НЕ трогать** (он всегда возвращает `{"code":0}` и не видит `product_id`/`user_id`).
+## Файл для правки (outcome-лог)
+Только `src/app/billing_cloudpayments/service.py` (auth-denied лог — отдельно, в `auth.py`, §выше). **Роутер НЕ трогать** (он всегда возвращает `{"code":0}` и не видит `product_id`/`user_id`).
 
 ## Импорты и логгер
 ```python

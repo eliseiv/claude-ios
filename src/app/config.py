@@ -171,6 +171,20 @@ class Settings(BaseSettings):
         default=1000, alias="CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT"
     )
 
+    # --- CloudPayments (broadapps) RU checkout / payment-link (ADR-051) ---
+    # Outgoing call to broadapps POST {base}/payments/link that creates a YooKassa payment link.
+    # api_base is PUBLIC (not a secret): the fixed upstream host (no SSRF — never taken from the
+    # client body). app_id is the broadapps application UUID (server-side, not in the client).
+    cloudpayments_api_base: str = Field(
+        default="https://pay.broadapps.dev/api/v1", alias="CLOUDPAYMENTS_API_BASE"
+    )
+    cloudpayments_app_id: str = Field(default="", alias="CLOUDPAYMENTS_APP_ID")
+    # SECRET: outgoing Bearer WE present to broadapps. Semantically distinct from
+    # CLOUDPAYMENTS_WEBHOOK_TOKEN (which broadapps presents to US) even if the value currently
+    # coincides — separate config allows independent rotation of each side. Empty (default) =>
+    # the /checkout endpoint returns 503 (not configured) so it is active only where set (avelyra).
+    cloudpayments_api_token: str = Field(default="", alias="CLOUDPAYMENTS_API_TOKEN")
+
     # --- Token purchase (ADR-015, token-purchase/03) ---
     # Server-side mapping consumable productId -> credits (JSON object). Source of truth for
     # how many credits a token-package purchase grants; never taken from the client body
@@ -392,6 +406,15 @@ class Settings(BaseSettings):
                 continue
             products[key] = value
         return products
+
+    def cloudpayments_checkout_configured(self) -> bool:
+        """True when the RU checkout endpoint is configured on this instance (ADR-051 §5).
+
+        Requires BOTH the broadapps application id and the outgoing API token; either empty =>
+        POST /v1/billing/cloudpayments/checkout returns 503 (feature not available here). Active
+        only on the instance where the operator sets both (avelyra).
+        """
+        return bool(self.cloudpayments_app_id and self.cloudpayments_api_token)
 
     def default_model(self) -> str:
         """Active instance default model (ADR-034 §1): the model used when none is selected.

@@ -1,6 +1,55 @@
 # billing-cloudpayments / 07 — Implementation Phases (ТЗ backend)
 
-Реализация [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md). Backend выполняет фазы строго по порядку. **НЕ писать код в этом документе — это ТЗ.** Точные правила парсинга/маппинга — [03-architecture.md](03-architecture.md).
+Модуль реализует два ADR: **[ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)** (входящий вебхук — фазы 1–7 ниже, **уже реализован**) и **[ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)** (исходящий checkout — фазы C1–C4 ниже, **к реализации**). Backend выполняет фазы строго по порядку. **НЕ писать код в этом документе — это ТЗ.** Точные правила — [03-architecture.md](03-architecture.md).
+
+---
+
+# Checkout (ADR-051) — исходящий вызов broadapps `/payments/link`
+
+Цель: наш JWT-эндпоинт `POST /v1/billing/cloudpayments/checkout` создаёт платёжную ссылку через broadapps; `userId` берётся из JWT (не из тела) → устраняет «потерянные платежи». **Passthrough, без миграции.** Точные детали — [03-architecture.md §Checkout](03-architecture.md), контракт — [02-api-contracts.md](02-api-contracts.md).
+
+## Фаза C1 — Config + зависимость + схемы + ошибка
+- `src/app/config.py` (рядом с блоком CloudPayments-вебхука, `config.py:155-172`):
+  - `cloudpayments_api_base: str = Field(default="https://pay.broadapps.dev/api/v1", alias="CLOUDPAYMENTS_API_BASE")`
+  - `cloudpayments_app_id: str = Field(default="", alias="CLOUDPAYMENTS_APP_ID")`
+  - `cloudpayments_api_token: str = Field(default="", alias="CLOUDPAYMENTS_API_TOKEN")`
+  - (опц.) helper `cloudpayments_checkout_configured() -> bool` = `bool(self.cloudpayments_app_id and self.cloudpayments_api_token)`.
+- `pyproject.toml`: добавить `email-validator>=2,<3` (или `pydantic[email]`) в dependencies — `EmailStr` требует его; сейчас лишь транзитивно.
+- `src/app/schemas/billing_cloudpayments.py`: **добавить** `CloudPaymentsCheckoutRequest` (`productId: str` non-empty, `customerEmail: EmailStr`, StrictModel) + `CloudPaymentsCheckoutResponse` (`paymentId: str`, `paymentUrl: str`, `status: str`, `expiresAt: str | None`). **Swagger-чистота:** `Field`-описания/примеры без ADR/TD/Q; примеры-плейсхолдеры (`week_6.99_nottrial` / `user@example.com`).
+- `src/app/errors.py`: `CloudPaymentsCheckoutNotConfiguredError(ServiceUnavailableError)` (`status_code=503`, `code="cloudpayments_checkout_not_configured"`).
+
+## Фаза C2 — Checkout-клиент (`src/app/billing_cloudpayments/checkout.py`)
+- `CheckoutResult` dataclass (`payment_id`, `payment_url`, `status`, `expires_at: str | None`), `_CHECKOUT_TIMEOUT_SECONDS = 15.0`.
+- `CloudPaymentsCheckoutClient(settings)`:
+  - `validate_product(product_id) -> None`: `classify_product(product_id, None, frozenset(settings.token_products()))`; `unknown` → `ValidationFailedError` (422); `tokens` с `token_products().get(product_id,0)<=0` → `ValidationFailedError` (422). (Может жить в роутере — единая точка; сумму НЕ считает.)
+  - `async create_payment_link(*, user_id, product_id, customer_email) -> CheckoutResult`: `httpx.AsyncClient` per-call, `POST {api_base}/payments/link`, **multipart через `files={"app_id":(None,...),"product_id":(None,...),"user_id":(None,str(user_id)),"customer_email":(None,...)}`** (НЕ `data=`), `headers={"Authorization":f"Bearer {api_token}","Accept":"application/json"}`, `timeout=_CHECKOUT_TIMEOUT_SECONDS`. **Content-Type руками не ставить.**
+  - Ошибки → `UpstreamError` (502): `TimeoutException`→`timeout`; `RequestError`→`connect_error`; статус не 2xx→`upstream_status`; 2xx без `payment_url`/не-JSON→`malformed_response`. Наружу — generic 502, **без** upstream-тела/статуса/токена.
+- **Наблюдаемость:** ровно один лог `"cloudpayments_checkout_outcome"` на вызов (allowlist: `result`/`reason`/`userId`/`productId`/`status`/`paymentId`). **НЕ логировать** `customer_email`/токен/`app_id`/upstream-тело.
+
+## Фаза C3 — Router + deps
+- `src/app/api_gateway/routers/billing_cloudpayments.py`: **добавить** `@router.post("/checkout", response_model=CloudPaymentsCheckoutResponse, ...)`:
+  1. `current: CurrentUser` → `user_id = current.user_id` (**из JWT, не из тела**).
+  2. config-gate: `if not settings.cloudpayments_checkout_configured(): raise CloudPaymentsCheckoutNotConfiguredError(...)` → 503.
+  3. `if not await enforce_other_limits(user_id=current.user_id): raise RateLimitedError(...)` → 429.
+  4. `client.validate_product(body.productId)` → 422 при unknown/некредитуемом.
+  5. `result = await client.create_payment_link(user_id=current.user_id, product_id=body.productId, customer_email=body.customerEmail)`.
+  6. вернуть `CloudPaymentsCheckoutResponse(paymentId=..., paymentUrl=..., status=..., expiresAt=...)` — HTTP **200**.
+  - **Swagger-чистота:** `summary` (напр. «Создать ссылку на оплату (RU)»), лаконичный `description` (что делает, возвращает `paymentUrl`) — без ADR/TD/Q и имён секретов/сервисов.
+- `src/app/deps.py`: `get_cloudpayments_checkout_client() -> CloudPaymentsCheckoutClient` (только `get_settings()`; без DbSession).
+- `src/app/main.py` — **не трогать** (router уже включён).
+
+## Фаза C4 — Deployment (devops, после backend)
+- Env на **avelyra**: `CLOUDPAYMENTS_APP_ID=481d10b0-c7ee-4eeb-8618-d3a6cd7f7b9d`, `CLOUDPAYMENTS_API_TOKEN=<app token broadapps>` (секрет; значение = `CLOUDPAYMENTS_WEBHOOK_TOKEN`, но конфиг отдельный), `CLOUDPAYMENTS_API_BASE` — дефолт (не задавать, если стандартный). На прочих инстансах не задавать → `503` (неактивен). Рабочий образ пересобрать (появилась зависимость `email-validator`).
+- **После деплоя (сверка живьём, [Q-051-1](../../99-open-questions.md)):** прислать тестовый `POST /checkout`; убедиться, что broadapps вернул `payment_url` (201-shape), а последующий колбэк нашёл пользователя.
+
+## Что НЕ трогать (checkout)
+- Входящий вебхук `POST /v1/billing/cloudpayments/webhook` (ADR-050) и его файлы (`auth.py`/`parser.py`/`service.py`).
+- Adapty-webhook, StoreKit, `/v1/tokens/purchase`, BYOK, policy-engine, схемы БД, миграции.
+- `customer_email`/токен — не логировать, не персистить.
+
+---
+
+# Webhook (ADR-050) — входящий колбэк broadapps
 
 ## Фаза 1 — Config + миграция + ORM + audit
 - `src/app/config.py` (рядом с Adapty-блоком, `config.py:138-153`):

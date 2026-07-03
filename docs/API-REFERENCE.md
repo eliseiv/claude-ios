@@ -319,7 +319,27 @@
 
 ---
 
-## 7b. Billing — CloudPayments/broadapps webhook (RU-путь, [ADR-050](adr/ADR-050-cloudpayments-webhook.md))
+## 7b. Billing — CloudPayments/broadapps (RU-путь: [ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md) checkout + [ADR-050](adr/ADR-050-cloudpayments-webhook.md) webhook)
+
+### POST /v1/billing/cloudpayments/checkout
+**Наш** эндпоинт создания платёжной ссылки RU-оплаты ([ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md)). **Вызывает iOS-клиент** (JWT). Делает исходящий вызов broadapps `POST /payments/link` и возвращает ссылку YooKassa. Активен **только на avelyra**.
+
+**Авторизация:** пользовательский JWT (`Authorization: Bearer <JWT>`, `bearerAuth`). **`userId` = JWT `sub`, НЕ из тела** — фикс «потерянных платежей» (колбэк [ADR-050](adr/ADR-050-cloudpayments-webhook.md) находит пользователя по этому `userId`).
+
+**Тело** (StrictModel): `productId` (валидируется allowlist `classify_product`; unknown/некредитуемый → `422`), `customerEmail` (`EmailStr`). Пример: `{"productId":"week_6.99_nottrial","customerEmail":"user@example.com"}`.
+
+**Ответ `200`** (проброс broadapps): `{"paymentId","paymentUrl","status","expiresAt":null|str}`. `paymentUrl` — ссылка YooKassa (`https://yoomoney.ru/checkout/...`).
+
+| HTTP | Код | Когда |
+|---|---|---|
+| 200 | — | broadapps вернул ссылку |
+| 401 | `unauthorized` | нет/невалидный JWT |
+| 422 | `validation_error` | неизвестный/некредитуемый `productId`, невалидный email, лишнее поле |
+| 429 | `rate_limited` | лимит |
+| 502 | `upstream_error` | broadapps недоступен/таймаут/не-2xx/malformed (без утечки токена/деталей) |
+| 503 | `cloudpayments_checkout_not_configured` | `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN` не заданы (⇒ только avelyra) |
+
+**Исходящий вызов:** `POST {CLOUDPAYMENTS_API_BASE}/payments/link` (default `https://pay.broadapps.dev/api/v1`), multipart {`app_id`(config), `product_id`, `user_id`(=sub), `customer_email`}, `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>` (**отдельный** от входящего `WEBHOOK_TOKEN`), таймаут 15с. `customer_email` (PII) и токен — не логируются/не в ответе. Контракт — сверить живьём ([Q-051-1](99-open-questions.md)). Детали — [modules/billing-cloudpayments/02-api-contracts.md](modules/billing-cloudpayments/02-api-contracts.md).
 
 ### POST /v1/billing/cloudpayments/webhook
 Серверный вебхук агрегатора **broadapps** (`pay.broadapps.dev`, фронтит YooKassa) в формате **CloudPayments** (M2M, **вызывает broadapps, не iOS**) — **отдельный RU-путь**: по успешному платежу активирует подписку или начисляет token-пакет и идемпотентно начисляет кредиты. Активен **только на avelyra** (где задан секрет).
