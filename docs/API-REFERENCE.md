@@ -43,7 +43,7 @@
 | **Admin** | Операторские/саппорт-инструменты, `/v1/admin/*` | статический секрет | `X-Admin-Token: <ADMIN_API_SECRET>` | `adminToken` (apiKey, header `X-Admin-Token`) |
 | **Preview** | Браузер (открывает превью сайта) | подпись внутри URL (HMAC+TTL) | нет — авторизация в самой ссылке | — (публичный по signed URL) |
 | **Adapty webhook** | Сервис Adapty (M2M), `/v1/billing/adapty/webhook` | статический bearer-секрет (без HMAC-подписи payload) | `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` | отдельная http-bearer схема ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)) |
-| **CloudPayments webhook** | Агрегатор broadapps/YooKassa (M2M, RU-путь), `/v1/billing/cloudpayments/webhook` | статический bearer-секрет (без HMAC-подписи payload) | `Authorization: Bearer <CLOUDPAYMENTS_WEBHOOK_TOKEN>` | отдельная http-bearer схема ([ADR-050](adr/ADR-050-cloudpayments-webhook.md)); активен только на avelyra |
+| **CloudPayments webhook** | Агрегатор broadapps/YooKassa (RU-путь), `/v1/billing/cloudpayments/webhook` | **публичный (нет 401), [ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md)** — broadapps шлёт колбэк без auth/подписи | нет обяз. заголовка; trust-anchor = **верификация через broadapps API**; per-IP rate-limit | начисление только по подтверждённому `succeeded`-платежу; гейт активации `CLOUDPAYMENTS_API_TOKEN`; активен только на avelyra |
 
 > Эндпоинты выпуска токена `/v1/auth/register|token|refresh|apple` и `GET /v1/auth/jwks` — **public** (без `Authorization`): это точка получения JWT. Защита — per-IP rate-limit. См. [§21](#21-auth-выпуск-токена).
 
@@ -342,23 +342,21 @@
 **Исходящий вызов:** `POST {CLOUDPAYMENTS_API_BASE}/payments/link` (default `https://pay.broadapps.dev/api/v1`), multipart {`app_id`(config), `product_id`, `user_id`(=sub), `customer_email`}, `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>` (**отдельный** от входящего `WEBHOOK_TOKEN`), таймаут 15с. `customer_email` (PII) и токен — не логируются/не в ответе. Контракт — сверить живьём ([Q-051-1](99-open-questions.md)). Детали — [modules/billing-cloudpayments/02-api-contracts.md](modules/billing-cloudpayments/02-api-contracts.md).
 
 ### POST /v1/billing/cloudpayments/webhook
-Серверный вебхук агрегатора **broadapps** (`pay.broadapps.dev`, фронтит YooKassa) в формате **CloudPayments** (M2M, **вызывает broadapps, не iOS**) — **отдельный RU-путь**: по успешному платежу активирует подписку или начисляет token-пакет и идемпотентно начисляет кредиты. Активен **только на avelyra** (где задан секрет).
+Серверный вебхук агрегатора **broadapps** (`pay.broadapps.dev`, фронтит YooKassa) в формате **CloudPayments** (**вызывает broadapps, не iOS**) — **отдельный RU-путь**. **[ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md): эндпоинт ПУБЛИЧНЫЙ (нет `401`); колбэк = ТРИГГЕР, начисление — только после ВЕРИФИКАЦИИ платежей через broadapps API.** Активен **только на avelyra** (где задан `CLOUDPAYMENTS_API_TOKEN`).
 
-**Авторизация:** `Authorization: Bearer <CLOUDPAYMENTS_WEBHOOK_TOKEN>` (= app API key broadapps, constant-time). **Нет HMAC-подписи payload.** Неверный/нет токена → `401`; секрет не сконфигурирован → `500`.
+**Авторизация ([ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md)):** **`401` НЕ выдаётся** — broadapps шлёт колбэк без авторизации (`authScheme=none`) и без HMAC-подписи → начислять по телу нельзя. `require_cloudpayments_webhook` — наблюдательная non-blocking (лог `cloudpayments_webhook_auth_observed`). **Trust-anchor начисления — верификация**, не токен. Публичный эндпоинт → **per-IP rate-limit** (`CLOUDPAYMENTS_WEBHOOK_RATE_LIMIT_PER_IP`, дефолт 120/мин, `429`). Гейт активации — `CLOUDPAYMENTS_API_TOKEN` (пуст → `500`). `CLOUDPAYMENTS_WEBHOOK_TOKEN` — легаси/опционален.
 
-**Тело:** читается **сырым**, **без Pydantic-валидации**. Плоские поля PascalCase; **`Data` — JSON-строка** (парсится отдельно). Распознаётся: `AccountId`(=наш `userId`, **верхний регистр → lower** → UUID)‖`Data.user_id`; `TransactionId` (дедуп/идемпотентность); гейт `Status=="Completed"`&`OperationType=="Payment"` (ci); из `Data` — `product_id`, `billing_interval_unit`/`count`, trial-флаги. **Карт-данные (`CardFirstSix`/`CardLastFour`/`Issuer`/`CardType`) не читаются/не логируются/не хранятся.**
+**Тело:** читается **сырым**. Из колбэка обязателен `AccountId`‖`Data.user_id` (**deviceId**, верхний регистр → lower → UUID) + гейт `Status=="Completed"`&`OperationType=="Payment"` (ci); `TransactionId`/`product_id` — опц. контекст лога. **Карт-данные не читаются/не логируются/не хранятся.**
 
-**После успешной авторизации любое тело → `200` c телом `{"code": 0}`** (агрегатор не ретраит). Внутренний исход (applied/duplicate/ignored+reason) — в лог/audit, не в теле:
+**Верификация (единственный триггер начисления):** `deviceId`→`userId` (двухступенчатый, [ADR-053](adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md); `user_not_found` → `ignored`, **без** GET) → исходящий `GET {CLOUDPAYMENTS_API_BASE}/users/{deviceId}/payments` (`Bearer CLOUDPAYMENTS_API_TOKEN`, 15с) → **реконсиляция**: начислить каждый платёж со `status ∈ CLOUDPAYMENTS_PAID_STATUSES` (дефолт `succeeded`) в окне свежести (`CLOUDPAYMENTS_PAYMENT_FRESHNESS_HOURS`, дефолт 72ч), класс по `product.payment_type` (`one_time`→tokens \| `subscription`→subscription), сумма по `product.code` из серверных карт (anti-tamper), идемпотентно `cp-txn:{payment_id}`.
 
 | HTTP | Тело | Когда |
 |---|---|---|
-| 401 | — | нет/неверный bearer |
-| 500 | — | секрет не задан **или** реальный внутренний сбой (БД) → агрегатор ретраит |
-| 200 | `{"code":0}` | всё принятое: `applied` / `duplicate` / `ignored` (`empty_body`/`invalid_json`/`not_an_object`/`not_a_completed_payment`/`missing_transaction_id`/`invalid_data`/`missing_product_id`/`invalid_account_id`/`user_not_found`/`unknown_product`) |
+| 429 | — | превышен per-IP лимит |
+| 500 | — | `CLOUDPAYMENTS_API_TOKEN` не задан \| `api_error` broadapps (retriable) \| сбой БД → ретрай |
+| 200 | `{"code":0}` | всё принятое: `applied` (`creditedCount≥1`) / `duplicate` / `ignored` (`empty_body`/`invalid_json`/`not_an_object`/`not_a_completed_payment`/`invalid_account_id`/`user_not_found`/`no_creditable_payment`) |
 
-**Маппинг:** классификация продукта → **subscription** (интервал в `Data` или паттерн имени → `subscriptions.status=active`+`plan`+`expires_at`=now+интервал + грант per-tier `CLOUDPAYMENTS_PRODUCT_TOKENS`/fallback) \| **tokens** (в `TOKEN_PRODUCTS` или паттерн `NNN_tokens` → разовый грант `N` строго из `TOKEN_PRODUCTS`) \| **unknown** (`ignored`, WARNING).
-
-**Идемпотентность:** дедуп события — UNIQUE `cloudpayments_webhook_events.transaction_id` (=`TransactionId`); грант — **один на платёж** через ledger `cp-txn:{transaction_id}` (namespace изолирован от Apple-путей). Продление приходит новым `TransactionId` → новый грант. Одна транзакция; сбой → откат → `5xx` → ретрай. Формат ответа `{"code":0}` — **допущение к живой проверке** ([Q-050-1](99-open-questions.md)). Детали — [modules/billing-cloudpayments/02-api-contracts.md](modules/billing-cloudpayments/02-api-contracts.md).
+**Идемпотентность:** дедуп + грант по broadapps **`payment_id`** (ledger `cp-txn:{payment_id}`, дедуп-колонка `cloudpayments_webhook_events.transaction_id`:=`payment_id`), НЕ callback `TransactionId`. Продление — новый `payment_id` → новый грант. Детали — [modules/billing-cloudpayments/02-api-contracts.md](modules/billing-cloudpayments/02-api-contracts.md). Живая калибровка — [Q-054-1](99-open-questions.md)/[Q-054-2](99-open-questions.md).
 
 ---
 

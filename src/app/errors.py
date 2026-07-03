@@ -125,6 +125,37 @@ class ServiceUnavailableError(AppError):
     code = "service_unavailable"
 
 
+class CloudPaymentsWebhookMisconfiguredError(ServiceUnavailableError):
+    """The RU webhook cannot verify payments because ``CLOUDPAYMENTS_API_TOKEN`` is unset (ADR-054).
+
+    500 with code=cloudpayments_webhook_misconfigured (billing-cloudpayments/02-api-contracts.md).
+    Under ADR-054 the instance activation gate moved from ``CLOUDPAYMENTS_WEBHOOK_TOKEN`` (legacy,
+    no longer gates) to ``CLOUDPAYMENTS_API_TOKEN`` (the outgoing Bearer used for verification):
+    without it no payment can be confirmed, so ``handle()`` raises this BEFORE any parsing and the
+    aggregator retries until the operator sets the token. So the webhook credits only where the API
+    token is set (avelyra). Overrides ``status_code`` to 500 (not the 503 of the base) so the
+    aggregator treats it as a transient server fault to retry.
+    """
+
+    status_code = 500
+    code = "cloudpayments_webhook_misconfigured"
+
+
+class CloudPaymentsVerificationUnavailableError(AppError):
+    """broadapps payment-verification GET failed transiently — credit deferred, retriable (ADR-054).
+
+    500 with code=cloudpayments_verification_unavailable: a timeout / connect error / 5xx / a
+    malformed (non-JSON or missing ``data``) response from ``GET /users/{deviceId}/payments`` must
+    not silently drop a real payment. The service raises this so the whole callback returns 500 and
+    the aggregator re-delivers later (idempotency by broadapps ``payment_id`` keeps reprocessing
+    safe). A broadapps ``404`` is NOT this error — it means "no payments" (permanent) and yields
+    ``no_creditable_payment`` (200). The upstream body/status/token are never proxied outward.
+    """
+
+    status_code = 500
+    code = "cloudpayments_verification_unavailable"
+
+
 class CloudPaymentsCheckoutNotConfiguredError(ServiceUnavailableError):
     """RU checkout is not configured on this instance (ADR-051 §5).
 

@@ -1,24 +1,26 @@
 # billing-cloudpayments / 08 — Observability (логирование исхода вебхука)
 
-Реализует [ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md). Образец — [billing-adapty/08-observability.md](../billing-adapty/08-observability.md) ([ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md)). Точное ТЗ для backend — без додумывания. HTTP-семантику (`{"code":0}`/401/500), начисление, дедуп и контракт **не меняет**.
+Базово — [ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md); **АКТУАЛЬНО — [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)** (auth-лог переименован; в outcome добавлены поля верификации/реконсиляции). Образец — [billing-adapty/08-observability.md](../billing-adapty/08-observability.md) ([ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md)). HTTP-семантику (`{"code":0}`/429/500), начисление, дедуп и контракт лог **не меняет**.
 
 Два независимых лога:
-- `"cloudpayments_webhook_auth_denied"` — **только на 401**, эмитится в `require_cloudpayments_webhook` (`src/app/billing_cloudpayments/auth.py`), см. §Auth-denied ниже ([ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md)).
-- `"cloudpayments_webhook_outcome"` — после успешной авторизации, эмитится в `CloudPaymentsWebhookService.handle()` (`service.py`), см. ниже ([ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md)).
+- `"cloudpayments_webhook_auth_observed"` ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)) — **наблюдательный** (не привязан к 401, которого больше нет), эмитится в `require_cloudpayments_webhook` (`auth.py`), см. §Auth-observed ниже.
+- `"cloudpayments_webhook_outcome"` — эмитится в `CloudPaymentsWebhookService.handle()` (`service.py`), см. ниже.
 
-## Auth-denied лог (401, [ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md))
-**Файл:** `src/app/billing_cloudpayments/auth.py` (логгер `app.billing_cloudpayments.auth`, `log_event`). Ровно один WARNING `"cloudpayments_webhook_auth_denied"` на каждый `401` (mismatch/нет заголовка). На `500` (secret не задан) и на успех — **не** эмитится.
+## Auth-observed лог ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md); ранее auth-denied [ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md))
+**Изменение [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md):** эндпоинт публичный, `401` **снят** → прежний WARNING `"cloudpayments_webhook_auth_denied"` (на 401) **переименован** в `"cloudpayments_webhook_auth_observed"` (уровень **DEBUG/INFO**), эмитится наблюдательно (авторизация не блокирует). Цель прежняя — видимость, если broadapps позже введёт подпись/иной заголовок ([Q-052-1](../../99-open-questions.md) закрыт: сейчас `authScheme=none`).
 
-**Allowlist полей:**
+**Файл:** `src/app/billing_cloudpayments/auth.py` (логгер `app.billing_cloudpayments.auth`, `log_event`).
+
+**Allowlist полей (без изменений):**
 | Поле | Значение |
 |---|---|
-| `matched` | `false` (bool; всегда на этом пути) |
-| `authScheme` | слово-схема в lower при «схема + значение» (`bearer`/`token`/`basic`/…), иначе `none` (нет заголовка) / `empty` (пустой) / `raw` (одиночный токен без пробелов — **значение НЕ логируется**) |
+| `matched` | `bool` — совпал ли (опц.) присутствующий токен с легаси `CLOUDPAYMENTS_WEBHOOK_TOKEN` (для лога; НЕ гейтит) |
+| `authScheme` | слово-схема в lower (`bearer`/`token`/…) при «схема+значение», иначе `none` (нет заголовка; **ожидаемо для broadapps**) / `empty` / `raw` (значение НЕ логируется) |
 | `presentAuthHeaders` | список **имён** присутствующих заголовков из allowlist `("authorization","x-api-key","x-signature","x-sign","x-webhook-signature","x-content-hmac","content-hmac","signature")` |
 
 **ЗАПРЕЩЕНО:** значение токена/секрета, полный заголовок `Authorization`, значения любых заголовков, сырое тело.
 
-**Ориентиры для qa:** валидный секрет в формах `Bearer <t>`/`Token <t>`/сырой `<t>` → **нет** auth_denied-лога (проходит); неверный токен и отсутствие заголовка → ровно один WARNING с `matched=false` и корректными `authScheme`/`presentAuthHeaders`; в записи **нет** значения токена/заголовка.
+**Ориентиры для qa:** колбэк broadapps без `Authorization` → `authScheme="none"`, `matched=false`, **пропускается** (нет 401); один DEBUG/INFO `auth_observed`-лог; в записи нет значений/секрета.
 
 ## Outcome лог (после авторизации, [ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md))
 
@@ -108,6 +110,31 @@ def _level_for(result: str, reason: str | None) -> int:
 ## Allowlist / запрет (PII, секреты)
 **Логируется только:** `result`, `reason`, `transactionId`, `productId`, `userId` (**резолвнутый** наш UUID, `str`), `kind`, `resolvedVia` (`"user_id"`\|`"device_id"`, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)). Опционально — `accountId` (= исходный `X`/deviceId, наш внутренний id, безопасно).
 **ЗАПРЕЩЕНО:** карт-данные (`CardFirstSix`/`CardLastFour`/`Issuer`/`CardType`), `Authorization`/bearer/`CLOUDPAYMENTS_WEBHOOK_TOKEN`, сырой `raw`/`Data`-строка, `amount`/`currency` в логе (они только в санитизированном `payload`/audit, не в outcome-логе). Канон — [ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md), [05-security.md](../../05-security.md#логирование-безопасное).
+
+## Дополнение [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md) — поля верификации/реконсиляции
+
+Модель начисления сменилась на **реконсиляцию платежей** (`GET /users/{deviceId}/payments`). `outcome`-лог остаётся **один агрегатный на колбэк**, но:
+
+**Новые поля `cloudpayments_webhook_outcome`:**
+| Поле | Значение |
+|---|---|
+| `verify` | `"ok"` (2xx от broadapps) \| `"api_error"` (таймаут/не-2xx/malformed). Опущено на до-verify исходах (`user_not_found`/ранние `ignored`). |
+| `creditedCount` | int — сколько `payment_id` начислено на этом колбэке (`applied`: ≥1; `duplicate`/`no_creditable_payment`: 0). |
+| `paymentStatuses` | список фактических broadapps `status` из `data[]` (для калибровки [Q-054-1](../../99-open-questions.md); безопасно). Опущено, если verify не выполнялся. |
+| `resolvedVia` | как в [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md) (`user_id`/`device_id`). |
+
+**Новые/изменённые `reason` и уровни:**
+| `result` | `reason` | Level |
+|---|---|---|
+| `applied` | `None` (`creditedCount≥1`) | INFO |
+| `duplicate` | все платежи уже начислены | INFO |
+| `ignored` | `user_not_found` (без GET) | **WARNING** |
+| `ignored` | `no_creditable_payment` (2xx, нет свежих `succeeded`) | **WARNING** |
+| `ignored` | `unknown_product` / `unknown_payment_type` (платёж пропущен) | **WARNING** |
+| `ignored` | `not_a_completed_payment` / `invalid_account_id` / `empty_body` / `invalid_json` / `not_an_object` | INFO (empty_body → DEBUG) |
+| — (raise) | `api_error` → лог `verify=api_error` (WARNING) затем `500` retriable | **WARNING** |
+
+**Отменено [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md):** reason'ы `missing_transaction_id`/`missing_product_id`/`invalid_data`/`unknown_product`-по-паттерну из [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md) для пути начисления не применяются (тело колбэка больше не источник продукта/суммы; классификация — по `product.payment_type` из verify). Идемпотентность/дедуп — по broadapps `payment_id` (не `TransactionId`). **ЗАПРЕЩЕНО** дополнительно: `CLOUDPAYMENTS_API_TOKEN`/Bearer, полное тело ответа verify, `paid_at`-значения с PII (только `status` безопасен).
 
 ## Тестовые ориентиры (для qa)
 - На **каждый** исход — ровно одна запись `"cloudpayments_webhook_outcome"` с корректными `result`/`reason`/`level`.

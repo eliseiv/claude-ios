@@ -108,6 +108,30 @@ async def enforce_auth_limits(*, ip: str | None) -> bool:
         return True
 
 
+async def enforce_cloudpayments_webhook_limits(*, ip: str | None) -> bool:
+    """Per-source-IP rate limit on the PUBLIC CloudPayments webhook (ADR-054 §1).
+
+    The endpoint is public (broadapps sends no auth), so the only throttle is per source IP; its
+    purpose is anti-amplification of the outgoing verification GET, not blocking legitimate traffic
+    (the cap is generous, default 120/min). When the client IP cannot be resolved a single shared
+    ``unknown`` bucket is used so the surface is never fully unlimited. Fail-open on a Redis error
+    (availability over strictness), like the other limiters. Window is rate_limit_window_seconds.
+    """
+    settings = get_settings()
+    client = get_redis()
+    bucket = ip or "unknown"
+    try:
+        return await _allow(
+            client,
+            f"rl:cpwebhook:{bucket}",
+            settings.cloudpayments_webhook_rate_limit_per_ip,
+            settings.rate_limit_window_seconds,
+        )
+    except redis.RedisError as exc:
+        log_event(logger, logging.WARNING, "rate_limit_redis_unavailable", error=str(exc))
+        return True
+
+
 async def enforce_other_limits(*, user_id: uuid.UUID) -> bool:
     settings = get_settings()
     client = get_redis()

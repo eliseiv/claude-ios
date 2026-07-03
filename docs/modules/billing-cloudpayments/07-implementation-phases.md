@@ -1,6 +1,84 @@
 # billing-cloudpayments / 07 — Implementation Phases (ТЗ backend)
 
-Модуль реализует два ADR: **[ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)** (входящий вебхук — фазы 1–7 ниже, **уже реализован**) и **[ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)** (исходящий checkout — фазы C1–C4 ниже, **к реализации**). Backend выполняет фазы строго по порядку. **НЕ писать код в этом документе — это ТЗ.** Точные правила — [03-architecture.md](03-architecture.md).
+Модуль реализует: **[ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)** (checkout, фазы C1–C4, реализован), **[ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)** (базовый вебхук, фазы 1–7 — **исторические, частично реализованы**) и **[ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)** (верификация платежей + публичный вебхук + резолв [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md) — **АКТУАЛЬНЫЕ фазы W1–W6 ниже, к реализации**). Backend выполняет фазы строго по порядку. **НЕ писать код в этом документе — это ТЗ.** Точные правила — [03-architecture.md](03-architecture.md).
+
+> **ПРИОРИТЕТ: фазы W1–W6 ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)) — текущее ТЗ вебхука.** Фазы 1–7 ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)) ниже — **исторические**: их авторизация (bearer/401), классификация паттерном имени и идемпотентность по `TransactionId` **отменены** [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md). При расхождении — приоритет у W1–W6.
+
+---
+
+# Webhook (ADR-054 — АКТУАЛЬНО) — колбэк-триггер + верификация платежей
+
+Цель: колбэк broadapps = **триггер**; начисление — только после **реконсиляции платежей** через broadapps API (`GET /users/{deviceId}/payments`) нашим `CLOUDPAYMENTS_API_TOKEN`. Эндпоинт публичный (нет `401`). **Без миграции.** Точные правила — [03-architecture.md §Верификация платежей](03-architecture.md), контракт — [02-api-contracts.md](02-api-contracts.md), RBAC — [06-rbac.md](06-rbac.md).
+
+## Фаза W1 — Config + ошибка + rate-limit
+- `src/app/config.py` (рядом с CloudPayments-блоком):
+  - `cloudpayments_paid_statuses_raw: str = Field(default="succeeded", alias="CLOUDPAYMENTS_PAID_STATUSES")` + метод `cloudpayments_paid_statuses() -> frozenset[str]` (CSV **или** JSON-массив; lower-case; пусто/малформед → `{"succeeded"}`).
+  - `cloudpayments_payment_freshness_hours: int = Field(default=72, alias="CLOUDPAYMENTS_PAYMENT_FRESHNESS_HOURS")` (>0; ≤0 → дефолт 72).
+  - `cloudpayments_webhook_rate_limit_per_ip: int = Field(default=120, alias="CLOUDPAYMENTS_WEBHOOK_RATE_LIMIT_PER_IP")`.
+  - Переиспользуются существующие `cloudpayments_api_base`/`cloudpayments_api_token` (ADR-051), `token_products()`/`cloudpayments_product_tokens()`/`cloudpayments_subscription_tokens_grant`.
+- `src/app/errors.py`: `CloudPaymentsVerificationUnavailableError` (`status_code=500`, `code="cloudpayments_verification_unavailable"`). `CloudPaymentsWebhookMisconfiguredError` (500) переиспользуется, но триггерится **пустым `CLOUDPAYMENTS_API_TOKEN`** (текст «cloudpayments api token not configured»).
+- `src/app/api_gateway/rate_limit.py`: `async def enforce_cloudpayments_webhook_limits(*, ip: str | None) -> bool` — образец `enforce_auth_limits` (per-IP бакет `rl:cpwebhook:{ip or "unknown"}`, лимит `cloudpayments_webhook_rate_limit_per_ip`, окно `rate_limit_window_seconds`, fail-open при `redis.RedisError`).
+
+## Фаза W2 — Авторизация → наблюдательная (снять 401)
+- `src/app/billing_cloudpayments/auth.py`: `require_cloudpayments_webhook` **больше не выдаёт `401`** — читает сырой `Authorization`, вычисляет `matched` (constant-time с легаси `CLOUDPAYMENTS_WEBHOOK_TOKEN`, если задан — **только для лога**) и `authScheme`, **всегда возвращает `None` (пропускает)**. Ровно один лог `"cloudpayments_webhook_auth_observed"` (**DEBUG/INFO**, не WARNING; allowlist `matched`/`authScheme`/`presentAuthHeaders`, [08-observability §Auth-observed](08-observability.md)). Прежний `cloudpayments_webhook_auth_denied` **удалить** (401 нет). `CloudPaymentsWebhookMisconfiguredError` из auth-dep **убрать** (гейт `API_TOKEN` теперь в `handle()`, W4). OpenAPI-схема `cloudpayments_webhook_scheme` (`auto_error=False`) остаётся декоративной.
+
+## Фаза W3 — Verify-клиент (`src/app/billing_cloudpayments/verify.py`, **новый**)
+- `_VERIFY_TIMEOUT_SECONDS = 15.0`; dataclass `CreditablePayment(payment_id: str, product_code: str, payment_type: str, status: str, paid_at: datetime)`.
+- `CloudPaymentsVerifyClient(settings)`:
+  - `async list_payments(*, device_id: uuid.UUID) -> list[dict]`: `httpx.AsyncClient` per-call, `GET {api_base}/users/{str(device_id)}/payments`, `headers={"Authorization":f"Bearer {api_token}","Accept":"application/json"}`, `timeout=_VERIFY_TIMEOUT_SECONDS`. **Ошибки → `CloudPaymentsVerificationUnavailableError` (500 retriable):** `httpx.TimeoutException`/`RequestError`; **не-2xx** (см. §404 ниже); не-JSON / нет ключа `data`. Возвращает `data` (list). **НЕ** проксировать тело/токен наружу.
+    - **Обработка 404 ([ADR-054 §Decision п.5](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)):** `404` от broadapps = «у пользователя нет платежей» → трактовать как **пустой список** (не `api_error`): вернуть `[]` → далее `no_creditable_payment` (200), **НЕ** 500-retry. Только `5xx`/timeout/connect/невалидный JSON → `api_error` (500 retriable). (Точное поведение 404 — сверить живьём, [Q-054-2](../../99-open-questions.md).)
+  - `select_creditable_payments(data, *, paid_statuses, now, freshness_hours) -> list[CreditablePayment]` (**чистая**): оставить `p`, если `str(p["status"]).strip().lower() ∈ paid_statuses` **И** `parse(p["paid_at"]) >= now - timedelta(hours=freshness_hours)` **И** валидные `p["payment_id"]`, `p["product"]["code"]`, `p["product"]["payment_type"]`.
+
+## Фаза W4 — Сервис (`src/app/billing_cloudpayments/service.py`) — реконсиляция
+- Порядок в `handle(raw)`:
+  1. **конфиг-гейт:** `not settings.cloudpayments_api_token` → `raise CloudPaymentsWebhookMisconfiguredError` (500).
+  2. парсинг (упрощён, W5): гейт `Status/OperationType` не прошёл → `ignored/not_a_completed_payment`; нет/не-UUID `X` → `ignored/invalid_account_id`. (`TransactionId`/`product_id` — опц. контекст, НЕ гейтят.)
+  3. резолв `X`→`userId` (двухступенчатый, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md), метод `_resolve_user`): `None` → `ignored/user_not_found` (**WARNING**, **без** GET).
+  4. `data = await verify_client.list_payments(device_id=X)` (api_error → пробросить `CloudPaymentsVerificationUnavailableError` → 500).
+  5. `payments = select_creditable_payments(data, paid_statuses=..., now=utcnow, freshness_hours=...)`; пусто → `ignored/no_creditable_payment` (**WARNING**; лог `paymentStatuses`).
+  6. `credited = 0`; **по каждому** `p in payments` — `await self._apply_payment(p, user_id, resolved_via)`; если начислено → `credited += 1`.
+  7. итог: `credited >= 1` → `applied` (`creditedCount=credited`); иначе (все дубли) → `duplicate`.
+- `_apply_payment(p, user_id, resolved_via)` (**отдельная транзакция на платёж**):
+  - класс: `p.payment_type=="one_time"`→tokens; `=="subscription"`→subscription; иначе → лог `unknown_payment_type` (WARNING), пропустить (не начислено).
+  - сумма (anti-tamper, по `p.product_code`): tokens `settings.token_products().get(code)` → `None`/`<=0` → `unknown_product` (WARNING), пропуск; subscription `settings.cloudpayments_product_tokens().get(code) or settings.cloudpayments_subscription_tokens_grant`.
+  - `BEGIN` → INSERT `cloudpayments_webhook_events(transaction_id=p.payment_id, user_id, product_id=code, kind, payload=sanitize) ON CONFLICT DO NOTHING RETURNING` → пусто ⇒ пропуск (дубликат платежа); иначе:
+    - subscription → `_upsert_subscription(user_id, active, plan=code, expires_at=_compute_expiry(now, unit_from_code, 1))` (`unit` инферится из `code`, [03-architecture.md](03-architecture.md)) + грант; tokens → грант.
+    - `WalletService.grant(user_id, amount=credits, idempotency_key=f"cp-txn:{p.payment_id}", reason, meta={"paymentId":p.payment_id,"productCode":code,"kind":kind})`; audit `cloudpayments_payment`; `COMMIT`.
+  - вернуть «начислено?» (bool).
+- **`classify_product` в начислении НЕ вызывать** (класс — из `payment_type`); функция остаётся для checkout.
+
+## Фаза W5 — Парсер (упростить `src/app/billing_cloudpayments/parser.py`)
+- Обязательны: гейт `parse_gate(Status, OperationType)` + `parse_user_id` (`X`=AccountId→Data.user_id, **`.lower()`+UUID**).
+- `TransactionId`/`product_id`/`billing_*`/trial-флаги → **опц. контекст лога** (не гейтят, не отсекают колбэк). `missing_transaction_id`/`missing_product_id`/`invalid_data` как отсекающие исходы **убрать** из пути начисления.
+- Карт-данные (`CardFirstSix`/…) — по-прежнему **не** читать. `sanitize_payload` — allowlist для персиста/audit ([04-data-model.md](04-data-model.md)).
+
+## Фаза W6 — Router + наблюдаемость
+- `src/app/api_gateway/routers/billing_cloudpayments.py` (вебхук-роут):
+  1. `if not await enforce_cloudpayments_webhook_limits(ip=client_ip(request)): raise RateLimitedError(...)` → `429`.
+  2. `raw = await request.body()`; `outcome = await service.handle(raw)`.
+  3. **всегда** `JSONResponse({"code": 0}, status_code=200)` для любого `WebhookOutcome`; `429` из rate-limit, `500` из `CloudPaymentsWebhookMisconfiguredError`/`CloudPaymentsVerificationUnavailableError`/ошибок БД. `require_cloudpayments_webhook` остаётся в `dependencies` (наблюдательная).
+- `src/app/deps.py`: `get_cloudpayments_verify_client() -> CloudPaymentsVerifyClient` (только `get_settings()`); фабрика сервиса дополняется verify-клиентом.
+- Наблюдаемость (`service.py`): один `"cloudpayments_webhook_outcome"` на колбэк + поля `verify`/`creditedCount`/`paymentStatuses`/`resolvedVia` ([08-observability.md](08-observability.md)). Опц. DEBUG per-payment.
+
+## Что НЕ трогать (ADR-054)
+- **Миграции — НЕТ** (`cloudpayments_webhook_events`/ledger/subscriptions уже есть; колонка `transaction_id` хранит broadapps `payment_id` — репурпозинг без DDL, [Q-054-3](../../99-open-questions.md)).
+- Checkout ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)) — только переиспользование config/httpx-паттерна (контракт не менять). Резолв deviceId→userId ([ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)) — не менять. Adapty/StoreKit/BYOK/policy — не трогать. anti-tamper — сумма только из серверных карт.
+
+## Deployment (devops, после backend, ADR-054)
+- Env на **avelyra**: `CLOUDPAYMENTS_API_TOKEN=<app token broadapps>` (уже есть от checkout — теперь гейтит и вебхук); опц. `CLOUDPAYMENTS_PAID_STATUSES` (дефолт `succeeded`), `CLOUDPAYMENTS_PAYMENT_FRESHNESS_HOURS` (72), `CLOUDPAYMENTS_WEBHOOK_RATE_LIMIT_PER_IP` (120). `CLOUDPAYMENTS_WEBHOOK_TOKEN` — можно **не задавать** (легаси). Callback URL в broadapps = `…/v1/billing/cloudpayments/webhook`.
+- **Разовый шаг восстановления застрявших платежей ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)):** платежи, «застрявшие» за инцидентный период (когда вебхук отбивал `401`), лежат вне 72-часового окна свежести. Для их восстановления — **временно** поднять `CLOUDPAYMENTS_PAYMENT_FRESHNESS_HOURS` до величины, покрывающей инцидентный период (напр. `2160`=90д), прогнать тестовые колбэки/дождаться ретраев broadapps по каждому оплатившему deviceId, затем **вернуть `72`**. Идемпотентность по `payment_id` гарантирует отсутствие двойного начисления при повышенном окне.
+- **После деплоя (сверка живьём, [Q-054-1](../../99-open-questions.md)/[Q-054-2](../../99-open-questions.md)):** тестовый платёж → лог `verify=ok`, `applied` `creditedCount≥1`; сверить `paymentStatuses` (ожидается `succeeded`), поведение broadapps 404, при необходимости откалибровать `CLOUDPAYMENTS_PAID_STATUSES`/`FRESHNESS_HOURS`.
+
+## Тестовые ориентиры (кратко, полное — [09-testing.md](09-testing.md))
+- Публичный: колбэк без `Authorization` → **не `401`**, доходит до резолва/верификации.
+- `CLOUDPAYMENTS_API_TOKEN==""` → `500` misconfigured; per-IP флуд → `429`.
+- verify api_error (timeout/5xx/malformed) → `500` retriable, начисления нет; broadapps `404` → `no_creditable_payment` (200).
+- `succeeded`-платёж в окне → `applied` `creditedCount≥1`; вне окна → не начислен; повтор колбэка → `duplicate` (идемпотентность по `payment_id`).
+- класс по `payment_type`; сумма по `product.code`; неизвестный `code`/`payment_type` → платёж пропущен (WARNING).
+
+---
+
+# Checkout (ADR-051) — исходящий вызов broadapps `/payments/link`
 
 ---
 
@@ -49,7 +127,9 @@
 
 ---
 
-# Webhook (ADR-050) — входящий колбэк broadapps
+# Webhook (ADR-050) — входящий колбэк broadapps — **ИСТОРИЧЕСКОЕ (отменено [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md))**
+
+> **⚠️ Эти фазы 1–7 ОТМЕНЕНЫ [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md).** Их авторизация (Фаза 2: bearer/401/500-if-unset), классификация паттерном имени и идемпотентность по `TransactionId` (Фаза 4), а также reason'ы `missing_transaction_id`/`missing_product_id`/`invalid_data` **больше не применяются**. Актуальное ТЗ вебхука — **фазы W1–W6 выше**. Раздел сохранён для истории/трассируемости; **backend реализует W1–W6, не 1–7**. Миграция `0014` (Фаза 1) и ORM `CloudPaymentsWebhookEvent` — **уже применены** и переиспользуются W-фазами (колонка `transaction_id` хранит `payment_id`).
 
 ## Фаза 1 — Config + миграция + ORM + audit
 - `src/app/config.py` (рядом с Adapty-блоком, `config.py:138-153`):

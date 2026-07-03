@@ -251,6 +251,22 @@ def classify_product(
     return KIND_UNKNOWN
 
 
+def infer_interval_unit_from_code(product_code: str) -> str | None:
+    """Infer the subscription interval unit from a product code (ADR-054 §7 / ADR-050 §Expiry).
+
+    Under ADR-054 the callback body no longer carries ``billing_interval_unit`` — the class comes
+    from the verified ``product.payment_type`` — so the subscription expiry unit is inferred from
+    the ``product.code`` name (e.g. ``week_6.99_nottrial`` -> ``week``; ``yearly_49.99`` -> year).
+    First keyword match in a deterministic order wins; no keyword -> ``None`` (``_compute_expiry``
+    then applies the 30-day default). Pure — same keyword set as ``classify_product``.
+    """
+    lowered = product_code.lower()
+    for keyword in _SUB_KEYWORDS:  # ("week", "month", "year", "day")
+        if keyword in lowered:
+            return keyword
+    return None
+
+
 def _compute_expiry(now: datetime.datetime, unit: str | None, count: int) -> datetime.datetime:
     """Subscription expiry (MVP timedelta approximation, ADR-050 §3a / Q-050-3).
 

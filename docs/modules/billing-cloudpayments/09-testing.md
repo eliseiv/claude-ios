@@ -1,45 +1,41 @@
 # billing-cloudpayments / 09 — Testing (ориентиры для qa)
 
-Тесты по [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md), герметичные (без сети/реального broadapps). Стек/команды — [docs/02-tech-stack.md](../../02-tech-stack.md), [docs/06-testing-strategy.md](../../06-testing-strategy.md). Плейсхолдер-секрет `CLOUDPAYMENTS_WEBHOOK_TOKEN` в тестах.
+**АКТУАЛЬНО — [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)** (публичный вебхук + верификация; [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md) резолв). Тесты герметичные — **исходящий `GET /users/{deviceId}/payments` мокируется** (без сети/реального broadapps). Стек/команды — [docs/02-tech-stack.md](../../02-tech-stack.md), [docs/06-testing-strategy.md](../../06-testing-strategy.md). Плейсхолдер-секрет `CLOUDPAYMENTS_API_TOKEN` в тестах (гейт активации).
 
-## Авторизация ([ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md) — терпимый формат)
-- **Верный секрет во ВСЕХ формах → проходит** (доходит до парсинга): `Authorization: Bearer <token>`, `bearer <token>` (ci к слову), `Token <token>`, сырой `Authorization: <token>` (без схемы).
-- Нет заголовка / неверный токен / нераспознанная схема с верным значением после неё (`Basic <token>`) → `401`.
-- `CLOUDPAYMENTS_WEBHOOK_TOKEN==""` → `500` (мис-конфигурация) на любой запрос (лога auth_denied нет).
-- **На каждый 401** — ровно один WARNING `"cloudpayments_webhook_auth_denied"` с `matched=false`, корректным `authScheme` (`bearer`/`token`/`raw`/`none`/`empty`) и `presentAuthHeaders` (имена); в записи **нет** значения токена/полного заголовка. См. [08-observability §Auth-denied](08-observability.md).
-- constant-time: и «нет заголовка», и «неверный токен» → одинаковый `401` (оба проходят `compare_digest`).
+## Авторизация ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md) — публичный, нет 401)
+- **Колбэк БЕЗ `Authorization` → НЕ `401`** (публичный): доходит до резолва пользователя/верификации. `authScheme="none"` в наблюдательном логе.
+- Колбэк с любым `Authorization` (валидный легаси-токен / мусор) → тоже принимается (не блокирует).
+- `CLOUDPAYMENTS_API_TOKEN==""` → **`500`** misconfigured (верификация невозможна ⇒ активен только avelyra).
+- Per-source-IP флуд > `CLOUDPAYMENTS_WEBHOOK_RATE_LIMIT_PER_IP` → `429` (fail-open при недоступности Redis — не блокирует).
+- **Наблюдательный лог:** ровно один DEBUG/INFO `"cloudpayments_webhook_auth_observed"` (allowlist `matched`/`authScheme`/`presentAuthHeaders`; **нет** значения токена/заголовка). Прежнего `cloudpayments_webhook_auth_denied`/`401` **нет**. См. [08-observability §Auth-observed](08-observability.md).
 
-## HTTP-контракт (всё `200 {"code":0}` кроме 401/500)
-- Пустое тело → `200 {"code":0}` (лог `ignored/empty_body`, DEBUG).
-- Не-JSON / JSON-не-объект → `200 {"code":0}`.
+## HTTP-контракт (всё `200 {"code":0}` кроме 429/500)
+- Пустое тело / не-JSON / JSON-не-объект → `200 {"code":0}` (`ignored/empty_body`|`invalid_json`|`not_an_object`).
 - `Status!="Completed"` или `OperationType!="Payment"` → `200 {"code":0}` (`not_a_completed_payment`).
-- Нет `TransactionId` → `missing_transaction_id`.
-- `Data` не парсится / нет → `invalid_data`.
-- Нет `product_id` → `missing_product_id`.
 - Нет/не-UUID `AccountId` и `Data.user_id` → `invalid_account_id`.
+- `TransactionId`/`product_id` **отсутствуют** → колбэк **всё равно обрабатывается** (опц. контекст; не отсекают — регресс против ADR-050).
+- verify `api_error` (мок timeout/5xx/malformed) → **`500` retriable**, начисления нет. broadapps `404` (мок) → `no_creditable_payment` (200), **не** 500.
 
-## Парсинг
-- `userId` ← `AccountId` (верх), fallback `Data.user_id`; **верхний регистр → нормализация lower** → находит `users`.
-- `Data` как JSON-строка → извлечены `product_id`/`billing_interval_unit`/`billing_interval_count`(str→int).
-- `billing_interval_count="1"` → int 1; невалид → 1.
-- Карт-данные (`CardFirstSix`/`CardLastFour`/`Issuer`/`CardType`) **не** попадают в `ParsedPayment`.
+## Резолв пользователя ([ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md), до verify)
+- `X`(=`AccountId`/`Data.user_id`, верх → **lower**) в `users` → `resolvedVia="user_id"`, verify по `X`.
+- `X` только в `auth_devices.device_id` (deviceId) → `userId=auth_devices[X].user_id`, `resolvedVia="device_id"`.
+- `X` ни там ни там → `ignored/user_not_found` (WARNING), **исходящего GET НЕТ**, без создания пользователя/устройства.
+- Карт-данные (`CardFirstSix`/…) **не** попадают в `ParsedPayment`/лог/`payload`.
 
-## Классификация продукта
-- `product_id ∈ TOKEN_PRODUCTS` → `tokens` (приоритет карты).
-- `billing_interval_unit="year"` (не в TOKEN_PRODUCTS) → `subscription`.
-- `"100_tokens_pack"` не в TOKEN_PRODUCTS → `tokens` по паттерну, но `token_products().get` пусто → `ignored/unknown_product` (WARNING), **без** записи события.
-- `"yearly_49.99_nottrial"` без `billing_interval_unit` → `subscription` по имени.
-- мусорный `product_id` без сигналов → `unknown` → `ignored/unknown_product`.
+## Верификация / реконсиляция ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md); мок `list_payments`)
+- Мок `data=[{payment_id, status:"succeeded", product:{code, payment_type}, paid_at:<свежий>}]` → **начисление**: `applied`, `creditedCount=1`.
+- `payment_type=="subscription"` → `subscriptions.status=active`, `plan=product.code`, `expires_at≈now+интервал` (unit из `code`); сумма = `CLOUDPAYMENTS_PRODUCT_TOKENS[code]` или fallback.
+- `payment_type=="one_time"` → разовый грант `N=TOKEN_PRODUCTS[code]`, `subscriptions` **не** тронута.
+- `status!="succeeded"` (напр. `pending`/`failed`) **или** `paid_at` вне окна свежести → **не начислен**; отбор пуст → `no_creditable_payment` (WARNING; лог `paymentStatuses`).
+- Несколько свежих `succeeded` в `data[]` → начислены **все недоначисленные** (`creditedCount=len`), каждый идемпотентно.
+- Неизвестный `product.code` (нет в картах) / неизвестный `payment_type` → платёж **пропущен** (WARNING `unknown_product`/`unknown_payment_type`), не начислен.
+- `CLOUDPAYMENTS_PAID_STATUSES` (напр. добавлен `paid`) → соответствующий статус начисляется.
 
-## Маппинг / начисление
-- **Реальный payload годовой подписки** (пример из ADR-050) → `subscriptions.status=active`, `plan="yearly_49.99_nottrial"`, `expires_at ≈ now+365д`; **один** ledger-грант с ключом `cp-txn:{TransactionId}`; сумма = `CLOUDPAYMENTS_PRODUCT_TOKENS[product_id]` или fallback `CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT`.
-- token-пакет → разовый грант `N=TOKEN_PRODUCTS[product_id]`, `subscriptions` **не** изменена.
-- Пользователь не найден → `ignored/user_not_found` (WARNING), нет вставки в `users`/журнал, баланс не изменён.
-
-## Идемпотентность
-- Повтор того же `TransactionId` → `duplicate`, баланс/подписка не изменились (двойная граница: UNIQUE журнала + ledger-ключ).
-- Продление: новый `TransactionId`, тот же `subscription_id` → **новый** грант + `expires_at` сдвинут (не схлопывается).
-- Гонка двух одинаковых `TransactionId` → ровно один `applied`, второй `duplicate` (ON CONFLICT).
+## Идемпотентность ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md) — по broadapps `payment_id`)
+- Повтор колбэка → тот же `data` → **тот же `payment_id`** → `ON CONFLICT DO NOTHING` + ledger `cp-txn:{payment_id}` → `duplicate`, баланс/подписка не изменились (двойная граница).
+- Продление: новый `payment_id` (тот же `subscription_id`) в `data[]` → **новый** грант + `expires_at` сдвинут.
+- Гонка двух одинаковых колбэков → ровно один начисляет платёж, второй `duplicate` (ON CONFLICT по `transaction_id`=`payment_id`).
+- Ключ дедупа/идемпотентности — broadapps `payment_id`, **не** callback `TransactionId`.
 
 ## Наблюдаемость / PII
 - На каждый исход — ровно одна запись `"cloudpayments_webhook_outcome"`; уровни по таблице [08-observability.md](08-observability.md).

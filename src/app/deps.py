@@ -22,6 +22,7 @@ from app.auth.service import AuthService
 from app.billing_adapty.service import AdaptyWebhookService
 from app.billing_cloudpayments.checkout import CloudPaymentsCheckoutClient
 from app.billing_cloudpayments.service import CloudPaymentsWebhookService
+from app.billing_cloudpayments.verify import CloudPaymentsVerifyClient
 from app.byok.kms import get_kms_client
 from app.byok.service import BYOKService
 from app.chat.global_tools import GlobalToolHandlers, SystemClock
@@ -174,6 +175,12 @@ def get_adapty_webhook_service(session: DbSession) -> AdaptyWebhookService:
     )
 
 
+def get_cloudpayments_verify_client() -> CloudPaymentsVerifyClient:
+    # ADR-054: outgoing broadapps payment-verification GET — no DbSession (no persisted state);
+    # needs only settings (api_base / api_token).
+    return CloudPaymentsVerifyClient(get_settings())
+
+
 def get_cloudpayments_webhook_service(session: DbSession) -> CloudPaymentsWebhookService:
     audit = AuditService(session)
     return CloudPaymentsWebhookService(
@@ -181,6 +188,7 @@ def get_cloudpayments_webhook_service(session: DbSession) -> CloudPaymentsWebhoo
         WalletService(session, audit),
         audit,
         get_settings(),
+        get_cloudpayments_verify_client(),
     )
 
 

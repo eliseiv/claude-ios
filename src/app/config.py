@@ -9,10 +9,14 @@ from __future__ import annotations
 import ipaddress
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _IpNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+# Default payment-freshness window (hours) for CloudPayments verification/reconciliation (ADR-054
+# §Окно свежести). A non-positive CLOUDPAYMENTS_PAYMENT_FRESHNESS_HOURS falls back to this.
+_CLOUDPAYMENTS_DEFAULT_FRESHNESS_HOURS = 72
 
 
 class Settings(BaseSettings):
@@ -169,6 +173,30 @@ class Settings(BaseSettings):
     # independently (ADR-050 §3a).
     cloudpayments_subscription_tokens_grant: int = Field(
         default=1000, alias="CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT"
+    )
+    # --- CloudPayments webhook payment verification (ADR-054) ---
+    # broadapps sends the callback WITHOUT auth/signature, so it is only a TRIGGER: the endpoint
+    # verifies the payment via the broadapps API (GET /users/{deviceId}/payments) with our
+    # CLOUDPAYMENTS_API_TOKEN before crediting. These three tune that reconciliation.
+    #
+    # Set of broadapps `status` values counted as "paid" (CSV or JSON array; compared lower-case).
+    # Default "succeeded" (the real broadapps value); parsed by cloudpayments_paid_statuses().
+    # Malformed / empty => {"succeeded"}. The actual status is logged each reconcile (Q-054-1).
+    cloudpayments_paid_statuses_raw: str = Field(
+        default="succeeded", alias="CLOUDPAYMENTS_PAID_STATUSES"
+    )
+    # Freshness window (hours): only payments with paid_at >= now() - window are creditable, so the
+    # first callback for a user with pre-existing history does not credit the whole back-catalogue
+    # at once (ADR-054 §Окно свежести). Reference is now() (not the manipulable paid_at); a
+    # non-positive value falls back to the default (see the field_validator below).
+    cloudpayments_payment_freshness_hours: int = Field(
+        default=_CLOUDPAYMENTS_DEFAULT_FRESHNESS_HOURS,
+        alias="CLOUDPAYMENTS_PAYMENT_FRESHNESS_HOURS",
+    )
+    # Per-source-IP rate limit on the PUBLIC webhook (ADR-054 §1): generous so legitimate
+    # callbacks/retries are never throttled; its job is anti-amplification of the outgoing GET.
+    cloudpayments_webhook_rate_limit_per_ip: int = Field(
+        default=120, alias="CLOUDPAYMENTS_WEBHOOK_RATE_LIMIT_PER_IP"
     )
 
     # --- CloudPayments (broadapps) RU checkout / payment-link (ADR-051) ---
@@ -406,6 +434,47 @@ class Settings(BaseSettings):
                 continue
             products[key] = value
         return products
+
+    @field_validator("cloudpayments_payment_freshness_hours")
+    @classmethod
+    def _clamp_freshness_hours(cls, value: int) -> int:
+        """A non-positive CLOUDPAYMENTS_PAYMENT_FRESHNESS_HOURS falls back to the default (ADR-054).
+
+        The window must be strictly positive (``paid_at >= now() - timedelta(hours=window)``); a
+        mis-configured ``0``/negative env degrades to the safe default instead of disabling the
+        window, mirroring the graceful config parsing elsewhere (token_products()/allowed_models()).
+        """
+        return value if value > 0 else _CLOUDPAYMENTS_DEFAULT_FRESHNESS_HOURS
+
+    def cloudpayments_paid_statuses(self) -> frozenset[str]:
+        """Parse CLOUDPAYMENTS_PAID_STATUSES into the set of "paid" broadapps statuses (ADR-054 §4).
+
+        Accepts a JSON array (``["succeeded","paid"]``) OR a CSV (``succeeded,paid``); each entry is
+        stripped and lower-cased (the reconciliation compares ``status.strip().lower()``). A
+        malformed / empty value yields ``{"succeeded"}`` (the authoritative broadapps "paid" value)
+        so the gate is never accidentally emptied. Pure; cached via get_settings()'s lru_cache.
+        """
+        import json
+
+        raw = (self.cloudpayments_paid_statuses_raw or "").strip()
+        if not raw:
+            return frozenset({"succeeded"})
+        statuses: set[str] = set()
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, str) and item.strip():
+                        statuses.add(item.strip().lower())
+        else:
+            for part in raw.split(","):
+                token = part.strip().lower()
+                if token:
+                    statuses.add(token)
+        return frozenset(statuses) if statuses else frozenset({"succeeded"})
 
     def cloudpayments_checkout_configured(self) -> bool:
         """True when the RU checkout endpoint is configured on this instance (ADR-051 §5).

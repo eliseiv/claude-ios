@@ -5,16 +5,14 @@
 
 ## In scope
 - **Исходящий checkout** ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)): наш JWT-эндпоинт `POST /v1/billing/cloudpayments/checkout` создаёт платёжную ссылку через broadapps `POST /payments/link` (multipart). `userId` из JWT `sub` (не из тела) → подставляется как `user_id`/`AccountId` → колбэк находит пользователя (фикс «потерянных платежей»). `app_id`+app token — серверные (config `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN`). Passthrough без миграции; ответ `paymentUrl`. Не задан конфиг → `503` (только avelyra).
-- **Входящий вебхук** `POST /v1/billing/cloudpayments/webhook` ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)).
-- Статическая bearer-авторизация `CLOUDPAYMENTS_WEBHOOK_TOKEN` (constant-time), изолированный per-instance секрет.
-- Дефенсивный приём сырого тела + ручной парсинг (без Pydantic-валидации тела). `Data` — JSON-**строка**, парсится отдельно.
-- Гейт `Status=="Completed"` (ci) И `OperationType=="Payment"` (ci).
-- Классификация продукта `subscription | tokens | unknown` (§[03-architecture](03-architecture.md)).
-- Подписка: upsert `subscriptions` (`active`/`plan`/`expires_at`) + грант per-tier (`CLOUDPAYMENTS_PRODUCT_TOKENS` + fallback `CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT`).
-- Token-пакет: разовый грант `N` строго из `TOKEN_PRODUCTS` ([ADR-015](../../adr/ADR-015-consumable-token-iap.md)).
-- Идемпотентность: дедуп события (`cloudpayments_webhook_events.transaction_id`) + грант один на платёж (ledger `cp-txn:{TransactionId}`).
-- Санитизация PII (карт-данные не логируются/не персистятся) + audit `cloudpayments_payment`.
-- Ответ CloudPayments-стандарт `{"code":0}` на всё принятое (допущение, [Q-050-1](../../99-open-questions.md)).
+- **Входящий вебхук** `POST /v1/billing/cloudpayments/webhook` ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md) → **АКТУАЛЬНО [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)**).
+- **Эндпоинт публичный (нет `401`, [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)):** broadapps шлёт колбэк без авторизации/подписи. Гейт активации — `CLOUDPAYMENTS_API_TOKEN`; `CLOUDPAYMENTS_WEBHOOK_TOKEN` — легаси/опционален. Per-IP rate-limit (`429`).
+- **Колбэк = ТРИГГЕР; начисление — только после ВЕРИФИКАЦИИ платежей через broadapps API** `GET /users/{deviceId}/payments` (нашим `CLOUDPAYMENTS_API_TOKEN`): реконсиляция — начислить каждый недоначисленный `status=="succeeded"` в окне свежести.
+- Дефенсивный приём сырого тела; из колбэка обязателен `X`=deviceId + гейт `Status=="Completed"` И `OperationType=="Payment"` (ci); `TransactionId`/`product_id` — опц. контекст лога.
+- Классификация — по авторитетному `product.payment_type` (`one_time`→tokens \| `subscription`→subscription); сумма — по `product.code` из серверных карт (`TOKEN_PRODUCTS`/`CLOUDPAYMENTS_PRODUCT_TOKENS`+fallback), anti-tamper.
+- Идемпотентность: дедуп + грант по broadapps `payment_id` (ledger `cp-txn:{payment_id}`); `api_error` broadapps → `500` retriable.
+- Санитизация PII (карт-данные/`API_TOKEN`/тело verify не логируются/не персистятся) + audit `cloudpayments_payment`.
+- Ответ `{"code":0}` на всё принятое (кроме `429`/`500`).
 
 ## Out of scope (этой итерации)
 - **Прочие ручки broadapps** (user subscription / user payments / **subscription cancel** / app payment stat). Только создание платёжной ссылки; отмена подписки из приложения — возможное будущее (отдельный ADR).

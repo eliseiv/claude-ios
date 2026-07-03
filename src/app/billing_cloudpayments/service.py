@@ -1,23 +1,28 @@
-"""CloudPaymentsWebhookService: defensive parse -> classify -> dedup -> apply -> audit (ADR-050).
+"""CloudPaymentsWebhookService: callback = trigger -> broadapps verification -> reconcile -> credit.
 
-Implements ADR-050 §2-§7 / billing-cloudpayments/03-architecture.md. ``handle(raw)`` never raises on
-a malformed / unrecognised callback — it returns an ``ignored`` / ``duplicate`` / ``applied``
-outcome (the router maps every one of these to HTTP 200 ``{"code": 0}``). It DOES raise on a real
-internal failure (e.g. the DB is unavailable): the caller's session_scope then rolls the whole
-transaction back and the router surfaces 500, which the aggregator retries — on retry the
-``transaction_id`` is free again (the INSERT was rolled back) so reprocessing is clean (and
-``grant`` is additionally idempotent by ``cp-txn:{transaction_id}``).
+ADR-054 (revises ADR-050). broadapps sends the RU payment callback WITHOUT auth or signature, so the
+body is never trusted for crediting. ``handle(raw)`` treats the callback as a TRIGGER: it resolves
+the deviceId to our userId (ADR-053), then VERIFIES the device's payments via the broadapps API
+(``GET /users/{deviceId}/payments`` with our ``CLOUDPAYMENTS_API_TOKEN``) and credits every
+confirmed-``succeeded`` payment inside the freshness window, idempotently by the broadapps
+``payment_id``. Any malformed / non-completed / unknown callback yields an ``ignored`` outcome (the
+router maps every outcome to HTTP 200 ``{"code": 0}``); only a real failure raises:
+``CloudPaymentsWebhookMisconfiguredError`` (no API token) and
+``CloudPaymentsVerificationUnavailableError`` (transient verify failure) surface as 500 so the
+aggregator re-delivers.
 
-Two independent idempotency layers (ADR-050 §4): event-delivery dedup lives in the single statement
-``INSERT cloudpayments_webhook_events ... ON CONFLICT (transaction_id) DO NOTHING RETURNING``; empty
-RETURNING => duplicate => no mutations. Credit-grant idempotency is separate — keyed by
-``cp-txn:{transaction_id}`` (namespace isolated from Adapty / StoreKit). Both, plus the subscription
-upsert / token grant and the audit row, run in the SAME transaction.
+Idempotency = the broadapps ``payment_id`` (ADR-054 §3), NOT the callback ``TransactionId``: one
+callback reconciles MANY payments, so the key must be per-payment. Two layers: event-delivery dedup
+via ``INSERT cloudpayments_webhook_events (transaction_id = payment_id) ON CONFLICT DO NOTHING
+RETURNING`` (the ``transaction_id`` column is repurposed to hold ``payment_id`` — no migration,
+Q-054-3), and grant idempotency via ``cp-txn:{payment_id}``. Each payment is credited in its OWN
+short transaction so per-payment isolation holds; the outgoing verification GET runs OUTSIDE any
+open DB transaction.
 
-Anti-tamper (ADR-050 §3, ADR-015 BR-TP-1): credit amounts come ONLY from server-side maps
-(``cloudpayments_product_tokens`` + fallback, or ``token_products``) — NEVER from the payload
-``Amount``/``recurring_amount``. Card data (``CardFirstSix``/``CardLastFour``/``Issuer`` /
-``CardType``) and the bearer are never read into business logic, logged, or persisted.
+Anti-tamper (ADR-054 §6, ADR-015): the credit amount comes ONLY from server-side maps keyed by
+``product.code`` — never from the broadapps ``amount``. The class comes from the authoritative
+``product.payment_type`` (``one_time`` -> tokens, ``subscription`` -> subscription). Card data, the
+bearer and the raw payload/body are never read into business logic, logged, or persisted.
 """
 
 from __future__ import annotations
@@ -32,9 +37,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import EVENT_CLOUDPAYMENTS_PAYMENT, AuditEvent, AuditService
-from app.billing_cloudpayments import parser
-from app.billing_cloudpayments.parser import ParsedPayment
+from app.billing_cloudpayments import parser, verify
+from app.billing_cloudpayments.verify import CloudPaymentsVerifyClient, CreditablePayment
 from app.config import Settings
+from app.errors import CloudPaymentsWebhookMisconfiguredError
 from app.observability.logging import log_event
 from app.wallet.service import WalletService
 
@@ -54,21 +60,20 @@ def _ignored(reason: str) -> WebhookOutcome:
 
 
 def _level_for(result: str, reason: str | None) -> int:
-    """Map a webhook outcome to a log level (ADR-050 §7 / 08-observability.md).
+    """Map a webhook outcome to a log level (ADR-054 §5 / 08-observability.md).
 
-    ``user_not_found`` / ``unknown_product`` are WARNING (a payment arrived but the credit could not
-    be delivered — the incident class). ``applied`` / ``duplicate`` and the parse-shape reasons are
-    INFO; a fully empty body is a low-signal connectivity probe -> DEBUG.
+    ``user_not_found`` / ``no_creditable_payment`` are WARNING (a callback arrived but nothing could
+    be credited — the incident class the operator watches). ``applied`` / ``duplicate`` and the
+    parse-shape ``ignored`` reasons are INFO; a fully empty body is a low-signal probe -> DEBUG.
     """
     if result in ("applied", "duplicate"):
         return logging.INFO
     # result == "ignored"
-    if reason in ("user_not_found", "unknown_product"):
+    if reason in ("user_not_found", "no_creditable_payment"):
         return logging.WARNING
     if reason == "empty_body":
         return logging.DEBUG
-    # invalid_json | not_an_object | not_a_completed_payment | missing_transaction_id
-    # | invalid_data | missing_product_id | invalid_account_id
+    # invalid_json | not_an_object | not_a_completed_payment | invalid_account_id
     return logging.INFO
 
 
@@ -83,30 +88,33 @@ class CloudPaymentsWebhookService:
         wallet: WalletService,
         audit: AuditService,
         settings: Settings,
+        verify_client: CloudPaymentsVerifyClient,
     ) -> None:
         self._session = session
         self._wallet = wallet
         self._audit = audit
         self._settings = settings
+        self._verify = verify_client
 
     def _log_outcome(
         self,
         outcome: WebhookOutcome,
         *,
         transaction_id: str | None = None,
-        product_id: str | None = None,
         user_id: uuid.UUID | None = None,
-        kind: str | None = None,
         resolved_via: str | None = None,
+        verify_result: str | None = None,
+        credited_count: int | None = None,
+        payment_statuses: list[str] | None = None,
     ) -> WebhookOutcome:
         """Emit exactly one structured ``cloudpayments_webhook_outcome`` record; return ``outcome``.
 
-        Only the fixed allowlist is logged (result / reason / transactionId / productId / userId /
-        kind / resolvedVia). ``user_id`` is the RESOLVED internal UUID -> ``str(...)`` so
-        ``json.dumps`` in the ``JsonFormatter`` cannot fail; ``None`` fields are dropped from the
-        JSON (= "not parsed"). ``resolved_via`` (ADR-053) is ``"user_id"`` | ``"device_id"`` on
-        outcomes where the user was resolved, else ``None`` (dropped). Card data, the bearer and the
-        raw payload are never logged (ADR-050 §7).
+        Only the fixed allowlist is logged (ADR-054 §5 / 08-observability.md): result / reason /
+        transactionId (callback ``TransactionId``, log context only) / userId (the RESOLVED internal
+        UUID -> ``str``) / resolvedVia / verify / creditedCount / paymentStatuses. ``None`` fields
+        are dropped by the JsonFormatter. Verification fields appear only on post-verify outcomes.
+        Card data, the bearer, ``amount``/``currency`` and the raw payload/verify body are never
+        logged.
         """
         level = _level_for(outcome.result, outcome.reason)
         log_event(
@@ -116,22 +124,35 @@ class CloudPaymentsWebhookService:
             result=outcome.result,
             reason=outcome.reason,
             transactionId=transaction_id,
-            productId=product_id,
             userId=str(user_id) if user_id is not None else None,
-            kind=kind,
             resolvedVia=resolved_via,
+            verify=verify_result,
+            creditedCount=credited_count,
+            paymentStatuses=payment_statuses,
         )
         return outcome
 
     async def handle(self, raw: bytes) -> WebhookOutcome:
-        """Process one raw callback body. Always returns a 200-mappable outcome unless the DB fails.
+        """Process one raw callback: trigger -> resolve -> verify -> reconcile -> credit (ADR-054).
 
-        Pre-transaction validation (empty / not-JSON / not-object / gate / missing fields /
-        invalid account / user-not-found / unknown product) yields ``ignored`` with no DB writes.
-        A valid, known, grantable payment is applied inside the caller's transaction; any real DB
-        failure propagates (=> rollback/500).
+        Order (an early ``ignored`` before any outgoing GET, so a forged callback cannot use the
+        broadapps API as an oracle/amplifier):
+        0. config gate: no ``CLOUDPAYMENTS_API_TOKEN`` -> 500 misconfigured (cannot verify).
+        1. body shape (empty / not-JSON / not-object) -> ``ignored`` (no DB, no GET).
+        2. gate ``Status=Completed & OperationType=Payment`` + deviceId ``X`` (UUID, lower). The
+           callback ``TransactionId``/``product_id`` are optional log context only — never gate.
+        3. resolve ``X`` -> our userId (ADR-053); miss -> ``user_not_found`` (WARNING, NO GET).
+        4. verify: ``GET /users/{X}/payments`` (outside any open DB tx). Transient failure raises
+           ``CloudPaymentsVerificationUnavailableError`` (500, retriable).
+        5. reconcile (pure): keep ``succeeded`` payments inside the freshness window; empty ->
+           ``no_creditable_payment`` (WARNING).
+        6. credit each selected payment in its own tx; aggregate -> ``applied`` / ``duplicate``.
         """
-        # --- Stage 1: body shape (no DB) ---
+        # --- Stage 0: config gate (ADR-054 §1) ---
+        if not self._settings.cloudpayments_api_token:
+            raise CloudPaymentsWebhookMisconfiguredError("cloudpayments api token not configured")
+
+        # --- Stage 1: body shape (no DB, no GET) ---
         if not raw:
             return self._log_outcome(_ignored("empty_body"))
         try:
@@ -141,92 +162,73 @@ class CloudPaymentsWebhookService:
         if not isinstance(body, dict):
             return self._log_outcome(_ignored("not_an_object"))
 
-        # --- Stage 2: defensive field parsing (no DB) ---
-        transaction_id = parser.parse_transaction_id(body)
-        if transaction_id is None:
-            return self._log_outcome(_ignored("missing_transaction_id"))
-
+        # --- Stage 2: gate + deviceId (TransactionId/product_id are optional log context now) ---
         status = parser.parse_status(body)
         operation_type = parser.parse_operation_type(body)
+        transaction_id = parser.parse_transaction_id(body)  # log context only (ADR-054 §2)
         if not parser.parse_gate(status, operation_type):
             return self._log_outcome(
                 _ignored("not_a_completed_payment"), transaction_id=transaction_id
             )
 
-        data = parser._parse_data(body)
-        if data is None:
-            return self._log_outcome(_ignored("invalid_data"), transaction_id=transaction_id)
-
-        product_id = parser.parse_product_id(data)
-        if product_id is None:
-            return self._log_outcome(_ignored("missing_product_id"), transaction_id=transaction_id)
-
-        user_id = parser.parse_user_id(body, data)
-        if user_id is None:
-            return self._log_outcome(
-                _ignored("invalid_account_id"),
-                transaction_id=transaction_id,
-                product_id=product_id,
-            )
+        data = parser._parse_data(body) or {}
+        device_id = parser.parse_user_id(body, data)
+        if device_id is None:
+            return self._log_outcome(_ignored("invalid_account_id"), transaction_id=transaction_id)
 
         # --- Stage 3: two-step user resolution (ADR-053; DB read; never provision users here) ---
-        # ``user_id`` here is the parsed candidate ``X`` (AccountId/Data.user_id, lower UUID); on
-        # the RU flow broadapps sends a deviceId, not our userId. Resolve X -> our userId via
-        # users, then auth_devices. On miss: user_not_found (X is only a candidate -> NOT logged).
-        resolved = await self._resolve_user(user_id)
+        resolved = await self._resolve_user(device_id)
         if resolved is None:
-            return self._log_outcome(
-                _ignored("user_not_found"),
-                transaction_id=transaction_id,
-                product_id=product_id,
-            )
+            # X is only a candidate deviceId (not our confirmed user) -> userId omitted, NO GET.
+            return self._log_outcome(_ignored("user_not_found"), transaction_id=transaction_id)
         resolved_user_id, resolved_via = resolved
 
-        # --- Stage 4: single classification point (ADR-050 §3; findings: classify ONCE here) ---
-        billing_interval_unit = parser.parse_billing_interval_unit(data)
-        token_products = self._settings.token_products()
-        kind = parser.classify_product(product_id, billing_interval_unit, frozenset(token_products))
-        if kind == parser.KIND_UNKNOWN:
+        # Close the read transaction opened by the resolution SELECTs BEFORE the outgoing GET, so
+        # the 15s network call never holds a DB transaction/connection open (ADR-054 §2).
+        await self._session.commit()
+
+        # --- Stage 4: verification (outgoing GET; transient failure -> 500 retriable) ---
+        payments_data = await self._verify.list_payments(device_id=device_id)
+        statuses = verify.payment_statuses(payments_data)
+
+        # --- Stage 5: reconciliation (pure) ---
+        creditable = verify.select_creditable_payments(
+            payments_data,
+            paid_statuses=self._settings.cloudpayments_paid_statuses(),
+            now=_now(),
+            freshness_hours=self._settings.cloudpayments_payment_freshness_hours,
+        )
+        if not creditable:
             return self._log_outcome(
-                _ignored("unknown_product"),
+                _ignored("no_creditable_payment"),
                 transaction_id=transaction_id,
-                product_id=product_id,
                 user_id=resolved_user_id,
-                kind=kind,
                 resolved_via=resolved_via,
-            )
-        # Token package whose id matched by name/map but has no positive credit entry -> anti-tamper
-        # (never size a grant from the payload / product name). Checked BEFORE the dedup INSERT.
-        if kind == parser.KIND_TOKENS and token_products.get(product_id, 0) <= 0:
-            return self._log_outcome(
-                _ignored("unknown_product"),
-                transaction_id=transaction_id,
-                product_id=product_id,
-                user_id=resolved_user_id,
-                kind=kind,
-                resolved_via=resolved_via,
+                verify_result="ok",
+                credited_count=0,
+                payment_statuses=statuses,
             )
 
-        is_trial_initial, is_trial_conversion, is_initial_payment = parser.parse_trial_flags(data)
-        parsed = ParsedPayment(
+        # --- Stage 6: credit each selected payment in its OWN transaction (idempotent) ---
+        credited = 0
+        for payment in creditable:
+            if await self._apply_payment(payment, resolved_user_id):
+                credited += 1
+
+        outcome = (
+            WebhookOutcome(result="applied")
+            if credited >= 1
+            else WebhookOutcome(result="duplicate")
+        )
+        return self._log_outcome(
+            outcome,
             transaction_id=transaction_id,
             user_id=resolved_user_id,
-            product_id=product_id,
-            status=status,
-            operation_type=operation_type,
-            billing_interval_unit=billing_interval_unit,
-            billing_interval_count=parser.parse_billing_interval_count(data),
-            billing_phase=parser.parse_billing_phase(data),
-            subscription_id=parser.parse_subscription_id(data, body),
-            is_trial_initial=is_trial_initial,
-            is_trial_conversion=is_trial_conversion,
-            is_initial_payment=is_initial_payment,
-            amount=parser.parse_amount(body),
-            currency=parser.parse_currency(body),
-            test_mode=parser.parse_test_mode(body),
-            kind=kind,
+            resolved_via=resolved_via,
+            verify_result="ok",
+            credited_count=credited,
+            payment_statuses=statuses,
         )
-        return await self._apply(parsed, token_products, resolved_via)
 
     async def _resolve_user(self, x: uuid.UUID) -> tuple[uuid.UUID, str] | None:
         """Resolve the callback identifier ``X`` to our internal ``userId`` (ADR-053, two-step).
@@ -241,8 +243,7 @@ class CloudPaymentsWebhookService:
 
         The deviceId->userId mapping is taken ONLY from our ``auth_devices`` (never from the
         callback body). ``X`` is an already-lower UUID; ``auth_devices.device_id`` is a lower UUID
-        string (iOS sends lower to both ``/v1/auth/register`` and broadapps), so ``str(x)`` matches.
-        Both lookups run in the caller's single transaction.
+        string, so ``str(x)`` matches. Both lookups run before the verification GET.
         """
         if await self._session.scalar(
             text("SELECT 1 FROM users WHERE id = :x"),
@@ -259,101 +260,154 @@ class CloudPaymentsWebhookService:
 
         return None
 
-    async def _apply(
-        self, parsed: ParsedPayment, token_products: dict[str, int], resolved_via: str
-    ) -> WebhookOutcome:
-        """Apply a valid, known, grantable payment inside the caller's single transaction (ADR-050).
+    async def _apply_payment(self, payment: CreditablePayment, user_id: uuid.UUID) -> bool:
+        """Credit ONE verified payment in its own transaction; return True iff it was credited.
 
-        The INSERT ... ON CONFLICT DO NOTHING RETURNING is the sole event-delivery dedup point: an
-        empty RETURNING means a previous/concurrent delivery already recorded this transaction_id ->
-        duplicate, no mutations. Otherwise, by ``kind``: subscription upserts an active subscription
-        and grants per-tier credits; tokens grants a one-time package (subscription untouched). The
-        grant is idempotent by ``cp-txn:{transaction_id}``. The audit row runs in this transaction.
+        Class from the authoritative ``payment_type`` (``one_time`` -> tokens, ``subscription`` ->
+        subscription; anything else -> skip, WARNING). Amount from server-side maps keyed by
+        ``product_code`` (anti-tamper; a token product missing / non-positive -> skip, WARNING).
+        Then the event-delivery dedup INSERT keyed by ``payment_id``: an empty RETURNING means this
+        payment was already credited -> skip (duplicate). Otherwise upsert any subscription, grant
+        idempotently by ``cp-txn:{payment_id}``, audit, and COMMIT this payment's transaction.
+        A DB failure rolls this payment back and propagates (=> 500 retriable); payments credited in
+        earlier iterations stay committed (idempotency makes re-delivery safe).
         """
-        sanitized = parser.sanitize_payload(parsed)
-        inserted = await self._session.scalar(
-            text(
-                "INSERT INTO cloudpayments_webhook_events "
-                "(transaction_id, user_id, product_id, kind, payload) "
-                "VALUES (:txn, :uid, :product_id, :kind, CAST(:payload AS JSONB)) "
-                "ON CONFLICT (transaction_id) DO NOTHING "
-                "RETURNING transaction_id"
-            ),
-            {
-                "txn": parsed.transaction_id,
-                "uid": str(parsed.user_id),
-                "product_id": parsed.product_id,
-                "kind": parsed.kind,
-                "payload": json.dumps(sanitized),
-            },
-        )
-        if inserted is None:
-            # Duplicate transaction_id: no mutations (ADR-050 §4).
-            return self._log_outcome(
-                WebhookOutcome(result="duplicate"),
-                transaction_id=parsed.transaction_id,
-                product_id=parsed.product_id,
-                user_id=parsed.user_id,
-                kind=parsed.kind,
-                resolved_via=resolved_via,
-            )
+        # Classify by the authoritative payment_type (not the callback / product name).
+        if payment.payment_type == "one_time":
+            kind = parser.KIND_TOKENS
+        elif payment.payment_type == "subscription":
+            kind = parser.KIND_SUBSCRIPTION
+        else:
+            self._log_payment_skipped(payment, user_id, "unknown_payment_type")
+            return False
 
-        sub_status: str | None = None
-        plan: str | None = None
-        expires_at: datetime.datetime | None = None
-        if parsed.kind == parser.KIND_SUBSCRIPTION:
-            expires_at = parser._compute_expiry(
-                _now(), parsed.billing_interval_unit, parsed.billing_interval_count
-            )
-            plan = parsed.product_id
-            sub_status = "active"
-            await self._upsert_subscription(parsed.user_id, plan, expires_at)
+        # Amount ONLY from server-side maps keyed by product_code (anti-tamper, ADR-054 §6).
+        if kind == parser.KIND_TOKENS:
+            credits = self._settings.token_products().get(payment.product_code)
+            if credits is None or credits <= 0:
+                self._log_payment_skipped(payment, user_id, "unknown_product")
+                return False
+            reason = "cloudpayments_tokens"
+        else:
             credits = (
-                self._settings.cloudpayments_product_tokens().get(parsed.product_id)
+                self._settings.cloudpayments_product_tokens().get(payment.product_code)
                 or self._settings.cloudpayments_subscription_tokens_grant
             )
-            await self._grant(parsed, credits, reason="cloudpayments_subscription")
-        else:
-            # tokens: token_products[product_id] is guaranteed > 0 (checked in handle()).
-            credits = token_products[parsed.product_id]
-            await self._grant(parsed, credits, reason="cloudpayments_tokens")
+            reason = "cloudpayments_subscription"
 
-        await self._audit.record(
-            AuditEvent(
-                user_id=parsed.user_id,
-                event_type=EVENT_CLOUDPAYMENTS_PAYMENT,
-                payload={
-                    "transactionId": parsed.transaction_id,
-                    "productId": parsed.product_id,
-                    "kind": parsed.kind,
-                    "semantics": parsed.kind,
-                    "status": sub_status,
-                    "plan": plan,
-                    "expiresAt": expires_at.isoformat() if expires_at is not None else None,
-                    "creditsGranted": credits,
-                    "billingPhase": parsed.billing_phase,
-                    "amount": parsed.amount,
-                    "currency": parsed.currency,
-                    "testMode": parsed.test_mode,
-                    "subscriptionId": parsed.subscription_id,
+        try:
+            # Event-delivery dedup keyed by broadapps payment_id (stored in transaction_id column).
+            sanitized = {
+                "paymentId": payment.payment_id,
+                "productCode": payment.product_code,
+                "paymentType": payment.payment_type,
+                "status": payment.status,
+                "kind": kind,
+            }
+            inserted = await self._session.scalar(
+                text(
+                    "INSERT INTO cloudpayments_webhook_events "
+                    "(transaction_id, user_id, product_id, kind, payload) "
+                    "VALUES (:txn, :uid, :product_id, :kind, CAST(:payload AS JSONB)) "
+                    "ON CONFLICT (transaction_id) DO NOTHING "
+                    "RETURNING transaction_id"
+                ),
+                {
+                    "txn": payment.payment_id,
+                    "uid": str(user_id),
+                    "product_id": payment.product_code,
+                    "kind": kind,
+                    "payload": json.dumps(sanitized),
                 },
             )
+            if inserted is None:
+                # Already credited on a previous delivery -> no mutations for this payment.
+                await self._session.rollback()
+                return False
+
+            sub_status: str | None = None
+            plan: str | None = None
+            expires_at: datetime.datetime | None = None
+            if kind == parser.KIND_SUBSCRIPTION:
+                unit = parser.infer_interval_unit_from_code(payment.product_code)
+                expires_at = parser._compute_expiry(_now(), unit, 1)
+                plan = payment.product_code
+                sub_status = "active"
+                await self._upsert_subscription(user_id, plan, expires_at)
+
+            await self._wallet.grant(
+                user_id=user_id,
+                amount=credits,
+                idempotency_key=f"cp-txn:{payment.payment_id}",
+                reason=reason,
+                meta={
+                    "paymentId": payment.payment_id,
+                    "productCode": payment.product_code,
+                    "kind": kind,
+                },
+            )
+            await self._audit.record(
+                AuditEvent(
+                    user_id=user_id,
+                    event_type=EVENT_CLOUDPAYMENTS_PAYMENT,
+                    payload={
+                        "transactionId": payment.payment_id,
+                        "paymentId": payment.payment_id,
+                        "productId": payment.product_code,
+                        "kind": kind,
+                        "semantics": kind,
+                        "paymentType": payment.payment_type,
+                        "status": sub_status,
+                        "plan": plan,
+                        "expiresAt": expires_at.isoformat() if expires_at is not None else None,
+                        "creditsGranted": credits,
+                        "paidAt": payment.paid_at.isoformat(),
+                    },
+                )
+            )
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+
+        # Optional per-payment visibility (the aggregate outcome is logged once in handle()).
+        log_event(
+            logger,
+            logging.DEBUG,
+            "cloudpayments_payment_credited",
+            paymentId=payment.payment_id,
+            productId=payment.product_code,
+            kind=kind,
+            userId=str(user_id),
+            creditsGranted=credits,
         )
-        return self._log_outcome(
-            WebhookOutcome(result="applied"),
-            transaction_id=parsed.transaction_id,
-            product_id=parsed.product_id,
-            user_id=parsed.user_id,
-            kind=parsed.kind,
-            resolved_via=resolved_via,
+        return True
+
+    def _log_payment_skipped(
+        self, payment: CreditablePayment, user_id: uuid.UUID, reason: str
+    ) -> None:
+        """One WARNING per skipped payment (unknown product / payment_type) — ADR-054 §5.
+
+        Separate from the single aggregate ``cloudpayments_webhook_outcome`` (invariant: exactly one
+        outcome per callback). No amount / card data / secret is logged.
+        """
+        log_event(
+            logger,
+            logging.WARNING,
+            "cloudpayments_payment_skipped",
+            reason=reason,
+            paymentId=payment.payment_id,
+            productId=payment.product_code,
+            paymentType=payment.payment_type,
+            userId=str(user_id),
         )
 
     async def _upsert_subscription(
         self, user_id: uuid.UUID, plan: str, expires_at: datetime.datetime
     ) -> None:
-        """Activate/extend the subscription in one statement (ADR-048 pattern, ADR-050 §3a).
+        """Activate/extend the subscription in one statement (ADR-048 pattern, ADR-054 §7).
 
-        ON CONFLICT (user_id) makes a concurrent FIRST activation idempotent by PK. Parameterized;
+        ON CONFLICT (user_id) makes a concurrent first activation idempotent by PK. Parameterized;
         ``'active'`` casts to the subscription-status enum.
         """
         await self._session.execute(
@@ -367,21 +421,3 @@ class CloudPaymentsWebhookService:
             {"uid": str(user_id), "plan": plan, "expires_at": expires_at},
         )
         await self._session.flush()
-
-    async def _grant(self, parsed: ParsedPayment, credits: int, *, reason: str) -> None:
-        """Grant credits idempotently by ``cp-txn:{transaction_id}`` (ADR-050 §4).
-
-        One payment (unique TransactionId) grants exactly once; a renewal (new TransactionId) grants
-        afresh. The amount is passed in from a server-side map only (anti-tamper).
-        """
-        await self._wallet.grant(
-            user_id=parsed.user_id,
-            amount=credits,
-            idempotency_key=f"cp-txn:{parsed.transaction_id}",
-            reason=reason,
-            meta={
-                "transactionId": parsed.transaction_id,
-                "productId": parsed.product_id,
-                "kind": parsed.kind,
-            },
-        )

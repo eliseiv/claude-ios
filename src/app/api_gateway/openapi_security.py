@@ -58,16 +58,16 @@ adapty_webhook_scheme = HTTPBearer(
 )
 
 # scheme_name fixes the OpenAPI components.securitySchemes key to `cloudPaymentsWebhook`.
-# HTTP Bearer documents the static webhook secret; the real constant-time check stays in
-# require_cloudpayments_webhook (ADR-050). Separate from bearerAuth / adminToken / adaptyWebhook.
+# Decorative only (ADR-054): the webhook is PUBLIC — the aggregator sends no authorization, so this
+# scheme никого не блокирует; заголовок лишь наблюдается в логах. Kept so Swagger shows the lock
+# icon. Separate from bearerAuth / adminToken / adaptyWebhook.
 cloudpayments_webhook_scheme = HTTPBearer(
     scheme_name="cloudPaymentsWebhook",
     auto_error=False,
     description=(
-        "Статический секрет платёжного вебхука (`CLOUDPAYMENTS_WEBHOOK_TOKEN`). Вызывает "
-        "платёжный агрегатор, не клиент. Формат заголовка `Authorization` терпимый: секрет "
-        "принимается с префиксом `Bearer <secret>` или `Token <secret>`, либо сырым значением "
-        "без схемы. НЕ пользовательский JWT и НЕ admin-токен. Реальная constant-time проверка — "
-        "на сервере."
+        "Публичный вебхук платёжного агрегатора (вызывает агрегатор, не клиент). Заголовок "
+        "`Authorization` не требуется и не блокирует приём — он лишь наблюдается в логах. "
+        "Начисление выполняется только после подтверждения платежа через платёжный сервис. НЕ "
+        "пользовательский JWT и НЕ admin-токен."
     ),
 )
