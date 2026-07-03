@@ -97,13 +97,16 @@ class CloudPaymentsWebhookService:
         product_id: str | None = None,
         user_id: uuid.UUID | None = None,
         kind: str | None = None,
+        resolved_via: str | None = None,
     ) -> WebhookOutcome:
         """Emit exactly one structured ``cloudpayments_webhook_outcome`` record; return ``outcome``.
 
         Only the fixed allowlist is logged (result / reason / transactionId / productId / userId /
-        kind). ``user_id`` is our internal UUID -> ``str(...)`` so ``json.dumps`` in the
-        ``JsonFormatter`` cannot fail; ``None`` fields are dropped from the JSON (= "not parsed").
-        Card data, the bearer and the raw payload are never logged (ADR-050 §7).
+        kind / resolvedVia). ``user_id`` is the RESOLVED internal UUID -> ``str(...)`` so
+        ``json.dumps`` in the ``JsonFormatter`` cannot fail; ``None`` fields are dropped from the
+        JSON (= "not parsed"). ``resolved_via`` (ADR-053) is ``"user_id"`` | ``"device_id"`` on
+        outcomes where the user was resolved, else ``None`` (dropped). Card data, the bearer and the
+        raw payload are never logged (ADR-050 §7).
         """
         level = _level_for(outcome.result, outcome.reason)
         log_event(
@@ -116,6 +119,7 @@ class CloudPaymentsWebhookService:
             productId=product_id,
             userId=str(user_id) if user_id is not None else None,
             kind=kind,
+            resolvedVia=resolved_via,
         )
         return outcome
 
@@ -165,14 +169,18 @@ class CloudPaymentsWebhookService:
                 product_id=product_id,
             )
 
-        # --- Stage 3: user existence (DB read; we never provision users here) ---
-        if not await self._user_exists(user_id):
+        # --- Stage 3: two-step user resolution (ADR-053; DB read; never provision users here) ---
+        # ``user_id`` here is the parsed candidate ``X`` (AccountId/Data.user_id, lower UUID); on
+        # the RU flow broadapps sends a deviceId, not our userId. Resolve X -> our userId via
+        # users, then auth_devices. On miss: user_not_found (X is only a candidate -> NOT logged).
+        resolved = await self._resolve_user(user_id)
+        if resolved is None:
             return self._log_outcome(
                 _ignored("user_not_found"),
                 transaction_id=transaction_id,
                 product_id=product_id,
-                user_id=user_id,
             )
+        resolved_user_id, resolved_via = resolved
 
         # --- Stage 4: single classification point (ADR-050 §3; findings: classify ONCE here) ---
         billing_interval_unit = parser.parse_billing_interval_unit(data)
@@ -183,8 +191,9 @@ class CloudPaymentsWebhookService:
                 _ignored("unknown_product"),
                 transaction_id=transaction_id,
                 product_id=product_id,
-                user_id=user_id,
+                user_id=resolved_user_id,
                 kind=kind,
+                resolved_via=resolved_via,
             )
         # Token package whose id matched by name/map but has no positive credit entry -> anti-tamper
         # (never size a grant from the payload / product name). Checked BEFORE the dedup INSERT.
@@ -193,14 +202,15 @@ class CloudPaymentsWebhookService:
                 _ignored("unknown_product"),
                 transaction_id=transaction_id,
                 product_id=product_id,
-                user_id=user_id,
+                user_id=resolved_user_id,
                 kind=kind,
+                resolved_via=resolved_via,
             )
 
         is_trial_initial, is_trial_conversion, is_initial_payment = parser.parse_trial_flags(data)
         parsed = ParsedPayment(
             transaction_id=transaction_id,
-            user_id=user_id,
+            user_id=resolved_user_id,
             product_id=product_id,
             status=status,
             operation_type=operation_type,
@@ -216,16 +226,42 @@ class CloudPaymentsWebhookService:
             test_mode=parser.parse_test_mode(body),
             kind=kind,
         )
-        return await self._apply(parsed, token_products)
+        return await self._apply(parsed, token_products, resolved_via)
 
-    async def _user_exists(self, user_id: uuid.UUID) -> bool:
-        exists = await self._session.scalar(
-            text("SELECT 1 FROM users WHERE id = :uid"),
-            {"uid": str(user_id)},
+    async def _resolve_user(self, x: uuid.UUID) -> tuple[uuid.UUID, str] | None:
+        """Resolve the callback identifier ``X`` to our internal ``userId`` (ADR-053, two-step).
+
+        broadapps sends a deviceId (not our userId) as ``AccountId``/``Data.user_id`` on the RU
+        flow. First-match wins, deterministic (``users`` before ``auth_devices`` for compat):
+
+        - (a) ``X`` in ``users`` -> ``X`` already IS our userId; ``resolved_via = "user_id"``.
+        - (b) else ``X`` in ``auth_devices.device_id`` -> take the linked ``user_id`` (deviceId ->
+          userId); ``resolved_via = "device_id"``. This is the RU-flow fix.
+        - (c) else -> ``None`` (=> ``user_not_found``; we never provision users/devices, ADR-007).
+
+        The deviceId->userId mapping is taken ONLY from our ``auth_devices`` (never from the
+        callback body). ``X`` is an already-lower UUID; ``auth_devices.device_id`` is a lower UUID
+        string (iOS sends lower to both ``/v1/auth/register`` and broadapps), so ``str(x)`` matches.
+        Both lookups run in the caller's single transaction.
+        """
+        if await self._session.scalar(
+            text("SELECT 1 FROM users WHERE id = :x"),
+            {"x": str(x)},
+        ):
+            return x, "user_id"
+
+        device_user_id = await self._session.scalar(
+            text("SELECT user_id FROM auth_devices WHERE device_id = :x"),
+            {"x": str(x)},
         )
-        return exists is not None
+        if device_user_id is not None:
+            return uuid.UUID(str(device_user_id)), "device_id"
 
-    async def _apply(self, parsed: ParsedPayment, token_products: dict[str, int]) -> WebhookOutcome:
+        return None
+
+    async def _apply(
+        self, parsed: ParsedPayment, token_products: dict[str, int], resolved_via: str
+    ) -> WebhookOutcome:
         """Apply a valid, known, grantable payment inside the caller's single transaction (ADR-050).
 
         The INSERT ... ON CONFLICT DO NOTHING RETURNING is the sole event-delivery dedup point: an
@@ -259,6 +295,7 @@ class CloudPaymentsWebhookService:
                 product_id=parsed.product_id,
                 user_id=parsed.user_id,
                 kind=parsed.kind,
+                resolved_via=resolved_via,
             )
 
         sub_status: str | None = None
@@ -308,6 +345,7 @@ class CloudPaymentsWebhookService:
             product_id=parsed.product_id,
             user_id=parsed.user_id,
             kind=parsed.kind,
+            resolved_via=resolved_via,
         )
 
     async def _upsert_subscription(

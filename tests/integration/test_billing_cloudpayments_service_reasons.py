@@ -182,7 +182,10 @@ async def test_user_not_found_reason_and_warning(
     assert len(recs) == 1
     assert recs[0].levelno == logging.WARNING
     fields = _rendered(recs[0])
-    assert fields["userId"] == str(uid)  # our UUID, serialised as a string
+    # ADR-053: on user_not_found X is only a candidate (not in users nor auth_devices), so it is
+    # NOT a resolved userId -> userId (and resolvedVia) are omitted from the outcome log.
+    assert "userId" not in fields
+    assert "resolvedVia" not in fields
 
 
 @pytest.mark.asyncio
@@ -270,7 +273,8 @@ async def test_outcome_log_carries_no_card_data_or_secret(
     for forbidden in ("CardFirstSix", "CardLastFour", "220024", "8808", "VTB", _SENTINEL):
         assert forbidden not in rendered
     assert "bearer" not in rendered.lower()
-    # Only the fixed allowlist of outcome keys is present.
+    # Only the fixed allowlist of outcome keys is present. This drives an APPLIED outcome for a
+    # seeded user, so ADR-053's ``resolvedVia`` ("user_id") is now part of the allowlist.
     fields = _rendered(recs[0])
     assert set(fields) <= {
         "level",
@@ -282,9 +286,12 @@ async def test_outcome_log_carries_no_card_data_or_secret(
         "productId",
         "userId",
         "kind",
+        "resolvedVia",
         "requestId",
         "sessionId",
     }
+    # ADR-053: the applied outcome for a directly-resolved userId carries resolvedVia="user_id".
+    assert fields["resolvedVia"] == "user_id"
 
 
 # ============================ _level_for table ============================

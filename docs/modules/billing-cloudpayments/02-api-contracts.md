@@ -89,11 +89,22 @@
   "CardFirstSix": "220024", "CardLastFour": "8808", "Issuer": "VTB", "CardType": "Mir", "Description": "Годовая подписка"
 }
 ```
-- `userId` (наш backend UUID) ← `AccountId` (верх) → fallback `Data.user_id`. **Приходит в ВЕРХНЕМ регистре — нормализуется к lower.**
+- `AccountId` (верх) → fallback `Data.user_id` — **идентификатор-кандидат `X`** (приходит в ВЕРХНЕМ регистре → нормализуется к lower, парсится в UUID). На RU-флоу broadapps шлёт сюда **deviceId** (id устройства), а не наш `userId`; резолв `X`→наш `userId` — **двухступенчатый** ([ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md), см. §Резолв пользователя ниже).
 - `TransactionId` (верх) — ключ дедупа события и идемпотентности гранта.
 - `CardFirstSix`/`CardLastFour`/`Issuer`/`CardType` — **PII, НЕ логируются и НЕ персистятся** ([08-observability](08-observability.md)).
 
 Полный порядок источников/парсинг — [03-architecture.md §Дефенсивный парсинг](03-architecture.md).
+
+#### Резолв пользователя — двухступенчатый (deviceId → userId, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md))
+Идентификатор `X` (из `AccountId`→`Data.user_id`, lower/UUID) резолвится в наш `userId` в **две ступени** (первое совпадение выигрывает), детали — [03-architecture.md §Резолв пользователя](03-architecture.md#резолв-пользователя--двухступенчатый-deviceid--userid-adr-053):
+
+| Ступень | Условие | Результат | `resolvedVia` (лог) |
+|---|---|---|---|
+| (a) | `X` есть в `users` | `userId = X` (уже наш id; обратная совместимость с [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)) | `user_id` |
+| (b) | иначе `X` есть в `auth_devices.device_id` | `userId = auth_devices[X].user_id` (deviceId→userId, [ADR-018](../../adr/ADR-018-embedded-auth-issuer.md)) | `device_id` |
+| (c) | иначе (нет ни в `users`, ни в `auth_devices`) | `ignored/user_not_found` — `200 {"code":0}` + WARNING, **без** создания пользователя/устройства | — |
+
+**Всё начисление/подписка/дедуп/идемпотентность/audit — на резолвнутый `userId`** (не на deviceId). Идемпотентность `cp-txn:{TransactionId}` и anti-tamper не меняются. Маппинг deviceId→userId — **только из нашей `auth_devices`** (телу колбэка не доверяем). Скоуп — только этот вебхук (Adapty/checkout не затронуты).
 
 #### Гейт и классификация продукта
 - Обрабатывается только `Status=="Completed"` (ci) И `OperationType=="Payment"` (ci); иначе `ignored/not_a_completed_payment`.
@@ -123,7 +134,7 @@
 | 200 | `{"code":0}` | `ignored/invalid_data` (`Data` нет/не парсится) |
 | 200 | `{"code":0}` | `ignored/missing_product_id` |
 | 200 | `{"code":0}` | `ignored/invalid_account_id` (нет/не-UUID `AccountId`/`Data.user_id`) |
-| 200 | `{"code":0}` | `ignored/user_not_found` (WARNING) |
+| 200 | `{"code":0}` | `ignored/user_not_found` (WARNING) — `X` не найден **ни** в `users`, **ни** в `auth_devices.device_id` ([ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)); без провижининга |
 | 200 | `{"code":0}` | `ignored/unknown_product` (WARNING) |
 | 200 | `{"code":0}` | `duplicate` (повтор `TransactionId`) |
 | 200 | `{"code":0}` | `applied` (subscription/tokens начислено) |

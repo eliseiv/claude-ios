@@ -98,10 +98,11 @@ sequenceDiagram
     R->>R: lenient-parse header → constant-time compare (401 + WARNING auth_denied / 500-if-unset)
     R->>R: raw = await request.body()  (без Pydantic)
     R->>S: handle(raw)
-    S->>S: parse: empty/json/object → gate(Status,OperationType) → TransactionId → Data(json.loads) → product_id → AccountId(UUID,lower)
+    S->>S: parse: empty/json/object → gate(Status,OperationType) → TransactionId → Data(json.loads) → product_id → AccountId→X(UUID,lower)
+    S->>DB: резолв X (ADR-053): (a) users[X]? → userId=X ; (b) иначе auth_devices[X].user_id? → userId=<это> ; (c) иначе → user_not_found
     alt любая невалидность / user_not_found / unknown_product
         S-->>R: outcome ignored/<reason>
-    else валидный платёж
+    else валидный платёж (userId = резолвнутый)
         S->>DB: BEGIN
         S->>DB: INSERT cloudpayments_webhook_events ON CONFLICT(transaction_id) DO NOTHING RETURNING
         alt конфликт (дубликат) — RETURNING пуст
@@ -117,6 +118,30 @@ sequenceDiagram
     R-->>B: HTTP 200 {"code": 0}   (или 401/500)
     Note over S,DB: любой сбой → ROLLBACK → 500 → агрегатор ретраит → чистая переобработка
 ```
+
+## Резолв пользователя — двухступенчатый (deviceId → userId, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md))
+
+**Файл:** `src/app/billing_cloudpayments/service.py` — новый метод резолва (например `_resolve_user`), заменяет прежний одноступенчатый `_user_exists` (Stage 3 в `handle()`). **`parser.py` НЕ трогать** (резолв — DB-логика сервиса, не чистый парсинг).
+
+**Причина ([ADR-053 §Context](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)).** broadapps на RU-флоу присылает как `AccountId`/`Data.user_id` **deviceId** (id устройства, напр. `55cbe083-...`), а НЕ наш JWT `userId` (напр. `b0f407bd-...`). Прежний lookup искал `X` **только в `users`** → deviceId там нет → `user_not_found` → оплата без начисления. Связь deviceId→userId хранится в **нашей** таблице `auth_devices(device_id PK, user_id FK→users)` ([ADR-018](../../adr/ADR-018-embedded-auth-issuer.md), [03-data-model.md §18](../../03-data-model.md)).
+
+**Вход:** `X` — уже распарсенный, нормализованный к lower `uuid.UUID` (из `AccountId`→fallback `Data.user_id`, [§Дефенсивный парсинг](#дефенсивный-парсинг-точный-порядок-источников)). Парсинг `X` **не меняется**.
+
+**Порядок (детерминированный, первое совпадение выигрывает):**
+```
+(a) SELECT 1 FROM users WHERE id = :x               -- найдено → resolved_user_id = X ;      resolved_via = "user_id"
+(b) SELECT user_id FROM auth_devices WHERE device_id = :x  -- найдено → resolved_user_id = <row.user_id> ; resolved_via = "device_id"
+(c) ни то, ни другое                                 -- → ignored/user_not_found (200 {"code":0} + WARNING, БЕЗ провижининга)
+```
+- **`:x`** передаётся как строка `str(X)` (уже lower UUID). `auth_devices.device_id` — `TEXT PK`; deviceId — UUID-строка в нижнем регистре (iOS-клиент шлёт lower и в `/v1/auth/register`, и в broadapps → сопоставление совпадает).
+- Метод возвращает `(resolved_user_id: uuid.UUID, resolved_via: str)` или `None` (= `user_not_found`).
+- **(a) приоритетнее (b)** — обратная совместимость: если broadapps когда-нибудь пришлёт настоящий `userId` (намерение [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)), поведение прежнее.
+
+**После резолва:** в `ParsedPayment.user_id` кладётся **`resolved_user_id`** (наш `userId`), НЕ исходный `X`/deviceId. Всё дальнейшее ([§Маппинг → эффект](#маппинг--эффект-_apply-после-успешного-дедуп-insert), дедуп-INSERT, upsert subscription, `WalletService.grant`, audit) — на резолвнутый `userId`. **Идемпотентность `cp-txn:{TransactionId}` и anti-tamper — БЕЗ изменений** (ключ по `TransactionId`, не по userId). `resolved_via` пробрасывается в outcome-лог ([08-observability.md](08-observability.md)).
+
+**Безопасность/консистентность ([ADR-053 §4](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md), [05-security.md](../../05-security.md#cloudpaymentsbroadapps-webhook-авторизация-ru-путь-изолированная-adr-050)):** маппинг deviceId→userId — **только** из нашей `auth_devices` (телу колбэка не доверяем, из тела — лишь сам `X`); `X` вне `users` **и** вне `auth_devices` → `user_not_found` (не создавать пользователей/устройства, [ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)); оба lookup — в **той же** транзакции; `auth_devices`-строка стабильна (создаётся при `/v1/auth/register` до оплаты).
+
+**Скоуп:** только этот метод в CloudPayments-`service.py`. **НЕ трогать:** Adapty-вебхук (там `customer_user_id` = наш `userId`, своя семантика), checkout ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md), берёт `userId` из JWT `sub`), миграции (`auth_devices` уже есть, миграция `0005`), парсер, дедуп, идемпотентность, anti-tamper, auth-заголовок ([ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md)).
 
 ## Авторизация (детали для backend) — терпимый разбор заголовка ([ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md))
 
@@ -200,7 +225,7 @@ def _auth_scheme_label(authorization: str | None) -> str:
 - **`transaction_id`** = `_first_str(body["TransactionId"])`. Нет → `ignored/missing_transaction_id`. (Первичен top-level; в `Data` его нет.)
 - **`status`** = `str(body.get("Status") or "").strip().lower()`; **`operation_type`** = `str(body.get("OperationType") or "").strip().lower()`. Гейт: `status == "completed" and operation_type == "payment"` иначе `ignored/not_a_completed_payment`.
 - **`Data`-парсинг** (`_parse_data(body) -> dict | None`): `d = body.get("Data")`; если `isinstance(d, str)` → `json.loads(d)` (в try; ошибка → `None`); если `isinstance(d, dict)` → `d` (дефенсивно); иначе → `None`. `None`/не-объект → `ignored/invalid_data`.
-- **`user_id`** = `_first_str(body["AccountId"], data["user_id"]).lower()` → `uuid.UUID(...)`. Нет/не-UUID → `ignored/invalid_account_id`. **Нормализация lower обязательна** (приходит в верхнем регистре).
+- **`user_id`-кандидат `X`** = `_first_str(body["AccountId"], data["user_id"]).lower()` → `uuid.UUID(...)`. Нет/не-UUID → `ignored/invalid_account_id`. **Нормализация lower обязательна** (приходит в верхнем регистре). `X` — это `AccountId`, который на RU-флоу равен **deviceId** (не нашему `userId`); резолв `X`→наш `userId` — двухступенчатый ([§Резолв пользователя](#резолв-пользователя--двухступенчатый-deviceid--userid-adr-053), [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)).
 - **`product_id`** = `_first_str(data["product_id"])`. Нет/пусто → `ignored/missing_product_id`.
 - **`billing_interval_unit`** = `_first_str(data["billing_interval_unit"]).lower()` (может отсутствовать у token-пакета).
 - **`billing_interval_count`** = `_parse_int(data["billing_interval_count"], default=1)` (приходит строкой `"1"`; `<1`/невалид → 1).

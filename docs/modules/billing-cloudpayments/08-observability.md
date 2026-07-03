@@ -45,6 +45,7 @@ def _log_outcome(
     product_id: str | None = None,
     user_id: uuid.UUID | None = None,
     kind: str | None = None,
+    resolved_via: str | None = None,   # ADR-053: "user_id" | "device_id" | None
 ) -> WebhookOutcome:
     level = _level_for(outcome.result, outcome.reason)
     log_event(
@@ -52,10 +53,12 @@ def _log_outcome(
         result=outcome.result, reason=outcome.reason,
         transactionId=transaction_id, productId=product_id,
         userId=str(user_id) if user_id is not None else None, kind=kind,
+        resolvedVia=resolved_via,
     )
     return outcome
 ```
 - `user_id: uuid.UUID` → **обязательно** `str(...)` (иначе `json.dumps` падает). `None`-поля `JsonFormatter` выкидывает из JSON (отсутствие = «не распарсено»).
+- **`resolvedVia`** ([ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)) — как резолвнут пользователь: `"user_id"` (`X` найден в `users`) \| `"device_id"` (`X` найден в `auth_devices.device_id`, deviceId→userId). Присутствует на исходах, где пользователь резолвнут (`applied`/`duplicate`/`unknown_product`); на `user_not_found` резолв не удался → опущено. `userId` в логе — **резолвнутый наш внутренний UUID** (безопасно). deviceId (= исходный `X`) — тоже наш внутренний id, безопасно логировать (опционально как `accountId`); карт-PII/секреты по-прежнему запрещены.
 
 ## Функция уровня
 ```python
@@ -93,15 +96,17 @@ def _level_for(result: str, reason: str | None) -> int:
 | `Data` не парсится | `ignored/invalid_data` | `transaction_id` |
 | нет `product_id` | `ignored/missing_product_id` | `transaction_id` |
 | невалидный `AccountId` | `ignored/invalid_account_id` | `transaction_id`, `product_id` |
-| пользователь не найден | `ignored/user_not_found` | `transaction_id`, `product_id`, `user_id` |
-| `unknown` / token не в карте | `ignored/unknown_product` | `transaction_id`, `product_id`, `user_id`, `kind` |
-| `_apply` → `duplicate`/`applied` | — | логирует `_apply` (`transaction_id`/`product_id`/`user_id`/`kind`) |
+| пользователь не найден | `ignored/user_not_found` | `transaction_id`, `product_id` (`user_id` НЕ резолвнут → опущено; `resolvedVia` опущено) |
+| `unknown` / token не в карте | `ignored/unknown_product` | `transaction_id`, `product_id`, `user_id` (резолвнутый), `kind`, `resolvedVia` |
+| `_apply` → `duplicate`/`applied` | — | логирует `_apply` (`transaction_id`/`product_id`/`user_id` (резолвнутый)/`kind`/`resolvedVia`) |
+
+> На `user_not_found` в логе **резолвнутого `userId` нет** (резолв не удался: `X` не в `users` и не в `auth_devices`); поле `userId` опущено (не `null`-ключ). Ранее (до [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)) `user_not_found` логировал распарсенный `X` как `userId`; теперь `X`=кандидат, а не подтверждённый наш id — поэтому на `user_not_found` `userId` опускается.
 
 ## Инвариант «ровно один лог на вызов»
 Каждая return-ветка проходит через `_log_outcome` один раз; `handle` НЕ логирует на пути `_apply`.
 
 ## Allowlist / запрет (PII, секреты)
-**Логируется только:** `result`, `reason`, `transactionId`, `productId`, `userId` (наш UUID, `str`), `kind`.
+**Логируется только:** `result`, `reason`, `transactionId`, `productId`, `userId` (**резолвнутый** наш UUID, `str`), `kind`, `resolvedVia` (`"user_id"`\|`"device_id"`, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)). Опционально — `accountId` (= исходный `X`/deviceId, наш внутренний id, безопасно).
 **ЗАПРЕЩЕНО:** карт-данные (`CardFirstSix`/`CardLastFour`/`Issuer`/`CardType`), `Authorization`/bearer/`CLOUDPAYMENTS_WEBHOOK_TOKEN`, сырой `raw`/`Data`-строка, `amount`/`currency` в логе (они только в санитизированном `payload`/audit, не в outcome-логе). Канон — [ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md), [05-security.md](../../05-security.md#логирование-безопасное).
 
 ## Тестовые ориентиры (для qa)
@@ -109,3 +114,4 @@ def _level_for(result: str, reason: str | None) -> int:
 - `user_not_found`, `unknown_product` → **WARNING**; `applied`/`duplicate`/технические `ignored` → INFO; `empty_body` → DEBUG.
 - `transactionId`/`userId`/`productId` присутствуют там, где распарсены; отсутствуют (не `null`-ключ) на ранних reason'ах.
 - `userId` — строка UUID; в записи **нет** карт-данных, bearer, сырого payload.
+- **[ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md):** `X`(=`AccountId`) в `users` → `applied` с `resolvedVia="user_id"`, `userId=X`; `X` только в `auth_devices` (deviceId) → `applied` с `resolvedVia="device_id"`, `userId`=связанный `auth_devices[X].user_id` (**не** `X`); `X` ни там ни там → `user_not_found` (WARNING), без `resolvedVia`/`userId`.
