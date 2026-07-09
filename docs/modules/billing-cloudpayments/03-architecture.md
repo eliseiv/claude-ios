@@ -201,7 +201,9 @@ sequenceDiagram
 
 ## Резолв пользователя — двухступенчатый (deviceId → userId, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md))
 
-**Файл:** `src/app/billing_cloudpayments/service.py` — новый метод резолва (например `_resolve_user`), заменяет прежний одноступенчатый `_user_exists` (Stage 3 в `handle()`). **`parser.py` НЕ трогать** (резолв — DB-логика сервиса, не чистый парсинг).
+**Файл:** резолв реализован в `src/app/billing_cloudpayments/service.py` (метод `_resolve_user`), заменил прежний одноступенчатый `_user_exists` (Stage 3 в `handle()`). **`parser.py` НЕ трогать** (резолв — DB-логика сервиса, не чистый парсинг).
+
+**[ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md) — вынос в общий модуль.** Тело резолва перенесено в общий лист-модуль `src/app/billing_common/resolve.py::resolve_user(session, x) -> tuple[uuid.UUID, str] | None` (единый источник для Adapty и CloudPayments — устраняет дублирование, из-за которого фикс не был перенесён в Adapty). `_resolve_user` удаляется/делегирует: вызов `self._resolve_user(device_id)` → `resolve_user(self._session, device_id)`. **Behavior-preserving:** порядок (a)→(b)→(c), возврат `(userId, resolvedVia)`, значения `"user_id"`/`"device_id"` — идентичны; контракт/наблюдаемость/тесты не меняются (только ре-верификация).
 
 **Причина ([ADR-053 §Context](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)).** broadapps на RU-флоу присылает как `AccountId`/`Data.user_id` **deviceId** (id устройства, напр. `55cbe083-...`), а НЕ наш JWT `userId` (напр. `b0f407bd-...`). Прежний lookup искал `X` **только в `users`** → deviceId там нет → `user_not_found` → оплата без начисления. Связь deviceId→userId хранится в **нашей** таблице `auth_devices(device_id PK, user_id FK→users)` ([ADR-018](../../adr/ADR-018-embedded-auth-issuer.md), [03-data-model.md §18](../../03-data-model.md)).
 

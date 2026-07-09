@@ -2,7 +2,7 @@
 
 ## POST /v1/billing/adapty/webhook
 
-Серверный вебхук Adapty. **Вызывает Adapty**, не iOS-клиент. Контракт целиком в [ADR-029](../../adr/ADR-029-adapty-subscription-webhook.md); **реальный формат payload, маппинг событий и идемпотентность гранта исправлены в [ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)** (по реальным payload'ам Adapty).
+Серверный вебхук Adapty. **Вызывает Adapty**, не iOS-клиент. Контракт целиком в [ADR-029](../../adr/ADR-029-adapty-subscription-webhook.md); **реальный формат payload, маппинг событий и идемпотентность гранта исправлены в [ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)** (по реальным payload'ам Adapty); **резолв пользователя `customer_user_id` (deviceId→userId через `auth_devices`) — [ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)** (контракт эндпоинта не меняется, лечит `ignored/user_not_found` на реальном прод-флоу).
 
 ### Авторизация
 - `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` — статический секрет, заданный оператором в Adapty UI.
@@ -36,7 +36,7 @@
 }
 ```
 - `event_id` нашего журнала ← **`profile_event_id`** (не `event_id`/`id` — их в payload нет).
-- `customer_user_id` (наш `userId` UUID) **отсутствует** в текущих payload'ах; появится, когда iOS вызовет `Adapty.identify(<userId>)`. До этого → `200 ignored/missing_customer_user_id` (корректно, видно в логах ADR-046).
+- `customer_user_id` — идентификатор из `Adapty.identify`. **По факту прода iOS передаёт `deviceId`** (id устройства, [ADR-018](../../adr/ADR-018-embedded-auth-issuer.md)), а не наш JWT `userId`. Поэтому резолв двухступенчатый ([ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)): `X∈users`→userId напрямую; иначе `X∈auth_devices.device_id`→связанный `user_id`; иначе `user_not_found`. Absent/не-UUID `customer_user_id` → `200 ignored/missing_customer_user_id` (корректно, видно в логах ADR-046).
 - `transaction_id`/`original_transaction_id`/`profile_event_id` могут приходить **числом** (без кавычек) — парсер приводит к строке.
 
 Полный порядок fallback-источников по каждому полю — [03-architecture.md §Дефенсивный парсинг](03-architecture.md).
@@ -68,14 +68,18 @@
 | 200 | `{"result":"ignored","reason":"not_an_object"}` | JSON не объект |
 | 200 | `{"result":"ignored","reason":"missing_event_id"}` | нет `event_id` |
 | 200 | `{"result":"ignored","reason":"missing_customer_user_id"}` | нет/не-UUID `customer_user_id` |
-| 200 | `{"result":"ignored","reason":"user_not_found"}` | пользователь не найден |
+| 200 | `{"result":"ignored","reason":"user_not_found"}` | `customer_user_id` не найден **ни** в `users`, **ни** в `auth_devices` ([ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)) |
 | 200 | `{"result":"ignored","event_type":"<echo>"}` | неизвестный `event_type` |
 | 200 | `{"result":"duplicate"}` | повтор `event_id` |
 | 200 | `{"result":"applied"}` | событие применено |
 | 500 | (внутренний сбой) | БД недоступна и т. п. → Adapty ретраит |
 
+### Резолв пользователя ([ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md))
+
+Начисление/подписка/дедуп/audit ведутся на **резолвнутый** `userId`, не на исходный `customer_user_id`. Резолв — общий модуль `src/app/billing_common/resolve.py::resolve_user(session, x)` (один для Adapty и CloudPayments): (a) `X∈users.id`→`(X,"user_id")`; (b) `X∈auth_devices.device_id`→`(linked user_id,"device_id")`; (c) None→`user_not_found`. Исходный `customer_user_id` (deviceId либо userId) сохраняется в логе; резолвнутый `userId` — реальный получатель гранта.
+
 ### Эффекты при `applied`
-- GRANTING: `subscriptions.status=active`, `plan=vendor_product_id`, `expires_at` (из `subscription_expires_at`); грант кредитов по тиру, **идемпотентно по `adapty-txn:{transaction_id}`** (ADR-047, не по `event_id`).
+- GRANTING: `subscriptions.status=active`, `plan=vendor_product_id`, `expires_at` (из `subscription_expires_at`); грант кредитов по тиру, **идемпотентно по `adapty-txn:{transaction_id}`** (ADR-047, не по `event_id`). Всё — на резолвнутый `userId` (ADR-055).
 - EXPIRING: `subscriptions.status=expired`; кредиты не изменяются.
 - NOOP (`*_renewal_cancelled`): подписка/кредиты **не изменяются** (доступ сохраняется); событие записано + audit.
 

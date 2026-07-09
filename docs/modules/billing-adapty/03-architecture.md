@@ -1,6 +1,6 @@
 # billing-adapty / 03 — Architecture
 
-Реализует [ADR-029](../../adr/ADR-029-adapty-subscription-webhook.md); **парсинг реального формата, маппинг событий и идемпотентность гранта — [ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)** (заменяет §«Дефенсивный парсинг», §«Маппинг событий», §«Grant» ниже). Ниже — детали для backend.
+Реализует [ADR-029](../../adr/ADR-029-adapty-subscription-webhook.md); **парсинг реального формата, маппинг событий и идемпотентность гранта — [ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)** (заменяет §«Дефенсивный парсинг», §«Маппинг событий», §«Grant» ниже); **резолв пользователя `customer_user_id`→`userId` (deviceId→userId через `auth_devices`) — [ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)** (заменяет Stage 3 `_user_exists`). Ниже — детали для backend.
 
 ## Файлы (фактическая раскладка)
 - `src/app/billing_adapty/__init__.py`
@@ -8,6 +8,7 @@
 - `src/app/billing_adapty/auth.py` — `require_adapty_webhook` (constant-time bearer) + `AdaptyWebhookMisconfiguredError` (override `status_code = 500`, code `adapty_webhook_misconfigured`). 401 при mismatch/нет токена, 500 при незаданном секрете.
 - `src/app/billing_adapty/service.py` — `AdaptyWebhookService` + `WebhookOutcome`: дедуп, маппинг события, транзакция (upsert subscription + grant + audit).
 - `src/app/billing_adapty/parser.py` — чистые функции дефенсивного парсинга полей + `ParsedEvent`, константы событий (`GRANTING_EVENTS`/`EXPIRING_EVENTS`/`KNOWN_EVENTS`).
+- `src/app/billing_common/resolve.py` ([ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)) — **общий** двухступенчатый резолв пользователя `resolve_user(session, x) -> tuple[uuid.UUID, str] | None` + константы `RESOLVED_VIA_USER_ID`/`RESOLVED_VIA_DEVICE_ID`. Единый источник резолва для Adapty и CloudPayments (лист-модуль, зависит только от `AsyncSession`; убирает дублирование, из-за которого фикс [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md) не был перенесён в Adapty).
 - `src/app/schemas/billing_adapty.py` — `AdaptyWebhookResponse` (`{result, reason?, event_type?}`, только для OpenAPI; тела запроса нет).
 - OpenAPI-схема `adapty_webhook_scheme` (`HTTPBearer`, `scheme_name="adaptyWebhook"`, `auto_error=False`) — в `src/app/api_gateway/openapi_security.py`.
 - Фабрика `get_adapty_webhook_service` — в `src/app/deps.py`.
@@ -28,7 +29,14 @@ sequenceDiagram
     S->>S: parse: empty/json/object/event_id/customer_user_id
     alt любая невалидность
         S-->>R: 200 ignored/<reason>
-    else валидное событие
+    else customer_user_id есть
+        S->>DB: resolve_user(X): users → auth_devices.device_id (ADR-055)
+        alt X не в users и не в auth_devices
+            S-->>R: 200 ignored/user_not_found
+        else резолвнут → resolved_user_id, resolved_via
+        end
+    end
+    alt валидное событие (после резолва)
         S->>DB: BEGIN
         S->>DB: INSERT adapty_webhook_events ON CONFLICT(event_id) DO NOTHING RETURNING event_id
         alt конфликт (дубликат) — RETURNING пуст
@@ -121,13 +129,14 @@ tokens = settings.adapty_product_tokens().get(vendor_product_id) or settings.ada
 ```
 txn = event.transaction_id or event.original_transaction_id or event.event_id
 WalletService.grant(
-    user_id=<UUID customer_user_id>,
+    user_id=<resolved_user_id>,          # ADR-055: резолвнутый userId, НЕ event.customer_user_id
     amount=tokens,
     idempotency_key=f"adapty-txn:{txn}",
     reason="adapty_subscription",
     meta={"transactionId": txn, "eventType": event_type, "vendorProductId": vendor_product_id},
 )
 ```
+**[ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md):** `user_id` во **всех** записях `_apply` (дедуп `INSERT adapty_webhook_events(user_id=...)`, upsert `subscriptions WHERE user_id=...`, `WalletService.grant(user_id=...)`, `AuditEvent(user_id=...)`) — **резолвнутый** `userId`, а не исходный `event.customer_user_id`. Ключ идемпотентности гранта по `transaction_id` не меняется (не зависит от userId).
 **`transaction_id` первичен** (уникален на период → продления начисляют заново; несколько событий одного периода → один грант). `original_transaction_id` — fallback (постоянен на цепочку, НЕ первичен — иначе продления без кредитов). `event_id` — крайний fallback (вырожденный случай без transaction id). Только для granting-событий. Подробности и обоснование — [ADR-047 §C](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md).
 
 ## Observability (логирование исхода, [ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md))

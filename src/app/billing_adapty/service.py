@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.service import EVENT_ADAPTY_SUBSCRIPTION, AuditEvent, AuditService
 from app.billing_adapty import parser
 from app.billing_adapty.parser import ParsedEvent
+from app.billing_common.resolve import resolve_user
 from app.config import Settings
 from app.models import Subscription
 from app.observability.logging import log_event
@@ -99,14 +100,20 @@ class AdaptyWebhookService:
         event_type: str | None = None,
         event_id: str | None = None,
         customer_user_id: uuid.UUID | None = None,
+        resolved_via: str | None = None,
+        resolved_user_id: uuid.UUID | None = None,
     ) -> WebhookOutcome:
         """Emit exactly one structured ``adapty_webhook_outcome`` record and return ``outcome``.
 
         Returns the same outcome so it can wrap an existing ``return`` without changing control
         flow (ADR-046 / 08-observability.md). Only the fixed allowlist is logged (result / reason /
-        eventType / eventId / customerUserId); the raw payload and the bearer secret are never
-        logged. ``customer_user_id`` is our internal UUID -> ``str(...)`` so ``json.dumps`` in the
-        ``JsonFormatter`` cannot fail; ``None`` fields are dropped from the JSON (= "not parsed").
+        eventType / eventId / customerUserId / resolvedVia / resolvedUserId); the raw payload and
+        the bearer secret are never logged. ``customer_user_id`` stays the ORIGINAL Adapty
+        identifier (deviceId or userId — our internal id, safe to log); ``resolved_user_id`` is the
+        RESOLVED internal UUID (ADR-055). UUIDs are ``str(...)`` so ``json.dumps`` in the
+        ``JsonFormatter`` cannot fail; ``None`` fields are dropped from the JSON (= "not parsed" /
+        "not resolved"), so ``resolvedVia`` / ``resolvedUserId`` are simply absent on
+        ``user_not_found`` and the early ``ignored`` outcomes.
         """
         level = _level_for(outcome.result, outcome.reason)
         log_event(
@@ -118,6 +125,8 @@ class AdaptyWebhookService:
             eventType=event_type,
             eventId=event_id,
             customerUserId=str(customer_user_id) if customer_user_id is not None else None,
+            resolvedVia=resolved_via,
+            resolvedUserId=str(resolved_user_id) if resolved_user_id is not None else None,
         )
         return outcome
 
@@ -160,14 +169,18 @@ class AdaptyWebhookService:
                 event_id=event_id,
             )
 
-        # --- Stage 3: user existence (DB read; we never provision users here) ---
-        if not await self._user_exists(customer_user_id):
+        # --- Stage 3: two-step user resolution (ADR-055; DB read; never provision here) ---
+        # Adapty sends a deviceId (not our userId) in customer_user_id; resolve it via auth_devices.
+        resolved = await resolve_user(self._session, customer_user_id)
+        if resolved is None:
+            # X found in neither users nor auth_devices -> user_not_found (resolve fields omitted).
             return self._log_outcome(
                 _ignored("user_not_found"),
                 event_type=event_type,
                 event_id=event_id,
                 customer_user_id=customer_user_id,
             )
+        resolved_user_id, resolved_via = resolved
 
         # --- Stage 4: event-type dispatch ---
         if event_type not in parser.KNOWN_EVENTS:
@@ -178,6 +191,8 @@ class AdaptyWebhookService:
                 event_type=event_type,
                 event_id=event_id,
                 customer_user_id=customer_user_id,
+                resolved_via=resolved_via,
+                resolved_user_id=resolved_user_id,
             )
 
         parsed = ParsedEvent(
@@ -192,16 +207,15 @@ class AdaptyWebhookService:
             access_level_id=parser.parse_access_level_id(body),
             will_renew=parser.parse_will_renew(body),
         )
-        return await self._apply(parsed, body)
+        return await self._apply(parsed, body, resolved_user_id, resolved_via)
 
-    async def _user_exists(self, user_id: uuid.UUID) -> bool:
-        exists = await self._session.scalar(
-            text("SELECT 1 FROM users WHERE id = :uid"),
-            {"uid": str(user_id)},
-        )
-        return exists is not None
-
-    async def _apply(self, event: ParsedEvent, body: dict[str, Any]) -> WebhookOutcome:
+    async def _apply(
+        self,
+        event: ParsedEvent,
+        body: dict[str, Any],
+        resolved_user_id: uuid.UUID,
+        resolved_via: str,
+    ) -> WebhookOutcome:
         """Apply a recognised event inside the caller's single transaction (ADR-029 §6 / ADR-047).
 
         The INSERT ... ON CONFLICT DO NOTHING RETURNING is the sole event-delivery dedup point: an
@@ -212,6 +226,11 @@ class AdaptyWebhookService:
         subscription expired (credits untouched); NOOP (auto-renew turned off, access kept) touches
         neither subscription nor credits but is still recorded + audited. The audit row runs in this
         transaction, committed on success.
+
+        Every DB write (dedup INSERT, subscription upsert, credit grant, audit) targets
+        ``resolved_user_id`` — our internal userId (ADR-055), NOT ``event.customer_user_id`` (which
+        may be a deviceId). ``event.customer_user_id`` is left untouched as the original Adapty
+        identifier, still surfaced for tracing in the log/audit.
         """
         inserted = await self._session.scalar(
             text(
@@ -222,7 +241,7 @@ class AdaptyWebhookService:
             ),
             {
                 "event_id": event.event_id,
-                "uid": str(event.customer_user_id),
+                "uid": str(resolved_user_id),
                 "event_type": event.event_type,
                 "payload": json.dumps(body),
             },
@@ -234,6 +253,8 @@ class AdaptyWebhookService:
                 event_type=event.event_type,
                 event_id=event.event_id,
                 customer_user_id=event.customer_user_id,
+                resolved_via=resolved_via,
+                resolved_user_id=resolved_user_id,
             )
 
         semantics = parser.classify_event(event)
@@ -244,15 +265,15 @@ class AdaptyWebhookService:
         if semantics == parser.SEM_NOOP:
             # Auto-renew cancellation: access is kept until period end -> touch neither subscription
             # nor credits. Echo the current subscription state (if any) into the audit row.
-            status, plan = await self._read_subscription(event.customer_user_id)
+            status, plan = await self._read_subscription(resolved_user_id)
         else:
-            status, plan = await self._upsert_subscription(event, semantics)
+            status, plan = await self._upsert_subscription(event, semantics, resolved_user_id)
             if semantics == parser.SEM_GRANTING:
-                await self._grant(event, txn)
+                await self._grant(event, txn, resolved_user_id)
 
         await self._audit.record(
             AuditEvent(
-                user_id=event.customer_user_id,
+                user_id=resolved_user_id,
                 event_type=EVENT_ADAPTY_SUBSCRIPTION,
                 payload={
                     "adaptyEventId": event.event_id,
@@ -272,6 +293,8 @@ class AdaptyWebhookService:
             event_type=event.event_type,
             event_id=event.event_id,
             customer_user_id=event.customer_user_id,
+            resolved_via=resolved_via,
+            resolved_user_id=resolved_user_id,
         )
 
     async def _read_subscription(self, user_id: uuid.UUID) -> tuple[str | None, str | None]:
@@ -284,22 +307,23 @@ class AdaptyWebhookService:
         return row.status, row.plan
 
     async def _upsert_subscription(
-        self, event: ParsedEvent, semantics: str
+        self, event: ParsedEvent, semantics: str, resolved_user_id: uuid.UUID
     ) -> tuple[str, str | None]:
         """Upsert subscriptions per the resolved semantics (ADR-047 §B). Returns (status, plan).
 
-        GRANTING -> active, plan=vendor_product_id, expires_at (if present).
+        Keyed by ``resolved_user_id`` — our internal userId (ADR-055), not the raw Adapty
+        ``customer_user_id``. GRANTING -> active, plan=vendor_product_id, expires_at (if present).
         EXPIRING -> expired; plan and expires_at are left unchanged. NOOP never reaches here.
         """
         row = await self._session.scalar(
-            select(Subscription).where(Subscription.user_id == event.customer_user_id)
+            select(Subscription).where(Subscription.user_id == resolved_user_id)
         )
         if semantics == parser.SEM_GRANTING:
             status = "active"
             plan = event.vendor_product_id
             if row is None:
                 row = Subscription(
-                    user_id=event.customer_user_id,
+                    user_id=resolved_user_id,
                     status=status,
                     plan=plan,
                     expires_at=event.expires_at,
@@ -315,7 +339,7 @@ class AdaptyWebhookService:
             status = "expired"
             if row is None:
                 row = Subscription(
-                    user_id=event.customer_user_id,
+                    user_id=resolved_user_id,
                     status=status,
                     plan=None,
                     expires_at=None,
@@ -329,16 +353,17 @@ class AdaptyWebhookService:
         await self._session.flush()
         return status, plan
 
-    async def _grant(self, event: ParsedEvent, txn: str) -> None:
+    async def _grant(self, event: ParsedEvent, txn: str, resolved_user_id: uuid.UUID) -> None:
         """Grant credits by product tier, idempotent by ``adapty-txn:{txn}`` (ADR-047 §C).
 
-        ``txn`` is the per-period transaction id (resolved in ``_apply``): one purchase period maps
-        to exactly one grant no matter how many granting-events it emits, while each renewal (new
-        transaction_id) grants afresh. Only granting-events call this.
+        Credits land on ``resolved_user_id`` (our internal userId, ADR-055). ``txn`` is the
+        per-period transaction id (resolved in ``_apply``): one purchase period maps to exactly one
+        grant no matter how many granting-events it emits, while each renewal (new transaction_id)
+        grants afresh. Only granting-events call this.
         """
         tier = self._tier_for(event.vendor_product_id)
         await self._wallet.grant(
-            user_id=event.customer_user_id,
+            user_id=resolved_user_id,
             amount=tier,
             idempotency_key=f"adapty-txn:{txn}",
             reason="adapty_subscription",

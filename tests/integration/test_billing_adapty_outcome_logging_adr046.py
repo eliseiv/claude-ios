@@ -159,6 +159,9 @@ async def test_missing_event_id_info_no_parsed_keys(
     assert "eventId" not in fields
     assert "customerUserId" not in fields
     assert "eventType" not in fields
+    # ADR-055: resolution never ran (early ignored) -> both fields ABSENT (not null).
+    assert "resolvedVia" not in fields
+    assert "resolvedUserId" not in fields
 
 
 @pytest.mark.asyncio
@@ -181,6 +184,9 @@ async def test_missing_customer_user_id_warning_eventid_only(
     assert fields["eventId"] == "evt-no-user"
     assert fields["eventType"] == "subscription_started"
     assert "customerUserId" not in fields
+    # ADR-055: no customer_user_id -> resolution never ran -> both fields ABSENT (not null).
+    assert "resolvedVia" not in fields
+    assert "resolvedUserId" not in fields
 
 
 # ============================ DB-backed reasons ============================
@@ -207,6 +213,10 @@ async def test_user_not_found_warning_all_context(
     # customerUserId present AND serialised as a UUID STRING (not an object).
     assert fields["customerUserId"] == str(uid)
     assert isinstance(fields["customerUserId"], str)
+    # ADR-055: resolve_user returned None (X in neither users nor auth_devices) -> the resolution
+    # fields are OMITTED on user_not_found (not null); customerUserId stays the original X.
+    assert "resolvedVia" not in fields
+    assert "resolvedUserId" not in fields
 
 
 @pytest.mark.asyncio
@@ -234,6 +244,9 @@ async def test_unknown_event_type_warning_reason_absent_echoes_type(
     assert fields["eventType"] == "subscription_paused"  # echoed
     assert fields["eventId"] == "evt-unknown"
     assert fields["customerUserId"] == str(uid)
+    # ADR-055: user resolved (X in users) before the unknown-type echo -> resolution fields present.
+    assert fields["resolvedVia"] == "user_id"
+    assert fields["resolvedUserId"] == str(uid)
 
 
 @pytest.mark.asyncio
@@ -259,6 +272,9 @@ async def test_applied_info_full_context_no_reason(
     assert fields["eventId"] == "evt-applied"
     assert fields["eventType"] == "subscription_started"
     assert fields["customerUserId"] == str(uid)
+    # ADR-055: X is a real user -> resolved via branch (a); resolvedUserId == X.
+    assert fields["resolvedVia"] == "user_id"
+    assert fields["resolvedUserId"] == str(uid)
 
 
 @pytest.mark.asyncio
@@ -291,6 +307,9 @@ async def test_duplicate_info_and_one_record_per_call(
     assert fields["eventId"] == "evt-dup"
     assert fields["eventType"] == "subscription_started"
     assert fields["customerUserId"] == str(uid)
+    # ADR-055: the replay still resolves X -> resolution fields present on duplicate too.
+    assert fields["resolvedVia"] == "user_id"
+    assert fields["resolvedUserId"] == str(uid)
 
 
 # ==================== Security: allowlist drops payload + secret ====================
@@ -321,7 +340,10 @@ async def test_record_contains_no_raw_payload_or_bearer_secret(
     assert "expires_at" not in rendered
     assert "authorization" not in rendered.lower()
     assert "bearer" not in rendered.lower()
-    # Only the fixed allowlist of keys is present.
+    # Only the fixed allowlist of keys is present. resolvedVia/resolvedUserId (ADR-055) are the
+    # user-resolution fields; both are internal-safe (our UUID / a {"user_id","device_id"} enum),
+    # carry no card-PII or secret, and appear on resolved outcomes (here: applied). The allowlist
+    # stays CLOSED (``<=``) so any NEW field — including an accidental leak — still trips it.
     fields = _rendered(recs[0])
     assert set(fields) <= {
         "level",
@@ -332,10 +354,18 @@ async def test_record_contains_no_raw_payload_or_bearer_secret(
         "eventType",
         "eventId",
         "customerUserId",
+        "resolvedVia",
+        "resolvedUserId",
         "requestId",
         "sessionId",
         "userId",
     }
+    # Positive proof the resolution fields ARE emitted for this (applied, X in users) case: X is a
+    # real seeded user -> resolved via branch (a), resolvedUserId == the original X. This also
+    # guards against resolvedUserId silently going missing (would slip past the ``<=`` allowlist).
+    assert fields["resolvedVia"] == "user_id"
+    assert fields["resolvedUserId"] == str(uid)
+    assert fields["customerUserId"] == str(uid)
 
 
 # ============================ Level table (compact, all outcomes) ============================

@@ -1,6 +1,6 @@
 # billing-adapty / 08 — Observability (логирование исхода вебхука)
 
-Реализует [ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md). Точное ТЗ для backend — без додумывания. Расширяет [03-architecture.md](03-architecture.md); HTTP-семантику, начисление, `KNOWN_EVENTS`, контракт `AdaptyWebhookResponse` и схему данных **не меняет**.
+Реализует [ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md); **[ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md) добавляет поля `resolvedVia`/`resolvedUserId`** (см. §«Дополнение ADR-055» ниже). Точное ТЗ для backend — без додумывания. Расширяет [03-architecture.md](03-architecture.md); HTTP-семантику, начисление, `KNOWN_EVENTS`, контракт `AdaptyWebhookResponse` и схему данных **не меняет**.
 
 ## Цель
 
@@ -142,6 +142,21 @@ return self._log_outcome(
 ## Allowlist / запрет (PII, секреты)
 
 **Логируется только:** `result`, `reason`, `eventType`, `eventId`, `customerUserId` (наш UUID, `str`). **Запрещено:** сырой `raw`/`body`, `Authorization`/bearer/`ADAPTY_WEBHOOK_SECRET`, любые поля payload вне allowlist (`vendor_product_id`, `expires_at`, `profile.*` и пр.). Канон — [ADR-046 §Allowlist](../../adr/ADR-046-adapty-webhook-outcome-logging.md#allowlist-полей-лога-pii--секреты), [05-security.md](../../05-security.md#логирование-безопасное). Имена полей не пересекаются с redaction-denylist → значения не маскируются.
+
+## Дополнение [ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md) — поля резолва пользователя
+
+Stage 3 меняется с `_user_exists` на общий `resolve_user` (deviceId→userId через `auth_devices`). `_log_outcome` получает **два новых опциональных параметра** (allowlist расширяется только внутренними-безопасными UUID/enum — карт-PII/секретов нет и не было):
+
+| Поле | Значение |
+|---|---|
+| `resolvedVia` | `"user_id"` (`X` найден в `users`) \| `"device_id"` (`X` найден в `auth_devices.device_id`). Присутствует на исходах, где пользователь резолвнут (`applied`/`duplicate`/unknown-`event_type`); на `user_not_found`/ранних `ignored` — **опущено** (не `null`-ключ). |
+| `resolvedUserId` | резолвнутый **наш внутренний** `userId` (`str(uuid)`), там же, где `resolvedVia`. Показывает реального получателя гранта, когда `customerUserId` = deviceId. |
+
+- **`customerUserId` сохраняется как есть** — исходный `customer_user_id`, что прислал Adapty (deviceId либо userId); значение параметра `_log_outcome` не меняется. Это наш внутренний id, безопасно.
+- `_level_for` **не меняется** (уровни по `result`/`reason` те же).
+- Точки вызова: на `user_not_found` (резолв вернул None) — `resolvedVia`/`resolvedUserId` опущены, `customerUserId`=исходный `X`. На `applied`/`duplicate`/unknown-type — оба поля присутствуют.
+
+**Ориентиры qa (ADR-055):** `X`(=`customer_user_id`) в `users` → `applied`/событие с `resolvedVia="user_id"`, `resolvedUserId=X`; `X` только в `auth_devices` (deviceId) → `resolvedVia="device_id"`, `resolvedUserId`=`auth_devices[X].user_id` (**не** `X`), грант/подписка на нём; `X` ни там ни там → `user_not_found` (WARNING), без `resolvedVia`/`resolvedUserId`; `customerUserId` в записи = исходный `X` во всех случаях, где распарсен.
 
 ## Тестовые ориентиры (для qa)
 

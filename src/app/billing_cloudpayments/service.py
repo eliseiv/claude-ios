@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.service import EVENT_CLOUDPAYMENTS_PAYMENT, AuditEvent, AuditService
 from app.billing_cloudpayments import parser, verify
 from app.billing_cloudpayments.verify import CloudPaymentsVerifyClient, CreditablePayment
+from app.billing_common.resolve import resolve_user
 from app.config import Settings
 from app.errors import CloudPaymentsWebhookMisconfiguredError
 from app.observability.logging import log_event
@@ -176,8 +177,8 @@ class CloudPaymentsWebhookService:
         if device_id is None:
             return self._log_outcome(_ignored("invalid_account_id"), transaction_id=transaction_id)
 
-        # --- Stage 3: two-step user resolution (ADR-053; DB read; never provision users here) ---
-        resolved = await self._resolve_user(device_id)
+        # --- Stage 3: two-step user resolution (ADR-053/055; DB read; never provision here) ---
+        resolved = await resolve_user(self._session, device_id)
         if resolved is None:
             # X is only a candidate deviceId (not our confirmed user) -> userId omitted, NO GET.
             return self._log_outcome(_ignored("user_not_found"), transaction_id=transaction_id)
@@ -229,36 +230,6 @@ class CloudPaymentsWebhookService:
             credited_count=credited,
             payment_statuses=statuses,
         )
-
-    async def _resolve_user(self, x: uuid.UUID) -> tuple[uuid.UUID, str] | None:
-        """Resolve the callback identifier ``X`` to our internal ``userId`` (ADR-053, two-step).
-
-        broadapps sends a deviceId (not our userId) as ``AccountId``/``Data.user_id`` on the RU
-        flow. First-match wins, deterministic (``users`` before ``auth_devices`` for compat):
-
-        - (a) ``X`` in ``users`` -> ``X`` already IS our userId; ``resolved_via = "user_id"``.
-        - (b) else ``X`` in ``auth_devices.device_id`` -> take the linked ``user_id`` (deviceId ->
-          userId); ``resolved_via = "device_id"``. This is the RU-flow fix.
-        - (c) else -> ``None`` (=> ``user_not_found``; we never provision users/devices, ADR-007).
-
-        The deviceId->userId mapping is taken ONLY from our ``auth_devices`` (never from the
-        callback body). ``X`` is an already-lower UUID; ``auth_devices.device_id`` is a lower UUID
-        string, so ``str(x)`` matches. Both lookups run before the verification GET.
-        """
-        if await self._session.scalar(
-            text("SELECT 1 FROM users WHERE id = :x"),
-            {"x": str(x)},
-        ):
-            return x, "user_id"
-
-        device_user_id = await self._session.scalar(
-            text("SELECT user_id FROM auth_devices WHERE device_id = :x"),
-            {"x": str(x)},
-        )
-        if device_user_id is not None:
-            return uuid.UUID(str(device_user_id)), "device_id"
-
-        return None
 
     async def _apply_payment(self, payment: CreditablePayment, user_id: uuid.UUID) -> bool:
         """Credit ONE verified payment in its own transaction; return True iff it was credited.
