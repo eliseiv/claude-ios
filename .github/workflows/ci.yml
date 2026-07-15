@@ -242,6 +242,8 @@ jobs:
             # instance `avelyra:avelyra` (avelyraweb.shop) is provisioned on the server. The third
             # instance `orvianix:orvianix` (orvianix.shop) and the fourth `veltrio:veltrio`
             # (veltriohub.shop) are OpenAI clones (ADR-033: LLM_PROVIDER=openai + OPENAI_* in their
+            # own /opt/<dir>/.env) — same code, same per-instance deploy/readiness/smoke; only their
+            # .env differs.
             INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix veltrio:veltrio elvarixa:elvarixa"
             FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
             for entry in $INSTANCES; do
