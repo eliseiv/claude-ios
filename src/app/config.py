@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     appstore_environment: str = Field(default="sandbox", alias="APPSTORE_ENVIRONMENT")
     appstore_bundle_id: str = Field(default="", alias="APPSTORE_BUNDLE_ID")
     appstore_root_cert_dir: str = Field(default="", alias="APPSTORE_ROOT_CERT_DIR")
+    # DEV/TEST ONLY: skip Apple x5c chain anchoring for real StoreKit JWS.
+    # The JWS signature is still verified with the embedded leaf certificate, but without
+    # anchoring that leaf to an Apple root this is not proof of Apple issuance. The verifier
+    # ignores this flag when APPSTORE_ENVIRONMENT=production.
+    storekit_dev_skip_cert_chain_verification: bool = Field(
+        default=False, alias="STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION"
+    )
 
     # --- Sign in with Apple (ADR-043, modules/auth Phase 6) ---
     # Apple OIDC identity-token verification for POST /v1/auth/apple. Native Sign in with Apple
