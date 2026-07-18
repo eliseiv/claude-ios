@@ -241,13 +241,13 @@ jobs:
             # INSTANCES-loop). `-p claude-ios` == basename of /opt/claude-ios => no-op vs the
             # previous no-`-p` deploy (backward-compat for the live broadnova.shop). The second
             # instance `avelyra:avelyra` (avelyraweb.shop) is provisioned on the server. The third
-            # instance `orvianix:orvianix` (orvianix.shop) is an OpenAI clone (ADR-033:
-            # LLM_PROVIDER=openai + OPENAI_* in their own /opt/<dir>/.env) — same code, same
-            # per-instance deploy/readiness/smoke; only their .env differs.
+            # instance `orvianix:orvianix` (orvianix.shop) and `elvarixa:elvarixa` are OpenAI
+            # clones (ADR-033: LLM_PROVIDER=openai + OPENAI_* in their own /opt/<dir>/.env) — same
+            # code, same per-instance deploy/readiness/smoke; only their .env differs.
             # veltrio (veltriohub.shop) was decommissioned 2026-07-18: the domain was handed over to
             # a different service on the same server. It MUST stay out of this loop — redeploying it
             # would re-create its Traefik router and take the domain back.
-            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix"
+            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa"
             FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
             for entry in $INSTANCES; do
               dir="${entry%%:*}"; proj="${entry##*:}"
