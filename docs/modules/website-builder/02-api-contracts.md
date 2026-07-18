@@ -40,7 +40,7 @@
 - `url` — **АБСОЛЮТНЫЙ** URL на наш домен: `https://<SERVICE_DOMAIN>/v1/preview/{projectId}/{token}/{entry}` ([ADR-031](../../adr/ADR-031-absolute-preview-url.md)).
   Абсолютная форма нужна, чтобы модель копировала ссылку **дословно** и не достраивала/галлюцинировала базовый хост (раньше `url` был относительным `/v1/preview/...`, и модель подставляла чужой хост вроде `claude.site`/`val.town`).
   - `<SERVICE_DOMAIN>` берётся из app-config (`service_domain`, PUBLIC, [config.py](../../../src/app/config.py)) и **нормализуется** (срез протокола `https://`/`http://` и хвостового `/`), без двойных слешей. Схема — всегда `https`.
-  - **Fallback (только локальная разработка):** если `SERVICE_DOMAIN` пуст → `url` — относительный путь `/v1/preview/{projectId}/{token}/{entry}` (как прежде), без хардкода `localhost`. На проде `SERVICE_DOMAIN` уже задан в `.env` обоих инстансов ([07-deployment.md](../../07-deployment.md)).
+  - **Fallback (только локальная разработка):** если `SERVICE_DOMAIN` пуст → `url` — относительный путь `/v1/preview/{projectId}/{token}/{entry}` (как прежде), без хардкода `localhost`. На проде `SERVICE_DOMAIN` задан в `.env` каждого действующего инстанса ([07-deployment.md](../../07-deployment.md)).
 - Подпись/TTL **не меняются**: signed URL `GET /v1/preview/{projectId}/{token}/{entry}` (HMAC под `PREVIEW_URL_SECRET`, TTL
   `PREVIEW_URL_TTL_SECONDS`, дефолт 15 мин). `projectId` — внутренний UUID проекта владельца сессии. Подпись покрывает
   `projectId`+`ownerUserId`+`exp` ([ADR-010](../../adr/ADR-010-backend-hosted-preview.md)).

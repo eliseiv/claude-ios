@@ -106,7 +106,7 @@
 **Итог выката (2026-06-10).** Все next-step операции devops выполнены и проверены ревью:
 1. `docker-compose.prod.yml` параметризован через `${COMPOSE_PROJECT_NAME:-claude-ios}` (image + Traefik router/service-имена); инвариант обратной совместимости проверен (`compose config` для существующего `/opt/claude-ios/.env` идентичен — broadnova не затронут).
 2. Закомментированный `COMPOSE_PROJECT_NAME` (дефолт `claude-ios`) добавлен в `.env.prod.example`.
-3. `INSTANCES`-loop внедрён в **оба** workflow (`ci.yml` gated deploy-job + ручной `deploy.yml`): `INSTANCES="claude-ios:claude-ios avelyra:avelyra"`, **claude-ios первым** (backward-compat no-op).
+3. `INSTANCES`-loop внедрён в **оба** workflow (`ci.yml` gated deploy-job + ручной `deploy.yml`): `INSTANCES="claude-ios:claude-ios avelyra:avelyra"`, **claude-ios первым** (backward-compat no-op). *(значение на 2026-06-10; актуальное — [07-deployment.md §CI/CD INSTANCES-loop](07-deployment.md#cicd-контракт-instances-loop-мульти-инстанс))*
 4. `/opt/avelyra` провизионирован (git clone того же репо, свой `.env`, **свежий** JWT keypair в `/opt/avelyra/.secrets/`, **свежие** секреты `POSTGRES_PASSWORD`/`ANTHROPIC_API_KEY`/`ADMIN_API_SECRET`/`KMS_LOCAL_MASTER_KEY`/`PREVIEW_URL_SECRET`/`METRICS_SCRAPE_TOKEN`) и выкачен `-p avelyra`. `GET https://avelyraweb.shop/healthz` и `/docs` → `200`; round-trip auth зелёный; `broadnova.shop/healthz` → `200` (сосед не затронут).
 
 **Изоляция (подтверждена).** Инстансы полностью изолированы по данным, секретам и JWT keypair: раздельные тома `avelyra_pgdata`/`claude-ios_pgdata`, раздельные `.secrets/`, у avelyra **собственные** секреты (не копии broadnova). Разделяются только внешняя сеть `web` + общий edge-Traefik (`/opt/edge`).
