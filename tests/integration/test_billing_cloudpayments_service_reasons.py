@@ -296,6 +296,7 @@ async def test_outcome_log_carries_no_card_data_or_secret(
     [
         ("user_not_found", logging.WARNING),
         ("no_creditable_payment", logging.WARNING),
+        ("payment_skipped", logging.WARNING),  # ADR-057 §4
         ("empty_body", logging.DEBUG),
         ("invalid_json", logging.INFO),
         ("not_an_object", logging.INFO),

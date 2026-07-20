@@ -360,7 +360,8 @@ async def test_unknown_payment_type_is_skipped_not_credited(
     # No credit; a per-payment WARNING skip is emitted (unknown_payment_type).
     assert await _balance(db_sessionmaker, _U) is None
     assert await _ledger_keys(db_sessionmaker, _U) == []
-    assert outcome.result == "duplicate" and outcome.reason is None
+    # ADR-057 §4: a dropped PAID payment is an incident, no longer collapsed into "duplicate".
+    assert outcome.result == "ignored" and outcome.reason == "payment_skipped"
     skips = _skips(caplog)
     assert len(skips) == 1
     assert skips[0].levelno == logging.WARNING

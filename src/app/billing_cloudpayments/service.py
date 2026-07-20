@@ -32,6 +32,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,14 +64,15 @@ def _ignored(reason: str) -> WebhookOutcome:
 def _level_for(result: str, reason: str | None) -> int:
     """Map a webhook outcome to a log level (ADR-054 §5 / 08-observability.md).
 
-    ``user_not_found`` / ``no_creditable_payment`` are WARNING (a callback arrived but nothing could
-    be credited — the incident class the operator watches). ``applied`` / ``duplicate`` and the
-    parse-shape ``ignored`` reasons are INFO; a fully empty body is a low-signal probe -> DEBUG.
+    ``user_not_found`` / ``no_creditable_payment`` / ``payment_skipped`` are WARNING (a callback
+    arrived but nothing could be credited — the incident class the operator watches).
+    ``applied`` / ``duplicate`` and the parse-shape ``ignored`` reasons are INFO; a fully empty
+    body is a low-signal probe -> DEBUG.
     """
     if result in ("applied", "duplicate"):
         return logging.INFO
     # result == "ignored"
-    if reason in ("user_not_found", "no_creditable_payment"):
+    if reason in ("user_not_found", "no_creditable_payment", "payment_skipped"):
         return logging.WARNING
     if reason == "empty_body":
         return logging.DEBUG
@@ -212,15 +214,23 @@ class CloudPaymentsWebhookService:
 
         # --- Stage 6: credit each selected payment in its OWN transaction (idempotent) ---
         credited = 0
+        skipped = 0
         for payment in creditable:
-            if await self._apply_payment(payment, resolved_user_id):
+            applied = await self._apply_payment(payment, resolved_user_id)
+            if applied == "credited":
                 credited += 1
+            elif applied == "skipped":
+                skipped += 1
 
-        outcome = (
-            WebhookOutcome(result="applied")
-            if credited >= 1
-            else WebhookOutcome(result="duplicate")
-        )
+        # A skip is NOT a duplicate (ADR-057 §4): a PAID payment we could neither classify nor size
+        # is an incident and must surface as WARNING. Before ADR-057 both collapsed into
+        # "duplicate", so a lost payment was indistinguishable from a benign re-delivery.
+        if credited >= 1:
+            outcome = WebhookOutcome(result="applied")
+        elif skipped >= 1:
+            outcome = _ignored("payment_skipped")
+        else:
+            outcome = WebhookOutcome(result="duplicate")
         return self._log_outcome(
             outcome,
             transaction_id=transaction_id,
@@ -231,11 +241,15 @@ class CloudPaymentsWebhookService:
             payment_statuses=statuses,
         )
 
-    async def _apply_payment(self, payment: CreditablePayment, user_id: uuid.UUID) -> bool:
-        """Credit ONE verified payment in its own transaction; return True iff it was credited.
+    async def _apply_payment(
+        self, payment: CreditablePayment, user_id: uuid.UUID
+    ) -> Literal["credited", "duplicate", "skipped"]:
+        """Credit ONE verified payment in its own transaction; return what happened to it.
 
-        Class from the authoritative ``payment_type`` (``one_time`` -> tokens, ``subscription`` ->
-        subscription; anything else -> skip, WARNING). Amount from server-side maps keyed by
+        ``"credited"`` / ``"duplicate"`` (already processed) / ``"skipped"`` (paid but dropped —
+        an incident, see ADR-057 §4). Class from the authoritative ``payment_type`` (``one_time``
+        -> tokens, ``subscription`` -> subscription; anything else -> skip, WARNING), with the
+        ADR-057 re-classification below. Amount from server-side maps keyed by
         ``product_code`` (anti-tamper; a token product missing / non-positive -> skip, WARNING).
         Then the event-delivery dedup INSERT keyed by ``payment_id``: an empty RETURNING means this
         payment was already credited -> skip (duplicate). Otherwise upsert any subscription, grant
@@ -250,14 +264,42 @@ class CloudPaymentsWebhookService:
             kind = parser.KIND_SUBSCRIPTION
         else:
             self._log_payment_skipped(payment, user_id, "unknown_payment_type")
-            return False
+            return "skipped"
+
+        token_products = self._settings.token_products()
+
+        # ADR-057: the provider may misreport a SUBSCRIPTION product as one_time (observed on
+        # avelyra 2026-07-19: week_6.99_nottrial arrived as one_time, was not a configured token
+        # product, and a succeeded payment was dropped). Before losing such a payment, re-classify
+        # by code using the SAME rule checkout applied when it issued the link
+        # (checkout.validate_product) — restoring the checkout/webhook symmetry that file
+        # documents. Reachable ONLY where we would otherwise skip: nothing credited today changes.
+        # ``product_code`` still comes from the verified API response, never the callback body, and
+        # the amount still comes from server-side config: ADR-054 §6 anti-tamper is unchanged.
+        if (
+            kind == parser.KIND_TOKENS
+            and payment.product_code not in token_products
+            and parser.classify_product(payment.product_code, None, frozenset(token_products))
+            == parser.KIND_SUBSCRIPTION
+        ):
+            kind = parser.KIND_SUBSCRIPTION
+            log_event(
+                logger,
+                logging.WARNING,
+                "cloudpayments_payment_type_mismatch",
+                paymentId=payment.payment_id,
+                productId=payment.product_code,
+                paymentType=payment.payment_type,
+                creditedAs=parser.KIND_SUBSCRIPTION,
+                userId=str(user_id),
+            )
 
         # Amount ONLY from server-side maps keyed by product_code (anti-tamper, ADR-054 §6).
         if kind == parser.KIND_TOKENS:
-            credits = self._settings.token_products().get(payment.product_code)
+            credits = token_products.get(payment.product_code)
             if credits is None or credits <= 0:
                 self._log_payment_skipped(payment, user_id, "unknown_product")
-                return False
+                return "skipped"
             reason = "cloudpayments_tokens"
         else:
             credits = (
@@ -294,7 +336,7 @@ class CloudPaymentsWebhookService:
             if inserted is None:
                 # Already credited on a previous delivery -> no mutations for this payment.
                 await self._session.rollback()
-                return False
+                return "duplicate"
 
             sub_status: str | None = None
             plan: str | None = None
@@ -352,7 +394,7 @@ class CloudPaymentsWebhookService:
             userId=str(user_id),
             creditsGranted=credits,
         )
-        return True
+        return "credited"
 
     def _log_payment_skipped(
         self, payment: CreditablePayment, user_id: uuid.UUID, reason: str
