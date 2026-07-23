@@ -8,18 +8,23 @@ from fastapi import APIRouter, Body, Depends, Header, Request
 
 from app.api_gateway.rate_limit import enforce_chat_limits
 from app.chat.orchestrator import ChatOrchestrator, ChatRunOut, ToolResultIn
+from app.config import get_settings
 from app.deps import (
     CurrentUser,
     client_ip,
     get_orchestrator,
+    get_v2_orchestrator,
     require_owner,
 )
 from app.errors import RateLimitedError
 from app.observability.context import set_session_id
 from app.schemas.chat import (
+    ChatCapabilitiesResponse,
     ChatResponse,
     ChatRunRequest,
     ChatToolResultRequest,
+    ChatV2RunRequest,
+    GenerationModeCapability,
     ServerToolExecutionSchema,
     ToolCallSchema,
 )
@@ -167,6 +172,33 @@ _RUN_REQUEST_EXAMPLES = {
     },
 }
 
+_V2_RUN_REQUEST_EXAMPLES = {
+    **_RUN_REQUEST_EXAMPLES,
+    "research_mode": {
+        "summary": "V2: research",
+        "description": (
+            "Один ход с hosted web search. Следующий ход той же сессии может быть general."
+        ),
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "sessionId": _SESSION_ID,
+            "message": "Найди свежие факты и кратко сравни варианты.",
+            "mode": "credits",
+            "generationMode": "research",
+        },
+    },
+    "reasoning_mode": {
+        "summary": "V2: reasoning",
+        "description": "Один ход с reasoning/thinking. Уровень effort задаётся серверной ENV.",
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "message": "Разбери задачу по шагам и предложи надежное решение.",
+            "mode": "credits",
+            "generationMode": "reasoning",
+        },
+    },
+}
+
 _TOOL_RESULT_RESPONSE_EXAMPLES = {
     "assistant_message": {
         "summary": "Финал tool-loop",
@@ -305,14 +337,55 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
     )
 
 
+@router.get(
+    "/v2/capabilities",
+    response_model=ChatCapabilitiesResponse,
+    summary="Получить доступные режимы генерации",
+    description=(
+        "Возвращает режимы генерации, которые backend понимает в `generationMode`: `general`, "
+        "`research`, `reasoning`, плюс стоимость каждого режима в кредитах. Это backend contract "
+        "для UI single-select; конкретная подписка/баланс проверяются в `/v1/chat/v2/run`."
+    ),
+)
+async def chat_v2_capabilities(current: CurrentUser) -> ChatCapabilitiesResponse:
+    _ = current  # endpoint is authenticated but does not need per-user state.
+    settings = get_settings()
+    provider = settings.llm_provider.strip().lower()
+    return ChatCapabilitiesResponse(
+        provider=provider,
+        defaultGenerationMode="general",
+        generationModes=[
+            GenerationModeCapability(
+                mode="general",
+                creditCost=settings.chat_generation_credit_cost("general"),
+                available=True,
+            ),
+            GenerationModeCapability(
+                mode="research",
+                creditCost=settings.chat_generation_credit_cost("research"),
+                available=True,
+            ),
+            GenerationModeCapability(
+                mode="reasoning",
+                creditCost=settings.chat_generation_credit_cost("reasoning"),
+                available=True,
+            ),
+        ],
+        reasoningLevel=settings.resolved_reasoning_level(),
+    )
+
+
 @router.post(
     "/run",
     response_model=ChatResponse,
     summary="Запустить шаг диалога",
     description=(
-        "Принимает сообщение пользователя и возвращает одно из трёх состояний: "
+        "Legacy-ручка. Принимает сообщение пользователя и возвращает одно из трёх состояний: "
         "`assistant_message` (готовый ответ), `tool_call` (выполните инструмент на устройстве "
         "и пришлите результат в `/v1/chat/tool-result`) или `blocked`. "
+        "Не использует `generationMode`, OpenAI Responses API или `previous_response_id`; "
+        "контекст полностью собирается из локальной истории. Для режимов `research`/`reasoning` "
+        "используйте `/v1/chat/v2/run`. "
         "Блокировки приходят с HTTP 200 и полем `blockReason`; технические ошибки — `4xx`/`5xx`. "
         "Необязательный заголовок `X-Device-Id` задаёт устройство для rate limit."
     ),
@@ -350,6 +423,56 @@ async def chat_run(
         context=body.context,
         # ADR-040: edit+regenerate — truncate history from this turn and generate a new one.
         edit_message_step_id=body.editMessageStepId,
+        generation_backend="legacy",
+    )
+    return _to_response(out)
+
+
+@router.post(
+    "/v2/run",
+    response_model=ChatResponse,
+    summary="Запустить шаг диалога через chat v2",
+    description=(
+        "Новая provider-neutral ручка для режимов `general`, `research`, `reasoning`. "
+        "`generationMode` выбирается на каждый ход и может меняться внутри одной сессии. "
+        "OpenAI-ветка использует Responses API и `previous_response_id` там, где он сохранён; "
+        "Anthropic-ветка использует Messages API с hosted web search или extended thinking для "
+        "соответствующих режимов. Стоимость в credits зависит от режима. "
+        "Tool-loop продолжается через `/v1/chat/v2/tool-result`."
+    ),
+    responses={
+        200: {"content": {"application/json": {"examples": _RUN_RESPONSE_EXAMPLES}}},
+        **_CHAT_RESPONSES,
+    },
+)
+async def chat_v2_run(
+    request: Request,
+    current: CurrentUser,
+    orchestrator: Annotated[ChatOrchestrator, Depends(get_v2_orchestrator)],
+    body: Annotated[ChatV2RunRequest, Body(openapi_examples=_V2_RUN_REQUEST_EXAMPLES)],
+    x_device_id: Annotated[str | None, Header()] = None,
+) -> ChatResponse:
+    require_owner(body.userId, current)
+    device_id = x_device_id or current.device_id
+    if not await enforce_chat_limits(
+        user_id=current.user_id, device_id=device_id, ip=client_ip(request)
+    ):
+        raise RateLimitedError("rate limit exceeded")
+
+    out = await orchestrator.run(
+        user_id=current.user_id,
+        project_id=body.projectId,
+        session_id=body.sessionId,
+        message=body.message,
+        mode=body.mode,
+        assistant_mode=body.assistantMode,
+        attachments=body.attachments,
+        model=body.model,
+        workspace_project_id=body.workspaceProjectId,
+        context=body.context,
+        edit_message_step_id=body.editMessageStepId,
+        generation_mode=body.generationMode,
+        generation_backend="v2",
     )
     return _to_response(out)
 
@@ -398,5 +521,51 @@ async def chat_tool_result(
         user_id=current.user_id,
         session_id=body.sessionId,
         results=normalized,
+        generation_backend="legacy",
+    )
+    return _to_response(out)
+
+
+@router.post(
+    "/v2/tool-result",
+    response_model=ChatResponse,
+    summary="Передать результаты инструментов для chat v2",
+    description=(
+        "V2 continuation для tool-loop, начатого через `/v1/chat/v2/run`. Режим генерации и "
+        "стоимость восстанавливаются из исходного user-step этого хода, поэтому body не содержит "
+        "`generationMode`. Legacy tool-call продолжайте через `/v1/chat/tool-result`."
+    ),
+    responses={
+        200: {"content": {"application/json": {"examples": _TOOL_RESULT_RESPONSE_EXAMPLES}}},
+        **_CHAT_RESPONSES,
+    },
+)
+async def chat_v2_tool_result(
+    request: Request,
+    current: CurrentUser,
+    orchestrator: Annotated[ChatOrchestrator, Depends(get_v2_orchestrator)],
+    body: Annotated[ChatToolResultRequest, Body(openapi_examples=_TOOL_RESULT_REQUEST_EXAMPLES)],
+    x_device_id: Annotated[str | None, Header()] = None,
+) -> ChatResponse:
+    require_owner(body.userId, current)
+    device_id = x_device_id or current.device_id
+    if not await enforce_chat_limits(
+        user_id=current.user_id, device_id=device_id, ip=client_ip(request)
+    ):
+        raise RateLimitedError("rate limit exceeded")
+
+    normalized = [
+        ToolResultIn(
+            tool_call_id=item.toolCallId,
+            result=item.result,
+            error=item.error.model_dump() if item.error is not None else None,
+        )
+        for item in body.normalized_results()
+    ]
+    out = await orchestrator.tool_result(
+        user_id=current.user_id,
+        session_id=body.sessionId,
+        results=normalized,
+        generation_backend="v2",
     )
     return _to_response(out)

@@ -183,6 +183,14 @@ class ChatSession(Base):
         ForeignKey("workspace_projects.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Turn generation modes are stored on chat_steps, while this session-level provider state keeps
+    # opaque continuation handles that make a later turn cheaper/simpler to send to the provider.
+    # OpenAI stores the latest Responses API response id here; Anthropic Messages stays stateless.
+    provider_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Nullable for existing rows. NULL and "legacy" both mean the original /v1/chat/run backend;
+    # "v2" means the session is owned by /v1/chat/v2/* and can use provider-side continuation
+    # state such as OpenAI Responses API previous_response_id.
+    generation_backend: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_pinned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa_text("false")
     )

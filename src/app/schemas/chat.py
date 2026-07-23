@@ -1,4 +1,4 @@
-"""Chat schemas for /v1/chat/run and /v1/chat/tool-result (chat-orchestrator/02)."""
+"""Chat schemas for /v1/chat/run, /v1/chat/v2/run and tool-result endpoints."""
 
 from __future__ import annotations
 
@@ -48,7 +48,17 @@ class AttachmentIn(StrictModel):
     )
 
 
+GenerationMode = Literal["general", "research", "reasoning"]
+
+
 class ChatRunRequest(StrictModel):
+    """Legacy request for one chat turn.
+
+    The legacy endpoint (`POST /v1/chat/run`) keeps the original stateless-provider behavior:
+    the backend rebuilds the full local chat history for every provider call and charges the
+    historical fixed generation cost. Generation modes live only in `ChatV2RunRequest`.
+    """
+
     userId: uuid.UUID = Field(
         description="Идентификатор пользователя. Обязан совпадать с `sub` JWT."
     )
@@ -153,6 +163,26 @@ class ChatRunRequest(StrictModel):
             if len(json.dumps(self.context).encode("utf-8")) > settings.size_limit_context:
                 raise ValueError("context exceeds size limit")
         return self
+
+
+class ChatV2RunRequest(ChatRunRequest):
+    """V2 request for one chat turn with turn-scoped generation modes.
+
+    `generationMode` is intentionally turn-scoped, not session-scoped: the iOS app may send
+    `research` for one message and then `general` for the next message in the same `sessionId`.
+    The backend persists the selected mode on the user step so any `/v1/chat/v2/tool-result`
+    continuation keeps using the same provider options and billing cost as the original turn.
+    """
+
+    generationMode: GenerationMode = Field(
+        default="general",
+        description=(
+            "Режим генерации для ЭТОГО сообщения: `general` — обычный чат, `research` — чат с "
+            "web search, `reasoning` — чат с reasoning/thinking. Не фиксируется на сессию и может "
+            "меняться между сообщениями одного чата. Не путать с `mode` (`credits|byok`) и "
+            "`assistantMode` (`chat|code`)."
+        ),
+    )
 
 
 class ToolErrorBody(StrictModel):
@@ -278,6 +308,31 @@ class ToolCallSchema(StrictModel):
         description="Имя инструмента для исполнения на устройстве (например, `files.read`)."
     )
     args: dict[str, Any] = Field(description="Аргументы вызова инструмента.")
+
+
+class GenerationModeCapability(StrictModel):
+    mode: GenerationMode = Field(description="Режим генерации: `general`, `research`, `reasoning`.")
+    creditCost: int = Field(
+        description="Сколько внутренних кредитов списывается за финальный ответ в этом режиме."
+    )
+    available: bool = Field(description="Доступен ли режим на текущем backend instance.")
+
+
+class ChatCapabilitiesResponse(StrictModel):
+    """Capabilities для UI-переключателя режимов генерации.
+
+    Возвращает backend-level поддержку. Пользовательский баланс и подписка проверяются уже на
+    конкретном `/v1/chat/v2/run`, потому что это бизнес-решение по текущему кошельку.
+    """
+
+    provider: str = Field(description="Активный LLM provider текущего instance.")
+    defaultGenerationMode: GenerationMode = Field(description="Дефолт при отсутствии поля.")
+    generationModes: list[GenerationModeCapability] = Field(
+        description="Список режимов и их стоимость в кредитах."
+    )
+    reasoningLevel: str = Field(
+        description="Серверный effort/budget level для `generationMode=reasoning`."
+    )
 
 
 class ServerToolExecutionSchema(StrictModel):

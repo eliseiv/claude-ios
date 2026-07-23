@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +34,7 @@ from app.chat.llm_client import (
     LLMClient,
     LLMResult,
     NeutralMessage,
+    generation_llm_client_for,
     llm_client_for,
 )
 from app.chat.openai_client import OpenAIAuthError
@@ -71,7 +72,7 @@ from app.policy.engine import (
 )
 from app.policy.loader import load_policy_state
 from app.preferences.service import PreferencesService
-from app.schemas.chat import AttachmentIn
+from app.schemas.chat import AttachmentIn, GenerationMode
 from app.wallet.service import WalletService
 from app.website.tools import SiteToolHandlers, ToolExecution
 from app.workspaces.repository import WorkspacesRepository
@@ -109,6 +110,8 @@ _SYSTEM_PROMPT_CODE = (
     "user's device executes locally (files, calendar, reminders) and server-side site tools. "
     "Use tools when needed and respond concisely. " + _TIME_NOW_INSTRUCTION
 )
+
+GenerationBackend = Literal["legacy", "v2"]
 
 
 def _system_prompt_for(assistant_mode: str) -> str:
@@ -375,7 +378,7 @@ class _BillingPlan:
     """How the final assistant_message must be billed (ADR-002 + ADR-005).
 
     Exactly one of the two flags is true when billing applies:
-    - debit_credits: active subscription + mode=credits → consume 1 credit (idempotent).
+    - debit_credits: active subscription + mode=credits → consume credit_amount (idempotent).
     - mark_trial:    subscription=none + trial_used=false + mode=credits → free trial, flip
       users.trial_used (idempotent). No debit.
     BYOK and trial generations are free → both flags false.
@@ -383,20 +386,48 @@ class _BillingPlan:
 
     debit_credits: bool
     mark_trial: bool
+    credit_amount: int = 0
+    expose_credit_amount: bool = False
 
 
-def _billing_plan(mode: Mode, state: PolicyState) -> _BillingPlan:
+def _billing_plan(
+    mode: Mode,
+    state: PolicyState,
+    *,
+    credit_amount: int,
+    expose_credit_amount: bool = False,
+) -> _BillingPlan:
     if mode is Mode.byok:
-        return _BillingPlan(debit_credits=False, mark_trial=False)
+        return _BillingPlan(
+            debit_credits=False,
+            mark_trial=False,
+            credit_amount=0,
+            expose_credit_amount=expose_credit_amount,
+        )
     # mode == credits
     if state.subscription_status is SubscriptionStatus.active:
-        # ADR-002: "active + credits>0 → allow + debit". Only here do we charge a credit.
-        return _BillingPlan(debit_credits=True, mark_trial=False)
+        # ADR-002: active + enough credits → allow + debit. Generation modes calibrate amount.
+        return _BillingPlan(
+            debit_credits=True,
+            mark_trial=False,
+            credit_amount=max(1, credit_amount),
+            expose_credit_amount=expose_credit_amount,
+        )
     if state.subscription_status is SubscriptionStatus.none and not state.trial_used:
         # ADR-002: trial-allow has NO debit; instead the lifetime trial is consumed.
-        return _BillingPlan(debit_credits=False, mark_trial=True)
+        return _BillingPlan(
+            debit_credits=False,
+            mark_trial=True,
+            credit_amount=0,
+            expose_credit_amount=expose_credit_amount,
+        )
     # Any other credits state would have been blocked by policy before reaching here.
-    return _BillingPlan(debit_credits=False, mark_trial=False)
+    return _BillingPlan(
+        debit_credits=False,
+        mark_trial=False,
+        credit_amount=0,
+        expose_credit_amount=expose_credit_amount,
+    )
 
 
 @dataclass
@@ -470,8 +501,12 @@ class ChatOrchestrator:
         workspace_project_id: uuid.UUID | None = None,
         context: dict[str, Any] | None = None,
         edit_message_step_id: uuid.UUID | None = None,
+        generation_mode: GenerationMode = "general",
+        generation_backend: GenerationBackend = "legacy",
     ) -> ChatRunOut:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
+        requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
+        use_generation_v2 = requested_backend == "v2"
         # ADR-034 §3: resolve the session-fixed model. None (no field) → NULL (= instance default,
         # never substituted in the DB so the row stays "instance default" even if env default
         # changes). The schema guarantees a non-empty value here, so .strip() is safe.
@@ -521,8 +556,15 @@ class ChatOrchestrator:
             # ADR-036 §3: session-fixed workspace binding; written only at creation, ignored on
             # resume (the request field is validated above only when a new session is created).
             workspace_project_id=workspace_project_id if will_create else None,
+            # Public chat backend contract: legacy `/v1/chat/*` or v2 `/v1/chat/v2/*`.
+            generation_backend=requested_backend,
         )
         sess = ctx.session
+        await self._ensure_session_backend(
+            sess,
+            requested_backend=requested_backend,
+            allow_upgrade_from_legacy=use_generation_v2,
+        )
         # mode is fixed on the session; use the session's stored mode.
         effective_mode = Mode(sess.mode)
 
@@ -545,6 +587,7 @@ class ChatOrchestrator:
             )
             if deleted is None:
                 raise MessageNotFoundError("message_not_found")
+            await self._deps.repo.clear_provider_state(sess.id)
 
         # ADR-036 §3/§6 + ADR-038 §3: workspace `instructions` live in the `system` param (NOT in
         # history) and MUST be injected on EVERY turn of a session with a workspace — decoupled
@@ -618,10 +661,25 @@ class ChatOrchestrator:
             session_id=sess.id,
             message_step_id=message_step_id,
             role="user",
-            payload={"content": user_payload_content},
+            payload=(
+                {"content": user_payload_content, "generationMode": generation_mode}
+                if use_generation_v2
+                else {"content": user_payload_content}
+            ),
         )
 
-        decision, state = await self._evaluate(user_id, effective_mode, sess.id)
+        effective_generation_mode = generation_mode if use_generation_v2 else "general"
+        generation_credit_cost = (
+            get_settings().chat_generation_credit_cost(effective_generation_mode)
+            if use_generation_v2
+            else 1
+        )
+        decision, state = await self._evaluate(
+            user_id,
+            effective_mode,
+            sess.id,
+            required_credits=generation_credit_cost,
+        )
         if not decision_allow(decision):
             return self._blocked(sess.id, decision.block_reason)
 
@@ -633,7 +691,12 @@ class ChatOrchestrator:
             session_id=sess.id,
             message_step_id=message_step_id,
             mode=effective_mode,
-            billing=_billing_plan(effective_mode, state),
+            billing=_billing_plan(
+                effective_mode,
+                state,
+                credit_amount=generation_credit_cost,
+                expose_credit_amount=use_generation_v2,
+            ),
             api_key=api_key,
             byok_provider=byok_provider,
             system_prompt=system_prompt,
@@ -644,6 +707,8 @@ class ChatOrchestrator:
             # resolved inside _generate_loop against the right provider's allowlist (stale-model
             # fallback): credits → active provider, byok → key provider.
             model=sess.model or None,
+            generation_mode=effective_generation_mode,
+            generation_backend=requested_backend,
         )
 
     async def tool_result(
@@ -652,6 +717,7 @@ class ChatOrchestrator:
         user_id: uuid.UUID,
         session_id: uuid.UUID,
         results: list[ToolResultIn],
+        generation_backend: GenerationBackend = "legacy",
     ) -> ChatRunOut:
         """Apply a batch of tool results and continue only when the turn barrier closes (ADR-025).
 
@@ -668,6 +734,13 @@ class ChatOrchestrator:
         sess = await self._deps.repo.get_session(session_id, user_id)
         if sess is None:
             raise NotFoundError("session not found")
+        requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
+        use_generation_v2 = requested_backend == "v2"
+        await self._ensure_session_backend(
+            sess,
+            requested_backend=requested_backend,
+            allow_upgrade_from_legacy=False,
+        )
 
         resolved: list[tuple[ToolResultIn, ToolCall]] = []
         message_step_id: uuid.UUID | None = None
@@ -738,8 +811,23 @@ class ChatOrchestrator:
             return self._render_saved_step(session_id, message_step_id, saved)
 
         mode = Mode(sess.mode)
+        generation_mode = (
+            await self._deps.repo.generation_mode_for_message_step(session_id, message_step_id)
+            if use_generation_v2
+            else "general"
+        )
+        generation_credit_cost = (
+            get_settings().chat_generation_credit_cost(generation_mode)
+            if use_generation_v2
+            else 1
+        )
         # Re-evaluate policy (access may have changed).
-        decision, state = await self._evaluate(user_id, mode, session_id)
+        decision, state = await self._evaluate(
+            user_id,
+            mode,
+            session_id,
+            required_credits=generation_credit_cost,
+        )
         if not decision_allow(decision):
             return self._blocked(session_id, decision.block_reason)
 
@@ -761,7 +849,12 @@ class ChatOrchestrator:
             session_id=session_id,
             message_step_id=message_step_id,
             mode=mode,
-            billing=_billing_plan(mode, state),
+            billing=_billing_plan(
+                mode,
+                state,
+                credit_amount=generation_credit_cost,
+                expose_credit_amount=use_generation_v2,
+            ),
             api_key=api_key,
             byok_provider=byok_provider,
             system_prompt=system_prompt,
@@ -770,6 +863,8 @@ class ChatOrchestrator:
             # ADR-034 §4 / ADR-044: session-fixed model; effective model resolved in _generate_loop
             # against the right provider's allowlist (credits → active, byok → key provider).
             model=sess.model or None,
+            generation_mode=generation_mode,
+            generation_backend=requested_backend,
         )
 
     @staticmethod
@@ -851,10 +946,15 @@ class ChatOrchestrator:
     # ---- internals ----
 
     async def _evaluate(
-        self, user_id: uuid.UUID, mode: Mode, session_id: uuid.UUID
+        self,
+        user_id: uuid.UUID,
+        mode: Mode,
+        session_id: uuid.UUID,
+        *,
+        required_credits: int = 1,
     ) -> tuple[Decision, PolicyState]:
         state = await load_policy_state(self._session, user_id)
-        decision = evaluate(state, mode)
+        decision = evaluate(state, mode, required_credits=required_credits)
         await self._deps.audit.record(
             AuditEvent(
                 user_id=user_id,
@@ -864,6 +964,7 @@ class ChatOrchestrator:
                     "mode": mode.value,
                     "decision": "allow" if decision.allow else "blocked",
                     "blockReason": decision.block_reason.value if decision.block_reason else None,
+                    "requiredCredits": max(1, required_credits),
                 },
             )
         )
@@ -874,6 +975,7 @@ class ChatOrchestrator:
             mode=mode.value,
             allow=decision.allow,
             blockReason=decision.block_reason.value if decision.block_reason else None,
+            requiredCredits=max(1, required_credits),
         )
         return decision, state
 
@@ -920,6 +1022,33 @@ class ChatOrchestrator:
             return True
         return self._deps.repo.is_expired(existing)
 
+    async def _ensure_session_backend(
+        self,
+        session: ChatSession,
+        *,
+        requested_backend: GenerationBackend,
+        allow_upgrade_from_legacy: bool,
+    ) -> None:
+        """Enforce that a chat session is continued through the matching chat API generation path.
+
+        `chat_sessions.generation_backend` is nullable because existing sessions predate v2; NULL is
+        treated as `legacy`. A normal v2 `/run` may upgrade such a session because the caller
+        explicitly opted into the new contract and a missing `previous_response_id` simply triggers
+        full local replay. `/tool-result` does not upgrade: it must continue the same in-flight turn
+        through the backend that created the tool call.
+        """
+        actual_backend: GenerationBackend = (
+            "v2" if session.generation_backend == "v2" else "legacy"
+        )
+        if actual_backend == requested_backend:
+            return
+        if requested_backend == "legacy":
+            raise ValidationFailedError("session belongs to chat v2; use /v1/chat/v2/run")
+        if not allow_upgrade_from_legacy:
+            raise ValidationFailedError("session belongs to legacy chat; use /v1/chat/tool-result")
+        await self._deps.repo.set_generation_backend(session, "v2")
+        await self._deps.repo.clear_provider_state(session.id)
+
     async def _build_messages(self, session_id: uuid.UUID) -> list[NeutralMessage]:
         """Reconstruct the provider-NEUTRAL history from chat_steps (TD-002, ADR-033 §3).
 
@@ -964,7 +1093,10 @@ class ChatOrchestrator:
         byok_provider: str | None = None,
         first_turn_attachments: PreparedAttachments | None = None,
         model: str | None = None,
+        generation_mode: str = "general",
+        generation_backend: GenerationBackend = "legacy",
     ) -> ChatRunOut:
+        use_generation_v2 = generation_backend == "v2"
         # ADR-044 §5: select the generation client + the effective model by mode.
         # - credits → the injected active-provider client (self._deps.llm); stale-model guard
         #   against the ACTIVE provider allowlist (a session model fixed for another provider after
@@ -978,15 +1110,21 @@ class ChatOrchestrator:
                 # An unrecognized legacy key reached generation → block, do not call any provider.
                 await self._session.commit()
                 return self._blocked(session_id, BlockReason.byok_invalid)
-            llm = llm_client_for(byok_provider)
+            llm = (
+                generation_llm_client_for(byok_provider)
+                if use_generation_v2
+                else llm_client_for(byok_provider)
+            )
             effective_model = _model_for_provider(model, byok_provider)
             if effective_model is None:
                 # §5.3: foreign/absent session model → the BYOK default of the key's provider.
                 effective_model = get_settings().byok_default_model_for(byok_provider)
+            provider = byok_provider
         else:
             llm = self._deps.llm
             # §Stale-model: guard the session model against the active provider's allowlist.
             effective_model = _model_for_provider(model, _active_provider())
+            provider = _active_provider()
         # ADR-011: server-side site.* tools are executed by the backend synchronously inside this
         # loop, WITHOUT a round-trip to iOS. We keep calling the LLM as long as the turn contains
         # ONLY server-side tools (their tool_results are produced here and fed straight back).
@@ -1005,6 +1143,15 @@ class ChatOrchestrator:
         turn0_attachments = first_turn_attachments
         for _ in range(max_rounds + 1):
             messages = await self._build_messages(session_id)
+            sess = await self._session.get(ChatSession, session_id)
+            provider_state = (
+                dict(sess.provider_state)
+                if sess is not None
+                and isinstance(sess.provider_state, dict)
+                and mode is not Mode.byok
+                and use_generation_v2
+                else None
+            )
             # MAJOR-4: commit the persisted steps + audit BEFORE the network call so the pooled DB
             # connection is not held open for the whole LLM generation. Each subsequent
             # server-side round commits its own persisted tool_use/tool_result before re-calling.
@@ -1025,6 +1172,8 @@ class ChatOrchestrator:
                     # client uses its provider default; the orchestrator never blindly forwards a
                     # foreign model.
                     model=effective_model,
+                    generation_mode=generation_mode if use_generation_v2 else "general",
+                    provider_state=provider_state,
                 )
             except (AnthropicAuthError, OpenAIAuthError):
                 if mode is Mode.byok:
@@ -1038,12 +1187,22 @@ class ChatOrchestrator:
             turn0_attachments = None
 
             usage = result.usage.to_dict()
+            if use_generation_v2:
+                usage["generationMode"] = generation_mode
             token_usage_total.labels(direction="input", model=result.usage.model).inc(
                 result.usage.input_tokens
             )
             token_usage_total.labels(direction="output", model=result.usage.model).inc(
                 result.usage.output_tokens
             )
+            if use_generation_v2:
+                await self._maybe_update_provider_state(
+                    session_id=session_id,
+                    mode=mode,
+                    provider=provider,
+                    model=result.usage.model,
+                    result=result,
+                )
 
             # ADR-025: dispatch by stop_reason, NOT by the mere presence of tool_use blocks. A
             # max_tokens-truncated turn may carry incomplete tool_use blocks in content — they are
@@ -1114,6 +1273,40 @@ class ChatOrchestrator:
         await self._session.commit()
         raise UpstreamError("server-side tool loop exceeded maximum rounds")
 
+    async def _maybe_update_provider_state(
+        self,
+        *,
+        session_id: uuid.UUID,
+        mode: Mode,
+        provider: str,
+        model: str,
+        result: LLMResult,
+    ) -> None:
+        """Persist provider-side continuation handles after a successful model response.
+
+        Only credit-mode OpenAI calls store Responses API ids. BYOK is intentionally excluded
+        because a user can rotate the key between turns; a stored response id may belong to a
+        different provider account. A max_tokens-truncated OpenAI turn clears the state instead of
+        chaining from a partial remote response; the next turn will rebuild from local history.
+        Anthropic Messages API does not have the same ``previous_response_id`` contract in this
+        integration, so Anthropic continues through local history replay plus prompt caching.
+        """
+        if mode is Mode.byok or provider != "openai":
+            return
+        if result.stop_reason == STOP_REASON_MAX_TOKENS:
+            await self._deps.repo.clear_provider_state(session_id)
+            return
+        if not result.provider_response_id:
+            return
+        await self._deps.repo.set_provider_state(
+            session_id,
+            {
+                "provider": "openai",
+                "responseId": result.provider_response_id,
+                "model": model,
+            },
+        )
+
     async def _external_project_id(self, session_id: uuid.UUID) -> str:
         """external_project_id for site.* tools — from chat_sessions.project_id (session context).
 
@@ -1144,6 +1337,8 @@ class ChatOrchestrator:
         # ADR-023: capture the persisted assistant step's id → ChatResponse.stepId. It is the same
         # ChatStep.id that GET /v1/chats/{id} renders as ChatStepSchema.id for this step (sync
         # invariant).
+        if billing.debit_credits and billing.expose_credit_amount:
+            usage = {**usage, "creditsCharged": billing.credit_amount}
         assistant_step = await self._deps.repo.add_step(
             session_id=session_id,
             message_step_id=message_step_id,
@@ -1167,7 +1362,7 @@ class ChatOrchestrator:
         )
 
         # CO-7 / ADR-002 / ADR-005: bill exactly once on the final assistant_message.
-        # - active subscription + credits → consume 1 credit;
+        # - active subscription + credits → consume the generation-mode cost;
         # - trial (subscription=none, trial_used=false) → free, flip users.trial_used;
         # - byok / already-trial-used → free, no write.
         if billing.debit_credits:
@@ -1177,9 +1372,11 @@ class ChatOrchestrator:
                     session_id=session_id,
                     message_step_id=message_step_id,
                     usage=usage,
+                    generation_mode=str(usage.get("generationMode") or "general"),
+                    amount=billing.credit_amount,
                 )
             except InsufficientCreditsError:
-                # Balance dropped below 1 after policy allow → business block, not a tech error.
+                # Balance dropped below the mode cost after policy allow → business block.
                 # Roll back the assistant-step+audit so the unbillable step is not persisted.
                 await self._session.rollback()
                 return self._blocked(session_id, BlockReason.credits_empty)
@@ -1542,14 +1739,21 @@ class ChatOrchestrator:
         session_id: uuid.UUID,
         message_step_id: uuid.UUID,
         usage: dict[str, Any],
+        generation_mode: str,
+        amount: int,
     ) -> None:
-        # amount is fixed at 1 (1 credit = 1 message, ADR-006); idempotent by messageStepId.
+        # amount is generation-mode dependent, still idempotent by messageStepId.
         # InsufficientCreditsError propagates to the caller, which maps it to a credits_empty block.
         await self._deps.wallet.consume(
             user_id=user_id,
-            amount=1,
+            amount=amount,
             idempotency_key=str(message_step_id),
-            meta={"usage": usage, "model": usage.get("model")},
+            meta={
+                "usage": usage,
+                "model": usage.get("model"),
+                "generationMode": generation_mode,
+                "creditsCharged": amount,
+            },
             session_id=session_id,
         )
 

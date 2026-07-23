@@ -82,6 +82,9 @@ _ENDPOINT_TAG = {
     ("/v1/auth/jwks", "get"): "Auth",
     ("/v1/chat/run", "post"): "Chat",
     ("/v1/chat/tool-result", "post"): "Chat",
+    ("/v1/chat/v2/capabilities", "get"): "Chat",
+    ("/v1/chat/v2/run", "post"): "Chat",
+    ("/v1/chat/v2/tool-result", "post"): "Chat",
     ("/v1/tools", "get"): "Tools",
     ("/v1/models", "get"): "Models",
     ("/v1/presets", "get"): "Presets",
@@ -385,7 +388,15 @@ def test_admin_token_not_a_parameter_on_admin_endpoints(openapi_schema: dict[str
 #     X-Device-Id is a real Header() on the chat endpoints (rate-limit device
 #     scoping); removing auth params must leave it intact. (routers/chat.py.)
 # ============================================================================
-@pytest.mark.parametrize("path", ["/v1/chat/run", "/v1/chat/tool-result"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/chat/run",
+        "/v1/chat/tool-result",
+        "/v1/chat/v2/run",
+        "/v1/chat/v2/tool-result",
+    ],
+)
 def test_x_device_id_header_param_preserved_on_chat(
     openapi_schema: dict[str, Any], path: str
 ) -> None:
@@ -485,6 +496,12 @@ def test_chat_run_response_examples(openapi_schema: dict[str, Any]) -> None:
 def test_chat_run_request_example(openapi_schema: dict[str, Any]) -> None:
     op = _operation(openapi_schema, "/v1/chat/run", "post")
     assert _request_example_names(op), "chat/run must have a named request example"
+
+
+def test_chat_v2_run_request_example(openapi_schema: dict[str, Any]) -> None:
+    op = _operation(openapi_schema, "/v1/chat/v2/run", "post")
+    names = _request_example_names(op)
+    assert {"research_mode", "reasoning_mode"} <= names, names
 
 
 def test_chat_tool_result_response_examples(openapi_schema: dict[str, Any]) -> None:

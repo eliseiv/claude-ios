@@ -24,6 +24,7 @@ from app.config import get_settings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a circular import at runtime
     from app.chat.openai_client import OpenAIClient
+    from app.chat.openai_responses_client import OpenAIResponsesClient
 
 # Canonical (provider-neutral) stop_reason values — the only ones the orchestrator dispatches on
 # (ADR-033 §2 / ADR-025). Each client maps its wire stop_reason to one of these.
@@ -58,15 +59,22 @@ class LLMUsage:
     model: str
     cache_read_tokens: int
     cache_write_tokens: int
+    reasoning_tokens: int = 0
+    web_search_requests: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "inputTokens": self.input_tokens,
             "outputTokens": self.output_tokens,
             "model": self.model,
             "cacheReadTokens": self.cache_read_tokens,
             "cacheWriteTokens": self.cache_write_tokens,
         }
+        if self.reasoning_tokens:
+            data["reasoningTokens"] = self.reasoning_tokens
+        if self.web_search_requests:
+            data["webSearchRequests"] = self.web_search_requests
+        return data
 
 
 @dataclass(frozen=True)
@@ -90,6 +98,8 @@ class LLMResult:
     usage: LLMUsage
     text: str = ""
     tool_uses: list[dict[str, Any]] = field(default_factory=list)
+    provider_response_id: str | None = None
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -134,12 +144,21 @@ class LLMClient(Protocol):
         # ADR-034 §4: optional per-call model override. None → the client uses its provider default
         # (settings.<provider>_model) — the current behavior, unchanged for existing callers/tests.
         model: str | None = None,
+        # Turn-scoped generation mode selected by the API caller. Providers map this to their own
+        # optional capabilities: ``general`` → no extra knobs, ``research`` → hosted web search,
+        # ``reasoning`` → reasoning/thinking controls. It is deliberately not a session attribute.
+        generation_mode: str = "general",
+        # Provider-specific state owned by chat_sessions.provider_state. OpenAI uses this for the
+        # Responses API chain (previous_response_id); Anthropic currently receives it only for
+        # future compatibility because the normal Messages API is stateless.
+        provider_state: dict[str, Any] | None = None,
     ) -> LLMResult: ...
 
     async def validate_key(self, api_key: str) -> KeyValidation: ...
 
 
 _openai_singleton: OpenAIClient | None = None
+_openai_responses_singleton: OpenAIResponsesClient | None = None
 
 
 def _get_openai_singleton() -> LLMClient:
@@ -155,6 +174,20 @@ def _get_openai_singleton() -> LLMClient:
 
         _openai_singleton = OpenAIClient()
     return _openai_singleton
+
+
+def _get_openai_responses_singleton() -> LLMClient:
+    """Process-wide OpenAI Responses client singleton for `/v1/chat/v2/*`.
+
+    This is deliberately separate from `_get_openai_singleton()` so the legacy OpenAI client can
+    never switch to Responses API just because the installed SDK exposes `client.responses`.
+    """
+    global _openai_responses_singleton
+    if _openai_responses_singleton is None:
+        from app.chat.openai_responses_client import OpenAIResponsesClient
+
+        _openai_responses_singleton = OpenAIResponsesClient()
+    return _openai_responses_singleton
 
 
 def llm_client_for(provider: str) -> LLMClient:
@@ -184,6 +217,23 @@ def llm_client_for(provider: str) -> LLMClient:
     raise ValueError(f"unknown LLM provider: {provider!r}")
 
 
+def generation_llm_client_for(provider: str) -> LLMClient:
+    """Return the v2 generation client for an explicit provider.
+
+    Used by `/v1/chat/v2/*`, including BYOK calls. OpenAI routes to the Responses API-only client.
+    Anthropic has no second API type in this backend, so it reuses the regular Messages client; the
+    orchestrator decides whether to pass `general`, `research` or `reasoning`.
+    """
+    normalized = provider.strip().lower()
+    if normalized == "openai":
+        return _get_openai_responses_singleton()
+    if normalized == "anthropic":
+        from app.chat.anthropic_client import get_anthropic_client
+
+        return get_anthropic_client()
+    raise ValueError(f"unknown LLM provider: {provider!r}")
+
+
 def get_llm_client() -> LLMClient:
     """Process-wide LLMClient selected by ``LLM_PROVIDER`` (default ``anthropic``, ADR-033 §8).
 
@@ -202,3 +252,16 @@ def get_llm_client() -> LLMClient:
         return llm_client_for("openai")
     # Default (and explicit "anthropic"): reuse the anthropic_client module singleton.
     return llm_client_for("anthropic")
+
+
+def get_generation_llm_client() -> LLMClient:
+    """Process-wide LLMClient selected by `LLM_PROVIDER` for `/v1/chat/v2/*`.
+
+    This is a separate dependency so OpenAI v2 can use the Responses API without changing legacy
+    `/v1/chat/run` traffic. For Anthropic it returns the same Messages client as `get_llm_client()`,
+    because v2 modes are ordinary Messages API parameters.
+    """
+    provider = get_settings().llm_provider.strip().lower()
+    if provider == "openai":
+        return generation_llm_client_for("openai")
+    return generation_llm_client_for("anthropic")

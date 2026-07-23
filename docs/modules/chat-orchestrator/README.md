@@ -13,6 +13,7 @@
 - [06-rbac.md](06-rbac.md)
 - [07-implementation-phases.md](07-implementation-phases.md)
 - [09-testing.md](09-testing.md)
+- [10-generation-modes-implementation.md](10-generation-modes-implementation.md)
 
 ## DoD
 Policy Engine вызывается перед каждой генерацией; tool-loop стабилен на нескольких шагах; tool payload строго типизирован; status=blocked машиночитаем; usage учитывается; mode=byok использует ключ пользователя; mode=credits инициирует списание.

@@ -13,8 +13,14 @@ import pytest
 import app.chat.anthropic_client as anthropic_mod
 import app.chat.llm_client as llm_mod
 from app.chat.anthropic_client import AnthropicClient
-from app.chat.llm_client import get_llm_client, llm_client_for
+from app.chat.llm_client import (
+    generation_llm_client_for,
+    get_generation_llm_client,
+    get_llm_client,
+    llm_client_for,
+)
 from app.chat.openai_client import OpenAIClient
+from app.chat.openai_responses_client import OpenAIResponsesClient
 from app.config import get_settings
 
 
@@ -23,6 +29,7 @@ def _reset_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each test starts from clean singletons so the factory constructs deterministically."""
     monkeypatch.setattr(anthropic_mod, "_anthropic_singleton", None)
     monkeypatch.setattr(llm_mod, "_openai_singleton", None)
+    monkeypatch.setattr(llm_mod, "_openai_responses_singleton", None)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -38,10 +45,25 @@ def test_llm_client_for_openai() -> None:
     assert isinstance(client, OpenAIClient)
 
 
+def test_generation_llm_client_for_anthropic() -> None:
+    client = generation_llm_client_for("anthropic")
+    assert isinstance(client, AnthropicClient)
+    assert client is llm_client_for("anthropic")
+
+
+def test_generation_llm_client_for_openai() -> None:
+    client = generation_llm_client_for("openai")
+    assert isinstance(client, OpenAIResponsesClient)
+
+
 def test_llm_client_for_is_singleton_per_provider() -> None:
     """Both clients are process-wide singletons (same instance on repeat calls)."""
     assert llm_client_for("openai") is llm_client_for("openai")
     assert llm_client_for("anthropic") is llm_client_for("anthropic")
+    assert generation_llm_client_for("openai") is generation_llm_client_for("openai")
+    assert generation_llm_client_for("anthropic") is generation_llm_client_for("anthropic")
+    assert generation_llm_client_for("openai") is not llm_client_for("openai")
+    assert generation_llm_client_for("anthropic") is llm_client_for("anthropic")
 
 
 def test_llm_client_for_normalizes_case_and_whitespace() -> None:
@@ -68,6 +90,19 @@ def test_get_llm_client_openai(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     get_settings.cache_clear()
     assert isinstance(get_llm_client(), OpenAIClient)
+
+
+def test_get_generation_llm_client_openai(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    get_settings.cache_clear()
+    assert isinstance(get_generation_llm_client(), OpenAIResponsesClient)
+
+
+def test_get_generation_llm_client_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    get_settings.cache_clear()
+    assert isinstance(get_generation_llm_client(), AnthropicClient)
+    assert get_generation_llm_client() is get_llm_client()
 
 
 def test_get_llm_client_delegates_to_factory_singletons(monkeypatch: pytest.MonkeyPatch) -> None:

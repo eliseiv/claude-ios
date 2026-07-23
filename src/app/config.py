@@ -145,6 +145,22 @@ class Settings(BaseSettings):
     subscription_credits_per_period: int = Field(
         default=1000, alias="SUBSCRIPTION_CREDITS_PER_PERIOD"
     )
+    # Turn-level generation-mode prices for the existing wallet credit system. These values do
+    # NOT mint a separate currency: they only replace the old fixed chat debit amount (1) when a
+    # final assistant_message is produced. BYOK remains unbilled by the internal wallet.
+    chat_credit_cost_general: int = Field(default=1, alias="CHAT_CREDIT_COST_GENERAL")
+    chat_credit_cost_research: int = Field(default=3, alias="CHAT_CREDIT_COST_RESEARCH")
+    chat_credit_cost_reasoning: int = Field(default=3, alias="CHAT_CREDIT_COST_REASONING")
+    # Server-side defaults for the single public "reasoning" mode. The app exposes only the mode;
+    # these knobs let operators tune provider cost/quality without changing the mobile contract.
+    chat_reasoning_level: str = Field(default="medium", alias="CHAT_REASONING_LEVEL")
+    anthropic_thinking_budget_tokens: int = Field(
+        default=4096, alias="ANTHROPIC_THINKING_BUDGET_TOKENS"
+    )
+    anthropic_thinking_display: str = Field(default="omitted", alias="ANTHROPIC_THINKING_DISPLAY")
+    anthropic_web_search_tool_type: str = Field(
+        default="web_search_20260318", alias="ANTHROPIC_WEB_SEARCH_TOOL_TYPE"
+    )
 
     # --- Adapty subscription webhook (ADR-029, billing-adapty/07) ---
     # Isolated static bearer secret for POST /v1/billing/adapty/webhook. Set by the operator in
@@ -452,6 +468,52 @@ class Settings(BaseSettings):
         window, mirroring the graceful config parsing elsewhere (token_products()/allowed_models()).
         """
         return value if value > 0 else _CLOUDPAYMENTS_DEFAULT_FRESHNESS_HOURS
+
+    @field_validator(
+        "chat_credit_cost_general",
+        "chat_credit_cost_research",
+        "chat_credit_cost_reasoning",
+    )
+    @classmethod
+    def _positive_chat_credit_cost(cls, value: int) -> int:
+        """Generation-mode prices must stay positive so wallet debits are always valid."""
+        return value if value > 0 else 1
+
+    @field_validator("anthropic_thinking_budget_tokens")
+    @classmethod
+    def _positive_thinking_budget(cls, value: int) -> int:
+        """Anthropic extended thinking requires a positive token budget."""
+        return value if value > 0 else 4096
+
+    def chat_generation_credit_cost(self, generation_mode: str) -> int:
+        """Return the wallet debit amount for one completed assistant turn.
+
+        This is the single bridge between the public chat generation mode
+        (``general|research|reasoning``) and the existing integer-credit wallet. The value is used
+        both for the pre-generation balance gate and for the final idempotent debit, so a mode
+        cannot be allowed at one price and charged at another inside the same request.
+        """
+        normalized = generation_mode.strip().lower()
+        if normalized == "research":
+            return self.chat_credit_cost_research
+        if normalized == "reasoning":
+            return self.chat_credit_cost_reasoning
+        return self.chat_credit_cost_general
+
+    def resolved_reasoning_level(self) -> str:
+        """Provider-safe reasoning effort for the public ``generationMode=reasoning`` mode."""
+        level = self.chat_reasoning_level.strip().lower()
+        return level if level in {"low", "medium", "high"} else "medium"
+
+    def resolved_anthropic_thinking_display(self) -> str:
+        """Provider-safe Anthropic thinking display setting.
+
+        ``omitted`` is the default to avoid returning reasoning summaries to the client by
+        accident; operators can opt into ``summarized`` if the product later needs visible
+        reasoning summaries.
+        """
+        display = self.anthropic_thinking_display.strip().lower()
+        return display if display in {"omitted", "summarized"} else "omitted"
 
     def cloudpayments_paid_statuses(self) -> frozenset[str]:
         """Parse CLOUDPAYMENTS_PAID_STATUSES into the set of "paid" broadapps statuses (ADR-054 §4).
