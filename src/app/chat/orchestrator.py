@@ -817,9 +817,7 @@ class ChatOrchestrator:
             else "general"
         )
         generation_credit_cost = (
-            get_settings().chat_generation_credit_cost(generation_mode)
-            if use_generation_v2
-            else 1
+            get_settings().chat_generation_credit_cost(generation_mode) if use_generation_v2 else 1
         )
         # Re-evaluate policy (access may have changed).
         decision, state = await self._evaluate(
@@ -1037,9 +1035,7 @@ class ChatOrchestrator:
         full local replay. `/tool-result` does not upgrade: it must continue the same in-flight turn
         through the backend that created the tool call.
         """
-        actual_backend: GenerationBackend = (
-            "v2" if session.generation_backend == "v2" else "legacy"
-        )
+        actual_backend: GenerationBackend = "v2" if session.generation_backend == "v2" else "legacy"
         if actual_backend == requested_backend:
             return
         if requested_backend == "legacy":

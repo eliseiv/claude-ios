@@ -372,7 +372,8 @@ async def test_credits_stale_model_tool_result_continuation_falls_back(
         )
         await s.commit()
 
-    # First turn (resume of the claude-pinned session): a client-side tool call, then continuation.
+    # First v2 turn (resume of the claude-pinned session): a client-side tool call, then v2
+    # continuation. A v2 tool-call must not be continued through the legacy tool-result endpoint.
     openai_instance.responses = [
         openai_instance.tool_result("files.read", {"path": "a.txt"}),
         openai_instance.text_result("continued"),
@@ -396,7 +397,7 @@ async def test_credits_stale_model_tool_result_continuation_falls_back(
     tcid = body1["toolCall"]["id"]
 
     r2 = await client.post(
-        "/v1/chat/tool-result",
+        "/v1/chat/v2/tool-result",
         json={"userId": str(uid), "sessionId": str(sid), "toolCallId": tcid, "result": {"ok": 1}},
         headers=auth_headers(uid),
     )
@@ -462,7 +463,7 @@ async def test_openai_credits_persists_response_id_and_passes_state_on_next_turn
         openai_instance.text_result("second", response_id="resp_second"),
     ]
     r1 = await client.post(
-        "/v1/chat/run",
+        "/v1/chat/v2/run",
         json={"userId": str(uid), "projectId": "p", "message": "first", "mode": "credits"},
         headers=auth_headers(uid),
     )
