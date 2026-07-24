@@ -13,6 +13,7 @@ from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import get_settings
 from tests.conftest import FakeAnthropicClient, auth_headers, seed_user
 
 
@@ -106,6 +107,166 @@ async def test_active_credits_zero_blocked(
     assert r.json()["status"] == "blocked"
     assert r.json()["blockReason"] == "credits_empty"
     assert not fake_anthropic.calls  # never called Anthropic
+
+
+@pytest.mark.asyncio
+async def test_generation_mode_switching_uses_turn_cost_and_llm_mode(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    settings = get_settings()
+    original = (
+        settings.chat_credit_cost_general,
+        settings.chat_credit_cost_research,
+        settings.chat_credit_cost_reasoning,
+    )
+    settings.chat_credit_cost_general = 1
+    settings.chat_credit_cost_research = 3
+    settings.chat_credit_cost_reasoning = 4
+    try:
+        async with db_sessionmaker() as s:
+            uid = await seed_user(s, subscription="active", balance=10)
+
+        fake_anthropic.responses = [
+            fake_anthropic.text_result("research answer"),
+            fake_anthropic.text_result("general answer"),
+        ]
+        r1 = await client.post(
+            "/v1/chat/v2/run",
+            json={
+                "userId": str(uid),
+                "projectId": "p",
+                "message": "find current info",
+                "mode": "credits",
+                "generationMode": "research",
+            },
+            headers=auth_headers(uid),
+        )
+        b1 = r1.json()
+        assert b1["status"] == "assistant_message"
+        assert b1["usage"]["generationMode"] == "research"
+        assert b1["usage"]["creditsCharged"] == 3
+        assert fake_anthropic.calls[-1]["generation_mode"] == "research"
+        assert any(t.get("name") == "web_search" for t in fake_anthropic.calls[-1]["tools"])
+
+        r2 = await client.post(
+            "/v1/chat/v2/run",
+            json={
+                "userId": str(uid),
+                "sessionId": b1["sessionId"],
+                "projectId": "p",
+                "message": "now answer normally",
+                "mode": "credits",
+                "generationMode": "general",
+            },
+            headers=auth_headers(uid),
+        )
+        b2 = r2.json()
+        assert b2["status"] == "assistant_message"
+        assert b2["usage"]["generationMode"] == "general"
+        assert b2["usage"]["creditsCharged"] == 1
+        assert fake_anthropic.calls[-1]["generation_mode"] == "general"
+
+        async with db_sessionmaker() as s:
+            bal = await s.scalar(
+                text("SELECT balance FROM wallets WHERE user_id=:u"), {"u": str(uid)}
+            )
+        assert int(bal) == 6
+    finally:
+        (
+            settings.chat_credit_cost_general,
+            settings.chat_credit_cost_research,
+            settings.chat_credit_cost_reasoning,
+        ) = original
+
+
+@pytest.mark.asyncio
+async def test_generation_mode_cost_gates_before_upstream_call(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    settings = get_settings()
+    original = settings.chat_credit_cost_reasoning
+    settings.chat_credit_cost_reasoning = 3
+    try:
+        async with db_sessionmaker() as s:
+            uid = await seed_user(s, subscription="active", balance=2)
+
+        r = await client.post(
+            "/v1/chat/v2/run",
+            json={
+                "userId": str(uid),
+                "projectId": "p",
+                "message": "think hard",
+                "mode": "credits",
+                "generationMode": "reasoning",
+            },
+            headers=auth_headers(uid),
+        )
+        assert r.json()["status"] == "blocked"
+        assert r.json()["blockReason"] == "credits_empty"
+        assert fake_anthropic.calls == []
+    finally:
+        settings.chat_credit_cost_reasoning = original
+
+
+@pytest.mark.asyncio
+async def test_tool_result_continuation_keeps_original_generation_mode_cost(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    settings = get_settings()
+    original = settings.chat_credit_cost_research
+    settings.chat_credit_cost_research = 3
+    try:
+        async with db_sessionmaker() as s:
+            uid = await seed_user(s, subscription="active", balance=5)
+
+        fake_anthropic.responses = [
+            fake_anthropic.tool_result("files.read", {"path": "a.txt"}),
+            fake_anthropic.text_result("done"),
+        ]
+        r1 = await client.post(
+            "/v1/chat/v2/run",
+            json={
+                "userId": str(uid),
+                "projectId": "p",
+                "message": "read and answer",
+                "mode": "credits",
+                "generationMode": "research",
+            },
+            headers=auth_headers(uid),
+        )
+        b1 = r1.json()
+        assert b1["status"] == "tool_call"
+        assert fake_anthropic.calls[-1]["generation_mode"] == "research"
+
+        r2 = await client.post(
+            "/v1/chat/v2/tool-result",
+            json={
+                "userId": str(uid),
+                "sessionId": b1["sessionId"],
+                "toolCallId": b1["toolCall"]["id"],
+                "result": {"ok": True},
+            },
+            headers=auth_headers(uid),
+        )
+        b2 = r2.json()
+        assert b2["status"] == "assistant_message"
+        assert b2["usage"]["generationMode"] == "research"
+        assert b2["usage"]["creditsCharged"] == 3
+        assert fake_anthropic.calls[-1]["generation_mode"] == "research"
+
+        async with db_sessionmaker() as s:
+            bal = await s.scalar(
+                text("SELECT balance FROM wallets WHERE user_id=:u"), {"u": str(uid)}
+            )
+        assert int(bal) == 2
+    finally:
+        settings.chat_credit_cost_research = original
 
 
 # --------------------------- AC-2: expired blocks both modes ---------------------------

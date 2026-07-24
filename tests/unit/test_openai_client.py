@@ -32,6 +32,7 @@ from app.chat.llm_client import (
     get_llm_client,
 )
 from app.chat.openai_client import OpenAIAuthError, OpenAIClient
+from app.chat.openai_responses_client import OpenAIResponsesClient
 from app.chat.tools import neutral_tool_definitions
 from app.config import get_settings
 from app.errors import UpstreamError, ValidationFailedError
@@ -86,6 +87,19 @@ class _FakeCompletions:
         return self.next_completion
 
 
+class _FakeResponses:
+    def __init__(self) -> None:
+        self.next_response: Any = None
+        self.raise_exc: Exception | None = None
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return self.next_response
+
+
 class _FakeModels:
     def __init__(self) -> None:
         self.raise_exc: Exception | None = None
@@ -112,11 +126,67 @@ class _FakeAsyncOpenAI:
         return self
 
 
+class _FakeAsyncOpenAIWithResponses(_FakeAsyncOpenAI):
+    """OpenAI fake that exposes the Responses API resource for the new production path."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.responses = _FakeResponses()
+
+    def with_options(self, *, api_key: str) -> _FakeAsyncOpenAIWithResponses:
+        self.options_key = api_key
+        return self
+
+
 def _client_with_fake() -> tuple[OpenAIClient, _FakeAsyncOpenAI]:
     client = OpenAIClient()
     fake = _FakeAsyncOpenAI()
     client._client = fake  # type: ignore[assignment]
     return client, fake
+
+
+def _client_with_responses_fake() -> tuple[OpenAIResponsesClient, _FakeAsyncOpenAIWithResponses]:
+    client = OpenAIResponsesClient()
+    fake = _FakeAsyncOpenAIWithResponses()
+    client._client = fake  # type: ignore[assignment]
+    return client, fake
+
+
+def _response(
+    *,
+    response_id: str = "resp_123",
+    text: str = "hi",
+    status: str = "completed",
+    output: list[Any] | None = None,
+    usage: Any | None = None,
+    model: str = "gpt-4o",
+) -> SimpleNamespace:
+    output_items = output
+    if output_items is None:
+        output_items = [
+            SimpleNamespace(
+                type="message",
+                content=[
+                    SimpleNamespace(type="output_text", text=text, annotations=[]),
+                ],
+            )
+        ]
+    if usage is None:
+        usage = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=20,
+            input_tokens_details=SimpleNamespace(cached_tokens=12),
+            output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        )
+    return SimpleNamespace(
+        id=response_id,
+        model=model,
+        output=output_items,
+        output_text=text,
+        status=status,
+        incomplete_details=None,
+        usage=usage,
+    )
 
 
 def _req() -> httpx.Request:
@@ -266,6 +336,196 @@ async def test_usage_absent_yields_zeros() -> None:
     assert result.usage.input_tokens == 0
     assert result.usage.output_tokens == 0
     assert result.usage.cache_read_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_openai_client_uses_chat_completions_even_when_responses_exists() -> None:
+    client = OpenAIClient()
+    fake = _FakeAsyncOpenAIWithResponses()
+    client._client = fake  # type: ignore[assignment]
+    fake.completions.next_completion = _completion(content="legacy", usage=_usage())
+
+    result = await client.create_message(
+        system_prompt="s",
+        messages=[NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "hi"}])],
+        tools=[],
+        attachments=None,
+        generation_mode="reasoning",
+        provider_state={"provider": "openai", "responseId": "resp_prev"},
+    )
+
+    assert result.text == "legacy"
+    assert fake.responses.calls == []
+    assert len(fake.completions.calls) == 1
+
+
+# ============================ Responses API state + generation modes ============================
+@pytest.mark.asyncio
+async def test_responses_api_uses_previous_response_id_and_delta_input() -> None:
+    client, fake = _client_with_responses_fake()
+    fake.responses.next_response = _response(response_id="resp_next", text="new answer")
+    messages = [
+        NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "old user"}]),
+        NeutralMessage(role="assistant", content_blocks=[{"type": "text", "text": "old answer"}]),
+        NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "new user"}]),
+    ]
+
+    result = await client.create_message(
+        system_prompt="SYSTEM",
+        messages=messages,
+        tools=[],
+        attachments=None,
+        provider_state={"provider": "openai", "responseId": "resp_prev"},
+    )
+
+    assert result.provider_response_id == "resp_next"
+    assert result.text == "new answer"
+    assert fake.completions.calls == []  # the Responses API path bypasses Chat Completions
+    sent = fake.responses.calls[0]
+    assert sent["instructions"] == "SYSTEM"
+    assert sent["previous_response_id"] == "resp_prev"
+    assert sent["store"] is True
+    # With previous_response_id, only the new user delta is sent.
+    assert sent["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "new user"}],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_full_replay_uses_valid_assistant_input_shape_on_model_mismatch() -> None:
+    client, fake = _client_with_responses_fake()
+    fake.responses.next_response = _response(response_id="resp_next", text="answer")
+    messages = [
+        NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "old user"}]),
+        NeutralMessage(role="assistant", content_blocks=[{"type": "text", "text": "old answer"}]),
+        NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "new user"}]),
+    ]
+
+    await client.create_message(
+        system_prompt="SYSTEM",
+        messages=messages,
+        tools=[],
+        attachments=None,
+        model="gpt-5-mini",
+        provider_state={
+            "provider": "openai",
+            "responseId": "resp_prev",
+            "model": "gpt-4o",
+        },
+    )
+
+    sent = fake.responses.calls[0]
+    assert sent["previous_response_id"] is openai.NOT_GIVEN
+    assert sent["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old user"}],
+        },
+        {"type": "message", "role": "assistant", "content": "old answer"},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "new user"}],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_research_adds_hosted_web_search_and_parses_usage() -> None:
+    client, fake = _client_with_responses_fake()
+    fake.responses.next_response = _response(
+        output=[
+            {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "found", "annotations": []}],
+            },
+        ],
+        usage={
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "input_tokens_details": {"cached_tokens": 2},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+    )
+
+    result = await client.create_message(
+        system_prompt="s",
+        messages=[NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "q"}])],
+        tools=neutral_tool_definitions(include_server_side=False),
+        attachments=None,
+        generation_mode="research",
+    )
+
+    sent_tools = fake.responses.calls[0]["tools"]
+    assert {"type": "web_search"} in sent_tools
+    assert any(t.get("type") == "function" and t.get("name") == "files_read" for t in sent_tools)
+    assert result.usage.web_search_requests == 1
+    assert result.usage.cache_read_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_sends_effort_and_parses_reasoning_tokens() -> None:
+    client, fake = _client_with_responses_fake()
+    settings = get_settings()
+    original = settings.chat_reasoning_level
+    settings.chat_reasoning_level = "high"
+    fake.responses.next_response = _response(
+        usage=SimpleNamespace(
+            input_tokens=20,
+            output_tokens=9,
+            input_tokens_details=SimpleNamespace(cached_tokens=0),
+            output_tokens_details=SimpleNamespace(reasoning_tokens=6),
+        )
+    )
+    try:
+        result = await client.create_message(
+            system_prompt="s",
+            messages=[NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "q"}])],
+            tools=[],
+            attachments=None,
+            generation_mode="reasoning",
+        )
+    finally:
+        settings.chat_reasoning_level = original
+
+    sent = fake.responses.calls[0]
+    assert sent["reasoning"] == {"effort": "high"}
+    assert result.usage.reasoning_tokens == 6
+
+
+@pytest.mark.asyncio
+async def test_responses_function_call_maps_to_domain_tool_use() -> None:
+    client, fake = _client_with_responses_fake()
+    fake.responses.next_response = _response(
+        text="",
+        output=[
+            SimpleNamespace(
+                type="function_call",
+                call_id="call_1",
+                name="files_read",
+                arguments='{"path": "a.txt"}',
+            )
+        ],
+    )
+
+    result = await client.create_message(
+        system_prompt="s",
+        messages=[NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "read"}])],
+        tools=neutral_tool_definitions(include_server_side=False),
+        attachments=None,
+    )
+
+    assert result.stop_reason == STOP_REASON_TOOL_USE
+    assert result.tool_uses == [{"id": "call_1", "name": "files.read", "input": {"path": "a.txt"}}]
+    assert result.content_blocks == [
+        {"type": "tool_use", "id": "call_1", "name": "files_read", "input": {"path": "a.txt"}}
+    ]
 
 
 # ============================ message building from neutral history ============================

@@ -82,8 +82,13 @@ def _byok_state(byok_enabled: bool, byok_status: ByokState) -> ByokState:
     return byok_status
 
 
-def evaluate(state: PolicyState, mode: Mode) -> Decision:
-    """Decide access per ADR-002. Pure: no I/O, no mutation."""
+def evaluate(state: PolicyState, mode: Mode, *, required_credits: int = 1) -> Decision:
+    """Decide access per ADR-002. Pure: no I/O, no mutation.
+
+    ``required_credits`` defaults to the legacy cost of one completed chat turn. Generation modes
+    such as research/reasoning pass a higher value so the policy gate blocks before the upstream
+    LLM call when the wallet cannot cover the final debit.
+    """
     if mode is Mode.byok:
         if state.subscription_status is not SubscriptionStatus.active:
             if state.subscription_status is SubscriptionStatus.expired:
@@ -100,7 +105,7 @@ def evaluate(state: PolicyState, mode: Mode) -> Decision:
 
     # mode == credits
     if state.subscription_status is SubscriptionStatus.active:
-        if state.credits_balance == 0:
+        if state.credits_balance < max(1, required_credits):
             return Decision.blocked(BlockReason.credits_empty)
         return Decision.allowed()  # debit happens after generation
     if state.subscription_status is SubscriptionStatus.expired:

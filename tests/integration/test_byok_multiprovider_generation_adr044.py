@@ -45,7 +45,9 @@ class FakeOpenAIClient:
         self.responses: list[Any] = []
         self.valid_keys: set[str] = set()
 
-    def text_result(self, text_value: str = "openai answer") -> Any:
+    def text_result(
+        self, text_value: str = "openai answer", *, response_id: str | None = None
+    ) -> Any:
         from app.chat.llm_client import LLMResult, LLMUsage
 
         usage = LLMUsage(
@@ -61,9 +63,17 @@ class FakeOpenAIClient:
             usage=usage,
             text=text_value,
             tool_uses=[],
+            provider_response_id=response_id,
         )
 
-    def tool_result(self, tool_name: str, args: dict[str, Any], tool_id: str | None = None) -> Any:
+    def tool_result(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        tool_id: str | None = None,
+        *,
+        response_id: str | None = None,
+    ) -> Any:
         """A turn with one OpenAI-shape tool_call (call_... id), domain tool_uses (ADR-033 §4)."""
         from app.chat.llm_client import LLMResult, LLMUsage
 
@@ -95,10 +105,18 @@ class FakeOpenAIClient:
             usage=usage,
             text="",
             tool_uses=[{"id": tid, "name": tool_name, "input": args}],
+            provider_response_id=response_id,
         )
 
     async def create_message(self, **kwargs: Any) -> Any:
-        self.calls.append({"model": kwargs.get("model"), "api_key": kwargs.get("api_key")})
+        self.calls.append(
+            {
+                "model": kwargs.get("model"),
+                "api_key": kwargs.get("api_key"),
+                "generation_mode": kwargs.get("generation_mode"),
+                "provider_state": kwargs.get("provider_state"),
+            }
+        )
         if not self.responses:
             return self.text_result()
         return self.responses.pop(0)
@@ -143,6 +161,7 @@ def openai_instance(
     s.byok_default_model = "claude-sonnet-4-6"
     s.openai_byok_default_model = "gpt-4o"
     monkeypatch.setattr(llm_mod, "_openai_singleton", fake_openai)
+    monkeypatch.setattr(llm_mod, "_openai_responses_singleton", fake_openai)
     yield fake_openai
     (
         s.llm_provider,
@@ -160,6 +179,16 @@ async def _session_model(maker: async_sessionmaker[AsyncSession], session_id: st
         return await s.scalar(
             text("SELECT model FROM chat_sessions WHERE id=:sid"), {"sid": session_id}
         )
+
+
+async def _session_provider_state(
+    maker: async_sessionmaker[AsyncSession], session_id: str
+) -> dict[str, Any] | None:
+    async with maker() as s:
+        value = await s.scalar(
+            text("SELECT provider_state FROM chat_sessions WHERE id=:sid"), {"sid": session_id}
+        )
+    return dict(value) if isinstance(value, dict) else None
 
 
 async def _set_byok_provider(
@@ -343,13 +372,14 @@ async def test_credits_stale_model_tool_result_continuation_falls_back(
         )
         await s.commit()
 
-    # First turn (resume of the claude-pinned session): a client-side tool call, then continuation.
+    # First v2 turn (resume of the claude-pinned session): a client-side tool call, then v2
+    # continuation. A v2 tool-call must not be continued through the legacy tool-result endpoint.
     openai_instance.responses = [
         openai_instance.tool_result("files.read", {"path": "a.txt"}),
         openai_instance.text_result("continued"),
     ]
     r1 = await client.post(
-        "/v1/chat/run",
+        "/v1/chat/v2/run",
         json={
             "userId": str(uid),
             "sessionId": str(sid),
@@ -367,7 +397,7 @@ async def test_credits_stale_model_tool_result_continuation_falls_back(
     tcid = body1["toolCall"]["id"]
 
     r2 = await client.post(
-        "/v1/chat/tool-result",
+        "/v1/chat/v2/tool-result",
         json={"userId": str(uid), "sessionId": str(sid), "toolCallId": tcid, "result": {"ok": 1}},
         headers=auth_headers(uid),
     )
@@ -411,3 +441,67 @@ async def test_credits_active_model_still_forwarded(
     )
     assert r.status_code == 200
     assert openai_instance.calls[-1]["model"] == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_openai_credits_persists_response_id_and_passes_state_on_next_turn(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    openai_instance: FakeOpenAIClient,
+) -> None:
+    """Credits-mode OpenAI stores the Responses API id and passes it to the next same-chat turn.
+
+    The turn-level generation mode still switches freely in the same session: the first turn uses
+    ``general`` by default, the second uses ``research``. Provider state is owned by the backend and
+    is not sent by the mobile client.
+    """
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s, subscription="active", balance=100)
+
+    openai_instance.responses = [
+        openai_instance.text_result("first", response_id="resp_first"),
+        openai_instance.text_result("second", response_id="resp_second"),
+    ]
+    r1 = await client.post(
+        "/v1/chat/v2/run",
+        json={"userId": str(uid), "projectId": "p", "message": "first", "mode": "credits"},
+        headers=auth_headers(uid),
+    )
+    assert r1.status_code == 200
+    b1 = r1.json()
+    assert b1["status"] == "assistant_message"
+    assert openai_instance.calls[-1]["generation_mode"] == "general"
+    assert openai_instance.calls[-1]["provider_state"] is None
+    assert await _session_provider_state(db_sessionmaker, b1["sessionId"]) == {
+        "provider": "openai",
+        "responseId": "resp_first",
+        "model": "gpt-4o",
+    }
+
+    r2 = await client.post(
+        "/v1/chat/v2/run",
+        json={
+            "userId": str(uid),
+            "sessionId": b1["sessionId"],
+            "projectId": "p",
+            "message": "now research",
+            "mode": "credits",
+            "generationMode": "research",
+        },
+        headers=auth_headers(uid),
+    )
+    assert r2.status_code == 200
+    b2 = r2.json()
+    assert b2["status"] == "assistant_message"
+    assert b2["usage"]["generationMode"] == "research"
+    assert openai_instance.calls[-1]["generation_mode"] == "research"
+    assert openai_instance.calls[-1]["provider_state"] == {
+        "provider": "openai",
+        "responseId": "resp_first",
+        "model": "gpt-4o",
+    }
+    assert await _session_provider_state(db_sessionmaker, b1["sessionId"]) == {
+        "provider": "openai",
+        "responseId": "resp_second",
+        "model": "gpt-4o",
+    }
