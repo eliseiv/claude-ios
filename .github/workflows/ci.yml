@@ -243,11 +243,13 @@ jobs:
             # instance `avelyra:avelyra` (avelyraweb.shop) is provisioned on the server. The third
             # instance `orvianix:orvianix` (orvianix.shop) and `elvarixa:elvarixa` are OpenAI
             # clones (ADR-033: LLM_PROVIDER=openai + OPENAI_* in their own /opt/<dir>/.env) — same
-            # code, same per-instance deploy/readiness/smoke; only their .env differs.
+            # code, same per-instance deploy/readiness/smoke; only their .env differs. The fifth
+            # instance `corvionet:corvionet` (corvionet.shop) is an Anthropic clone (default
+            # LLM_PROVIDER=anthropic).
             # veltrio (veltriohub.shop) was decommissioned 2026-07-18: the domain was handed over to
             # a different service on the same server. It MUST stay out of this loop — redeploying it
             # would re-create its Traefik router and take the domain back.
-            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa"
+            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet"
             FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
             for entry in $INSTANCES; do
               dir="${entry%%:*}"; proj="${entry##*:}"
