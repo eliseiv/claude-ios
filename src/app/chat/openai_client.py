@@ -1,9 +1,8 @@
 """OpenAI client — an LLMClient implementation (ADR-033).
 
-Real integration with the OpenAI Python SDK (``AsyncOpenAI``) over the Chat Completions API
-(function-calling + vision), NON-streaming — parity with the current non-streaming Anthropic path
-(ADR-025 §non-streaming). Active only on instances with ``LLM_PROVIDER=openai``; the default
-``anthropic`` path is unchanged.
+Real integration with the OpenAI Python SDK (``AsyncOpenAI``). This legacy client uses Chat
+Completions only. The newer stateful Responses API integration is intentionally isolated in
+``OpenAIResponsesClient`` so `/v1/chat/run` keeps its original full-history replay behavior.
 
 All OpenAI-specific (de)serialization of the wire format lives INSIDE this client (ADR-033 §3):
 - builds OpenAI Chat Completions ``messages`` from the neutral history (system message, assistant
@@ -267,12 +266,16 @@ class OpenAIClient:
         attachments: PreparedAttachments | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        generation_mode: str = "general",
+        provider_state: dict[str, Any] | None = None,
     ) -> LLMResult:
-        """Call chat.completions.create (non-streaming) and return a neutral LLMResult.
+        """Create one OpenAI Chat Completions response and return a neutral LLMResult.
 
-        model (ADR-034 §4): optional model id; None → the configured default
-        (``settings.openai_model``) — current behavior, unchanged.
+        `generation_mode` and `provider_state` are accepted only to satisfy the shared LLMClient
+        protocol. The legacy `/v1/chat/run` path ignores both fields: every call sends the full
+        locally reconstructed history to `chat.completions.create`, preserving the pre-v2 contract.
         """
+        _ = (generation_mode, provider_state)
         model = model if model is not None else self._default_model
         client = self._client
         if api_key is not None:

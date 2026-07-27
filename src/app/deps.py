@@ -26,7 +26,7 @@ from app.billing_cloudpayments.verify import CloudPaymentsVerifyClient
 from app.byok.kms import get_kms_client
 from app.byok.service import BYOKService
 from app.chat.global_tools import GlobalToolHandlers, SystemClock
-from app.chat.llm_client import get_llm_client
+from app.chat.llm_client import get_generation_llm_client, get_llm_client
 from app.chat.orchestrator import ChatOrchestrator
 from app.chat.repository import ChatRepository
 from app.chats.repository import ChatsRepository
@@ -241,6 +241,29 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         global_tools=GlobalToolHandlers(clock=SystemClock()),
         preferences=PreferencesService(session),
         # ADR-036: workspace context provider (instructions + knowledge files) for workspace chats.
+        workspaces=WorkspacesService(WorkspacesRepository(session)),
+    )
+
+
+def get_v2_orchestrator(session: DbSession) -> ChatOrchestrator:
+    """Chat orchestrator wired with the `/v1/chat/v2/*` generation client.
+
+    The repository, wallet, BYOK and tool services are the same as the legacy dependency. Only the
+    injected LLM client changes, which keeps the new Responses/reasoning/search behavior behind the
+    v2 routes.
+    """
+    audit = AuditService(session)
+    website = WebsiteService(session)
+    return ChatOrchestrator(
+        session=session,
+        repo=ChatRepository(session),
+        wallet=WalletService(session, audit),
+        byok=BYOKService(session, get_kms_client(), get_llm_client(), audit),
+        audit=audit,
+        anthropic_client=get_generation_llm_client(),
+        site_tools=SiteToolHandlers(session, website, audit),
+        global_tools=GlobalToolHandlers(clock=SystemClock()),
+        preferences=PreferencesService(session),
         workspaces=WorkspacesService(WorkspacesRepository(session)),
     )
 

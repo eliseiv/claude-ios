@@ -19,6 +19,7 @@ from sqlalchemy import cast as sa_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chats.cursor import ChatCursor
+from app.chats.provider_blocks import to_domain_blocks
 from app.models import ChatSession, ChatStep, ToolCall
 
 _PREVIEW_MAX_CHARS = 160
@@ -64,9 +65,14 @@ def _now() -> datetime.datetime:
 
 
 def _text_from_payload(payload: dict[str, Any]) -> str:
-    """Concatenate text blocks of a chat_steps.payload (user/assistant content blocks)."""
+    """Concatenate text blocks of a chat_steps.payload (user/assistant content blocks).
+
+    ADR-058: the content is read through ``to_domain_blocks`` — on an OpenAI instance the stored
+    assistant content is the provider's assistant MESSAGE, not domain blocks, and would otherwise
+    yield an empty preview.
+    """
     parts: list[str] = []
-    for block in payload.get("content", []):
+    for block in to_domain_blocks(payload.get("content")):
         if isinstance(block, dict) and block.get("type") == "text":
             parts.append(str(block.get("text", "")))
     return " ".join(p for p in parts if p).strip()

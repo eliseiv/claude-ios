@@ -82,11 +82,12 @@ def test_limit_for_per_file_delete_path_returns_general_limit(
     assert middleware._limit_for(path) != settings.workspace_request_body_limit
 
 
-# --- case 6: /v1/chat/run keeps its own attachment limit (ADR-020 unchanged) ---
+# --- case 6: chat run endpoints keep their own attachment limit (ADR-020 unchanged) ---
+@pytest.mark.parametrize("path", ["/v1/chat/run", "/v1/chat/v2/run"])
 def test_limit_for_chat_run_returns_attachment_limit(
-    middleware: SizeLimitMiddleware, settings: Settings
+    middleware: SizeLimitMiddleware, settings: Settings, path: str
 ) -> None:
-    assert middleware._limit_for("/v1/chat/run") == settings.attachment_request_body_limit
+    assert middleware._limit_for(path) == settings.attachment_request_body_limit
 
 
 # --- case 7: an unrelated route keeps the general limit ---

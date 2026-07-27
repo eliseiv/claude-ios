@@ -356,10 +356,42 @@ class FakeAnthropicClient:
         # ADR-034: record the session-fixed model passed by the orchestrator so model-proboros
         # tests can assert create_message(model=<session.model>) (None → client uses its default).
         model = kwargs.get("model")
+        generation_mode = kwargs.get("generation_mode", "general")
+        generation_mode = (
+            generation_mode
+            if generation_mode in {"general", "research", "reasoning"}
+            else "general"
+        )
+        provider_state = kwargs.get("provider_state")
 
         # Translate neutral → Anthropic wire exactly as the real client does (ADR-033 §3/§4).
         wire_messages = AnthropicClient._build_provider_messages(neutral_messages)
         wire_tools = AnthropicClient._serialize_tools(neutral_tools)
+        extra_body = None
+        if generation_mode == "research":
+            from app.config import get_settings
+
+            wire_tools.append(
+                {
+                    "type": get_settings().anthropic_web_search_tool_type,
+                    "name": "web_search",
+                    "response_inclusion": "excluded",
+                }
+            )
+        elif generation_mode == "reasoning":
+            from app.config import get_settings
+
+            settings = get_settings()
+            extra_body = {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": min(
+                        settings.anthropic_thinking_budget_tokens,
+                        max(1, settings.anthropic_max_tokens - 1),
+                    ),
+                    "display": settings.resolved_anthropic_thinking_display(),
+                }
+            }
         if attachments is not None and getattr(attachments, "content_blocks", None):
             # Inject the full attachment blocks into the last user turn — production parity.
             for wm in reversed(wire_messages):
@@ -379,6 +411,9 @@ class FakeAnthropicClient:
                 "attachments": attachments,
                 # ADR-034: session-fixed model handed to the client (None → provider default).
                 "model": model,
+                "generation_mode": generation_mode,
+                "provider_state": provider_state,
+                "extra_body": extra_body,
                 # Neutral kwargs preserved for tests that want to inspect the seam directly.
                 "neutral_messages": neutral_messages,
                 "neutral_tools": neutral_tools,

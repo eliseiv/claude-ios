@@ -31,16 +31,16 @@ class SizeLimitMiddleware(BaseHTTPMiddleware):
     """Rejects bodies exceeding the limit before parsing (413).
 
     The general limit applies to all routes. Two routes get a RAISED transport limit because they
-    accept large base64 payloads that exceed the general ≤512KB cap; each raise is scoped to its
+    accept large base64 payloads that exceed the general <=512KB cap; each raise is scoped to its
     own route so the attack surface for accepting a large payload is not widened globally:
-      - /v1/chat/run — inline base64 attachments (ADR-020, 05-security.md);
+      - /v1/chat/run and /v1/chat/v2/run — inline base64 attachments (ADR-020, 05-security.md);
       - POST /v1/workspaces/{id}/files — base64 workspace knowledge-file upload (ADR-045). Matched
         by path prefix+suffix (the path carries the workspace id), method-agnostic like the
-        /v1/chat/run rule: GET /v1/workspaces/{id}/files also matches but carries no body, so the
+        chat run rule: GET /v1/workspaces/{id}/files also matches but carries no body, so the
         raised limit is harmless for it.
     """
 
-    _CHAT_RUN_PATH = "/v1/chat/run"
+    _CHAT_RUN_PATHS = frozenset({"/v1/chat/run", "/v1/chat/v2/run"})
     _WORKSPACES_PREFIX = "/v1/workspaces/"
     _FILES_SUFFIX = "/files"
 
@@ -52,7 +52,7 @@ class SizeLimitMiddleware(BaseHTTPMiddleware):
         self._workspace_files_limit = settings.workspace_request_body_limit
 
     def _limit_for(self, path: str) -> int:
-        if path == self._CHAT_RUN_PATH:
+        if path in self._CHAT_RUN_PATHS:
             return self._chat_run_limit
         if path.startswith(self._WORKSPACES_PREFIX) and path.endswith(self._FILES_SUFFIX):
             return self._workspace_files_limit

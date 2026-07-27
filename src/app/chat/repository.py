@@ -92,6 +92,7 @@ class ChatRepository:
         title: str | None = None,
         model: str | None = None,
         workspace_project_id: uuid.UUID | None = None,
+        generation_backend: str | None = None,
     ) -> SessionContext:
         """Resume an owned, non-expired session or create a new one.
 
@@ -103,7 +104,9 @@ class ChatRepository:
         ``chat_sessions.model = NULL`` (= the instance default model, resolved by the client at
         generation time — ADR-034 §3). ``workspace_project_id=None`` creates a chat without a
         workspace (``chat_sessions.workspace_project_id = NULL`` — ADR-036; NOT the website-builder
-        ``project_id``). Ownership of the workspace is validated by the caller before creation.
+        ``project_id``). ``generation_backend`` is also fixed on create so legacy `/v1/chat/*`
+        sessions and `/v1/chat/v2/*` sessions do not accidentally mix provider-state and billing
+        contracts. Ownership of the workspace is validated by the caller before creation.
         """
         if session_id is not None:
             existing = await self.get_session(session_id, user_id)
@@ -118,6 +121,7 @@ class ChatRepository:
             title=title,
             model=model,
             workspace_project_id=workspace_project_id,
+            generation_backend=generation_backend,
         )
         self._session.add(new_session)
         await self._session.flush()
@@ -126,6 +130,52 @@ class ChatRepository:
     async def touch_session(self, session: ChatSession) -> None:
         session.updated_at = _now()
         await self._session.flush()
+
+    async def set_generation_backend(
+        self, session: ChatSession | uuid.UUID, generation_backend: str | None
+    ) -> None:
+        """Persist the public chat backend contract used by a session.
+
+        Existing rows may have NULL because this field was introduced after the legacy endpoint.
+        The orchestrator treats NULL as legacy unless a caller explicitly enters `/v1/chat/v2/*`,
+        in which case the session is upgraded to `v2` before provider state is used.
+        """
+        if isinstance(session, uuid.UUID):
+            row = await self._session.get(ChatSession, session)
+            if row is None:  # pragma: no cover - callers operate on an existing session
+                return
+        else:
+            row = session
+        row.generation_backend = generation_backend
+        await self._session.flush()
+
+    async def set_provider_state(
+        self, session: ChatSession | uuid.UUID, provider_state: dict[str, Any] | None
+    ) -> None:
+        """Persist opaque provider continuation state for a chat session.
+
+        The payload is intentionally provider-owned JSON. Today OpenAI stores the latest
+        Responses API ``response.id`` here so the next turn can use ``previous_response_id``.
+        Anthropic Messages API calls are still stateless, so they normally leave this unchanged or
+        empty. The repository remains the single writer for ``chat_sessions``.
+        """
+        if isinstance(session, uuid.UUID):
+            row = await self._session.get(ChatSession, session)
+            if row is None:  # pragma: no cover - callers operate on an existing session
+                return
+        else:
+            row = session
+        row.provider_state = provider_state
+        await self._session.flush()
+
+    async def clear_provider_state(self, session_id: uuid.UUID) -> None:
+        """Drop provider continuation state when local history is rewritten.
+
+        edit+regenerate truncates ``chat_steps`` locally; any remote chain id that points to the
+        old suffix is no longer a faithful representation of the chat. Clearing the state forces
+        the next provider call to rebuild from local history and establish a fresh continuation id.
+        """
+        await self.set_provider_state(session_id, None)
 
     async def add_step(
         self,
@@ -159,6 +209,32 @@ class ChatRepository:
                 .where(ChatStep.session_id == session_id)
                 .order_by(ChatStep.seq.asc())
             )
+        )
+
+    async def generation_mode_for_message_step(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID
+    ) -> str:
+        """Return the turn-scoped generation mode stored on the user step.
+
+        ``/v1/chat/v2/tool-result`` has no generationMode field by design. When it continues a
+        pending tool-use turn, it must reuse the exact mode chosen by the original
+        ``/v1/chat/v2/run`` request so provider options and wallet billing stay stable across the
+        whole message step.
+        """
+        value = await self._session.scalar(
+            select(ChatStep.payload["generationMode"].astext)
+            .where(
+                ChatStep.session_id == session_id,
+                ChatStep.message_step_id == message_step_id,
+                ChatStep.role == "user",
+            )
+            .order_by(ChatStep.seq.asc())
+            .limit(1)
+        )
+        return (
+            value
+            if isinstance(value, str) and value in {"general", "research", "reasoning"}
+            else "general"
         )
 
     async def create_tool_call(

@@ -16,6 +16,7 @@ from typing import Any
 
 from app.chat.tools import UnknownToolNameError, to_domain_tool_name
 from app.chats.cursor import ChatCursor, InvalidCursorError
+from app.chats.provider_blocks import to_domain_blocks
 from app.chats.repository import ChatsRepository, strip_context_block
 from app.errors import NotFoundError, ValidationFailedError, WorkspaceNotFoundError
 from app.models import ChatSession, ChatStep, ToolCall
@@ -86,8 +87,10 @@ def _truncate(value: str, limit: int = _SUMMARY_MAX_CHARS) -> str:
 
 
 def _text_summary(payload: dict[str, Any]) -> str:
+    # ADR-058: read the content through the provider adapter — an OpenAI assistant step stores the
+    # provider message, whose text would be invisible to the domain-shaped scan below.
     parts: list[str] = []
-    for block in payload.get("content", []):
+    for block in to_domain_blocks(payload.get("content")):
         if isinstance(block, dict) and block.get("type") == "text":
             parts.append(str(block.get("text", "")))
     return _truncate(" ".join(p for p in parts if p))
@@ -188,6 +191,11 @@ class ChatsService:
         Defensive (history is read-only, never 500): an unknown tool name or a provider id absent
         from the map is left as-is and a WARNING is logged (BUG-4 invariant says tool_calls cover
         every tool_use, so this is an upstream anomaly, not a normal path).
+
+        ADR-058: an assistant step written by the OpenAI client stores the provider's assistant
+        MESSAGE instead of domain blocks; ``to_domain_blocks`` converts it FIRST (on the deep copy)
+        so the per-block normalization below — and therefore ADR-008/ADR-024 — applies identically
+        on both providers.
         """
         payload = copy.deepcopy(step.payload)
         # ADR-008: never expose the raw provider id stored on tool steps.
@@ -195,6 +203,8 @@ class ChatsService:
         content = payload.get("content")
         if not isinstance(content, list):
             return payload
+        content = to_domain_blocks(content)
+        payload["content"] = content
         # ADR-042: for a user step, strip the leading ADR-037 conversation-settings block from the
         # FIRST text block (where the block leads, ADR-037 §4) — on this deep copy only, so the
         # stored payload stays wire-valid for replay. assistant/tool steps carry no block → skip.
@@ -303,7 +313,8 @@ class ChatsService:
         """
         out: list[StepsViewStep] = []
         if step.role == "assistant":
-            content = step.payload.get("content", [])
+            # ADR-058: provider-agnostic view of the assistant content (OpenAI stores its message).
+            content = to_domain_blocks(step.payload.get("content"))
             has_tool_use = any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content)
             summary = _text_summary(step.payload)
             if summary:

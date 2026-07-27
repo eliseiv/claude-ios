@@ -115,6 +115,15 @@ class StoreKitVerifier:
         # never weakens the real ES256/x5c path. Default false => prod unchanged.
         self._test_secret = settings.storekit_test_secret
         self._test_mode = settings.storekit_test_mode and bool(self._test_secret)
+        self._skip_chain_verification = (
+            settings.storekit_dev_skip_cert_chain_verification
+            and settings.appstore_environment.strip().lower() != "production"
+        )
+        if self._skip_chain_verification:
+            logger.warning(
+                "STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION is ENABLED: accepting StoreKit "
+                "JWS leaf certificates without anchoring them to an Apple root. DEV/TEST ONLY."
+            )
 
     @staticmethod
     def _load_roots(cert_dir: str) -> list[x509.Certificate]:
@@ -165,13 +174,14 @@ class StoreKitVerifier:
         chain = _load_certificate_chain(signed_transaction)
         leaf = chain[0]
 
-        if not self._roots:
-            # No trust anchor configured (Q-007-1): cannot complete chain verification.
-            raise ValidationFailedError(
-                "App Store root certificates not configured (APPSTORE_ROOT_CERT_DIR); "
-                "cannot verify StoreKit transaction"
-            )
-        _verify_chain(chain, self._roots)
+        if not self._skip_chain_verification:
+            if not self._roots:
+                # No trust anchor configured (Q-007-1): cannot complete chain verification.
+                raise ValidationFailedError(
+                    "App Store root certificates not configured (APPSTORE_ROOT_CERT_DIR); "
+                    "cannot verify StoreKit transaction"
+                )
+            _verify_chain(chain, self._roots)
 
         leaf_pubkey = leaf.public_key()
         try:

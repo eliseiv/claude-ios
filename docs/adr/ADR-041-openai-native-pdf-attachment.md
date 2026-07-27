@@ -5,6 +5,7 @@
 - **Тип:** implementation-ADR (расширяет существующее проектирование, без нового модуля/миграции/биллинга).
 - **Расширяет:** [ADR-020](ADR-020-inline-base64-attachments-mvp.md) (inline base64-вложения, класс `document`/PDF), [ADR-033 §5](ADR-033-llm-provider-abstraction.md) (провайдер-маппинг content-блоков; снимает зафиксированное там ограничение «PDF на OpenAI → 422»).
 - **Закрывает:** [TD-023](../100-known-tech-debt.md) (PDF-вложения не поддерживаются на OpenAI).
+- **Заметка о составе инстансов (2026-07-18):** перечень OpenAI-инстансов в §Контекст (`orvianix`, `veltrio`) актуален на дату ADR. `veltrio` выведен из эксплуатации 2026-07-18 ([ADR-056](ADR-056-instance-decommission-veltrio.md)) — единственный действующий OpenAI-инстанс сейчас `orvianix`. Тело ADR не переписывается (immutability); решение о PDF провайдер-уровневое и от состава инстансов не зависит. Актуальный список — [07-deployment.md §Мульти-инстанс](../07-deployment.md#мульти-инстанс--клонирование-сервиса).
 - **Связано:** [ADR-036 §4](ADR-036-workspaces-implementation.md) (паттерн извлечения текста PDF — `workspaces/text_extract.py`), [ADR-039](ADR-039-optional-message-with-attachments.md) (file-only ход), [05-security.md §Мультимодальные вложения](../05-security.md), [API-REFERENCE.md §Вложения](../API-REFERENCE.md), [TD-004a](../100-known-tech-debt.md) (CPU-guard pypdf), [Q-033-2](../99-open-questions.md) (Responses API).
 
 ## Контекст

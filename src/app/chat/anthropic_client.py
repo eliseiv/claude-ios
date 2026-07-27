@@ -271,12 +271,24 @@ class AnthropicClient:
     @staticmethod
     def _parse_usage(message: anthropic.types.Message, model: str) -> LLMUsage:
         usage = message.usage
+        output_details = getattr(usage, "output_tokens_details", None)
+        server_tool_use = getattr(usage, "server_tool_use", None)
+        if isinstance(output_details, dict):
+            reasoning_tokens = int(output_details.get("thinking_tokens") or 0)
+        else:
+            reasoning_tokens = int(getattr(output_details, "thinking_tokens", 0) or 0)
+        if isinstance(server_tool_use, dict):
+            web_search_requests = int(server_tool_use.get("web_search_requests") or 0)
+        else:
+            web_search_requests = int(getattr(server_tool_use, "web_search_requests", 0) or 0)
         return LLMUsage(
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
             model=model,
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
             cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            reasoning_tokens=reasoning_tokens,
+            web_search_requests=web_search_requests,
         )
 
     async def create_message(
@@ -288,8 +300,10 @@ class AnthropicClient:
         attachments: PreparedAttachments | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        generation_mode: str = "general",
+        provider_state: dict[str, Any] | None = None,
     ) -> LLMResult:
-        """Call messages.create with prompt caching and tools (LLMClient.create_message).
+        """Call Anthropic Messages with optional generation-mode controls.
 
         Builds the Anthropic wire messages from the neutral history, injects the attachment content
         blocks (ADR-020) into the LAST user turn on the first call only, serializes tools to the
@@ -297,8 +311,21 @@ class AnthropicClient:
         persist boundary), usage, text and tool_uses (domain names). api_key: optional per-call
         override (BYOK); None → service key. model (ADR-034 §4): optional model id; None → the
         configured default (``settings.anthropic_model``) — current behavior, unchanged.
+
+        Anthropic has one Messages API path in this backend, so there is no separate v2 client.
+        Isolation is handled one layer up: legacy `/v1/chat/*` calls pass only `general`, while
+        `/v1/chat/v2/*` may pass `research` or `reasoning`. `research` appends Anthropic hosted web
+        search; `reasoning` sends extended thinking through `extra_body`. `provider_state` is
+        accepted for protocol symmetry but ignored because this integration stays stateless for
+        Anthropic.
         """
+        _ = provider_state  # Anthropic Messages API is stateless in this integration.
         model = model if model is not None else self._default_model
+        generation_mode = (
+            generation_mode
+            if generation_mode in {"general", "research", "reasoning"}
+            else "general"
+        )
         client = self._client
         if api_key is not None:
             client = client.with_options(api_key=api_key)
@@ -320,15 +347,43 @@ class AnthropicClient:
         cached_tools = [dict(t) for t in anthropic_tools]
         if cached_tools:
             cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+        if generation_mode == "research":
+            settings = get_settings()
+            cached_tools.append(
+                {
+                    "type": settings.anthropic_web_search_tool_type,
+                    "name": "web_search",
+                    "response_inclusion": "excluded",
+                }
+            )
+
+        extra_body: dict[str, Any] | None = None
+        if generation_mode == "reasoning":
+            settings = get_settings()
+            budget = min(
+                settings.anthropic_thinking_budget_tokens,
+                max(1, self._max_tokens - 1),
+            )
+            extra_body = {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                    "display": settings.resolved_anthropic_thinking_display(),
+                }
+            }
+
+        create_kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": self._max_tokens,
+            "system": cast(Any, self._build_system(system_prompt)),
+            "tools": cast(Any, cached_tools),
+            "messages": cast(Any, wire_messages),
+        }
+        if generation_mode in {"research", "reasoning"}:
+            create_kwargs["extra_body"] = extra_body
 
         try:
-            message = await client.messages.create(
-                model=model,
-                max_tokens=self._max_tokens,
-                system=cast(Any, self._build_system(system_prompt)),
-                tools=cast(Any, cached_tools),
-                messages=cast(Any, wire_messages),
-            )
+            message = await client.messages.create(**create_kwargs)
         except anthropic.AuthenticationError as exc:
             # BYOK/service key rejected → mapped to byok_invalid (block) or 401 upstream.
             # TD-014: log the upstream error (401 → WARNING) BEFORE mapping; key is never logged.
