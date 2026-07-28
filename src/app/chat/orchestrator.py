@@ -96,19 +96,36 @@ _TIME_NOW_INSTRUCTION = (
     "do not guess."
 )
 
+# ADR-059: state, in the system prompt, that the assistant has the full conversation so far and
+# must use it. Without this, gpt-4o (the OpenAI-instance provider, ADR-033) reads "remember X" as a
+# request for cross-session persistent storage and replies with a canned "I can't store data /
+# can't recall" disclaimer — EVEN THOUGH the prior turns are replayed to it (_build_messages) and
+# it factually has them. The prior chat_steps ARE the memory; this line tells the model to treat
+# them as such and never claim statelessness. STATIC (no per-request interpolation) so the Anthropic
+# prompt cache prefix stays stable, exactly like _TIME_NOW_INSTRUCTION.
+_CONVERSATION_MEMORY_INSTRUCTION = (
+    "You have access to the full history of the current conversation; earlier messages in this "
+    "chat are part of your context. When the user asks you to remember something or refers back "
+    "to what was said, use that history to answer directly. Never claim you cannot remember, "
+    "store, or recall information from this conversation."
+)
+
 # ADR-012: base system prompt selected by assistant_mode (chat vs code). Single source of truth
 # for each mode's prompt (no scattered hardcoding). The set of tools offered to Claude is
 # unchanged in this sprint (Q-012-1 default deferred); only the system prompt varies.
 _SYSTEM_PROMPT_CHAT = (
     "You are a helpful assistant integrated into an iOS app. You can call tools that the "
     "user's device executes locally (files, calendar, reminders). Use tools when needed and "
-    "respond concisely. " + _TIME_NOW_INSTRUCTION
+    "respond concisely. " + _CONVERSATION_MEMORY_INSTRUCTION + " " + _TIME_NOW_INSTRUCTION
 )
 _SYSTEM_PROMPT_CODE = (
     "You are a coding assistant integrated into an iOS app. Favor precise, technical answers: "
     "produce correct, idiomatic code with brief explanations. You can call tools that the "
     "user's device executes locally (files, calendar, reminders) and server-side site tools. "
-    "Use tools when needed and respond concisely. " + _TIME_NOW_INSTRUCTION
+    "Use tools when needed and respond concisely. "
+    + _CONVERSATION_MEMORY_INSTRUCTION
+    + " "
+    + _TIME_NOW_INSTRUCTION
 )
 
 GenerationBackend = Literal["legacy", "v2"]
