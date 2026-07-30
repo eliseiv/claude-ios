@@ -28,6 +28,7 @@ async def policy_effective(current: CurrentUser, session: DbSession) -> Effectiv
         isSubscribed=result.is_subscribed,
         subscriptionExpiresAt=result.subscription_expires_at,
         plan=result.subscription_plan,
+        willRenew=result.subscription_will_renew,
         trialRemaining=result.trial_remaining,
         creditsBalance=result.credits_balance,
         byokEnabled=result.byok_enabled,

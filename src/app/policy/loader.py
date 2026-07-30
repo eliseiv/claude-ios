@@ -32,6 +32,7 @@ class EffectivePolicy:
     reasons: list[BlockReason]
     subscription_expires_at: datetime.datetime | None
     subscription_plan: str | None
+    subscription_will_renew: bool | None
 
 
 def _now() -> datetime.datetime:
@@ -108,9 +109,11 @@ async def effective(session: AsyncSession, user_id: uuid.UUID) -> EffectivePolic
     sub_row = await session.scalar(select(Subscription).where(Subscription.user_id == user_id))
     subscription_expires_at: datetime.datetime | None = None
     subscription_plan: str | None = None
+    subscription_will_renew: bool | None = None
     if sub_row is not None and is_subscribed:
         subscription_expires_at = sub_row.expires_at
         subscription_plan = sub_row.plan
+        subscription_will_renew = sub_row.will_renew
 
     return EffectivePolicy(
         is_subscribed=is_subscribed,
@@ -122,4 +125,5 @@ async def effective(session: AsyncSession, user_id: uuid.UUID) -> EffectivePolic
         reasons=reasons,
         subscription_expires_at=subscription_expires_at,
         subscription_plan=subscription_plan,
+        subscription_will_renew=subscription_will_renew,
     )

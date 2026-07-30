@@ -263,9 +263,10 @@ class AdaptyWebhookService:
         txn = event.transaction_id or event.original_transaction_id or event.event_id
 
         if semantics == parser.SEM_NOOP:
-            # Auto-renew cancellation: access is kept until period end -> touch neither subscription
-            # nor credits. Echo the current subscription state (if any) into the audit row.
-            status, plan = await self._read_subscription(resolved_user_id)
+            # Auto-renew cancellation: access is kept until period end -> do NOT touch status /
+            # expires_at / credits, but persist will_renew (false) so the client can show
+            # "cancelled, ends at expiresAt". Echo the current subscription state into the audit.
+            status, plan = await self._read_subscription(resolved_user_id, event.will_renew)
         else:
             status, plan = await self._upsert_subscription(event, semantics, resolved_user_id)
             if semantics == parser.SEM_GRANTING:
@@ -297,13 +298,22 @@ class AdaptyWebhookService:
             resolved_user_id=resolved_user_id,
         )
 
-    async def _read_subscription(self, user_id: uuid.UUID) -> tuple[str | None, str | None]:
-        """Read the current (status, plan) without mutating — used for the NOOP audit row."""
+    async def _read_subscription(
+        self, user_id: uuid.UUID, will_renew: bool | None = None
+    ) -> tuple[str | None, str | None]:
+        """Read the current (status, plan) for the NOOP audit row.
+
+        Does NOT change status/expires_at/credits, but persists ``will_renew`` on the existing row
+        (auto-renew cancellation) so /policy/effective can surface it. No row -> nothing to update.
+        """
         row = await self._session.scalar(
             select(Subscription).where(Subscription.user_id == user_id)
         )
         if row is None:
             return None, None
+        if will_renew is not None and row.will_renew != will_renew:
+            row.will_renew = will_renew
+            row.updated_at = _now()
         return row.status, row.plan
 
     async def _upsert_subscription(
@@ -327,12 +337,14 @@ class AdaptyWebhookService:
                     status=status,
                     plan=plan,
                     expires_at=event.expires_at,
+                    will_renew=event.will_renew,
                 )
                 self._session.add(row)
             else:
                 row.status = status
                 row.plan = plan
                 row.expires_at = event.expires_at
+                row.will_renew = event.will_renew
                 row.updated_at = _now()
         else:
             # EXPIRING: mark expired, do not touch plan / expires_at / credits.
@@ -343,11 +355,13 @@ class AdaptyWebhookService:
                     status=status,
                     plan=None,
                     expires_at=None,
+                    will_renew=event.will_renew,
                 )
                 self._session.add(row)
                 plan = None
             else:
                 row.status = status
+                row.will_renew = event.will_renew
                 row.updated_at = _now()
                 plan = row.plan
         await self._session.flush()

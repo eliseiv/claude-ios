@@ -79,6 +79,9 @@ class Subscription(Base):
     expires_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Auto-renew intent (ADR-047): true = will renew, false = cancelled/expiring, null = unknown
+    # (RU/broadapps path does not report it). Set from Adapty events; surfaced in /policy/effective.
+    will_renew: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )
