@@ -423,13 +423,16 @@ class CloudPaymentsWebhookService:
         ON CONFLICT (user_id) makes a concurrent first activation idempotent by PK. Parameterized;
         ``'active'`` casts to the subscription-status enum.
         """
+        # A paid subscription payment (re)activates auto-renew: set will_renew=true so a re-purchase
+        # after a cancel flips /policy/effective.willRenew back to true (ADR-047 / cancel endpoint).
         await self._session.execute(
             text(
-                "INSERT INTO subscriptions (user_id, status, plan, expires_at, updated_at) "
-                "VALUES (:uid, 'active', :plan, :expires_at, now()) "
+                "INSERT INTO subscriptions "
+                "(user_id, status, plan, expires_at, will_renew, updated_at) "
+                "VALUES (:uid, 'active', :plan, :expires_at, true, now()) "
                 "ON CONFLICT (user_id) DO UPDATE SET "
                 "status = 'active', plan = EXCLUDED.plan, "
-                "expires_at = EXCLUDED.expires_at, updated_at = now()"
+                "expires_at = EXCLUDED.expires_at, will_renew = true, updated_at = now()"
             ),
             {"uid": str(user_id), "plan": plan, "expires_at": expires_at},
         )
