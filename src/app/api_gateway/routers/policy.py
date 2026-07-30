@@ -26,6 +26,8 @@ async def policy_effective(current: CurrentUser, session: DbSession) -> Effectiv
     result = await effective(session, current.user_id)
     return EffectivePolicyResponse(
         isSubscribed=result.is_subscribed,
+        subscriptionExpiresAt=result.subscription_expires_at,
+        plan=result.subscription_plan,
         trialRemaining=result.trial_remaining,
         creditsBalance=result.credits_balance,
         byokEnabled=result.byok_enabled,
