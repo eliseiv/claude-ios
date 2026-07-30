@@ -106,9 +106,11 @@ async def effective(session: AsyncSession, user_id: uuid.UUID) -> EffectivePolic
 
     # Subscription detail for the client (only meaningful while effectively active — lazy expiry).
     sub_row = await session.scalar(select(Subscription).where(Subscription.user_id == user_id))
-    _has_active = sub_row is not None and is_subscribed
-    subscription_expires_at = sub_row.expires_at if _has_active else None
-    subscription_plan = sub_row.plan if _has_active else None
+    subscription_expires_at: datetime.datetime | None = None
+    subscription_plan: str | None = None
+    if sub_row is not None and is_subscribed:
+        subscription_expires_at = sub_row.expires_at
+        subscription_plan = sub_row.plan
 
     return EffectivePolicy(
         is_subscribed=is_subscribed,
