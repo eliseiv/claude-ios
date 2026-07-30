@@ -20,7 +20,15 @@ class EffectivePolicyResponse(StrictModel):
     )
     plan: str | None = Field(
         default=None,
-        description="Код тарифа активной подписки (например `week_6.99_not_trial`), или `null`.",
+        description="Код тарифа активной подписки (например `week_6.99_nottrial`), или `null`.",
+    )
+    willRenew: bool | None = Field(
+        default=None,
+        description=(
+            "Активно ли автопродление активной подписки: `true` — продлится, `false` — отменена "
+            "(доступ до `subscriptionExpiresAt`), `null` — неизвестно (нет подписки, либо оплата "
+            "прошла по каналу без сведений об автопродлении, напр. RU-платёж)."
+        ),
     )
     trialRemaining: int = Field(description="Остаток бесплатных пробных генераций (trial).")
     creditsBalance: int = Field(description="Текущий баланс кредитов (1 кредит = 1 сообщение).")
