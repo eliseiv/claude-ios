@@ -32,11 +32,28 @@ class TokenPurchaseResponse(StrictModel):
 
 
 class TokenProduct(StrictModel):
-    productId: str = Field(description="StoreKit productId пакета токенов.")
-    credits: int = Field(description="Сколько кредитов начисляется за этот пакет.")
+    productId: str = Field(description="Идентификатор продукта (совпадает с Adapty/StoreKit).")
+    title: str | None = Field(default=None, description="Отображаемое название (или null).")
+    kind: str | None = Field(
+        default=None, description="`subscription` | `tokens` (или null, если не задан)."
+    )
+    period: str | None = Field(
+        default=None, description="Период подписки (`week`/`year`/…); `null` для токенов."
+    )
+    price: int | None = Field(
+        default=None, description="Цена в минорных единицах (напр. `699` = 6.99), статична."
+    )
+    currency: str | None = Field(default=None, description="Валюта цены (напр. `RUB`).")
+    credits: int | None = Field(
+        default=None, description="Кредиты за пакет токенов; `null` для подписки."
+    )
 
 
 class TokenProductsResponse(StrictModel):
     products: list[TokenProduct] = Field(
-        description="Каталог пакетов токенов (productId → credits). Цены — из StoreKit на клиенте."
+        description=(
+            "Каталог продуктов. Если задан `PRODUCTS_CATALOG` — полный статичный каталог "
+            "(подписки+токены) с `title`/`price`/`currency`; иначе только токен-пакеты "
+            "(`productId`→`credits`), а цены берёт клиент из Adapty/StoreKit."
+        )
     )

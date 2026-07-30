@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import ValidationError
 
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.config import get_settings
@@ -65,10 +66,23 @@ async def purchase_tokens(
 async def list_token_products(
     current: CurrentUser,
 ) -> TokenProductsResponse:
-    products = get_settings().token_products()
+    settings = get_settings()
+    catalog = settings.products_catalog()
+    if catalog:
+        # Static display catalog (subs + tokens). Skip items that fail schema validation so one
+        # bad entry never 500s the whole endpoint.
+        items: list[TokenProduct] = []
+        for raw in catalog:
+            try:
+                items.append(TokenProduct.model_validate(raw))
+            except ValidationError:
+                continue
+        if items:
+            return TokenProductsResponse(products=items)
+    # Fallback: token packs derived from TOKEN_PRODUCTS (productId -> credits).
     return TokenProductsResponse(
         products=[
             TokenProduct(productId=product_id, credits=credits)
-            for product_id, credits in products.items()
+            for product_id, credits in settings.token_products().items()
         ]
     )
