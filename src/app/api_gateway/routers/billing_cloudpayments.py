@@ -21,6 +21,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 
 from app.api_gateway.rate_limit import (
     enforce_cloudpayments_webhook_limits,
@@ -32,12 +33,15 @@ from app.billing_cloudpayments.service import CloudPaymentsWebhookService
 from app.config import Settings, get_settings
 from app.deps import (
     CurrentUser,
+    DbSession,
     client_ip,
     get_cloudpayments_checkout_client,
     get_cloudpayments_webhook_service,
 )
 from app.errors import CloudPaymentsCheckoutNotConfiguredError, RateLimitedError
+from app.models import Subscription
 from app.schemas.billing_cloudpayments import (
+    CloudPaymentsCancelResponse,
     CloudPaymentsCheckoutRequest,
     CloudPaymentsCheckoutResponse,
     CloudPaymentsWebhookResponse,
@@ -108,4 +112,38 @@ async def cloudpayments_checkout(
         paymentUrl=result.payment_url,
         status=result.status,
         expiresAt=result.expires_at,
+    )
+
+
+@router.post(
+    "/cancel",
+    response_model=CloudPaymentsCancelResponse,
+    summary="Отменить подписку (RU)",
+    description=(
+        "Отменяет автопродление активной RU-подписки у провайдера (broadapps). Доступ сохраняется "
+        "до конца оплаченного периода (`status`/`expiresAt` не меняются), а `willRenew` становится "
+        "`false`. Требуется JWT. Если активной подписки у провайдера нет — `canceled=false`."
+    ),
+)
+async def cloudpayments_cancel(
+    current: CurrentUser,
+    session: DbSession,
+    client: Annotated[CloudPaymentsCheckoutClient, Depends(get_cloudpayments_checkout_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CloudPaymentsCancelResponse:
+    if not settings.cloudpayments_checkout_configured():
+        raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
+    if not await enforce_other_limits(user_id=current.user_id):
+        raise RateLimitedError("rate limit exceeded")
+    result = await client.cancel_subscription(user_id=current.user_id)
+    # Reflect auto-renew off locally (keep status/expires_at) so /policy/effective shows willRenew.
+    sub = await session.scalar(select(Subscription).where(Subscription.user_id == current.user_id))
+    if sub is not None:
+        sub.will_renew = False
+    return CloudPaymentsCancelResponse(
+        canceled=result.found,
+        status=result.status,
+        canceledAt=result.canceled_at,
+        alreadyCanceled=result.already_canceled,
+        willRenew=False,
     )
