@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 from functools import lru_cache
+from typing import Any
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -243,6 +244,12 @@ class Settings(BaseSettings):
     # "tokens_100":100}. Empty default => no products configured (every purchase 422 until set).
     token_products_raw: str = Field(default="{}", alias="TOKEN_PRODUCTS")
 
+    # Optional STATIC display catalog for GET /v1/tokens/products (subs + tokens with
+    # title/price/currency). Display-only — crediting still uses TOKEN_PRODUCTS. JSON array of
+    # objects; each must have a string `productId`. Empty/malformed => endpoint falls back to the
+    # TOKEN_PRODUCTS-derived {productId, credits} list. Not a secret.
+    products_catalog_raw: str = Field(default="[]", alias="PRODUCTS_CATALOG")
+
     # --- Admin auth (ADR-009, ADM-1) ---
     # Isolated admin secret (X-Admin-Token). High-entropy (>= 32 bytes), only via secret
     # manager / env, never in code/repo/image. Not shared with JWT/KMS/ANTHROPIC/PREVIEW
@@ -401,6 +408,30 @@ class Settings(BaseSettings):
                 continue
             products[key] = value
         return products
+
+    def products_catalog(self) -> list[dict[str, Any]]:
+        """Parse PRODUCTS_CATALOG (JSON array) into a list of display product dicts.
+
+        Display-only (GET /v1/tokens/products). Keeps only object items with a non-empty string
+        `productId`; malformed JSON / non-array / bad items are dropped gracefully (empty list =>
+        endpoint falls back to the TOKEN_PRODUCTS-derived catalog). Pure (no I/O).
+        """
+        import json
+
+        try:
+            parsed = json.loads(self.products_catalog_raw or "[]")
+        except (ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(parsed, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("productId")
+            if isinstance(pid, str) and pid:
+                out.append(item)
+        return out
 
     def adapty_product_tokens(self) -> dict[str, int]:
         """Parse ADAPTY_PRODUCT_TOKENS (JSON object vendor_product_id->tokens) (ADR-029 §5).
