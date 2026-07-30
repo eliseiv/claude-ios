@@ -55,3 +55,23 @@ class CloudPaymentsCheckoutResponse(StrictModel):
         description="Момент истечения ссылки (если задан провайдером), иначе `null`.",
         examples=[None],
     )
+
+
+class CloudPaymentsCancelResponse(StrictModel):
+    """Итог отмены RU-подписки. Автосписание отключено, доступ сохраняется до конца периода."""
+
+    canceled: bool = Field(
+        description="Найдена ли активная подписка и отправлена ли отмена в провайдер."
+    )
+    status: str | None = Field(
+        default=None, description="Статус подписки у провайдера после отмены (или `null`)."
+    )
+    canceledAt: str | None = Field(
+        default=None, description="Момент отмены (ISO8601), если провайдер вернул."
+    )
+    alreadyCanceled: bool | None = Field(
+        default=None, description="Была ли подписка уже отменена ранее (или `null`)."
+    )
+    willRenew: bool = Field(
+        description="Флаг автопродления после операции (`false` при успешной отмене)."
+    )

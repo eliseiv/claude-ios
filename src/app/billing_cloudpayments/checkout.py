@@ -41,6 +41,20 @@ class CheckoutResult:
     expires_at: str | None
 
 
+@dataclass(frozen=True)
+class CancelResult:
+    """Passthrough of the broadapps subscription-cancel response.
+
+    ``found`` is False when the user has no active broadapps subscription (nothing to cancel).
+    ``status`` / ``canceled_at`` / ``already_canceled`` echo the broadapps cancel response.
+    """
+
+    found: bool
+    status: str | None = None
+    canceled_at: str | None = None
+    already_canceled: bool | None = None
+
+
 class CloudPaymentsCheckoutClient:
     """Creates a RU payment link via broadapps. Passthrough — no DB, no persisted state."""
 
@@ -60,6 +74,91 @@ class CloudPaymentsCheckoutClient:
             raise ValidationFailedError("unknown_product")
         if kind == KIND_TOKENS and token_products.get(product_id, 0) <= 0:
             raise ValidationFailedError("unknown_product")
+
+    async def cancel_subscription(self, *, user_id: uuid.UUID) -> CancelResult:
+        """Cancel the user's active broadapps recurring subscription (auto-renew off, access kept).
+
+        Two upstream calls: GET ``/users/{user_id}/subscriptions`` to find the active
+        ``subscription_id``, then POST ``/subscriptions/{id}/cancel``. ``user_id`` is the JWT
+        subject; the broadapps account must match the id the payment was made under. No active
+        subscription -> ``found=False`` (no upstream cancel, caller no-ops). Any upstream failure
+        maps to ``UpstreamError`` (502) and never leaks the upstream body/status or our token.
+        """
+        settings = self._settings
+        base = settings.cloudpayments_api_base
+        headers = {
+            "Authorization": f"Bearer {settings.cloudpayments_api_token}",
+            "Accept": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=_CHECKOUT_TIMEOUT_SECONDS) as client:
+                listing = await client.get(f"{base}/users/{user_id}/subscriptions", headers=headers)
+                if not (200 <= listing.status_code < 300):
+                    raise self._cancel_upstream_error("list_status", user_id)
+                sub_id = self._active_subscription_id(listing.json())
+                if sub_id is None:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "cloudpayments_cancel_outcome",
+                        result="no_active_subscription",
+                        userId=str(user_id),
+                    )
+                    return CancelResult(found=False)
+                cancel = await client.post(
+                    f"{base}/subscriptions/{sub_id}/cancel", json={}, headers=headers
+                )
+                if not (200 <= cancel.status_code < 300):
+                    raise self._cancel_upstream_error("cancel_status", user_id)
+                body = cancel.json()
+        except httpx.TimeoutException as exc:
+            raise self._cancel_upstream_error("timeout", user_id) from exc
+        except httpx.RequestError as exc:
+            raise self._cancel_upstream_error("connect_error", user_id) from exc
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise self._cancel_upstream_error("malformed_response", user_id) from exc
+
+        status = body.get("status") if isinstance(body, dict) else None
+        canceled_at = body.get("canceled_at") if isinstance(body, dict) else None
+        already = body.get("already_canceled") if isinstance(body, dict) else None
+        log_event(
+            logger,
+            logging.INFO,
+            "cloudpayments_cancel_outcome",
+            result="canceled",
+            userId=str(user_id),
+            alreadyCanceled=already,
+        )
+        return CancelResult(
+            found=True,
+            status=status if isinstance(status, str) else None,
+            canceled_at=canceled_at if isinstance(canceled_at, str) else None,
+            already_canceled=already if isinstance(already, bool) else None,
+        )
+
+    @staticmethod
+    def _active_subscription_id(listing: Any) -> str | None:
+        """Extract the first active subscription_id from a broadapps subscriptions listing."""
+        if not isinstance(listing, dict):
+            return None
+        for item in listing.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            sub_id = item.get("subscription_id")
+            if item.get("status") == "active" and isinstance(sub_id, str) and sub_id:
+                return sub_id
+        return None
+
+    def _cancel_upstream_error(self, reason: str, user_id: uuid.UUID) -> UpstreamError:
+        log_event(
+            logger,
+            logging.WARNING,
+            "cloudpayments_cancel_outcome",
+            result="error",
+            reason=reason,
+            userId=str(user_id),
+        )
+        return UpstreamError("payment provider unavailable")
 
     async def create_payment_link(
         self, *, user_id: uuid.UUID, product_id: str, customer_email: str
