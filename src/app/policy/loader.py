@@ -30,6 +30,8 @@ class EffectivePolicy:
     can_generate_credits_mode: bool
     can_generate_byok_mode: bool
     reasons: list[BlockReason]
+    subscription_expires_at: datetime.datetime | None
+    subscription_plan: str | None
 
 
 def _now() -> datetime.datetime:
@@ -102,6 +104,14 @@ async def effective(session: AsyncSession, user_id: uuid.UUID) -> EffectivePolic
     )
     byok_enabled_effective = state.byok_enabled and state.byok_status is ByokState.valid
 
+    # Subscription detail for the client (only meaningful while effectively active — lazy expiry).
+    sub_row = await session.scalar(select(Subscription).where(Subscription.user_id == user_id))
+    subscription_expires_at: datetime.datetime | None = None
+    subscription_plan: str | None = None
+    if sub_row is not None and is_subscribed:
+        subscription_expires_at = sub_row.expires_at
+        subscription_plan = sub_row.plan
+
     return EffectivePolicy(
         is_subscribed=is_subscribed,
         trial_remaining=trial_remaining,
@@ -110,4 +120,6 @@ async def effective(session: AsyncSession, user_id: uuid.UUID) -> EffectivePolic
         can_generate_credits_mode=credits_decision.allow,
         can_generate_byok_mode=byok_decision.allow,
         reasons=reasons,
+        subscription_expires_at=subscription_expires_at,
+        subscription_plan=subscription_plan,
     )

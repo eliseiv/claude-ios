@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+
 from pydantic import Field
 
 from app.schemas.common import StrictModel
@@ -9,6 +11,17 @@ from app.schemas.common import StrictModel
 
 class EffectivePolicyResponse(StrictModel):
     isSubscribed: bool = Field(description="Есть ли активная подписка.")
+    subscriptionExpiresAt: datetime.datetime | None = Field(
+        default=None,
+        description=(
+            "Момент окончания активной подписки (ISO8601), или `null` если подписки нет/истекла. "
+            "После него подписка лениво считается истёкшей и `isSubscribed` станет `false`."
+        ),
+    )
+    plan: str | None = Field(
+        default=None,
+        description="Код тарифа активной подписки (например `week_6.99_not_trial`), или `null`.",
+    )
     trialRemaining: int = Field(description="Остаток бесплатных пробных генераций (trial).")
     creditsBalance: int = Field(description="Текущий баланс кредитов (1 кредит = 1 сообщение).")
     byokEnabled: bool = Field(
