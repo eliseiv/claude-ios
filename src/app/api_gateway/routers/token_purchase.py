@@ -6,14 +6,20 @@ Consumable StoreKit IAP -> idempotent credit grant. Distinct from subscription/s
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
 
 from app.api_gateway.rate_limit import enforce_other_limits
+from app.billing_cloudpayments.checkout import CloudPaymentsCheckoutClient
 from app.config import get_settings
-from app.deps import CurrentUser, get_token_purchase_service, require_owner
+from app.deps import (
+    CurrentUser,
+    get_cloudpayments_checkout_client,
+    get_token_purchase_service,
+    require_owner,
+)
 from app.errors import RateLimitedError
 from app.schemas.token_purchase import (
     TokenProduct,
@@ -65,12 +71,20 @@ async def purchase_tokens(
 )
 async def list_token_products(
     current: CurrentUser,
+    client: Annotated[CloudPaymentsCheckoutClient, Depends(get_cloudpayments_checkout_client)],
 ) -> TokenProductsResponse:
     settings = get_settings()
+    # 1) Live catalog from broadapps (source of truth for RU products). credits come from our
+    #    TOKEN_PRODUCTS map (broadapps does not know credit amounts); subscriptions -> null.
+    data = await client.list_products()
+    if data:
+        token_products = settings.token_products()
+        live = [p for p in (_from_broadapps(x, token_products) for x in data) if p is not None]
+        if live:
+            return TokenProductsResponse(products=live)
+    # 2) Fallback: static PRODUCTS_CATALOG (skip items that fail schema validation).
     catalog = settings.products_catalog()
     if catalog:
-        # Static display catalog (subs + tokens). Skip items that fail schema validation so one
-        # bad entry never 500s the whole endpoint.
         items: list[TokenProduct] = []
         for raw in catalog:
             try:
@@ -79,10 +93,45 @@ async def list_token_products(
                 continue
         if items:
             return TokenProductsResponse(products=items)
-    # Fallback: token packs derived from TOKEN_PRODUCTS (productId -> credits).
+    # 3) Fallback: token packs derived from TOKEN_PRODUCTS (productId -> credits).
     return TokenProductsResponse(
         products=[
             TokenProduct(productId=product_id, credits=credits)
             for product_id, credits in settings.token_products().items()
         ]
+    )
+
+
+def _from_broadapps(item: Any, token_products: dict[str, int]) -> TokenProduct | None:
+    """Map one broadapps product dict to a TokenProduct; skip inactive / malformed items.
+
+    price = price_amount (major units, e.g. "699.00") -> minor units int (69900). credits come from
+    the operator TOKEN_PRODUCTS map for token packs; subscriptions carry null credits.
+    """
+    if not isinstance(item, dict):
+        return None
+    code = item.get("code")
+    if not isinstance(code, str) or not code:
+        return None
+    if item.get("status") not in (None, "active"):
+        return None
+    is_sub = item.get("payment_type") == "subscription"
+    price: int | None = None
+    amount = item.get("price_amount")
+    if isinstance(amount, str | int | float):
+        try:
+            price = round(float(amount) * 100)
+        except (TypeError, ValueError):
+            price = None
+    period = item.get("subscription_interval_unit")
+    currency = item.get("price_currency")
+    name = item.get("name")
+    return TokenProduct(
+        productId=code,
+        title=name if isinstance(name, str) else None,
+        kind="subscription" if is_sub else "tokens",
+        period=period if isinstance(period, str) else None,
+        price=price,
+        currency=currency if isinstance(currency, str) else None,
+        credits=None if is_sub else token_products.get(code),
     )
