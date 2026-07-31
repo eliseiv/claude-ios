@@ -208,7 +208,7 @@ Devops заводит/обновляет артефакты под тополо�
 ```
 # GitHub Actions step (appleboy/ssh-action, script_stop: false):
 set -uo pipefail   # NO `-e` — loop ОБЯЗАН пройти ВСЕ инстансы; per-instance ошибки копятся в $FAILED
-INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet"   # claude-ios первым (backward-compat); veltrio выведен 2026-07-18 (ADR-056) — НЕ возвращать
+INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet"   # claude-ios первым (backward-compat); veltrio выведен 2026-07-18 (ADR-056) — НЕ возвращать
 FAILED=""
 for entry in $INSTANCES; do
   dir="${entry%%:*}"; proj="${entry##*:}"
@@ -270,8 +270,12 @@ GitHub Secrets (обязательны для workflow): `SSH_HOST=87.239.135.15
 - `orvianix` (OpenAI-инстанс, [ADR-033](adr/ADR-033-llm-provider-abstraction.md)) — `orvianix.shop`, каталог `/opt/orvianix`, `LLM_PROVIDER=openai` + per-instance `OPENAI_API_KEY`.
 - `elvarixa` (OpenAI-инстанс, [ADR-033](adr/ADR-033-llm-provider-abstraction.md)) — `elvarixa.shop`, каталог `/opt/elvarixa`, `LLM_PROVIDER=openai` + per-instance `OPENAI_API_KEY`.
 - `corvionet` — `corvionet.shop`, каталог `/opt/corvionet`.
+- `modavira` — `modavira.shop`, каталог `/opt/modavira`.
+- `artolixo` — `artolixo.shop`, каталог `/opt/artolixo`.
+- `lunexoro` — `lunexoro.shop`, каталог `/opt/lunexoro`.
+- `ravionet` — `ravionet.shop`, каталог `/opt/ravionet`.
 
-Действующих инстансов — **пять** (`claude-ios`, `avelyra`, `orvianix`, `elvarixa`, `corvionet`).
+Действующих инстансов — **девять** (`claude-ios`, `avelyra`, `orvianix`, `elvarixa`, `corvionet`, `modavira`, `artolixo`, `lunexoro`, `ravionet`).
 
 > **Выведен из эксплуатации: `veltrio` / `veltriohub.shop` (2026-07-18, [ADR-056](adr/ADR-056-instance-decommission-veltrio.md)).** Контейнеры остановлены и удалены, Traefik-роутер снят (`https://veltriohub.shop/healthz` → `404`), домен передан **другому сервису на том же сервере**. Тома `veltrio_pgdata`/`veltrio_redisdata` и каталог `/opt/veltrio` **сохранены**, бэкап снят (`/root/veltrio-decommission-20260718140433`: дамп БД, `.env`, `.secrets`) — отключение технически обратимо. Сохранённые артефакты = живой остаточный риск перехвата домена, заведён в реестр как [TD-030](100-known-tech-debt.md) (решение об удалении каталога/томов/бэкапа и его срок — за оператором).
 >
@@ -398,9 +402,9 @@ docker compose -f docker-compose.prod.yml --env-file .env config
 
 Deploy-job (gated в `ci.yml` и ручной `deploy.yml`) получает нормативную переменную `INSTANCES` — список инстансов в формате `dir:project`, разделённый пробелами, **claude-ios первым** (backward-compat). **Нормативное значение (совпадает с фактическим `ci.yml` + `deploy.yml`):**
 ```
-INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet"
+INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet"
 ```
-**Нормативный список инстансов (источник истины, docs ↔ оба workflow совпадают) — пять действующих:**
+**Нормативный список инстансов (источник истины, docs ↔ оба workflow совпадают) — девять действующих:**
 
 | dir (`/opt/<dir>`) | project (`-p`) | домен (`SERVICE_DOMAIN`) | провайдер | Порядок |
 |---|---|---|---|---|
@@ -408,7 +412,11 @@ INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elva
 | `avelyra` | `avelyra` | `avelyraweb.shop` | Anthropic (дефолт) | 2-й |
 | `orvianix` | `orvianix` | `orvianix.shop` | OpenAI (`LLM_PROVIDER=openai`) | 3-й |
 | `elvarixa` | `elvarixa` | `elvarixa.shop` | OpenAI (`LLM_PROVIDER=openai`) | 4-й |
-| `corvionet` | `corvionet` | `corvionet.shop` | Anthropic (дефолт) | 5-й |
+| `corvionet` | `corvionet` | `corvionet.shop` | OpenAI (`LLM_PROVIDER=openai`) | 5-й |
+| `modavira` | `modavira` | `modavira.shop` | OpenAI (`LLM_PROVIDER=openai`) | 6-й |
+| `artolixo` | `artolixo` | `artolixo.shop` | OpenAI (`LLM_PROVIDER=openai`) | 7-й |
+| `lunexoro` | `lunexoro` | `lunexoro.shop` | OpenAI (`LLM_PROVIDER=openai`) | 8-й |
+| `ravionet` | `ravionet` | `ravionet.shop` | OpenAI (`LLM_PROVIDER=openai`) | 9-й |
 
 **Выведен из эксплуатации (в `INSTANCES` отсутствует и не возвращается).** Таблица ниже — **реестр, по которому перебираются наблюдатели инварианта И-1** ([ADR-056 §Решение п.6](adr/ADR-056-instance-decommission-veltrio.md)): для каждой её строки `curl -sI https://<домен>/healthz` не должен отвечать нашим сервисом (авторитетный наблюдатель отказа). Проверка «`INSTANCES` посимвольно равен нормативному значению выше» — наблюдатель срабатывания защиты; он покрывает любой будущий выведенный инстанс без правки. Новая строка здесь = новая цель обхода наблюдателей.
 
@@ -445,7 +453,7 @@ INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elva
 - Добавление инстанса = добавить `dir:project` в `INSTANCES` (после провижининга его `/opt/<dir>` + `.env` + `.secrets/` по процедуре выше).
 - **Вывод инстанса из эксплуатации** ([ADR-056](adr/ADR-056-instance-decommission-veltrio.md)) = убрать `dir:project` из `INSTANCES` в **обоих** workflow (`ci.yml` + `deploy.yml`) + `docker compose -p <proj> -f docker-compose.prod.yml down` на сервере (снимает Traefik-роутер). Каталог `/opt/<dir>` и тома по умолчанию **сохраняются** (`down` без `-v`) — данные не теряются. **Инвариант:** если домен выведенного инстанса передан другому владельцу, запись **не возвращается** в `INSTANCES` ни при каких обстоятельствах — деплой поднимет `api` с labels `Host(<его SERVICE_DOMAIN>)` и **перехватит домен**. Возврат — только после смены `SERVICE_DOMAIN` в `/opt/<dir>/.env` и согласования с владельцем сервера.
 
-> **Текущий статус: ВНЕДРЕНО.** `INSTANCES`-loop и compose-параметризация (`${COMPOSE_PROJECT_NAME:-claude-ios}`) внесены в **оба** workflow (`ci.yml` gated deploy-job + ручной `deploy.yml`) и `docker-compose.prod.yml`; фактическое значение в обоих workflow — `INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet"` (claude-ios первым, пять действующих инстансов). Второй инстанс `avelyra` (`avelyraweb.shop`) развёрнут и изолирован ([Q-017-3](99-open-questions.md) Closed). Третий инстанс `orvianix` (`orvianix.shop`, OpenAI, [ADR-033](adr/ADR-033-llm-provider-abstraction.md)) и четвёртый `elvarixa` (`elvarixa.shop`, OpenAI) добавлены в loop; `/opt/orvianix` и `/opt/elvarixa` провижинены отдельно (`.env` с `LLM_PROVIDER=openai` + `OPENAI_*` + `.secrets/`). Пятый инстанс `corvionet` (`corvionet.shop`, Anthropic) добавлен в loop; `/opt/corvionet` провижинируется отдельно (`.env` + `.secrets/`). Прежний 4-й инстанс `veltrio` (`veltriohub.shop`, OpenAI) **выведен из эксплуатации 2026-07-18** и удалён из `INSTANCES` обоих workflow — возврат записи запрещён ([ADR-056](adr/ADR-056-instance-decommission-veltrio.md)). Инвариант обратной совместимости (`-p claude-ios` = basename → no-op) сохранён — живой broadnova.shop не затронут. Зафиксированная здесь спека — нормативный контракт; docs ↔ оба workflow совпадают.
+> **Текущий статус: ВНЕДРЕНО.** `INSTANCES`-loop и compose-параметризация (`${COMPOSE_PROJECT_NAME:-claude-ios}`) внесены в **оба** workflow (`ci.yml` gated deploy-job + ручной `deploy.yml`) и `docker-compose.prod.yml`; фактическое значение в обоих workflow — `INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet"` (claude-ios первым, девять действующих инстансов). Клоны `modavira`, `artolixo`, `lunexoro`, `ravionet` добавлены в loop; каждый провижинируется отдельно в `/opt/<dir>` (`.env` + `.secrets/`). Прежний инстанс `veltrio` (`veltriohub.shop`) **выведен из эксплуатации 2026-07-18** и удалён из `INSTANCES` обоих workflow — возврат записи запрещён ([ADR-056](adr/ADR-056-instance-decommission-veltrio.md)). Инвариант обратной совместимости (`-p claude-ios` = basename → no-op) сохранён — живой broadnova.shop не затронут. Зафиксированная здесь спека — нормативный контракт; docs ↔ оба workflow совпадают.
 
 ## Миграции
 - Alembic. `uv run alembic upgrade head` в `migrate`-job (`docker compose run --rm migrate`) до старта `api`.
