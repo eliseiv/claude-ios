@@ -75,6 +75,31 @@ class CloudPaymentsCheckoutClient:
         if kind == KIND_TOKENS and token_products.get(product_id, 0) <= 0:
             raise ValidationFailedError("unknown_product")
 
+    async def list_products(self) -> list[dict[str, Any]] | None:
+        """Fetch the broadapps product catalog for this app (GET /apps/{app_id}/products).
+
+        Returns the raw ``data`` list of product dicts, or ``None`` on any failure / unconfigured
+        app (the caller then falls back to the static catalog). Never raises; token never logged.
+        """
+        settings = self._settings
+        if not settings.cloudpayments_app_id or not settings.cloudpayments_api_token:
+            return None
+        url = f"{settings.cloudpayments_api_base}/apps/{settings.cloudpayments_app_id}/products"
+        headers = {
+            "Authorization": f"Bearer {settings.cloudpayments_api_token}",
+            "Accept": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=_CHECKOUT_TIMEOUT_SECONDS) as client:
+                resp = await client.get(url, headers=headers)
+            if not (200 <= resp.status_code < 300):
+                return None
+            body = resp.json()
+        except (httpx.HTTPError, ValueError, UnicodeDecodeError):
+            return None
+        data = body.get("data") if isinstance(body, dict) else None
+        return data if isinstance(data, list) else None
+
     async def cancel_subscription(self, *, user_id: uuid.UUID) -> CancelResult:
         """Cancel the user's active broadapps recurring subscription (auto-renew off, access kept).
 
