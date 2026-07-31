@@ -105,7 +105,7 @@ async def list_token_products(
 def _from_broadapps(item: Any, token_products: dict[str, int]) -> TokenProduct | None:
     """Map one broadapps product dict to a TokenProduct; skip inactive / malformed items.
 
-    price = price_amount (major units, e.g. "699.00") -> minor units int (69900). credits come from
+    price = price_amount with kopecks dropped, whole rubles ("699.00" -> 699). credits come from
     the operator TOKEN_PRODUCTS map for token packs; subscriptions carry null credits.
     """
     if not isinstance(item, dict):
@@ -120,7 +120,7 @@ def _from_broadapps(item: Any, token_products: dict[str, int]) -> TokenProduct |
     amount = item.get("price_amount")
     if isinstance(amount, str | int | float):
         try:
-            price = round(float(amount) * 100)
+            price = int(float(amount))  # drop kopecks: "699.00" -> 699
         except (TypeError, ValueError):
             price = None
     period = item.get("subscription_interval_unit")
