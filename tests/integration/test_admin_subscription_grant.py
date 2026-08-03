@@ -491,7 +491,7 @@ async def test_user_jwt_does_not_authorize(
         json={"userId": str(uid), "days": 30, "idempotencyKey": "s"},
         headers=auth_headers(uid),  # valid user JWT, but no X-Admin-Token
     )
-    assert r.status_code == 401
+    assert r.status_code == 403
 
 
 @pytest.mark.asyncio

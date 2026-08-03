@@ -289,7 +289,7 @@ async def test_user_jwt_does_not_authorize_admin_route(
         json={"userId": str(uid), "amount": 5, "idempotencyKey": "jwt", "reason": "x"},
         headers=auth_headers(uid),
     )
-    assert r.status_code == 401
+    assert r.status_code == 403
 
 
 @pytest.mark.asyncio
