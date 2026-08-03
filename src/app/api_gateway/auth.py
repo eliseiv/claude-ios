@@ -16,12 +16,12 @@ from typing import Annotated
 
 import httpx
 import jwt
-from fastapi import Depends
+from fastapi import Depends, Header
 from jwt import PyJWKClient
 
 from app.api_gateway.openapi_security import admin_scheme
 from app.config import get_settings
-from app.errors import UnauthorizedError
+from app.errors import ForbiddenError, UnauthorizedError
 
 
 @dataclass(frozen=True)
@@ -96,38 +96,46 @@ def get_jwt_verifier() -> JwtVerifier:
     return _verifier_singleton
 
 
-def _admin_token_matches(presented: str) -> bool:
-    """Constant-time compare the presented X-Admin-Token against the active admin secret(s).
-
-    Accepts a match with ADMIN_API_SECRET or (during rotation) ADMIN_API_SECRET_PREV. Both
-    comparisons are constant-time (``hmac.compare_digest``). An empty/unset configured secret
-    never matches (so a blank header can never authenticate). Both candidates are always
-    evaluated to avoid early-exit timing leaks (ADR-009 §3, §5).
-    """
+def _configured_admin_secrets() -> tuple[str, ...]:
+    """All non-empty admin secrets (current, rotation grace, CRM alias)."""
     settings = get_settings()
+    return tuple(
+        s
+        for s in (
+            settings.admin_api_secret,
+            settings.admin_api_secret_prev,
+            settings.admin_api_key,
+        )
+        if s
+    )
+
+
+def _admin_token_matches(presented: str) -> bool:
+    """Constant-time compare the presented admin credential against configured secret(s).
+
+    Accepts a match with ADMIN_API_SECRET, ADMIN_API_SECRET_PREV (rotation), or ADMIN_API_KEY
+    (CRM alias). An empty/unset configured secret never matches.
+    """
     matched = False
-    for candidate in (settings.admin_api_secret, settings.admin_api_secret_prev):
-        if candidate and hmac.compare_digest(presented, candidate):
+    for candidate in _configured_admin_secrets():
+        if hmac.compare_digest(presented, candidate):
             matched = True
     return matched
 
 
 async def require_admin(
+    x_admin_key: Annotated[str | None, Header(alias="X-Admin-Key")] = None,
     x_admin_token: Annotated[str | None, Depends(admin_scheme)] = None,
 ) -> None:
-    """Authorize an admin request via the isolated X-Admin-Token (ADR-009).
+    """Authorize an admin request (ADR-009 + broad-crm contract).
 
-    Fully separate from ``get_current_user``: no JWT, no lazy-provisioning (ADR-007), no
-    ``users.trial_used`` read/write, no ``users`` row created for the actor. The admin has no
-    ``sub``/identity — the actor is recorded as ``admin`` in audit. A missing or mismatching
-    token raises 401 without revealing the reason. The secret is never logged (redaction
-    allowlist covers X-Admin-Token, ADR-009 §6).
-
-    The token value comes from ``admin_scheme`` (APIKeyHeader on ``X-Admin-Token``,
-    ``auto_error=False``): a ``SecurityBase`` that contributes the ``adminToken`` security
-    scheme to OpenAPI (lock / Authorize) *without* emitting a duplicate ``X-Admin-Token`` header
-    parameter on the operation. ``auto_error=False`` keeps it from raising before our
-    constant-time check, so the 401-on-missing/mismatch behaviour is unchanged (ADR-009).
+    Credentials: ``X-Admin-Key`` (CRM) or legacy ``X-Admin-Token``. Fail-closed when no secret is
+    configured (401). Missing header → 403; wrong credential → 401.
     """
-    if x_admin_token is None or not _admin_token_matches(x_admin_token):
-        raise UnauthorizedError("invalid admin token")
+    if not _configured_admin_secrets():
+        raise UnauthorizedError("admin api not configured")
+    presented = x_admin_key if x_admin_key is not None else x_admin_token
+    if presented is None:
+        raise ForbiddenError("missing admin key")
+    if not _admin_token_matches(presented):
+        raise UnauthorizedError("invalid admin key")

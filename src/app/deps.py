@@ -12,6 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin.crm_service import CrmAdminService
 from app.admin.service import AdminService
 from app.api_gateway.auth import AuthenticatedUser, get_jwt_verifier
 from app.api_gateway.openapi_security import bearer_scheme
@@ -201,6 +202,13 @@ def get_cloudpayments_checkout_client() -> CloudPaymentsCheckoutClient:
 def get_admin_service(session: DbSession) -> AdminService:
     audit = AuditService(session)
     return AdminService(session, WalletService(session, audit), audit)
+
+
+def get_crm_admin_service(session: DbSession) -> CrmAdminService:
+    audit = AuditService(session)
+    wallet = WalletService(session, audit)
+    admin = AdminService(session, wallet, audit)
+    return CrmAdminService(session, wallet, audit, admin)
 
 
 def get_chats_service(session: DbSession) -> ChatsService:
