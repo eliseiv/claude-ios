@@ -6,7 +6,6 @@ legacy camelCase /v1/admin/wallet/* schemas.
 
 from __future__ import annotations
 
-import datetime
 from typing import Literal
 
 from pydantic import Field

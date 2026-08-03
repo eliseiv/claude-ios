@@ -176,9 +176,10 @@ class CrmAdminService:
         total = int(await self._session.scalar(text(count_sql), params) or 0)
 
         rows = (
-            await self._session.execute(
-                text(
-                    f"""
+            (
+                await self._session.execute(
+                    text(
+                        f"""
                     SELECT
                       u.id,
                       u.created_at,
@@ -215,14 +216,17 @@ class CrmAdminService:
                     ORDER BY u.created_at DESC
                     LIMIT :lim OFFSET :off
                     """
-                ),
-                {
-                    **params,
-                    "adapty_types": list(_ADAPTY_PAYMENT_EVENTS),
-                    "renewal_types": list(_ADAPTY_RENEWAL_EVENTS),
-                },
+                    ),
+                    {
+                        **params,
+                        "adapty_types": list(_ADAPTY_PAYMENT_EVENTS),
+                        "renewal_types": list(_ADAPTY_RENEWAL_EVENTS),
+                    },
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
         items: list[CrmUserListItem] = []
         for row in rows:
@@ -246,9 +250,10 @@ class CrmAdminService:
 
     async def get_user(self, user_id: uuid.UUID) -> CrmUserDetailResponse:
         row = (
-            await self._session.execute(
-                text(
-                    """
+            (
+                await self._session.execute(
+                    text(
+                        """
                     SELECT u.id, u.created_at,
                            COALESCE(w.balance, 0) AS balance,
                            s.status, s.plan, s.expires_at
@@ -257,10 +262,13 @@ class CrmAdminService:
                     LEFT JOIN subscriptions s ON s.user_id = u.id
                     WHERE u.id = :uid
                     """
-                ),
-                {"uid": str(user_id)},
+                    ),
+                    {"uid": str(user_id)},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if row is None:
             raise UserNotFoundError("user not found")
 
@@ -279,19 +287,23 @@ class CrmAdminService:
             {"uid": str(user_id)},
         )
         last_payment = (
-            await self._session.execute(
-                text(
-                    """
+            (
+                await self._session.execute(
+                    text(
+                        """
                     SELECT processed_at, product_id, payload
                     FROM cloudpayments_webhook_events
                     WHERE user_id = :uid
                     ORDER BY processed_at DESC
                     LIMIT 1
                     """
-                ),
-                {"uid": str(user_id)},
+                    ),
+                    {"uid": str(user_id)},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
 
         external_id = await self._external_id(user_id)
         plan_id = row["plan"]
@@ -326,9 +338,7 @@ class CrmAdminService:
 
         total_cp = int(
             await self._session.scalar(
-                text(
-                    "SELECT COUNT(*)::int FROM cloudpayments_webhook_events WHERE user_id = :uid"
-                ),
+                text("SELECT COUNT(*)::int FROM cloudpayments_webhook_events WHERE user_id = :uid"),
                 {"uid": str(user_id)},
             )
             or 0
@@ -343,9 +353,10 @@ class CrmAdminService:
         total = total_cp + total_ad
 
         rows = (
-            await self._session.execute(
-                text(
-                    """
+            (
+                await self._session.execute(
+                    text(
+                        """
                     SELECT title, description, amount, currency, status, occurred_at FROM (
                       SELECT
                         product_id AS title,
@@ -370,10 +381,13 @@ class CrmAdminService:
                     ORDER BY occurred_at DESC
                     LIMIT :lim OFFSET :off
                     """
-                ),
-                {"uid": str(user_id), "lim": limit, "off": offset},
+                    ),
+                    {"uid": str(user_id), "lim": limit, "off": offset},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
         items = [
             CrmPaymentItem(
@@ -403,19 +417,23 @@ class CrmAdminService:
             or 0
         )
         rows = (
-            await self._session.execute(
-                text(
-                    """
+            (
+                await self._session.execute(
+                    text(
+                        """
                     SELECT event_type, payload, created_at
                     FROM audit_logs
                     WHERE user_id = :uid
                     ORDER BY created_at DESC
                     LIMIT :lim OFFSET :off
                     """
-                ),
-                {"uid": str(user_id), "lim": limit, "off": offset},
+                    ),
+                    {"uid": str(user_id), "lim": limit, "off": offset},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
         items: list[CrmRequestItem] = []
         for row in rows:
@@ -428,7 +446,7 @@ class CrmAdminService:
             req_status: str
             if status_code >= 500 or payload.get("error"):
                 req_status = "error"
-            elif isinstance(duration, (int, float)) and duration > 30:
+            elif isinstance(duration, int | float) and duration > 30:
                 req_status = "slow"
             else:
                 req_status = "ok"
@@ -438,7 +456,7 @@ class CrmAdminService:
                     prompt_preview=preview if isinstance(preview, str) else None,
                     status_code=status_code,
                     status=req_status,
-                    duration_sec=float(duration) if isinstance(duration, (int, float)) else None,
+                    duration_sec=float(duration) if isinstance(duration, int | float) else None,
                     sent_at=_iso_z(row["created_at"]) or "",
                 )
             )
@@ -510,7 +528,7 @@ class CrmAdminService:
                     period=None,
                 )
             )
-        for product_id in self._settings.cloudpayments_product_tokens().keys():
+        for product_id in self._settings.cloudpayments_product_tokens():
             if product_id in seen:
                 continue
             seen.add(product_id)
@@ -606,13 +624,15 @@ class CrmAdminService:
 
         now = datetime.datetime.now(tz=datetime.UTC)
         sub_row = (
-            await self._session.execute(
-                text(
-                    "SELECT status, expires_at FROM subscriptions WHERE user_id = :uid"
-                ),
-                {"uid": str(user_id)},
+            (
+                await self._session.execute(
+                    text("SELECT status, expires_at FROM subscriptions WHERE user_id = :uid"),
+                    {"uid": str(user_id)},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         base = now
         if sub_row and sub_row["status"] == "active" and sub_row["expires_at"]:
             exp = sub_row["expires_at"]
@@ -672,9 +692,10 @@ class CrmAdminService:
         self, user_id: uuid.UUID
     ) -> tuple[int, dict[str, Any]]:
         row = (
-            await self._session.execute(
-                text(
-                    """
+            (
+                await self._session.execute(
+                    text(
+                        """
                     SELECT COALESCE(w.balance, 0) AS balance,
                            s.status, s.expires_at
                     FROM users u
@@ -682,10 +703,13 @@ class CrmAdminService:
                     LEFT JOIN subscriptions s ON s.user_id = u.id
                     WHERE u.id = :uid
                     """
-                ),
-                {"uid": str(user_id)},
+                    ),
+                    {"uid": str(user_id)},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if row is None:
             raise UserNotFoundError("user not found")
         return int(row["balance"] or 0), {"status": row["status"], "expires_at": row["expires_at"]}

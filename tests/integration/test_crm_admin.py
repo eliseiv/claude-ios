@@ -139,15 +139,11 @@ async def test_crm_empty_endpoints(
     assert stats.status_code == 200
     assert stats.json()["users_total"] >= 1
 
-    payments = await crm_admin_client.get(
-        f"/v1/admin/users/{uid}/payments", headers=_ADMIN_HEADERS
-    )
+    payments = await crm_admin_client.get(f"/v1/admin/users/{uid}/payments", headers=_ADMIN_HEADERS)
     assert payments.status_code == 200
     assert payments.json() == {"total": 0, "items": []}
 
-    requests = await crm_admin_client.get(
-        f"/v1/admin/users/{uid}/requests", headers=_ADMIN_HEADERS
-    )
+    requests = await crm_admin_client.get(f"/v1/admin/users/{uid}/requests", headers=_ADMIN_HEADERS)
     assert requests.status_code == 200
     assert requests.json()["total"] == 0
 

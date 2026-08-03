@@ -16,6 +16,7 @@ from fastapi import APIRouter, Body, Depends, Path, Request
 from app.admin.service import AdminService
 from app.api_gateway.auth import require_admin
 from app.api_gateway.rate_limit import enforce_admin_limits
+from app.api_gateway.routers import crm_admin
 from app.config import get_settings
 from app.deps import client_ip, get_admin_service
 from app.errors import PayloadTooLargeError, RateLimitedError
@@ -27,7 +28,6 @@ from app.schemas.admin import (
     AdminSubscriptionGrantResponse,
     AdminWalletResponse,
 )
-from app.api_gateway.routers import crm_admin
 
 # require_admin guards every route here; the user JWT is not an authorization factor (ADR-009).
 # require_admin depends on admin_scheme (APIKeyHeader, auto_error=False), a SecurityBase: that
