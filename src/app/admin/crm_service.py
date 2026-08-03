@@ -560,23 +560,23 @@ class CrmAdminService:
         if amount == 0:
             raise HTTPException(status_code=400, detail="amount must not be zero")
         if amount > 0:
-            result = await self._wallet.grant(
+            grant = await self._wallet.grant(
                 user_id=user_id,
                 amount=amount,
                 idempotency_key=f"crm-tokens:{uuid.uuid4()}",
                 meta={"source": "crm_admin"},
                 reason="crm_admin_tokens",
             )
-            balance = result.new_balance
+            balance = grant.new_balance
         else:
             try:
-                result = await self._wallet.consume(
+                debit = await self._wallet.consume(
                     user_id=user_id,
                     amount=-amount,
                     idempotency_key=f"crm-tokens:{uuid.uuid4()}",
                     meta={"source": "crm_admin"},
                 )
-                balance = result.new_balance
+                balance = debit.new_balance
             except InsufficientCreditsError as exc:
                 raise HTTPException(status_code=400, detail="insufficient balance") from exc
         return CrmTokensAdjustResponse(id=str(user_id), tokens=float(balance))
