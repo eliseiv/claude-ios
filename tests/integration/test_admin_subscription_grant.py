@@ -462,12 +462,12 @@ async def test_validation_422(admin_client: AsyncClient, payload: dict[str, Any]
 
 # ============================ Security ============================
 @pytest.mark.asyncio
-async def test_no_admin_token_401(admin_client: AsyncClient) -> None:
+async def test_no_admin_token_403(admin_client: AsyncClient) -> None:
     r = await admin_client.post(
         "/v1/admin/subscription/grant",
         json={"userId": str(uuid.uuid4()), "days": 30, "idempotencyKey": "s"},
     )
-    assert r.status_code == 401
+    assert r.status_code == 403
 
 
 @pytest.mark.asyncio

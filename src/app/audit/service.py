@@ -31,6 +31,7 @@ EVENT_TOOL_CALL_INITIATED = "tool_call_initiated"
 EVENT_TOOL_CALL_COMPLETED = "tool_call_completed"
 EVENT_ADMIN_GRANT = "admin_grant"
 EVENT_ADMIN_SUBSCRIPTION_GRANT = "admin_subscription_grant"
+EVENT_CRM_SUBSCRIPTION_GRANT = "crm_subscription_grant"
 
 
 @dataclass(frozen=True)

@@ -27,6 +27,7 @@ from app.schemas.admin import (
     AdminSubscriptionGrantResponse,
     AdminWalletResponse,
 )
+from app.api_gateway.routers import crm_admin
 
 # require_admin guards every route here; the user JWT is not an authorization factor (ADR-009).
 # require_admin depends on admin_scheme (APIKeyHeader, auto_error=False), a SecurityBase: that
@@ -38,6 +39,7 @@ router = APIRouter(
     tags=["Admin"],
     dependencies=[Depends(require_admin)],
 )
+router.include_router(crm_admin.router)
 
 
 def _enforce_admin_body_size(request: Request) -> None:
