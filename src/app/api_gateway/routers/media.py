@@ -4,6 +4,10 @@ JWT-protected (CurrentUser), owner-scoped: a foreign or missing job is 404. Gene
 asynchronous — the POST routes return a `queued` job and the client polls
 `GET /v1/media/jobs/{jobId}`, which is the only route that touches the provider. Per-user rate
 limit like the other non-chat endpoints.
+
+The whole prefix is gated on the instance being configured for generation, so on an instance
+without `FAL_API_KEY` every route here answers `503 media_generation_not_configured` — including the
+catalog, which otherwise would advertise models this instance cannot run.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Path, Query, Request
 
 from app.api_gateway.rate_limit import enforce_other_limits
-from app.deps import CurrentUser, get_media_generation_service
+from app.deps import CurrentUser, get_media_generation_service, require_media_generation_configured
 from app.errors import RateLimitedError
 from app.media_generation.catalog import KIND_IMAGE, KIND_VIDEO, all_models
 from app.media_generation.service import MediaGenerationService, MediaJobView
@@ -29,7 +33,11 @@ from app.schemas.media import (
     VideoGenerationRequest,
 )
 
-router = APIRouter(prefix="/v1/media", tags=["Media"])
+router = APIRouter(
+    prefix="/v1/media",
+    tags=["Media"],
+    dependencies=[Depends(require_media_generation_configured)],
+)
 
 
 async def _rate_limit(user_id: uuid.UUID) -> None:

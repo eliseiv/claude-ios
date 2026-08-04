@@ -798,6 +798,21 @@ async def test_unconfigured_instance_returns_503_on_submit(
     assert await _balance(db_sessionmaker, uid) == 100
 
 
+@pytest.mark.parametrize("path", [_MODELS_URL, _JOBS_URL, f"{_JOBS_URL}/{uuid.uuid4()}"])
+async def test_unconfigured_instance_returns_503_on_every_read_route(
+    unconfigured_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], path: str
+) -> None:
+    # The catalog must not advertise models an unconfigured instance cannot run: the client decides
+    # whether to show the generation section from one call, instead of hitting 503 after the user
+    # picked a model.
+    uid = await _seed(db_sessionmaker, balance=100)
+
+    resp = await unconfigured_client.get(path, headers=auth_headers(uid))
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["error"]["code"] == "media_generation_not_configured"
+
+
 # ----------------------------------- polling -----------------------------------
 
 

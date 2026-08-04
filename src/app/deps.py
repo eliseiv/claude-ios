@@ -34,7 +34,7 @@ from app.chats.repository import ChatsRepository
 from app.chats.service import ChatsService
 from app.config import get_settings
 from app.db import session_scope
-from app.errors import ForbiddenError, UnauthorizedError
+from app.errors import ForbiddenError, MediaGenerationNotConfiguredError, UnauthorizedError
 from app.media_generation.fal_client import FalClient
 from app.media_generation.repository import MediaJobsRepository
 from app.media_generation.service import MediaGenerationService
@@ -206,6 +206,19 @@ def get_fal_client() -> FalClient:
     # ADR-060: outgoing fal.ai queue calls — no DbSession (no persisted state); needs only
     # settings (api key / queue base / timeout).
     return FalClient(get_settings())
+
+
+def require_media_generation_configured() -> None:
+    """Gate the whole /v1/media/* surface on the instance having a fal key (ADR-060 §5).
+
+    Generation is opt-in per instance, and an instance without ``FAL_API_KEY`` cannot serve any part
+    of the feature usefully: offering the model catalog there would have the client render a picker
+    for models it cannot run. So the catalog and the job routes answer the same
+    ``503 media_generation_not_configured`` as a submit does, letting the client hide the section on
+    one call instead of discovering the outage after the user picked a model.
+    """
+    if not get_fal_client().configured:
+        raise MediaGenerationNotConfiguredError("media generation is not configured")
 
 
 def get_media_generation_service(session: DbSession) -> MediaGenerationService:
