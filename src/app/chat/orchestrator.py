@@ -118,11 +118,26 @@ _SYSTEM_PROMPT_CHAT = (
     "user's device executes locally (files, calendar, reminders). Use tools when needed and "
     "respond concisely. " + _CONVERSATION_MEMORY_INSTRUCTION + " " + _TIME_NOW_INSTRUCTION
 )
+# Website-builder guidance: gpt-4o tends to "create" images by writing image files with a
+# placeholder string as base64 ("base64 placeholder for dish1.jpg"), which site.write_file rejects
+# as invalid base64 -> the page ships with broken <img> and a crooked layout. Steer the model to a
+# self-contained page: no fake image bytes, no external URLs; use CSS/SVG/emoji for all visuals.
+_SITE_BUILDER_INSTRUCTION = (
+    "When building a website with the site tools, output a SELF-CONTAINED page. Do NOT create "
+    "image or other binary files with placeholder, fake, or invented base64 content — such writes "
+    "fail and leave broken images. If you have no real image data, do not write image files and do "
+    "not reference external URLs; render every visual with CSS (gradients/backgrounds/shapes), "
+    "inline SVG, or emoji instead."
+)
+
+
 _SYSTEM_PROMPT_CODE = (
     "You are a coding assistant integrated into an iOS app. Favor precise, technical answers: "
     "produce correct, idiomatic code with brief explanations. You can call tools that the "
     "user's device executes locally (files, calendar, reminders) and server-side site tools. "
     "Use tools when needed and respond concisely. "
+    + _SITE_BUILDER_INSTRUCTION
+    + " "
     + _CONVERSATION_MEMORY_INSTRUCTION
     + " "
     + _TIME_NOW_INSTRUCTION
