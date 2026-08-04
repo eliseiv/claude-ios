@@ -382,12 +382,16 @@ async def test_checkout_non_2xx_upstream_maps_to_502_without_leak(
         headers=auth_headers(uuid.uuid4()),
     )
     assert resp.status_code == 502, resp.text
-    assert resp.json()["error"]["code"] == "upstream_error"
+    error = resp.json()["error"]
+    assert error["code"] == "upstream_error"
     text = resp.text
     assert "UPSTREAM_CANARY_LEAK" not in text
     assert _API_TOKEN not in text
     assert _APP_ID not in text
-    assert str(status_code) not in text or status_code == 502
+    # The upstream status must not surface either — but only `code`/`message` are derived from it.
+    # `requestId` is a random correlation UUID, and its hex happily contains "401" or "400" every
+    # few runs, which made this assertion fail on bodies that leaked nothing.
+    assert str(status_code) not in f"{error['code']}{error['message']}"
 
 
 async def test_checkout_non_json_body_maps_to_502(
