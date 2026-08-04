@@ -9,6 +9,7 @@ from app.models.tables import (
     ChatStep,
     CloudPaymentsWebhookEvent,
     LedgerTransaction,
+    MediaJob,
     Project,
     SiteFile,
     Subscription,
@@ -38,4 +39,5 @@ __all__ = [
     "UserPreferences",
     "WorkspaceProject",
     "WorkspaceFile",
+    "MediaJob",
 ]

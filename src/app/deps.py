@@ -35,6 +35,9 @@ from app.chats.service import ChatsService
 from app.config import get_settings
 from app.db import session_scope
 from app.errors import ForbiddenError, UnauthorizedError
+from app.media_generation.fal_client import FalClient
+from app.media_generation.repository import MediaJobsRepository
+from app.media_generation.service import MediaGenerationService
 from app.observability.context import set_user_id
 from app.preferences.service import PreferencesService
 from app.profile.service import ProfileService
@@ -197,6 +200,23 @@ def get_cloudpayments_checkout_client() -> CloudPaymentsCheckoutClient:
     # ADR-051: passthrough outgoing call to broadapps — no DbSession (no persisted state); needs
     # only settings (api_base / app_id / api_token).
     return CloudPaymentsCheckoutClient(get_settings())
+
+
+def get_fal_client() -> FalClient:
+    # ADR-060: outgoing fal.ai queue calls — no DbSession (no persisted state); needs only
+    # settings (api key / queue base / timeout).
+    return FalClient(get_settings())
+
+
+def get_media_generation_service(session: DbSession) -> MediaGenerationService:
+    # ADR-060: the wallet debit and the media_jobs insert must land in ONE transaction, so the
+    # wallet service is built on the same request-scoped session as the repository.
+    return MediaGenerationService(
+        repo=MediaJobsRepository(session),
+        fal=get_fal_client(),
+        wallet=WalletService(session, AuditService(session)),
+        settings=get_settings(),
+    )
 
 
 def get_admin_service(session: DbSession) -> AdminService:

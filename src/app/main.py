@@ -25,6 +25,7 @@ from app.api_gateway.routers import (
     chat,
     chats,
     health,
+    media,
     models,
     policy,
     preferences,
@@ -112,6 +113,15 @@ _OPENAPI_TAGS = [
     {
         "name": "Presets",
         "description": "Пресеты промтов для чипов на главном экране чата.",
+    },
+    {
+        "name": "Media",
+        "description": (
+            "Генерация фото и видео через fal.ai. Сценарий: `GET /v1/media/models` → "
+            "`POST /v1/media/images`|`/videos` (ответ `202`, задача в статусе `queued`, кредиты "
+            "списаны) → опрос `GET /v1/media/jobs/{jobId}` до `completed`/`failed`. Неудачная "
+            "генерация возвращает кредиты."
+        ),
     },
     {
         "name": "Policy",
@@ -220,6 +230,7 @@ def create_app() -> FastAPI:
         tools,
         models,
         presets,
+        media,
         policy,
         wallet,
         subscription,

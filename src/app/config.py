@@ -250,6 +250,25 @@ class Settings(BaseSettings):
     # TOKEN_PRODUCTS-derived {productId, credits} list. Not a secret.
     products_catalog_raw: str = Field(default="[]", alias="PRODUCTS_CATALOG")
 
+    # --- Image/video generation via fal.ai (ADR-060, media-generation/03) ---
+    # SECRET: the fal API key, presented upstream as `Authorization: Key <value>`. Empty (default)
+    # => the whole /v1/media/* surface answers 503 media_generation_not_configured, so the feature
+    # is opt-in per instance. Never logged (redaction covers *key* fields).
+    fal_api_key: str = Field(default="", alias="FAL_API_KEY")
+    # PUBLIC upstream host of the fal QUEUE API (async submit/poll; the sync fal.run host cannot
+    # serve minute-long video runs). Fixed server-side — never taken from a request body — and
+    # also the allowlist for the polling URLs fal returns (SSRF guard in FalClient).
+    fal_queue_base: str = Field(default="https://queue.fal.run", alias="FAL_QUEUE_BASE")
+    # Connect+read timeout for one fal HTTP call. This bounds submit/status/result calls only, not
+    # the generation itself (that runs in fal's queue and is polled).
+    fal_timeout_seconds: float = Field(default=30.0, alias="FAL_TIMEOUT_SECONDS")
+    # Optional per-model credit price override (JSON object modelId->credits), e.g.
+    # {"veo-3.1":400,"nano-banana-2":3}. Unlisted models fall back to the catalog default.
+    # Server-side only: the price is NEVER taken from the request body (anti-tamper, cf. BR-TP-1).
+    media_model_credits_raw: str = Field(default="{}", alias="MEDIA_MODEL_CREDITS")
+    # Cap on how many jobs GET /v1/media/jobs returns in one page.
+    media_jobs_page_limit: int = Field(default=50, alias="MEDIA_JOBS_PAGE_LIMIT")
+
     # --- Admin auth (ADR-009, ADM-1) ---
     # Isolated admin secret (X-Admin-Token). High-entropy (>= 32 bytes), only via secret
     # manager / env, never in code/repo/image. Not shared with JWT/KMS/ANTHROPIC/PREVIEW
@@ -411,6 +430,34 @@ class Settings(BaseSettings):
                 continue
             products[key] = value
         return products
+
+    def media_model_credits(self) -> dict[str, int]:
+        """Parse MEDIA_MODEL_CREDITS (JSON object modelId->credits) into a validated mapping.
+
+        An override table for the per-model generation price (ADR-060 §4); models absent here keep
+        their catalog default. Only string keys with positive-int values survive, so a typo can
+        never make a model free — a malformed document degrades to "no overrides", not to zero
+        prices. Pure (no I/O); cached via get_settings()'s lru_cache.
+        """
+        import json
+
+        try:
+            parsed = json.loads(self.media_model_credits_raw or "{}")
+        except (ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        credits: dict[str, int] = {}
+        for key, value in parsed.items():
+            if not isinstance(key, str):
+                continue
+            # bool is a subclass of int; exclude it explicitly to avoid True->1 surprises.
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            if value <= 0:
+                continue
+            credits[key] = value
+        return credits
 
     def products_catalog(self) -> list[dict[str, Any]]:
         """Parse PRODUCTS_CATALOG (JSON array) into a list of display product dicts.

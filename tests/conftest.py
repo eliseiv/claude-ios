@@ -151,6 +151,9 @@ _TABLES = (
     "workspace_files",
     "workspace_projects",
     "chat_sessions",
+    # Media generation (ADR-060, migration 0018): FK→users, listed explicitly so generation jobs
+    # do not leak between tests.
+    "media_jobs",
     "byok_keys",
     # user_preferences must be truncated between tests so preferences-integration state does
     # not leak across tests (Figma-gap migration 0004 table; FK→users, but TRUNCATE CASCADE on

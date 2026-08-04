@@ -156,6 +156,19 @@ class CloudPaymentsVerificationUnavailableError(AppError):
     code = "cloudpayments_verification_unavailable"
 
 
+class MediaGenerationNotConfiguredError(ServiceUnavailableError):
+    """Image/video generation is unavailable on this instance (ADR-060 §5).
+
+    503 with code=media_generation_not_configured: either ``FAL_API_KEY`` is unset (the feature is
+    opt-in per instance) or fal rejected the configured key with 401/403. Both are operator
+    problems, not client ones, so they share one machine-readable code the iOS client maps to
+    "generation not available here" — distinguishable from a fal outage (502 upstream_error) and
+    from an empty balance (409 insufficient_credits).
+    """
+
+    code = "media_generation_not_configured"
+
+
 class CloudPaymentsCheckoutNotConfiguredError(ServiceUnavailableError):
     """RU checkout is not configured on this instance (ADR-051 §5).
 

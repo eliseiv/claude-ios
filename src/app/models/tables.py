@@ -433,6 +433,61 @@ class CloudPaymentsWebhookEvent(Base):
     __table_args__ = (Index("ix_cloudpayments_webhook_events_user_id", "user_id"),)
 
 
+class MediaJob(Base):
+    """One image/video generation run submitted to the fal.ai queue (ADR-060 §4, migration 0018).
+
+    A row is created *after* the credits are debited and the run is accepted upstream, so its
+    existence means "the user paid for this run and fal owns it". ``fal_request_id`` plus the two
+    upstream polling URLs are the handle ``GET /v1/media/jobs/{id}`` uses; the URLs are stored
+    rather than rebuilt because nested endpoints (``kling-video/v3/pro/...``) do not yield their
+    queue path from the endpoint id alone.
+
+    ``status`` is a terminal-state cache: once ``completed``/``failed`` no further upstream call is
+    made. ``credits_refunded`` makes the refund of a failed run idempotent even if two pollers race
+    (the wallet grant is itself keyed by the job id, this flag just avoids the redundant call).
+    """
+
+    __tablename__ = "media_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # Public model id from the server-side catalog (e.g. "veo-3.1"), not the fal endpoint.
+    model_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    fal_endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    fal_request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status_url: Mapped[str] = mapped_column(Text, nullable=False)
+    response_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    credits_charged: Mapped[int] = mapped_column(nullable=False, server_default=sa_text("0"))
+    credits_refunded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("false")
+    )
+    # Normalized output ({"assets": [...]}) — not the raw upstream body.
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed')",
+            name="ck_media_jobs_status",
+        ),
+        # Owner-scoped listing, newest first (GET /v1/media/jobs).
+        Index("ix_media_jobs_user_created", "user_id", "created_at"),
+    )
+
+
 class WorkspaceProject(Base):
     """A workspace («рабочее пространство», iOS «Project») — ADR-036 §2.
 

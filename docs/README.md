@@ -89,6 +89,7 @@
 | Snippets | [modules/snippets/](modules/snippets/README.md) | Спроектирован, ожидает реализации (Спринт 2) |
 | Attachments | [modules/attachments/](modules/attachments/README.md) | **Отложен ([TD-015](100-known-tech-debt.md))** — MVP мультимодального ввода реализуется inline base64 в `/chat/run` ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) без этого модуля; двухшаговый upload — будущий путь |
 | Token Purchase | [modules/token-purchase/](modules/token-purchase/README.md) | **Реализован (MVP)** — ⏳ доработка policy-guard «требует активной подписки» ([Q-015-1](99-open-questions.md) Closed = вариант B) |
+| Media Generation | [modules/media-generation/](modules/media-generation/README.md) | **Реализован ([ADR-060](adr/ADR-060-media-generation-fal.md))** — генерация фото/видео через fal.ai, 5 моделей (Nano Banana Pro/2, Kling Video, Kling Video V3, Veo 3.1). Асинхронно: `POST /v1/media/images`\|`/videos` → `202` `queued` → опрос `GET /v1/media/jobs/{jobId}`; каталог `GET /v1/media/models`. Серверная цена в кредитах + возврат при провале, миграция `0018`. Активен по инстансу (`FAL_API_KEY`; не задан → `503`) |
 | Notifications | [modules/notifications/](modules/notifications/README.md) | Спроектирован частично, ожидает реализации (Спринт 3; push → TD-011) |
 
 > Observability — сквозная функция (cross-cutting), не отдельный модуль с API. Описана в [01-architecture.md](01-architecture.md#наблюдаемость) и [05-security.md](05-security.md).
