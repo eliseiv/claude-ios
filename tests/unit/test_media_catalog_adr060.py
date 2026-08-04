@@ -14,9 +14,11 @@ from app.media_generation.catalog import (
     KIND_VIDEO,
     all_models,
     build_fal_input,
+    duration_seconds,
     fal_field_name,
     find_model,
     models_of_kind,
+    price_multiplier,
 )
 
 # The five models the product ships with. Ids are a public contract (iOS sends them in `model`).
@@ -108,16 +110,32 @@ def test_build_input_drops_none_values_so_upstream_defaults_apply() -> None:
 
 
 def test_build_input_drops_fields_the_endpoint_does_not_accept() -> None:
-    # Veo has no negative_prompt; forwarding it would be an upstream 422.
+    # Veo takes no cfg_scale or num_images; forwarding them would be an upstream 422.
     veo = find_model("veo-3.1")
     assert veo is not None
     payload = build_fal_input(
         model=veo,
         variant=veo.text_variant,
-        values={"prompt": "a city", "negativePrompt": "blurry", "generateAudio": True},
+        values={"prompt": "a city", "cfgScale": 0.7, "numImages": 2, "generateAudio": True},
         image_urls=[],
     )
     assert payload == {"prompt": "a city", "generate_audio": True}
+
+
+def test_kling_takes_cfg_scale_and_v3_also_audio() -> None:
+    kling_25 = find_model("kling-video")
+    kling_v3 = find_model("kling-video-v3")
+    assert kling_25 is not None and kling_v3 is not None
+
+    values = {"prompt": "a boat", "cfgScale": 0.8, "generateAudio": True}
+    # 2.5 Turbo Pro has cfg_scale but no audio; v3 has both.
+    assert build_fal_input(
+        model=kling_25, variant=kling_25.text_variant, values=values, image_urls=[]
+    ) == {"prompt": "a boat", "cfg_scale": 0.8}
+    assert build_fal_input(
+        model=kling_v3, variant=kling_v3.text_variant, values=values, image_urls=[]
+    ) == {"prompt": "a boat", "cfg_scale": 0.8, "generate_audio": True}
+    assert kling_v3.supports_audio and not kling_25.supports_audio
 
 
 def test_build_input_drops_aspect_ratio_for_kling_image_to_video() -> None:
@@ -160,3 +178,103 @@ def test_every_variant_accepts_a_prompt_and_has_a_positive_price() -> None:
             assert "prompt" in model.image_variant.fields, model.id
             assert model.image_field is not None, model.id
             assert model.max_input_images >= 1, model.id
+
+
+# ------------------------- accepted values live on the variant -------------------------
+
+
+def test_veo_allows_aspect_ratio_auto_only_with_a_reference_image() -> None:
+    """The reason the enums hang off the variant: upstream really does differ per mode."""
+    veo = find_model("veo-3.1")
+    assert veo is not None
+    assert veo.image_variant is not None
+    assert veo.text_variant.aspect_ratios == ("16:9", "9:16")
+    assert veo.image_variant.aspect_ratios == ("auto", "16:9", "9:16")
+
+
+def test_kling_image_to_video_reports_no_aspect_ratio_at_all() -> None:
+    for model_id in ("kling-video", "kling-video-v3"):
+        model = find_model(model_id)
+        assert model is not None
+        assert model.image_variant is not None
+        assert model.text_variant.aspect_ratios == ("16:9", "9:16", "1:1"), model_id
+        # Empty set == "no such control in this mode" for the client.
+        assert model.image_variant.aspect_ratios == (), model_id
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        ("nano-banana-pro", ("1K", "2K", "4K")),
+        ("nano-banana-2", ("0.5K", "1K", "2K", "4K")),
+        ("veo-3.1", ("720p", "1080p", "4k")),
+        ("kling-video", ()),
+        ("kling-video-v3", ()),
+    ],
+)
+def test_resolutions_match_the_published_fal_enums(
+    model_id: str, expected: tuple[str, ...]
+) -> None:
+    model = find_model(model_id)
+    assert model is not None
+    assert model.text_variant.resolutions == expected
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        ("kling-video", ("5", "10")),
+        ("kling-video-v3", tuple(str(n) for n in range(3, 16))),
+        ("veo-3.1", ("4s", "6s", "8s")),
+        ("nano-banana-pro", ()),
+    ],
+)
+def test_durations_match_the_published_fal_enums(model_id: str, expected: tuple[str, ...]) -> None:
+    model = find_model(model_id)
+    assert model is not None
+    assert model.text_variant.durations == expected
+
+
+def test_modes_are_named_per_kind_and_ordered_text_first() -> None:
+    image = find_model("nano-banana-2")
+    video = find_model("veo-3.1")
+    assert image is not None and video is not None
+    assert [mode for mode, _ in image.variants()] == ["textToImage", "imageToImage"]
+    assert [mode for mode, _ in video.variants()] == ["textToVideo", "imageToVideo"]
+
+
+# ------------------------- price scaling -------------------------
+
+
+def test_duration_seconds_reads_both_upstream_spellings() -> None:
+    assert duration_seconds("5") == 5
+    assert duration_seconds("8s") == 8
+    assert duration_seconds("auto") is None
+
+
+def test_image_price_scales_with_the_number_of_images() -> None:
+    model = find_model("nano-banana-2")
+    assert model is not None
+    assert price_multiplier(model=model, num_images=None, duration=None) == 1
+    assert price_multiplier(model=model, num_images=1, duration=None) == 1
+    assert price_multiplier(model=model, num_images=4, duration=None) == 4
+
+
+def test_video_price_scales_with_the_requested_length() -> None:
+    kling = find_model("kling-video-v3")  # base 5s
+    veo = find_model("veo-3.1")  # base 8s
+    assert kling is not None and veo is not None
+    assert price_multiplier(model=kling, num_images=None, duration="5") == 1
+    assert price_multiplier(model=kling, num_images=None, duration="10") == 2
+    assert price_multiplier(model=kling, num_images=None, duration="15") == 3
+    # Rounded up, and a shorter-than-base clip is never free.
+    assert price_multiplier(model=kling, num_images=None, duration="7") == 2
+    assert price_multiplier(model=veo, num_images=None, duration="4s") == 1
+    assert price_multiplier(model=veo, num_images=None, duration="8s") == 1
+
+
+def test_unparseable_or_absent_duration_falls_back_to_the_base_price() -> None:
+    veo = find_model("veo-3.1")
+    assert veo is not None
+    assert price_multiplier(model=veo, num_images=None, duration=None) == 1
+    assert price_multiplier(model=veo, num_images=None, duration="whatever") == 1

@@ -25,6 +25,7 @@ from app.schemas.media import (
     MediaJobsListResponse,
     MediaModelSchema,
     MediaModelsResponse,
+    MediaModeSchema,
     VideoGenerationRequest,
 )
 
@@ -62,9 +63,13 @@ def _job_response(view: MediaJobView) -> MediaJobResponse:
     summary="Каталог моделей генерации",
     description=(
         "Возвращает доступные модели генерации фото и видео: идентификатор для поля `model`, "
-        "цену в кредитах, поддержку референсных изображений и допустимые значения "
-        "`aspectRatio`/`resolution`/`duration`. Пустой список для параметра означает, что модель "
-        "его не поддерживает — присланное значение вернёт `422`."
+        "базовую цену в кредитах и **режимы** генерации. Режимов у модели два — без референсного "
+        "изображения (`textToImage`/`textToVideo`) и с ним (`imageToImage`/`imageToVideo`); режим "
+        "выбирается автоматически по наличию `imageUrls`/`imageUrl` в запросе. У каждого режима "
+        "свои `params` (какие параметры он принимает) и свои наборы `aspectRatio`/`resolution`/"
+        "`duration` — они действительно различаются между режимами. Пустой список означает, что "
+        "параметр в этом режиме не поддерживается: присланное значение вернёт `422` до списания. "
+        "Строьте контролы UI по режиму, а не по модели."
     ),
 )
 async def list_media_models(
@@ -80,11 +85,21 @@ async def list_media_models(
                 title=model.title,
                 kind=model.kind,
                 credits=media.credits_for(model),
+                baseDurationSeconds=model.base_duration_seconds,
                 supportsImageInput=model.image_variant is not None,
                 maxInputImages=model.max_input_images if model.image_variant else 0,
-                aspectRatios=list(model.aspect_ratios),
-                resolutions=list(model.resolutions),
-                durations=list(model.durations),
+                supportsAudio=model.supports_audio,
+                modes=[
+                    MediaModeSchema(
+                        mode=mode,
+                        # Sorted so the payload is stable across restarts (fields is a frozenset).
+                        params=sorted(variant.fields),
+                        aspectRatios=list(variant.aspect_ratios),
+                        resolutions=list(variant.resolutions),
+                        durations=list(variant.durations),
+                    )
+                    for mode, variant in model.variants()
+                ],
             )
             for model in all_models()
         ]
@@ -98,11 +113,13 @@ async def list_media_models(
     summary="Сгенерировать изображение",
     description=(
         "Ставит генерацию изображения в очередь и списывает кредиты по цене модели (цена берётся "
-        "с сервера, поле в запросе не предусмотрено). Отвечает `202` с задачей в статусе `queued` "
-        "— результат забирайте через `GET /v1/media/jobs/{jobId}`. Непустой `imageUrls` включает "
-        "режим редактирования референсных изображений. Недостаточно кредитов — `409 "
-        "insufficient_credits` (списания не будет); генерация не настроена на инстансе — `503 "
-        "media_generation_not_configured`."
+        "с сервера, поле в запросе не предусмотрено): `credits × numImages`. Отвечает `202` с "
+        "задачей в статусе `queued` — результат забирайте через `GET /v1/media/jobs/{jobId}`. "
+        "Непустой `imageUrls` включает режим редактирования референсных изображений. Параметры "
+        "`aspectRatio`/`resolution`/`numImages`/`outputFormat`/`seed` проверяются по набору "
+        "выбранной модели **до** списания — недопустимое значение вернёт `422` бесплатно. "
+        "Недостаточно кредитов — `409 insufficient_credits` (списания не будет); генерация не "
+        "настроена на инстансе — `503 media_generation_not_configured`."
     ),
 )
 async def generate_image(
@@ -123,6 +140,7 @@ async def generate_image(
             "resolution": body.resolution,
             "numImages": body.numImages,
             "outputFormat": body.outputFormat,
+            "seed": body.seed,
         },
     )
     return _job_response(view)
@@ -134,10 +152,14 @@ async def generate_image(
     status_code=202,
     summary="Сгенерировать видео",
     description=(
-        "Ставит генерацию видео в очередь и списывает кредиты по цене модели. Отвечает `202` с "
+        "Ставит генерацию видео в очередь и списывает кредиты по цене модели, масштабированной "
+        "длительностью: `credits × ceil(duration / baseDurationSeconds)`. Отвечает `202` с "
         "задачей в статусе `queued`: видео генерируется минутами, поэтому результат забирается "
         "опросом `GET /v1/media/jobs/{jobId}`. Заданный `imageUrl` включает режим image-to-video "
-        "(стартовый кадр). Если генерация упадёт на стороне провайдера, задача перейдёт в "
+        "(стартовый кадр) — в нём `aspectRatio` берётся из кадра и моделями Kling не принимается. "
+        "Прочие параметры: `duration`, `resolution`, `negativePrompt`, `generateAudio` (у моделей "
+        "с `supportsAudio`), `cfgScale` (Kling), `seed`; допустимые значения — в `modes` каталога, "
+        "проверяются до списания. Если генерация упадёт на стороне провайдера, задача перейдёт в "
         "`failed`, а списанные кредиты вернутся на баланс."
     ),
 )
@@ -160,6 +182,8 @@ async def generate_video(
             "resolution": body.resolution,
             "duration": body.duration,
             "generateAudio": body.generateAudio,
+            "cfgScale": body.cfgScale,
+            "seed": body.seed,
         },
     )
     return _job_response(view)

@@ -23,6 +23,8 @@ _PROMPT_MAX = 5000
 _NEGATIVE_PROMPT_MAX = 2000
 _URL_MAX = 2048
 _MAX_IMAGE_URLS = 14
+# 32-bit range: what the upstream models accept as a reproducibility seed.
+_SEED_MAX = 2**31 - 1
 
 
 def _validate_https_urls(values: list[str]) -> list[str]:
@@ -50,21 +52,24 @@ class MediaAssetSchema(StrictModel):
     )
 
 
-class MediaModelSchema(StrictModel):
-    id: str = Field(description="Идентификатор модели для полей `model` в запросах генерации.")
-    title: str = Field(description="Человекочитаемое название модели для UI.")
-    kind: Literal["image", "video"] = Field(
-        description="Что генерирует модель: `image` → `POST /v1/media/images`, `video` → `/videos`."
-    )
-    credits: int = Field(description="Сколько кредитов списывается за одну генерацию.")
-    supportsImageInput: bool = Field(
+class MediaModeSchema(StrictModel):
+    """Один режим генерации модели и параметры, которые он принимает.
+
+    Наборы значений различаются между режимами (у Veo в text-to-video нет `auto`, у Kling в
+    image-to-video нет `aspectRatio`), поэтому UI должен строить контролы по режиму, а не по модели.
+    """
+
+    mode: Literal["textToImage", "imageToImage", "textToVideo", "imageToVideo"] = Field(
         description=(
-            "Принимает ли модель референсные изображения (`imageUrls`/`imageUrl`). Для image-"
-            "моделей это режим редактирования, для video — image-to-video."
+            "Режим: `textTo…` — когда референсное изображение не передано, `imageTo…` — когда "
+            "передано. Выбирается автоматически по наличию `imageUrls`/`imageUrl` в запросе."
         )
     )
-    maxInputImages: int = Field(
-        description="Максимум референсных изображений в одном запросе (0 — не поддерживаются)."
+    params: list[str] = Field(
+        description=(
+            "Параметры, которые принимает этот режим (имена полей запроса). Параметр, которого "
+            "здесь нет, будет проигнорирован — не показывайте для него контрол."
+        )
     )
     aspectRatios: list[str] = Field(
         description="Допустимые значения `aspectRatio`. Пустой список — параметр не поддерживается."
@@ -77,6 +82,47 @@ class MediaModelSchema(StrictModel):
     )
 
 
+class MediaModelSchema(StrictModel):
+    id: str = Field(description="Идентификатор модели для полей `model` в запросах генерации.")
+    title: str = Field(description="Человекочитаемое название модели для UI.")
+    kind: Literal["image", "video"] = Field(
+        description="Что генерирует модель: `image` → `POST /v1/media/images`, `video` → `/videos`."
+    )
+    credits: int = Field(
+        description=(
+            "Базовая цена в кредитах: за **одно** изображение либо за видео базовой длительности "
+            "(`baseDurationSeconds`). Итог масштабируется: `numImages` изображений стоят "
+            "`credits × numImages`, видео длиной N секунд — `credits × ceil(N / "
+            "baseDurationSeconds)`. Фактически списанное всегда приходит в `creditsCharged`."
+        )
+    )
+    baseDurationSeconds: int | None = Field(
+        default=None,
+        description=(
+            "Длительность видео, которую покрывает базовая цена. `null` у image-моделей — они "
+            "масштабируются по `numImages`."
+        ),
+    )
+    supportsImageInput: bool = Field(
+        description=(
+            "Принимает ли модель референсные изображения (`imageUrls`/`imageUrl`). Для image-"
+            "моделей это режим редактирования, для video — image-to-video."
+        )
+    )
+    maxInputImages: int = Field(
+        description="Максимум референсных изображений в одном запросе (0 — не поддерживаются)."
+    )
+    supportsAudio: bool = Field(
+        description="Умеет ли модель генерировать звук (параметр `generateAudio`)."
+    )
+    modes: list[MediaModeSchema] = Field(
+        description=(
+            "Режимы генерации с их параметрами. Первый — без референсного изображения, второй "
+            "(если есть) — с ним."
+        )
+    )
+
+
 class MediaModelsResponse(StrictModel):
     models: list[MediaModelSchema] = Field(
         description="Каталог доступных моделей генерации в порядке отображения."
@@ -84,6 +130,29 @@ class MediaModelsResponse(StrictModel):
 
 
 class ImageGenerationRequest(StrictModel):
+    """Запрос генерации изображения. Наличие `imageUrls` переключает режим на редактирование."""
+
+    model_config = StrictModel.model_config | {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "model": "nano-banana-pro",
+                    "prompt": "Латунный телескоп на балконе в сумерках, кинематографично",
+                    "aspectRatio": "16:9",
+                    "resolution": "2K",
+                    "numImages": 1,
+                    "outputFormat": "png",
+                },
+                {
+                    "model": "nano-banana-2",
+                    "prompt": "Добавь рядом чашку чая с паром",
+                    "imageUrls": ["https://example.com/teapot.jpg"],
+                    "resolution": "1K",
+                },
+            ]
+        }
+    }
+
     model: str = Field(
         min_length=1,
         description=(
@@ -115,6 +184,15 @@ class ImageGenerationRequest(StrictModel):
     outputFormat: Literal["jpeg", "png", "webp"] | None = Field(
         default=None, description="Формат файла результата."
     )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=_SEED_MAX,
+        description=(
+            "Фиксирует случайность: одинаковый `seed` с теми же параметрами даёт похожий "
+            "результат. Опущено — каждый запуск новый."
+        ),
+    )
 
     @field_validator("imageUrls")
     @classmethod
@@ -123,6 +201,31 @@ class ImageGenerationRequest(StrictModel):
 
 
 class VideoGenerationRequest(StrictModel):
+    """Запрос генерации видео. Наличие `imageUrl` переключает режим на image-to-video."""
+
+    model_config = StrictModel.model_config | {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "model": "veo-3.1",
+                    "prompt": "Чашка кофе на столике кафе, утренний свет, лёгкий наезд камеры",
+                    "aspectRatio": "16:9",
+                    "resolution": "1080p",
+                    "duration": "8s",
+                    "generateAudio": True,
+                },
+                {
+                    "model": "kling-video-v3",
+                    "prompt": "Медленная панорама вдоль чайника",
+                    "imageUrl": "https://example.com/teapot.jpg",
+                    "duration": "10",
+                    "cfgScale": 0.7,
+                    "negativePrompt": "размытие, искажения",
+                },
+            ]
+        }
+    }
+
     model: str = Field(
         min_length=1,
         description="Идентификатор video-модели из `GET /v1/media/models` (например `veo-3.1`).",
@@ -159,7 +262,29 @@ class VideoGenerationRequest(StrictModel):
         default=None, description="Длительность из `durations` модели (например `8s` или `5`)."
     )
     generateAudio: bool | None = Field(
-        default=None, description="Генерировать ли звук. Поддерживается не всеми моделями."
+        default=None,
+        description=(
+            "Генерировать ли звук. Только для моделей с `supportsAudio: true`; у остальных "
+            "игнорируется."
+        ),
+    )
+    cfgScale: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description=(
+            "Насколько строго следовать промту (0–1, у провайдера по умолчанию 0.5). Выше — "
+            "ближе к описанию, ниже — свободнее. Только у моделей Kling."
+        ),
+    )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=_SEED_MAX,
+        description=(
+            "Фиксирует случайность: одинаковый `seed` с теми же параметрами даёт похожий "
+            "результат. Опущено — каждый запуск новый."
+        ),
     )
 
     @field_validator("imageUrl")

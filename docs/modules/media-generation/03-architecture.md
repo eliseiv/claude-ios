@@ -22,7 +22,8 @@ POST /v1/media/images|videos
   ├─ схема запроса (StrictModel)                → 422
   ├─ catalog: resolve model id                  → 422 (неизвестна / не тот kind)
   ├─ catalog: variant = image_variant | text_variant   (наличие картинки решает endpoint)
-  ├─ валидация значений против набора модели     → 422 (до любого списания)
+  ├─ валидация значений против набора ВАРИАНТА    → 422 (до любого списания)
+  ├─ cost = base × (numImages | ceil(duration/base_duration))
   ├─ jobId = uuid4()                            (нужен как ключ идемпотентности раньше строки)
   ├─ wallet.consume(cost, key=media-gen:{jobId})→ 409 insufficient_credits
   ├─ fal.submit(endpoint, payload)              → 502 / 503 / 422 / 429
@@ -62,9 +63,13 @@ GET /v1/media/jobs/{jobId}
 
 Каждая модель объявляет **два варианта** — prompt-only (`text_variant`) и «с референсным изображением» (`image_variant`), потому что у fal это разные endpoint'ы. Вариант выбирается по наличию картинки в запросе.
 
-Каждый вариант несёт **allowlist полей**, которые уходят наверх. `build_fal_input` отбрасывает `None` (чтобы применились дефолты провайдера) и всё, чего нет в allowlist. Это не косметика: fal отбивает неизвестные ключи, а входные схемы моделей различаются — у Veo нет `negative_prompt`, у Kling нет `resolution`, у image-to-video Kling нет `aspect_ratio`.
+Каждый вариант несёт **allowlist полей**, которые уходят наверх. `build_fal_input` отбрасывает `None` (чтобы применились дефолты провайдера) и всё, чего нет в allowlist. Это не косметика: fal отбивает неизвестные ключи, а входные схемы моделей различаются — у Veo нет `cfg_scale`, у Kling нет `resolution`, у image-to-video Kling нет `aspect_ratio`.
+
+Там же лежат **наборы допустимых значений** `aspect_ratio`/`resolution`/`duration` — именно на варианте, а не на модели, потому что они различаются между режимами: Veo в text-to-video не принимает `aspect_ratio: "auto"`, а в image-to-video принимает. Валидация идёт против варианта, поэтому неверное значение отбивается до списания вместо оплаченного upstream-отказа. `GET /v1/media/models` отдаёт эти наборы как `modes[]`, чтобы UI строил контролы по режиму.
 
 Имя поля с картинкой хранится в реестре, потому что наверху оно не унифицировано: `image_urls` (список) у image-моделей, `image_url` у Kling 2.5 и Veo, `start_image_url` у Kling v3. Благодаря этому сервис и схемы остаются модель-агностичными.
+
+Значения реестра сверены с опубликованными схемами fal (`fal.ai/api/openapi/queue/openapi.json?endpoint_id=…`) — это источник истины при добавлении модели или обновлении набора.
 
 ## Клиент провайдера
 

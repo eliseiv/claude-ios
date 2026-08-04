@@ -28,8 +28,10 @@ from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
     FalModel,
+    FalVariant,
     build_fal_input,
     find_model,
+    price_multiplier,
 )
 from app.media_generation.fal_client import (
     FAL_CANCELED,
@@ -85,12 +87,24 @@ class MediaGenerationService:
     # ---- pricing ----
 
     def credits_for(self, model: FalModel) -> int:
-        """Server-side price of one run: MEDIA_MODEL_CREDITS override, else the catalog default.
+        """Base price of one run: MEDIA_MODEL_CREDITS override, else the catalog default.
 
         Never derived from the request body (anti-tamper) and never zero: a non-positive override
         is dropped by ``Settings.media_model_credits()``, so the catalog default always wins.
         """
         return self._settings.media_model_credits().get(model.id, model.default_credits)
+
+    def price_of(
+        self, *, model: FalModel, num_images: int | None = None, duration: str | None = None
+    ) -> int:
+        """What this particular run costs — the base price times what the client asked for.
+
+        The multiplier exists because fal bills per image and per second of video: a flat price
+        would make 4 images or a 15 s clip the cheapest option per unit and lose money on it.
+        """
+        return self.credits_for(model) * price_multiplier(
+            model=model, num_images=num_images, duration=duration
+        )
 
     # ---- submit ----
 
@@ -112,9 +126,11 @@ class MediaGenerationService:
             raise ValidationFailedError(
                 f"model {model.id} accepts at most {model.max_input_images} reference image(s)"
             )
-        self._validate_enum("aspectRatio", params.get("aspectRatio"), model.aspect_ratios)
-        self._validate_enum("resolution", params.get("resolution"), model.resolutions)
-        self._validate_enum("duration", params.get("duration"), model.durations)
+        # Validated against the VARIANT, not the model: the same parameter accepts different values
+        # in different modes (Veo allows aspectRatio "auto" only with a reference image), and a
+        # parameter the mode has no notion of must not be silently swallowed.
+        for parameter in ("aspectRatio", "resolution", "duration"):
+            self._validate_enum(parameter, params.get(parameter), variant)
 
         payload = build_fal_input(
             model=model,
@@ -126,7 +142,11 @@ class MediaGenerationService:
         # The job id is minted here (not by the DB default) because it is also the wallet
         # idempotency key — the debit must be attributable to the job before the row exists.
         job_id = uuid.uuid4()
-        cost = self.credits_for(model)
+        cost = self.price_of(
+            model=model,
+            num_images=_as_int(params.get("numImages")),
+            duration=_as_str(params.get("duration")),
+        )
         await self._wallet.consume(
             user_id=user_id,
             amount=cost,
@@ -271,14 +291,23 @@ class MediaGenerationService:
         return model
 
     @staticmethod
-    def _validate_enum(field: str, value: Any, allowed: tuple[str, ...]) -> None:
-        """Reject a value the selected model does not support, before spending credits."""
+    def _validate_enum(field: str, value: Any, variant: FalVariant) -> None:
+        """Reject a value this mode does not support, before spending credits."""
         if value is None:
             return
+        allowed = variant.allowed(field)
         if not allowed:
-            raise ValidationFailedError(f"{field} is not supported by this model")
+            raise ValidationFailedError(f"{field} is not supported by this model in this mode")
         if value not in allowed:
             raise ValidationFailedError(f"{field} must be one of: {', '.join(allowed)}")
+
+
+def _as_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _as_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _normalize_result(body: dict[str, Any], *, kind: str) -> dict[str, Any]:

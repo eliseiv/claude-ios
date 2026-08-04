@@ -261,11 +261,55 @@ async def test_models_catalog_lists_the_five_models_with_server_side_prices(
         "kling-video-v3",
         "veo-3.1",
     ]
-    # No vendor endpoint leaks to the client — only the public id.
-    assert all("fal" not in str(m).lower() or m["id"] == "veo-3.1" for m in models)
+    # No vendor endpoint or queue host leaks to the client — only the public id.
+    payload = resp.text
+    assert "fal-ai/" not in payload
+    assert "queue.fal.run" not in payload
     for model in models:
         assert model["credits"] > 0
         assert model["kind"] in ("image", "video")
+
+
+async def test_models_catalog_reports_per_mode_parameters(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The client builds its controls from `modes`, so each mode must carry its own parameter
+    list and its own accepted values."""
+    uid = await _seed(db_sessionmaker, balance=0)
+
+    resp = await media_client.get(_MODELS_URL, headers=auth_headers(uid))
+
+    assert resp.status_code == 200, resp.text
+    by_id = {m["id"]: m for m in resp.json()["models"]}
+
+    veo = by_id["veo-3.1"]
+    assert [m["mode"] for m in veo["modes"]] == ["textToVideo", "imageToVideo"]
+    assert veo["baseDurationSeconds"] == 8
+    assert veo["supportsAudio"] is True
+    text_mode, image_mode = veo["modes"]
+    assert text_mode["durations"] == ["4s", "6s", "8s"]
+    assert text_mode["resolutions"] == ["720p", "1080p", "4k"]
+    # Same parameter, different accepted values per mode.
+    assert text_mode["aspectRatios"] == ["16:9", "9:16"]
+    assert image_mode["aspectRatios"] == ["auto", "16:9", "9:16"]
+    assert "generateAudio" in text_mode["params"]
+
+    kling = by_id["kling-video-v3"]
+    kling_text, kling_image = kling["modes"]
+    assert kling["baseDurationSeconds"] == 5
+    assert kling_text["durations"] == [str(n) for n in range(3, 16)]
+    assert "cfgScale" in kling_text["params"]
+    # No aspect ratio at all in image-to-video: it comes from the start frame.
+    assert kling_image["aspectRatios"] == []
+    assert "aspectRatio" not in kling_image["params"]
+
+    image_model = by_id["nano-banana-2"]
+    assert [m["mode"] for m in image_model["modes"]] == ["textToImage", "imageToImage"]
+    assert image_model["baseDurationSeconds"] is None
+    assert image_model["supportsAudio"] is False
+    assert image_model["modes"][0]["resolutions"] == ["0.5K", "1K", "2K", "4K"]
+    assert image_model["modes"][0]["durations"] == []
+    assert {"numImages", "outputFormat", "seed"} <= set(image_model["modes"][0]["params"])
 
 
 async def test_models_catalog_honours_the_operator_price_override(
@@ -296,7 +340,7 @@ async def test_image_submit_returns_202_queued_and_debits_the_model_price(
 
     resp = await media_client.post(
         _IMAGES_URL,
-        json={"model": "nano-banana-2", "prompt": "a cat", "resolution": "2K", "numImages": 2},
+        json={"model": "nano-banana-2", "prompt": "a cat", "resolution": "2K"},
         headers=auth_headers(uid),
     )
 
@@ -308,7 +352,7 @@ async def test_image_submit_returns_202_queued_and_debits_the_model_price(
     assert body["assets"] == []
     assert body["error"] is None
     assert body["creditsRefunded"] is False
-    # nano-banana-2 catalog default is 4 credits.
+    # nano-banana-2 catalog default is 4 credits for one image.
     assert body["creditsCharged"] == 4
     assert await _balance(db_sessionmaker, uid) == 96
 
@@ -342,6 +386,152 @@ async def test_image_submit_sends_the_fal_queue_contract(
     }
     # fal's own auth scheme is "Key", not "Bearer".
     assert fal.calls[0]["headers"]["Authorization"] == f"Key {_FAL_KEY}"
+
+
+async def test_image_price_scales_with_num_images(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    """fal bills per produced image, so four images cost four times the base price."""
+    uid = await _seed(db_sessionmaker, balance=100)
+    fal.on_submit(200, _submit_body("fal-ai/nano-banana-2"))
+
+    resp = await media_client.post(
+        _IMAGES_URL,
+        json={"model": "nano-banana-2", "prompt": "a cat", "numImages": 4},
+        headers=auth_headers(uid),
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["creditsCharged"] == 16
+    assert await _balance(db_sessionmaker, uid) == 84
+
+
+async def test_video_price_scales_with_duration(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    """A 15 s Kling v3 clip is three base durations, so it costs three base prices."""
+    uid = await _seed(db_sessionmaker, balance=1000)
+    fal.on_submit(200, _submit_body("fal-ai/kling-video/v3/pro/text-to-video"))
+
+    resp = await media_client.post(
+        _VIDEOS_URL,
+        json={"model": "kling-video-v3", "prompt": "a river", "duration": "15"},
+        headers=auth_headers(uid),
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["creditsCharged"] == 600
+    assert await _balance(db_sessionmaker, uid) == 400
+
+
+async def test_a_scaled_price_over_the_balance_is_409_without_submitting(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    """The balance is checked against the scaled price, not the base one."""
+    uid = await _seed(db_sessionmaker, balance=300)  # enough for 5s, not for 15s
+    fal.on_submit(200, _submit_body("fal-ai/kling-video/v3/pro/text-to-video"))
+
+    resp = await media_client.post(
+        _VIDEOS_URL,
+        json={"model": "kling-video-v3", "prompt": "a river", "duration": "15"},
+        headers=auth_headers(uid),
+    )
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "insufficient_credits"
+    assert fal.calls == []
+    assert await _balance(db_sessionmaker, uid) == 300
+
+
+async def test_video_submit_forwards_cfg_scale_seed_and_negative_prompt(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    uid = await _seed(db_sessionmaker, balance=1000)
+    fal.on_submit(200, _submit_body("fal-ai/kling-video/v3/pro/text-to-video"))
+
+    resp = await media_client.post(
+        _VIDEOS_URL,
+        json={
+            "model": "kling-video-v3",
+            "prompt": "a boat",
+            "negativePrompt": "blur",
+            "cfgScale": 0.8,
+            "generateAudio": True,
+            "duration": "5",
+            # Kling has no resolution/seed: both must be dropped, not forwarded.
+            "seed": 42,
+        },
+        headers=auth_headers(uid),
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert fal.submit_payload == {
+        "prompt": "a boat",
+        "negative_prompt": "blur",
+        "cfg_scale": 0.8,
+        "generate_audio": True,
+        "duration": "5",
+    }
+
+
+async def test_veo_takes_a_negative_prompt_and_a_seed(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    uid = await _seed(db_sessionmaker, balance=1000)
+    fal.on_submit(200, _submit_body("fal-ai/veo3.1"))
+
+    resp = await media_client.post(
+        _VIDEOS_URL,
+        json={
+            "model": "veo-3.1",
+            "prompt": "a city",
+            "negativePrompt": "text overlays",
+            "seed": 7,
+            "resolution": "1080p",
+            # Veo has no cfg_scale: dropped rather than forwarded.
+            "cfgScale": 0.3,
+        },
+        headers=auth_headers(uid),
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert fal.submit_payload == {
+        "prompt": "a city",
+        "negative_prompt": "text overlays",
+        "seed": 7,
+        "resolution": "1080p",
+    }
+
+
+async def test_aspect_ratio_auto_is_rejected_for_veo_text_to_video_but_accepted_with_an_image(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    """Values are validated per mode: upstream accepts "auto" only in image-to-video."""
+    uid = await _seed(db_sessionmaker, balance=1000)
+
+    rejected = await media_client.post(
+        _VIDEOS_URL,
+        json={"model": "veo-3.1", "prompt": "a city", "aspectRatio": "auto"},
+        headers=auth_headers(uid),
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert "16:9" in rejected.json()["error"]["message"]
+    assert fal.calls == []
+    assert await _balance(db_sessionmaker, uid) == 1000
+
+    fal.on_submit(200, _submit_body("fal-ai/veo3.1/image-to-video"))
+    accepted = await media_client.post(
+        _VIDEOS_URL,
+        json={
+            "model": "veo-3.1",
+            "prompt": "a city",
+            "aspectRatio": "auto",
+            "imageUrl": "https://cdn.example.com/frame.png",
+        },
+        headers=auth_headers(uid),
+    )
+    assert accepted.status_code == 202, accepted.text
+    assert fal.submit_payload["aspect_ratio"] == "auto"
 
 
 async def test_image_submit_with_reference_images_uses_the_edit_endpoint(
