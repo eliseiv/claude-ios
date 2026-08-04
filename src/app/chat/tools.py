@@ -304,8 +304,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     TOOL_SITE_WRITE_FILE: (
         "Write or overwrite a file in the website project. Path is relative to the project "
         "root. Use encoding 'utf8' for text (HTML/CSS/JS) and 'base64' for binary assets "
-        "(images/fonts). The project is the current chat session's project (no project id "
-        "needed)."
+        "(images/fonts) — but ONLY with REAL base64 bytes. NEVER write an image or other "
+        "binary file with placeholder, fake, or invented content (e.g. content like "
+        "'base64 placeholder for dish1.jpg'): it is rejected as invalid base64 and the page "
+        "is left with broken images. If you do NOT have real image bytes, do NOT create image "
+        "files and do NOT reference external image URLs — instead make the page self-contained "
+        "by rendering visuals with CSS gradients/backgrounds, inline SVG, or emoji. The project "
+        "is the current chat session's project (no project id needed)."
     ),
     TOOL_SITE_PREVIEW: (
         "Get a temporary signed preview URL for the current website project. Optional 'entry' "
