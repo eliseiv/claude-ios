@@ -18,9 +18,9 @@
 |---|---|---|---|---|---|---|
 | `nano-banana-pro` | Nano Banana Pro (Gemini 3 Pro Image) | изображение | 8 / изображение | до 14 (режим редактирования) | — | `1K`/`2K`/`4K` |
 | `nano-banana-2` | Nano Banana 2 (Gemini 3.1 Flash Image) | изображение | 4 / изображение | до 14 (режим редактирования) | — | `0.5K`/`1K`/`2K`/`4K` |
-| `kling-video` | Kling Video 2.5 Turbo Pro | видео | 120 / 5 с | 1 (image-to-video) | `5`, `10` | — |
-| `kling-video-v3` | Kling Video V3 Pro | видео | 200 / 5 с | 1 (image-to-video) | `3`…`15` | — |
-| `veo-3.1` | Veo 3.1 (Google) | видео | 300 / 8 с | 1 (image-to-video) | `4s`, `6s`, `8s` | `720p`/`1080p`/`4k` |
+| `kling-video` | Kling Video 2.5 Turbo Pro | видео | 5 / 5 с | 1 (image-to-video) | `5`, `10` | — |
+| `kling-video-v3` | Kling Video V3 Pro | видео | 10 / 5 с | 1 (image-to-video) | `3`…`15` | — |
+| `veo-3.1` | Veo 3.1 (Google) | видео | 15 / 4 с | 1 (image-to-video) | `4s`, `6s`, `8s` | `720p`/`1080p`/`4k` |
 
 Публичные id — стабильный контракт: клиент присылает их в поле `model`. Идентификаторы endpoint'ов fal остаются на сервере.
 

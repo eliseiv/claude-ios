@@ -284,7 +284,7 @@ async def test_models_catalog_reports_per_mode_parameters(
 
     veo = by_id["veo-3.1"]
     assert [m["mode"] for m in veo["modes"]] == ["textToVideo", "imageToVideo"]
-    assert veo["baseDurationSeconds"] == 8
+    assert veo["baseDurationSeconds"] == 4
     assert veo["supportsAudio"] is True
     text_mode, image_mode = veo["modes"]
     assert text_mode["durations"] == ["4s", "6s", "8s"]
@@ -410,7 +410,7 @@ async def test_video_price_scales_with_duration(
     media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
 ) -> None:
     """A 15 s Kling v3 clip is three base durations, so it costs three base prices."""
-    uid = await _seed(db_sessionmaker, balance=1000)
+    uid = await _seed(db_sessionmaker, balance=100)
     fal.on_submit(200, _submit_body("fal-ai/kling-video/v3/pro/text-to-video"))
 
     resp = await media_client.post(
@@ -420,15 +420,15 @@ async def test_video_price_scales_with_duration(
     )
 
     assert resp.status_code == 202, resp.text
-    assert resp.json()["creditsCharged"] == 600
-    assert await _balance(db_sessionmaker, uid) == 400
+    assert resp.json()["creditsCharged"] == 30
+    assert await _balance(db_sessionmaker, uid) == 70
 
 
 async def test_a_scaled_price_over_the_balance_is_409_without_submitting(
     media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
 ) -> None:
     """The balance is checked against the scaled price, not the base one."""
-    uid = await _seed(db_sessionmaker, balance=300)  # enough for 5s, not for 15s
+    uid = await _seed(db_sessionmaker, balance=20)  # enough for 5s and 10s, not for 15s
     fal.on_submit(200, _submit_body("fal-ai/kling-video/v3/pro/text-to-video"))
 
     resp = await media_client.post(
@@ -440,7 +440,7 @@ async def test_a_scaled_price_over_the_balance_is_409_without_submitting(
     assert resp.status_code == 409, resp.text
     assert resp.json()["error"]["code"] == "insufficient_credits"
     assert fal.calls == []
-    assert await _balance(db_sessionmaker, uid) == 300
+    assert await _balance(db_sessionmaker, uid) == 20
 
 
 async def test_video_submit_forwards_cfg_scale_seed_and_negative_prompt(

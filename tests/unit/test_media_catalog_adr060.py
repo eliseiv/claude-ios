@@ -262,15 +262,17 @@ def test_image_price_scales_with_the_number_of_images() -> None:
 
 def test_video_price_scales_with_the_requested_length() -> None:
     kling = find_model("kling-video-v3")  # base 5s
-    veo = find_model("veo-3.1")  # base 8s
+    veo = find_model("veo-3.1")  # base 4s
     assert kling is not None and veo is not None
     assert price_multiplier(model=kling, num_images=None, duration="5") == 1
     assert price_multiplier(model=kling, num_images=None, duration="10") == 2
     assert price_multiplier(model=kling, num_images=None, duration="15") == 3
     # Rounded up, and a shorter-than-base clip is never free.
     assert price_multiplier(model=kling, num_images=None, duration="7") == 2
+    # Veo's block is its shortest run, so its three offered lengths do not all cost one block.
     assert price_multiplier(model=veo, num_images=None, duration="4s") == 1
-    assert price_multiplier(model=veo, num_images=None, duration="8s") == 1
+    assert price_multiplier(model=veo, num_images=None, duration="6s") == 2
+    assert price_multiplier(model=veo, num_images=None, duration="8s") == 2
 
 
 def test_unparseable_or_absent_duration_falls_back_to_the_base_price() -> None:

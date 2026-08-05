@@ -200,7 +200,7 @@ _MODELS: tuple[FalModel, ...] = (
         id="kling-video",
         title="Kling Video 2.5 Turbo Pro",
         kind=KIND_VIDEO,
-        default_credits=120,
+        default_credits=5,
         text_variant=FalVariant(
             endpoint="fal-ai/kling-video/v2.5-turbo/pro/text-to-video",
             fields=_KLING_25_FIELDS | {"aspectRatio"},
@@ -222,7 +222,7 @@ _MODELS: tuple[FalModel, ...] = (
         id="kling-video-v3",
         title="Kling Video V3 Pro",
         kind=KIND_VIDEO,
-        default_credits=200,
+        default_credits=10,
         text_variant=FalVariant(
             endpoint="fal-ai/kling-video/v3/pro/text-to-video",
             fields=_KLING_V3_FIELDS | {"aspectRatio"},
@@ -245,7 +245,7 @@ _MODELS: tuple[FalModel, ...] = (
         id="veo-3.1",
         title="Veo 3.1 (Google)",
         kind=KIND_VIDEO,
-        default_credits=300,
+        default_credits=15,
         text_variant=FalVariant(
             endpoint="fal-ai/veo3.1",
             fields=_VEO_FIELDS,
@@ -264,7 +264,9 @@ _MODELS: tuple[FalModel, ...] = (
         image_field="image_url",
         image_field_is_list=False,
         max_input_images=1,
-        base_duration_seconds=8,
+        # 4 s = the shortest run this model offers, so each offered duration (4s/6s/8s) is priced
+        # by how many such blocks it needs instead of all three costing the same one block.
+        base_duration_seconds=4,
         supports_audio=True,
     ),
 )
