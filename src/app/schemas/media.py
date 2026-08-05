@@ -90,23 +90,45 @@ class MediaModelSchema(StrictModel):
     )
     credits: int = Field(
         description=(
-            "Базовая цена в кредитах: за **одно** изображение либо за видео базовой длительности "
-            "(`baseDurationSeconds`). Итог масштабируется: `numImages` изображений стоят "
-            "`credits × numImages`, видео длиной N секунд — `credits × ceil(N / "
-            "baseDurationSeconds)`. Фактически списанное всегда приходит в `creditsCharged`."
+            "Базовая цена в кредитах: для image — одно изображение в качестве `1K`; для video — "
+            "одна пачка длительности `baseDurationSeconds` при базовом качестве (без "
+            "resolution/audio множителей). Не хардкодьте итог: смотрите `resolutionCredits` / "
+            "`resolutionMultipliers` / `audioMultiplier`. Фактически списанное — в "
+            "`creditsCharged`."
         )
     )
     baseDurationSeconds: int | None = Field(
         default=None,
         description=(
             "Длительность видео, которую покрывает базовая цена. `null` у image-моделей — они "
-            "масштабируются по `numImages`."
+            "масштабируются по `resolutionCredits` и `numImages`."
+        ),
+    )
+    resolutionCredits: dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "Image: цена **одного** изображения по `resolution` (целые ступени). Итог = "
+            "`resolutionCredits[resolution] × numImages`. `null` у video-моделей."
+        ),
+    )
+    resolutionMultipliers: dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "Video: множитель пачки по `resolution` (например Veo `4k` → 2). `null`/пусто — "
+            "resolution на цену не влияет."
+        ),
+    )
+    audioMultiplier: int | None = Field(
+        default=None,
+        description=(
+            "Video: множитель при `generateAudio: true` (Veo → 2). `null` — звук на цену не "
+            "влияет (даже если переключатель в UI есть)."
         ),
     )
     supportsImageInput: bool = Field(
         description=(
             "Принимает ли модель референсные изображения (`imageUrls`/`imageUrl`). Для image-"
-            "моделей это режим редактирования, для video — image-to-video."
+            "моделей это режим редактирования, для video — image-to-video. На цену не влияет."
         )
     )
     maxInputImages: int = Field(
@@ -118,7 +140,7 @@ class MediaModelSchema(StrictModel):
     modes: list[MediaModeSchema] = Field(
         description=(
             "Режимы генерации с их параметрами. Первый — без референсного изображения, второй "
-            "(если есть) — с ним."
+            "(если есть) — с ним. Mode на цену не влияет."
         )
     )
 

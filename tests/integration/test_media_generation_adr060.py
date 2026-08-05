@@ -286,6 +286,9 @@ async def test_models_catalog_reports_per_mode_parameters(
     assert [m["mode"] for m in veo["modes"]] == ["textToVideo", "imageToVideo"]
     assert veo["baseDurationSeconds"] == 4
     assert veo["supportsAudio"] is True
+    assert veo["resolutionCredits"] is None
+    assert veo["resolutionMultipliers"] == {"720p": 1, "1080p": 1, "4k": 2}
+    assert veo["audioMultiplier"] == 2
     text_mode, image_mode = veo["modes"]
     assert text_mode["durations"] == ["4s", "6s", "8s"]
     assert text_mode["resolutions"] == ["720p", "1080p", "4k"]
@@ -297,6 +300,8 @@ async def test_models_catalog_reports_per_mode_parameters(
     kling = by_id["kling-video-v3"]
     kling_text, kling_image = kling["modes"]
     assert kling["baseDurationSeconds"] == 5
+    assert kling["resolutionMultipliers"] is None
+    assert kling["audioMultiplier"] is None
     assert kling_text["durations"] == [str(n) for n in range(3, 16)]
     assert "cfgScale" in kling_text["params"]
     # No aspect ratio at all in image-to-video: it comes from the start frame.
@@ -307,6 +312,13 @@ async def test_models_catalog_reports_per_mode_parameters(
     assert [m["mode"] for m in image_model["modes"]] == ["textToImage", "imageToImage"]
     assert image_model["baseDurationSeconds"] is None
     assert image_model["supportsAudio"] is False
+    assert image_model["resolutionCredits"] == {
+        "0.5K": 3,
+        "1K": 4,
+        "2K": 6,
+        "4K": 8,
+    }
+    assert image_model["resolutionMultipliers"] is None
     assert image_model["modes"][0]["resolutions"] == ["0.5K", "1K", "2K", "4K"]
     assert image_model["modes"][0]["durations"] == []
     assert {"numImages", "outputFormat", "seed"} <= set(image_model["modes"][0]["params"])
@@ -352,9 +364,9 @@ async def test_image_submit_returns_202_queued_and_debits_the_model_price(
     assert body["assets"] == []
     assert body["error"] is None
     assert body["creditsRefunded"] is False
-    # nano-banana-2 catalog default is 4 credits for one image.
-    assert body["creditsCharged"] == 4
-    assert await _balance(db_sessionmaker, uid) == 96
+    # nano-banana-2 at 2K is the 6-credit tier (1K would be 4).
+    assert body["creditsCharged"] == 6
+    assert await _balance(db_sessionmaker, uid) == 94
 
 
 async def test_image_submit_sends_the_fal_queue_contract(
@@ -391,7 +403,7 @@ async def test_image_submit_sends_the_fal_queue_contract(
 async def test_image_price_scales_with_num_images(
     media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
 ) -> None:
-    """fal bills per produced image, so four images cost four times the base price."""
+    """fal bills per produced image, so four images cost four times the base (1K) price."""
     uid = await _seed(db_sessionmaker, balance=100)
     fal.on_submit(200, _submit_body("fal-ai/nano-banana-2"))
 
@@ -404,6 +416,54 @@ async def test_image_price_scales_with_num_images(
     assert resp.status_code == 202, resp.text
     assert resp.json()["creditsCharged"] == 16
     assert await _balance(db_sessionmaker, uid) == 84
+
+
+async def test_image_price_scales_with_resolution(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    """0.5K and 4K are different whole-credit tiers — not the same flat image price."""
+    uid = await _seed(db_sessionmaker, balance=100)
+    fal.on_submit(200, _submit_body("fal-ai/nano-banana-2"))
+    cheap = await media_client.post(
+        _IMAGES_URL,
+        json={"model": "nano-banana-2", "prompt": "a cat", "resolution": "0.5K"},
+        headers=auth_headers(uid),
+    )
+    fal.on_submit(200, _submit_body("fal-ai/nano-banana-2"))
+    pricey = await media_client.post(
+        _IMAGES_URL,
+        json={"model": "nano-banana-2", "prompt": "a cat", "resolution": "4K"},
+        headers=auth_headers(uid),
+    )
+
+    assert cheap.status_code == 202, cheap.text
+    assert pricey.status_code == 202, pricey.text
+    assert cheap.json()["creditsCharged"] == 3
+    assert pricey.json()["creditsCharged"] == 8
+    assert await _balance(db_sessionmaker, uid) == 89
+
+
+async def test_veo_price_scales_with_4k_and_audio(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    uid = await _seed(db_sessionmaker, balance=100)
+    fal.on_submit(200, _submit_body("fal-ai/veo3.1"))
+
+    resp = await media_client.post(
+        _VIDEOS_URL,
+        json={
+            "model": "veo-3.1",
+            "prompt": "a river",
+            "duration": "4s",
+            "resolution": "4k",
+            "generateAudio": True,
+        },
+        headers=auth_headers(uid),
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["creditsCharged"] == 60
+    assert await _balance(db_sessionmaker, uid) == 40
 
 
 async def test_video_price_scales_with_duration(

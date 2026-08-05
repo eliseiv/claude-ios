@@ -20,7 +20,12 @@ from fastapi import APIRouter, Depends, Path, Query, Request
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.deps import CurrentUser, get_media_generation_service, require_media_generation_configured
 from app.errors import RateLimitedError
-from app.media_generation.catalog import KIND_IMAGE, KIND_VIDEO, all_models
+from app.media_generation.catalog import (
+    KIND_IMAGE,
+    KIND_VIDEO,
+    all_models,
+    resolution_credits_for_api,
+)
 from app.media_generation.service import MediaGenerationService, MediaJobView
 from app.schemas.media import (
     ImageGenerationRequest,
@@ -71,13 +76,11 @@ def _job_response(view: MediaJobView) -> MediaJobResponse:
     summary="Каталог моделей генерации",
     description=(
         "Возвращает доступные модели генерации фото и видео: идентификатор для поля `model`, "
-        "базовую цену в кредитах и **режимы** генерации. Режимов у модели два — без референсного "
-        "изображения (`textToImage`/`textToVideo`) и с ним (`imageToImage`/`imageToVideo`); режим "
-        "выбирается автоматически по наличию `imageUrls`/`imageUrl` в запросе. У каждого режима "
-        "свои `params` (какие параметры он принимает) и свои наборы `aspectRatio`/`resolution`/"
-        "`duration` — они действительно различаются между режимами. Пустой список означает, что "
-        "параметр в этом режиме не поддерживается: присланное значение вернёт `422` до списания. "
-        "Строьте контролы UI по режиму, а не по модели."
+        "базовую цену и **ступени качества**. Image: `resolutionCredits[resolution] × numImages`. "
+        "Video: `credits × ceil(duration/baseDurationSeconds) × resolutionMultipliers[resolution] "
+        "× (audioMultiplier при generateAudio)`. Mode text/image на цену не влияет. Режимов у "
+        "модели два — без референса и с ним; у каждого свои `params` и наборы значений. Пустой "
+        "список = параметр не поддерживается (`422` до списания). Стройте UI по режиму."
     ),
 )
 async def list_media_models(
@@ -94,6 +97,13 @@ async def list_media_models(
                 kind=model.kind,
                 credits=media.credits_for(model),
                 baseDurationSeconds=model.base_duration_seconds,
+                resolutionCredits=(
+                    resolution_credits_for_api(model, base_credits=media.credits_for(model)) or None
+                ),
+                resolutionMultipliers=(
+                    dict(model.resolution_multipliers) if model.resolution_multipliers else None
+                ),
+                audioMultiplier=model.audio_multiplier,
                 supportsImageInput=model.image_variant is not None,
                 maxInputImages=model.max_input_images if model.image_variant else 0,
                 supportsAudio=model.supports_audio,
@@ -121,7 +131,8 @@ async def list_media_models(
     summary="Сгенерировать изображение",
     description=(
         "Ставит генерацию изображения в очередь и списывает кредиты по цене модели (цена берётся "
-        "с сервера, поле в запросе не предусмотрено): `credits × numImages`. Отвечает `202` с "
+        "с сервера): `resolutionCredits[resolution] × numImages` (без resolution — цена `1K`). "
+        "Отвечает `202` с "
         "задачей в статусе `queued` — результат забирайте через `GET /v1/media/jobs/{jobId}`. "
         "Непустой `imageUrls` включает режим редактирования референсных изображений. Параметры "
         "`aspectRatio`/`resolution`/`numImages`/`outputFormat`/`seed` проверяются по набору "
@@ -161,7 +172,8 @@ async def generate_image(
     summary="Сгенерировать видео",
     description=(
         "Ставит генерацию видео в очередь и списывает кредиты по цене модели, масштабированной "
-        "длительностью: `credits × ceil(duration / baseDurationSeconds)`. Отвечает `202` с "
+        "длительностью и качеством: `credits × ceil(duration / baseDurationSeconds) × "
+        "resolutionMultipliers × audioMultiplier`. Отвечает `202` с "
         "задачей в статусе `queued`: видео генерируется минутами, поэтому результат забирается "
         "опросом `GET /v1/media/jobs/{jobId}`. Заданный `imageUrl` включает режим image-to-video "
         "(стартовый кадр) — в нём `aspectRatio` берётся из кадра и моделями Kling не принимается. "

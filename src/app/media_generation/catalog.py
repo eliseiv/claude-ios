@@ -32,7 +32,9 @@ That asymmetry lives here so the service and the schemas stay model-agnostic.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 KIND_IMAGE = "image"
 KIND_VIDEO = "video"
@@ -92,7 +94,12 @@ class FalModel:
 
     ``base_duration_seconds`` is the video length the price covers; a longer run scales the price
     proportionally (fal bills per second of output). ``None`` for image models, which scale by
-    ``numImages`` instead.
+    ``numImages`` and ``resolution_credits`` instead.
+
+    ``resolution_credits`` (image) is the whole-credit price of *one* image at each resolution;
+    ``default_credits`` is the 1K tier (operator override via MEDIA_MODEL_CREDITS scales the table
+    so the 1K cell stays equal to the override). ``resolution_multipliers`` / ``audio_multiplier``
+    (video) scale the duration-pack price — Veo bills fal more for 4K and for audio; Kling does not.
     """
 
     id: str
@@ -106,6 +113,9 @@ class FalModel:
     max_input_images: int
     base_duration_seconds: int | None = None
     supports_audio: bool = field(default=False)
+    resolution_credits: Mapping[str, int] = field(default_factory=dict)
+    resolution_multipliers: Mapping[str, int] = field(default_factory=dict)
+    audio_multiplier: int | None = None
 
     def variant_for(self, *, with_image: bool) -> FalVariant | None:
         return self.image_variant if with_image else self.text_variant
@@ -152,6 +162,12 @@ _VEO_FIELDS = frozenset(
 )
 _VEO_RESOLUTIONS = ("720p", "1080p", "4k")
 _VEO_DURATIONS = ("4s", "6s", "8s")
+# Whole-credit quality tiers (plan B). 1K == default_credits; higher res steps up in integers.
+_NB2_RESOLUTION_CREDITS: Mapping[str, int] = MappingProxyType(
+    {"0.5K": 3, "1K": 4, "2K": 6, "4K": 8}
+)
+_NB_PRO_RESOLUTION_CREDITS: Mapping[str, int] = MappingProxyType({"1K": 8, "2K": 12, "4K": 16})
+_VEO_RESOLUTION_MULTIPLIERS: Mapping[str, int] = MappingProxyType({"720p": 1, "1080p": 1, "4k": 2})
 
 _MODELS: tuple[FalModel, ...] = (
     FalModel(
@@ -174,6 +190,7 @@ _MODELS: tuple[FalModel, ...] = (
         image_field="image_urls",
         image_field_is_list=True,
         max_input_images=14,
+        resolution_credits=_NB_PRO_RESOLUTION_CREDITS,
     ),
     FalModel(
         id="nano-banana-2",
@@ -195,6 +212,7 @@ _MODELS: tuple[FalModel, ...] = (
         image_field="image_urls",
         image_field_is_list=True,
         max_input_images=14,
+        resolution_credits=_NB2_RESOLUTION_CREDITS,
     ),
     FalModel(
         id="kling-video",
@@ -268,6 +286,9 @@ _MODELS: tuple[FalModel, ...] = (
         # by how many such blocks it needs instead of all three costing the same one block.
         base_duration_seconds=4,
         supports_audio=True,
+        resolution_multipliers=_VEO_RESOLUTION_MULTIPLIERS,
+        # generateAudio doubles the pack price; Kling also exposes the toggle but does not bill it.
+        audio_multiplier=2,
     ),
 )
 
@@ -305,12 +326,10 @@ def duration_seconds(value: str) -> int | None:
 
 
 def price_multiplier(*, model: FalModel, num_images: int | None, duration: str | None) -> int:
-    """How many base prices one run costs, given what the client asked for.
+    """How many *units* of the unit price one run costs (images or duration packs).
 
-    fal bills per produced image and per second of video, so a run asking for 4 images or a 15 s
-    clip costs it 4x/3x — charging the flat base price would make the longest options the cheapest
-    per unit and lose money on them. Rounded up, and never below 1, so a shorter-than-base clip is
-    not free.
+    Image quality is priced separately via ``resolution_credits``; this returns only the count of
+    images. Video returns ``ceil(seconds / base_duration)``. Never below 1.
     """
     if model.kind == KIND_IMAGE:
         return max(1, num_images or 1)
@@ -319,6 +338,62 @@ def price_multiplier(*, model: FalModel, num_images: int | None, duration: str |
     if base is None or seconds is None:
         return 1
     return max(1, math.ceil(seconds / base))
+
+
+def image_unit_credits(model: FalModel, resolution: str | None, *, base_credits: int) -> int:
+    """Credits for one image at ``resolution``, scaled so the 1K tier equals ``base_credits``."""
+    table = model.resolution_credits
+    if not table:
+        return base_credits
+    if resolution is not None and resolution in table:
+        listed = table[resolution]
+    elif "1K" in table:
+        listed = table["1K"]
+    else:
+        listed = next(iter(table.values()))
+    if base_credits == model.default_credits or model.default_credits <= 0:
+        return listed
+    # Operator override of the 1K / default cell: keep the same integer ratios.
+    return max(1, (listed * base_credits + model.default_credits - 1) // model.default_credits)
+
+
+def resolution_credits_for_api(model: FalModel, *, base_credits: int) -> dict[str, int]:
+    """Per-resolution unit prices as exposed on ``GET /v1/media/models`` (empty for video)."""
+    if model.kind != KIND_IMAGE or not model.resolution_credits:
+        return {}
+    return {
+        key: image_unit_credits(model, key, base_credits=base_credits)
+        for key in model.resolution_credits
+    }
+
+
+def run_price(
+    *,
+    model: FalModel,
+    base_credits: int,
+    num_images: int | None = None,
+    duration: str | None = None,
+    resolution: str | None = None,
+    generate_audio: bool | None = None,
+) -> int:
+    """Total credits for one submit, given the knobs that actually change fal's bill.
+
+    Image: ``resolution_credits[resolution] × numImages``.
+    Video: ``base_credits × duration_packs × resolution_mult × audio_mult``.
+    Mode (text-to-* vs image-to-*) does not affect the price.
+    """
+    if model.kind == KIND_IMAGE:
+        return image_unit_credits(model, resolution, base_credits=base_credits) * price_multiplier(
+            model=model, num_images=num_images, duration=None
+        )
+    packs = price_multiplier(model=model, num_images=None, duration=duration)
+    res_mult = 1
+    if model.resolution_multipliers and resolution is not None:
+        res_mult = model.resolution_multipliers.get(resolution, 1)
+    audio_mult = 1
+    if generate_audio and model.audio_multiplier is not None:
+        audio_mult = model.audio_multiplier
+    return base_credits * packs * res_mult * audio_mult
 
 
 def build_fal_input(

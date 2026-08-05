@@ -57,9 +57,12 @@ GET  /v1/media/jobs/{jobId}            → опрашивать до status = co
 |---|---|
 | `id` | значение для поля `model` в запросах генерации |
 | `kind` | `image` → отправлять в `/v1/media/images`; `video` → в `/v1/media/videos` |
-| `credits` | базовая цена: за **одно** изображение либо за видео длительности `baseDurationSeconds` |
-| `baseDurationSeconds` | длительность видео, которую покрывает базовая цена; `null` у image-моделей |
-| `supportsImageInput` / `maxInputImages` | принимает ли модель референсные изображения и сколько |
+| `credits` | базовая цена: image — одно фото `1K`; video — одна пачка `baseDurationSeconds` без quality-множителей |
+| `baseDurationSeconds` | длительность видео на одну пачку; `null` у image-моделей |
+| `resolutionCredits` | image: цена одного фото по `resolution` (целые ступени); `null` у video |
+| `resolutionMultipliers` | video: множитель пачки по `resolution` (Veo: `4k`→2); `null`/пусто — не влияет |
+| `audioMultiplier` | video: множитель при `generateAudio: true` (Veo→2); `null` — звук на цену не влияет |
+| `supportsImageInput` / `maxInputImages` | принимает ли модель референсные изображения и сколько (на цену не влияет) |
 | `supportsAudio` | имеет ли смысл показывать переключатель `generateAudio` |
 | `modes` | режимы генерации: первый — без референсного изображения, второй — с ним |
 
@@ -73,12 +76,12 @@ GET  /v1/media/jobs/{jobId}            → опрашивать до status = co
 
 Наборы намеренно даны по режимам, а не по модели, потому что они действительно различаются: у Veo в text-to-video нет `aspectRatio: "auto"`, а в image-to-video есть; Kling в image-to-video `aspectRatio` не принимает вовсе (берёт из стартового кадра). Каталог — источник истины: модели, значения и цены меняются на сервере без релиза клиента.
 
-**Как считается цена.** `credits` — за единицу выпуска, потому что провайдер берёт за каждое изображение и за каждую секунду видео:
+**Как считается цена** (mode text/image не влияет):
 
-- изображения: `credits × numImages`;
-- видео: `credits × ceil(duration / baseDurationSeconds)` — например, 15-секундный Kling V3 стоит `10 × 3 = 30`, а 6-секундный Veo — `15 × 2 = 30` (округление вверх: 6 с не влезают в один 4-секундный блок).
+- изображения: `resolutionCredits[resolution] × numImages` — например `nano-banana-2` 4K × 2 = `8 × 2 = 16`; без `resolution` берётся цена `1K`;
+- видео: `credits × ceil(duration / baseDurationSeconds) × resolutionMultipliers[resolution] × (audioMultiplier если generateAudio)` — например 15 с Kling V3 = `10 × 3 = 30`; Veo `4s` + `4k` + audio = `15 × 1 × 2 × 2 = 60`.
 
-Фактически списанное всегда приходит в `creditsCharged` ответа задачи; баланс проверяется по итоговой цене, поэтому слишком длинное видео при малом балансе даст `409` до списания.
+Фактически списанное всегда приходит в `creditsCharged`; баланс проверяется по итоговой цене (`409` до списания).
 
 ---
 

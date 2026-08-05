@@ -85,6 +85,15 @@ def test_price_uses_the_operator_override_when_present() -> None:
     assert service.credits_for(model) == 400
 
 
+def test_image_override_scales_resolution_tiers_from_the_1k_cell() -> None:
+    # Override sets the 1K cell; 4K stays at 2× that cell (catalog 8/4).
+    service = _service(_settings('{"nano-banana-2":10}'))
+    model = find_model("nano-banana-2")
+    assert model is not None
+    assert service.price_of(model=model, resolution="1K") == 10
+    assert service.price_of(model=model, resolution="4K") == 20
+
+
 def test_a_dropped_override_cannot_make_a_run_free() -> None:
     service = _service(_settings('{"veo-3.1":0}'))
     model = find_model("veo-3.1")

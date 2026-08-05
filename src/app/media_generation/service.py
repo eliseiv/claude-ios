@@ -31,7 +31,7 @@ from app.media_generation.catalog import (
     FalVariant,
     build_fal_input,
     find_model,
-    price_multiplier,
+    run_price,
 )
 from app.media_generation.fal_client import (
     FAL_CANCELED,
@@ -95,15 +95,26 @@ class MediaGenerationService:
         return self._settings.media_model_credits().get(model.id, model.default_credits)
 
     def price_of(
-        self, *, model: FalModel, num_images: int | None = None, duration: str | None = None
+        self,
+        *,
+        model: FalModel,
+        num_images: int | None = None,
+        duration: str | None = None,
+        resolution: str | None = None,
+        generate_audio: bool | None = None,
     ) -> int:
-        """What this particular run costs — the base price times what the client asked for.
+        """What this particular run costs — quality tiers and usage, never from the request price.
 
-        The multiplier exists because fal bills per image and per second of video: a flat price
-        would make 4 images or a 15 s clip the cheapest option per unit and lose money on it.
+        Image: per-resolution credits × numImages. Video: pack price × duration packs × (Veo)
+        resolution/audio multipliers. text-to-* vs image-to-* does not change the price.
         """
-        return self.credits_for(model) * price_multiplier(
-            model=model, num_images=num_images, duration=duration
+        return run_price(
+            model=model,
+            base_credits=self.credits_for(model),
+            num_images=num_images,
+            duration=duration,
+            resolution=resolution,
+            generate_audio=generate_audio,
         )
 
     # ---- submit ----
@@ -146,6 +157,8 @@ class MediaGenerationService:
             model=model,
             num_images=_as_int(params.get("numImages")),
             duration=_as_str(params.get("duration")),
+            resolution=_as_str(params.get("resolution")),
+            generate_audio=_as_bool(params.get("generateAudio")),
         )
         await self._wallet.consume(
             user_id=user_id,
@@ -308,6 +321,10 @@ def _as_int(value: Any) -> int | None:
 
 def _as_str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _as_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _normalize_result(body: dict[str, Any], *, kind: str) -> dict[str, Any]:

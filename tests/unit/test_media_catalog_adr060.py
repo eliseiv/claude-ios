@@ -19,6 +19,7 @@ from app.media_generation.catalog import (
     find_model,
     models_of_kind,
     price_multiplier,
+    run_price,
 )
 
 # The five models the product ships with. Ids are a public contract (iOS sends them in `model`).
@@ -280,3 +281,37 @@ def test_unparseable_or_absent_duration_falls_back_to_the_base_price() -> None:
     assert veo is not None
     assert price_multiplier(model=veo, num_images=None, duration=None) == 1
     assert price_multiplier(model=veo, num_images=None, duration="whatever") == 1
+
+
+def test_image_run_price_uses_resolution_tiers_and_num_images() -> None:
+    nb2 = find_model("nano-banana-2")
+    pro = find_model("nano-banana-pro")
+    assert nb2 is not None and pro is not None
+    assert run_price(model=nb2, base_credits=4, resolution="0.5K") == 3
+    assert run_price(model=nb2, base_credits=4, resolution="1K") == 4
+    assert run_price(model=nb2, base_credits=4, resolution="2K") == 6
+    assert run_price(model=nb2, base_credits=4, resolution="4K", num_images=2) == 16
+    assert run_price(model=pro, base_credits=8, resolution="4K") == 16
+    # Missing resolution → 1K tier.
+    assert run_price(model=nb2, base_credits=4, resolution=None) == 4
+
+
+def test_veo_run_price_scales_resolution_and_audio() -> None:
+    veo = find_model("veo-3.1")
+    kling = find_model("kling-video-v3")
+    assert veo is not None and kling is not None
+    assert run_price(model=veo, base_credits=15, duration="4s") == 15
+    assert run_price(model=veo, base_credits=15, duration="4s", resolution="4k") == 30
+    assert (
+        run_price(
+            model=veo,
+            base_credits=15,
+            duration="4s",
+            resolution="4k",
+            generate_audio=True,
+        )
+        == 60
+    )
+    assert run_price(model=veo, base_credits=15, duration="6s", resolution="1080p") == 30
+    # Kling: generateAudio is a generation knob but not a price knob.
+    assert run_price(model=kling, base_credits=10, duration="5", generate_audio=True) == 10
