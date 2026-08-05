@@ -69,6 +69,13 @@ class FalVariant:
     ``fields`` is the forwarding allowlist. The three tuples are the accepted values of the
     same-named request fields; an empty tuple means "this endpoint has no such parameter", which is
     also how ``GET /v1/media/models`` tells the client not to render that control.
+
+    ``defaults`` covers the fields that CHANGE THE PRICE (ADR-061 §3). An omitted field used to be
+    dropped so fal's own default applied — but fal's defaults are not ours (``generate_audio`` is
+    ``true`` upstream, ``duration`` is ``8s`` on Veo), so the run we billed and the run we asked
+    for were two different runs. Filling the default here, once, before pricing, makes both use the
+    same value. Parameters that cannot move the price (``aspectRatio``, ``outputFormat``, ``seed``,
+    ``cfgScale``, ``negativePrompt``) deliberately get no default: fal may keep deciding those.
     """
 
     endpoint: str
@@ -76,6 +83,7 @@ class FalVariant:
     aspect_ratios: tuple[str, ...] = ()
     resolutions: tuple[str, ...] = ()
     durations: tuple[str, ...] = ()
+    defaults: Mapping[str, str | int | bool] = field(default_factory=dict)
 
     def allowed(self, request_field: str) -> tuple[str, ...]:
         return {
@@ -99,7 +107,9 @@ class FalModel:
     ``resolution_credits`` (image) is the whole-credit price of *one* image at each resolution;
     ``default_credits`` is the 1K tier (operator override via MEDIA_MODEL_CREDITS scales the table
     so the 1K cell stays equal to the override). ``resolution_multipliers`` / ``audio_multiplier``
-    (video) scale the duration-pack price — Veo bills fal more for 4K and for audio; Kling does not.
+    (video) scale the duration-pack price — both Veo and Kling v3 bill fal more for audio, Veo also
+    for 4K. ``audio_multiplier`` is a float because Kling v3's audio surcharge is ×1.5, not ×2; the
+    final price is rounded UP so a fractional multiplier can never price a run below its own cost.
     """
 
     id: str
@@ -115,7 +125,7 @@ class FalModel:
     supports_audio: bool = field(default=False)
     resolution_credits: Mapping[str, int] = field(default_factory=dict)
     resolution_multipliers: Mapping[str, int] = field(default_factory=dict)
-    audio_multiplier: int | None = None
+    audio_multiplier: float | None = None
 
     def variant_for(self, *, with_image: bool) -> FalVariant | None:
         return self.image_variant if with_image else self.text_variant
@@ -162,6 +172,22 @@ _VEO_FIELDS = frozenset(
 )
 _VEO_RESOLUTIONS = ("720p", "1080p", "4k")
 _VEO_DURATIONS = ("4s", "6s", "8s")
+
+# Server-side defaults for the price-affecting fields (ADR-061 §3). Everything here is sent
+# upstream explicitly and priced with the same value, so fal's own defaults never reach the bill.
+# `generateAudio` is False on purpose — upstream it is True, which silently doubled (Veo) or
+# multiplied by 1.5 (Kling v3) the cost of a request that never asked for sound. The rest match
+# fal's defaults, so what the models actually produce does not change.
+_IMAGE_DEFAULTS: Mapping[str, str | int | bool] = MappingProxyType(
+    {"resolution": "1K", "numImages": 1}
+)
+_KLING_25_DEFAULTS: Mapping[str, str | int | bool] = MappingProxyType({"duration": "5"})
+_KLING_V3_DEFAULTS: Mapping[str, str | int | bool] = MappingProxyType(
+    {"duration": "5", "generateAudio": False}
+)
+_VEO_DEFAULTS: Mapping[str, str | int | bool] = MappingProxyType(
+    {"duration": "8s", "resolution": "720p", "generateAudio": False}
+)
 # Whole-credit quality tiers (plan B). 1K == default_credits; higher res steps up in integers.
 _NB2_RESOLUTION_CREDITS: Mapping[str, int] = MappingProxyType(
     {"0.5K": 3, "1K": 4, "2K": 6, "4K": 8}
@@ -180,12 +206,14 @@ _MODELS: tuple[FalModel, ...] = (
             fields=_IMAGE_FIELDS,
             aspect_ratios=_IMAGE_ASPECT_RATIOS,
             resolutions=("1K", "2K", "4K"),
+            defaults=_IMAGE_DEFAULTS,
         ),
         image_variant=FalVariant(
             endpoint="fal-ai/nano-banana-pro/edit",
             fields=_IMAGE_FIELDS,
             aspect_ratios=_IMAGE_ASPECT_RATIOS,
             resolutions=("1K", "2K", "4K"),
+            defaults=_IMAGE_DEFAULTS,
         ),
         image_field="image_urls",
         image_field_is_list=True,
@@ -202,12 +230,14 @@ _MODELS: tuple[FalModel, ...] = (
             fields=_IMAGE_FIELDS,
             aspect_ratios=_NB2_ASPECT_RATIOS,
             resolutions=("0.5K", "1K", "2K", "4K"),
+            defaults=_IMAGE_DEFAULTS,
         ),
         image_variant=FalVariant(
             endpoint="fal-ai/nano-banana-2/edit",
             fields=_IMAGE_FIELDS,
             aspect_ratios=_NB2_ASPECT_RATIOS,
             resolutions=("0.5K", "1K", "2K", "4K"),
+            defaults=_IMAGE_DEFAULTS,
         ),
         image_field="image_urls",
         image_field_is_list=True,
@@ -218,18 +248,22 @@ _MODELS: tuple[FalModel, ...] = (
         id="kling-video",
         title="Kling Video 2.5 Turbo Pro",
         kind=KIND_VIDEO,
-        default_credits=5,
+        # fal bills $0.35 per 5 s pack; 14 credits at the cheapest credit price ($0.05) covers it
+        # twice over (ADR-061 §2).
+        default_credits=14,
         text_variant=FalVariant(
             endpoint="fal-ai/kling-video/v2.5-turbo/pro/text-to-video",
             fields=_KLING_25_FIELDS | {"aspectRatio"},
             aspect_ratios=_KLING_ASPECT_RATIOS,
             durations=("5", "10"),
+            defaults=_KLING_25_DEFAULTS,
         ),
         image_variant=FalVariant(
             # Aspect ratio is derived from the reference image upstream, so it is not accepted.
             endpoint="fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
             fields=_KLING_25_FIELDS,
             durations=("5", "10"),
+            defaults=_KLING_25_DEFAULTS,
         ),
         image_field="image_url",
         image_field_is_list=False,
@@ -240,17 +274,20 @@ _MODELS: tuple[FalModel, ...] = (
         id="kling-video-v3",
         title="Kling Video V3 Pro",
         kind=KIND_VIDEO,
-        default_credits=10,
+        # fal bills $0.112/s without audio => $0.56 per 5 s pack; 23 credits ≈ 2.05× at $0.05.
+        default_credits=23,
         text_variant=FalVariant(
             endpoint="fal-ai/kling-video/v3/pro/text-to-video",
             fields=_KLING_V3_FIELDS | {"aspectRatio"},
             aspect_ratios=_KLING_ASPECT_RATIOS,
             durations=_KLING_V3_DURATIONS,
+            defaults=_KLING_V3_DEFAULTS,
         ),
         image_variant=FalVariant(
             endpoint="fal-ai/kling-video/v3/pro/image-to-video",
             fields=_KLING_V3_FIELDS,
             durations=_KLING_V3_DURATIONS,
+            defaults=_KLING_V3_DEFAULTS,
         ),
         # v3 image-to-video names the reference frame start_image_url, not image_url.
         image_field="start_image_url",
@@ -258,12 +295,15 @@ _MODELS: tuple[FalModel, ...] = (
         max_input_images=1,
         base_duration_seconds=5,
         supports_audio=True,
+        # fal charges $0.168/s with audio against $0.112/s without — exactly 1.5x.
+        audio_multiplier=1.5,
     ),
     FalModel(
         id="veo-3.1",
         title="Veo 3.1 (Google)",
         kind=KIND_VIDEO,
-        default_credits=15,
+        # fal bills $0.20/s at 720p/1080p without audio => $0.80 per 4 s pack; 32 credits = 2x.
+        default_credits=32,
         text_variant=FalVariant(
             endpoint="fal-ai/veo3.1",
             fields=_VEO_FIELDS,
@@ -271,6 +311,7 @@ _MODELS: tuple[FalModel, ...] = (
             aspect_ratios=("16:9", "9:16"),
             resolutions=_VEO_RESOLUTIONS,
             durations=_VEO_DURATIONS,
+            defaults=_VEO_DEFAULTS,
         ),
         image_variant=FalVariant(
             endpoint="fal-ai/veo3.1/image-to-video",
@@ -278,6 +319,7 @@ _MODELS: tuple[FalModel, ...] = (
             aspect_ratios=("auto", "16:9", "9:16"),
             resolutions=_VEO_RESOLUTIONS,
             durations=_VEO_DURATIONS,
+            defaults=_VEO_DEFAULTS,
         ),
         image_field="image_url",
         image_field_is_list=False,
@@ -390,10 +432,30 @@ def run_price(
     res_mult = 1
     if model.resolution_multipliers and resolution is not None:
         res_mult = model.resolution_multipliers.get(resolution, 1)
-    audio_mult = 1
+    total = base_credits * packs * res_mult
     if generate_audio and model.audio_multiplier is not None:
-        audio_mult = model.audio_multiplier
-    return base_credits * packs * res_mult * audio_mult
+        # Kling v3's audio surcharge is x1.5, so the product is not an integer. Round UP: rounding
+        # down would price a run below the cost it was calibrated against.
+        return max(1, math.ceil(total * model.audio_multiplier))
+    return total
+
+
+def resolve_values(*, variant: FalVariant, values: Mapping[str, object]) -> dict[str, object]:
+    """Fill in the variant's defaults for the fields that move the price (ADR-061 §3).
+
+    An omitted field used to be dropped so that fal's own default applied — which meant the run we
+    priced and the run we submitted could differ (fal defaults ``generate_audio`` to true and Veo's
+    ``duration`` to ``8s``, both more expensive than what we charged). Resolving once, here, and
+    using the SAME mapping for both the price and the upstream payload removes that gap entirely.
+
+    Only fields this variant actually forwards get a default: the registry is per-variant precisely
+    because modes disagree about which parameters exist.
+    """
+    resolved = {key: value for key, value in values.items() if value is not None}
+    for key, default in variant.defaults.items():
+        if key in variant.fields and key not in resolved:
+            resolved[key] = default
+    return resolved
 
 
 def build_fal_input(

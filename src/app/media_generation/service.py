@@ -17,13 +17,24 @@ callback surface and no signature scheme, and the iOS client is already polling-
 
 from __future__ import annotations
 
+import datetime
 import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from app.chat.attachments import (
+    _check_magic_bytes,
+    _decode_base64,
+    _decoded_len_from_base64,
+)
 from app.config import Settings
-from app.errors import NotFoundError, ValidationFailedError
+from app.errors import (
+    JobNotTerminalError,
+    NotFoundError,
+    PayloadTooLargeError,
+    ValidationFailedError,
+)
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
@@ -31,8 +42,10 @@ from app.media_generation.catalog import (
     FalVariant,
     build_fal_input,
     find_model,
+    resolve_values,
     run_price,
 )
+from app.media_generation.cursor import MediaJobCursor
 from app.media_generation.fal_client import (
     FAL_CANCELED,
     FAL_COMPLETED,
@@ -40,6 +53,7 @@ from app.media_generation.fal_client import (
     FalClient,
 )
 from app.media_generation.repository import (
+    STATUS_COMPLETED,
     STATUS_QUEUED,
     TERMINAL_STATUSES,
     MediaJobsRepository,
@@ -60,6 +74,24 @@ class MediaAsset:
     url: str
     content_type: str | None
     file_name: str | None
+
+
+@dataclass(frozen=True)
+class UploadedFile:
+    """A reference image stored with the provider, as returned by ``POST /v1/media/uploads``."""
+
+    url: str
+    media_type: str
+    size: int
+    expires_at: datetime.datetime | None
+
+
+@dataclass(frozen=True)
+class MediaJobsFeed:
+    """One page of the generations feed, as returned to the API layer."""
+
+    items: list[MediaJobView]
+    next_cursor: str | None
 
 
 @dataclass(frozen=True)
@@ -128,8 +160,19 @@ class MediaGenerationService:
         prompt: str,
         image_urls: list[str],
         params: dict[str, Any],
+        source_job_id: uuid.UUID | None = None,
     ) -> MediaJobView:
         model = self._resolve_model(model_id=model_id, kind=kind)
+        if source_job_id is not None:
+            if image_urls:
+                # Two ways to name the same input on one request would make "which wins?" a
+                # question the contract has to answer. It should not have to.
+                raise ValidationFailedError(
+                    "sourceJobId and imageUrls/imageUrl are mutually exclusive"
+                )
+            image_urls = await self._assets_of_source(
+                user_id=user_id, source_job_id=source_job_id, limit=model.max_input_images
+            )
         variant = model.variant_for(with_image=bool(image_urls))
         if variant is None:
             raise ValidationFailedError(f"model {model.id} does not accept a reference image")
@@ -143,10 +186,14 @@ class MediaGenerationService:
         for parameter in ("aspectRatio", "resolution", "duration"):
             self._validate_enum(parameter, params.get(parameter), variant)
 
+        # One resolved mapping feeds BOTH the price and the upstream payload (ADR-061 §3). Pricing
+        # the raw request while letting fal fill the blanks meant billing a cheaper run than the
+        # one we asked for — fal defaults generate_audio to true and Veo's duration to 8s.
+        values = resolve_values(variant=variant, values={"prompt": prompt, **params})
         payload = build_fal_input(
             model=model,
             variant=variant,
-            values={"prompt": prompt, **params},
+            values=values,
             image_urls=image_urls,
         )
 
@@ -155,10 +202,10 @@ class MediaGenerationService:
         job_id = uuid.uuid4()
         cost = self.price_of(
             model=model,
-            num_images=_as_int(params.get("numImages")),
-            duration=_as_str(params.get("duration")),
-            resolution=_as_str(params.get("resolution")),
-            generate_audio=_as_bool(params.get("generateAudio")),
+            num_images=_as_int(values.get("numImages")),
+            duration=_as_str(values.get("duration")),
+            resolution=_as_str(values.get("resolution")),
+            generate_audio=_as_bool(values.get("generateAudio")),
         )
         await self._wallet.consume(
             user_id=user_id,
@@ -180,6 +227,8 @@ class MediaGenerationService:
             status=STATUS_QUEUED,
             prompt=prompt,
             credits_charged=cost,
+            parent_job_id=source_job_id,
+            input_image_urls=list(image_urls) or None,
         )
         log_event(
             logger,
@@ -194,6 +243,66 @@ class MediaGenerationService:
         )
         return MediaJobView(job=job, assets=[])
 
+    async def _assets_of_source(
+        self, *, user_id: uuid.UUID, source_job_id: uuid.UUID, limit: int
+    ) -> list[str]:
+        """Reference URLs taken from an earlier generation of this user (ADR-063 §1).
+
+        The client sends a job id rather than a URL because the edit chain is a relation between
+        OUR jobs, while the provider's URL lives under its own retention policy; keyed by id, the
+        link in the feed stays true even after the link dies.
+        """
+        source = await self._repo.get(job_id=source_job_id, user_id=user_id)
+        if source is None:
+            # Owner-scoped: a foreign job must be indistinguishable from a missing one.
+            raise NotFoundError("media job not found")
+        if source.status != STATUS_COMPLETED:
+            raise ValidationFailedError("sourceJobId must reference a completed generation")
+        if source.kind != KIND_IMAGE:
+            # Both editing and image-to-video take a picture in; we do not extract video frames.
+            raise ValidationFailedError("sourceJobId must reference an image generation")
+        urls = [asset.url for asset in _assets_from_result(source.result)]
+        if not urls:
+            raise ValidationFailedError("sourceJobId references a generation with no output")
+        return urls[: max(1, limit)]
+
+    # ---- reference-image upload ----
+
+    async def upload_reference_image(
+        self, *, media_type: str, file_name: str, data: str
+    ) -> UploadedFile:
+        """Store a client's local photo with the provider and return a URL it can generate from.
+
+        Exists because ``imageUrls``/``imageUrl`` accept only https URLs — fal fetches the picture
+        itself — while a phone only ever has local bytes (ADR-062). Costs no credits: the charge
+        belongs to the generation, and making a mis-picked reference cost money would be absurd.
+
+        Limits are checked BEFORE decoding (the base64 length bounds the decoded size), and the
+        magic bytes are checked after, so a renamed file cannot pass as an image.
+        """
+        if _decoded_len_from_base64(data) > self._settings.media_upload_max_bytes:
+            raise PayloadTooLargeError("file exceeds the maximum allowed size")
+        content = _decode_base64(data)
+        if len(content) > self._settings.media_upload_max_bytes:
+            raise PayloadTooLargeError("file exceeds the maximum allowed size")
+        _check_magic_bytes(media_type, content)
+
+        url = await self._fal.upload(content=content, media_type=media_type, file_name=file_name)
+        return UploadedFile(
+            url=url, media_type=media_type, size=len(content), expires_at=self._expires_at()
+        )
+
+    def _expires_at(self) -> datetime.datetime | None:
+        """When the uploaded file dies, if the instance pinned a lifetime (ADR-061 §5).
+
+        ``None`` covers both "never expires" and "provider decides": in either case we have no
+        honest timestamp to give, and inventing fal's default here would go stale silently.
+        """
+        preference = self._settings.fal_asset_retention()
+        if not isinstance(preference, int) or isinstance(preference, bool):
+            return None
+        return datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(seconds=preference)
+
     # ---- read / poll ----
 
     async def get_job(self, *, user_id: uuid.UUID, job_id: uuid.UUID) -> MediaJobView:
@@ -205,16 +314,54 @@ class MediaGenerationService:
         return await self._advance(job)
 
     async def list_jobs(
-        self, *, user_id: uuid.UUID, limit: int, kind: str | None
-    ) -> list[MediaJobView]:
-        """List the user's jobs newest-first. Read-only — never polls upstream.
+        self,
+        *,
+        user_id: uuid.UUID,
+        limit: int,
+        kind: str | None,
+        cursor: MediaJobCursor | None = None,
+    ) -> MediaJobsFeed:
+        """One page of the user's feed, newest-first. Read-only — never polls upstream.
 
         Listing N jobs must not fan out into N upstream calls, so a non-terminal job is reported
         with its last known status; the client refreshes the one it cares about via
         ``GET /v1/media/jobs/{id}``.
         """
-        rows = await self._repo.list_for_user(user_id=user_id, limit=limit, kind=kind)
-        return [MediaJobView(job=row, assets=_assets_from_result(row.result)) for row in rows]
+        page = await self._repo.list_for_user(
+            user_id=user_id, limit=limit, kind=kind, cursor=cursor
+        )
+        return MediaJobsFeed(
+            items=[
+                MediaJobView(job=row, assets=_assets_from_result(row.result)) for row in page.items
+            ],
+            next_cursor=page.next_cursor,
+        )
+
+    async def delete_job(self, *, user_id: uuid.UUID, job_id: uuid.UUID) -> None:
+        """Remove one finished job from the feed (ADR-063 §4).
+
+        A queued/running job is refused: the refund for a run the provider fails is attributed to
+        this row and triggered by polling it, so deleting it first would destroy the only place
+        that refund can happen. Only our row goes — the asset stays with the provider until its
+        own retention expires, since we never owned those bytes.
+        """
+        job = await self._repo.get(job_id=job_id, user_id=user_id)
+        if job is None:
+            raise NotFoundError("media job not found")
+        if job.status not in TERMINAL_STATUSES:
+            raise JobNotTerminalError(
+                "job is still running; poll it until it completes or fails before deleting"
+            )
+        await self._repo.delete(job)
+        log_event(
+            logger,
+            logging.INFO,
+            "media_generation_deleted",
+            userId=str(user_id),
+            jobId=str(job_id),
+            model=job.model_id,
+            status=job.status,
+        )
 
     async def _advance(self, job: MediaJob) -> MediaJobView:
         """Poll fal once and persist any state transition.

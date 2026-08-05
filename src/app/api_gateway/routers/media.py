@@ -19,22 +19,26 @@ from fastapi import APIRouter, Depends, Path, Query, Request
 
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.deps import CurrentUser, get_media_generation_service, require_media_generation_configured
-from app.errors import RateLimitedError
+from app.errors import RateLimitedError, ValidationFailedError
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
     all_models,
     resolution_credits_for_api,
 )
+from app.media_generation.cursor import InvalidCursorError, MediaJobCursor
 from app.media_generation.service import MediaGenerationService, MediaJobView
 from app.schemas.media import (
     ImageGenerationRequest,
     MediaAssetSchema,
+    MediaJobDeleteResponse,
     MediaJobResponse,
     MediaJobsListResponse,
     MediaModelSchema,
     MediaModelsResponse,
     MediaModeSchema,
+    MediaUploadRequest,
+    MediaUploadResponse,
     VideoGenerationRequest,
 )
 
@@ -65,9 +69,20 @@ def _job_response(view: MediaJobView) -> MediaJobResponse:
             for a in view.assets
         ],
         error=job.error,
+        parentJobId=job.parent_job_id,
+        inputImageUrls=list(job.input_image_urls or []),
         createdAt=job.created_at,
         updatedAt=job.updated_at,
     )
+
+
+def _decode_cursor(value: str | None) -> MediaJobCursor | None:
+    if value is None:
+        return None
+    try:
+        return MediaJobCursor.decode(value)
+    except InvalidCursorError as exc:
+        raise ValidationFailedError("invalid cursor") from exc
 
 
 @router.get(
@@ -78,9 +93,12 @@ def _job_response(view: MediaJobView) -> MediaJobResponse:
         "Возвращает доступные модели генерации фото и видео: идентификатор для поля `model`, "
         "базовую цену и **ступени качества**. Image: `resolutionCredits[resolution] × numImages`. "
         "Video: `credits × ceil(duration/baseDurationSeconds) × resolutionMultipliers[resolution] "
-        "× (audioMultiplier при generateAudio)`. Mode text/image на цену не влияет. Режимов у "
-        "модели два — без референса и с ним; у каждого свои `params` и наборы значений. Пустой "
-        "список = параметр не поддерживается (`422` до списания). Стройте UI по режиму."
+        "× (audioMultiplier при generateAudio)`, итог округляется вверх. Mode text/image на цену "
+        "не влияет. Режимов у модели два — без референса и с ним; у каждого свои `params`, наборы "
+        "значений и `defaults`. Пустой список = параметр не поддерживается (`422` до списания). "
+        "Влияющий на цену параметр, который вы не пришлёте, сервер подставит из `defaults` — "
+        "используйте их в своём расчёте, иначе он разойдётся с `creditsCharged`. Стройте UI по "
+        "режиму."
     ),
 )
 async def list_media_models(
@@ -115,6 +133,7 @@ async def list_media_models(
                         aspectRatios=list(variant.aspect_ratios),
                         resolutions=list(variant.resolutions),
                         durations=list(variant.durations),
+                        defaults=dict(variant.defaults),
                     )
                     for mode, variant in model.variants()
                 ],
@@ -131,7 +150,9 @@ async def list_media_models(
     summary="Сгенерировать изображение",
     description=(
         "Ставит генерацию изображения в очередь и списывает кредиты по цене модели (цена берётся "
-        "с сервера): `resolutionCredits[resolution] × numImages` (без resolution — цена `1K`). "
+        "с сервера): `resolutionCredits[resolution] × numImages`. Не присланные `resolution` и "
+        "`numImages` подставляются из `defaults` режима и отправляются провайдеру явно, поэтому "
+        "цена всегда описывает именно тот запуск, который будет выполнен. "
         "Отвечает `202` с "
         "задачей в статусе `queued` — результат забирайте через `GET /v1/media/jobs/{jobId}`. "
         "Непустой `imageUrls` включает режим редактирования референсных изображений. Параметры "
@@ -154,6 +175,7 @@ async def generate_image(
         model_id=body.model,
         prompt=body.prompt,
         image_urls=list(body.imageUrls or []),
+        source_job_id=body.sourceJobId,
         params={
             "aspectRatio": body.aspectRatio,
             "resolution": body.resolution,
@@ -172,8 +194,10 @@ async def generate_image(
     summary="Сгенерировать видео",
     description=(
         "Ставит генерацию видео в очередь и списывает кредиты по цене модели, масштабированной "
-        "длительностью и качеством: `credits × ceil(duration / baseDurationSeconds) × "
-        "resolutionMultipliers × audioMultiplier`. Отвечает `202` с "
+        "длительностью и качеством: `ceil(credits × ceil(duration / baseDurationSeconds) × "
+        "resolutionMultipliers × audioMultiplier)`. Не присланные `duration`/`resolution`/"
+        "`generateAudio` подставляются из `defaults` режима и отправляются провайдеру явно — "
+        "звук по умолчанию **выключен**, включайте его осознанно: он умножает цену. Отвечает `202` "
         "задачей в статусе `queued`: видео генерируется минутами, поэтому результат забирается "
         "опросом `GET /v1/media/jobs/{jobId}`. Заданный `imageUrl` включает режим image-to-video "
         "(стартовый кадр) — в нём `aspectRatio` берётся из кадра и моделями Kling не принимается. "
@@ -196,6 +220,7 @@ async def generate_video(
         model_id=body.model,
         prompt=body.prompt,
         image_urls=[body.imageUrl] if body.imageUrl else [],
+        source_job_id=body.sourceJobId,
         params={
             "negativePrompt": body.negativePrompt,
             "aspectRatio": body.aspectRatio,
@@ -209,14 +234,51 @@ async def generate_video(
     return _job_response(view)
 
 
+@router.post(
+    "/uploads",
+    response_model=MediaUploadResponse,
+    status_code=201,
+    summary="Загрузить изображение для генерации по референсу",
+    description=(
+        "Принимает изображение в base64 и возвращает https-ссылку на него. Ссылку подставляйте в "
+        "`imageUrls` (`POST /v1/media/images`, режим редактирования) или в `imageUrl` "
+        "(`POST /v1/media/videos`, image-to-video) — оба поля принимают только https-URL, потому "
+        "что файл скачивает сам провайдер. Кредитов не стоит. Допустимые типы: `image/jpeg`, "
+        "`image/png`, `image/gif`, `image/webp`; тип сверяется с реальной сигнатурой файла. "
+        "Файл больше допустимого размера — `413 payload_too_large`; провайдер недоступен — `502`; "
+        "генерация не настроена на инстансе — `503`. Срок жизни ссылки — в `expiresAt` (`null` — "
+        "срок не ограничен либо задан политикой провайдера, не полагайтесь на бессрочность)."
+    ),
+)
+async def upload_media_file(
+    body: MediaUploadRequest,
+    request: Request,
+    current: CurrentUser,
+    media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
+) -> MediaUploadResponse:
+    await _rate_limit(current.user_id)
+    uploaded = await media.upload_reference_image(
+        media_type=body.mediaType, file_name=body.filename, data=body.data
+    )
+    return MediaUploadResponse(
+        url=uploaded.url,
+        mediaType=uploaded.media_type,
+        size=uploaded.size,
+        expiresAt=uploaded.expires_at,
+    )
+
+
 @router.get(
     "/jobs",
     response_model=MediaJobsListResponse,
     summary="Список задач генерации",
     description=(
-        "Задачи генерации пользователя, новые сверху. Только чтение: у незавершённых задач "
+        "Лента генераций пользователя, новые сверху. Только чтение: у незавершённых задач "
         "отдаётся последнее известное состояние без обращения к провайдеру — обновляйте нужную "
-        "задачу через `GET /v1/media/jobs/{jobId}`. `kind` фильтрует по типу генерации."
+        "задачу через `GET /v1/media/jobs/{jobId}`. `kind` фильтрует по типу генерации. "
+        "Пролистывание — курсором: передайте `nextCursor` из предыдущего ответа в `cursor`; "
+        "`nextCursor: null` означает, что страниц больше нет. Фильтр `kind` при пролистывании "
+        "должен оставаться тем же."
     ),
 )
 async def list_media_jobs(
@@ -230,10 +292,18 @@ async def list_media_jobs(
         Literal["image", "video"] | None,
         Query(description="Фильтр по типу генерации. Опущен — задачи обоих типов."),
     ] = None,
+    cursor: Annotated[
+        str | None,
+        Query(description="Курсор следующей страницы — `nextCursor` из предыдущего ответа."),
+    ] = None,
 ) -> MediaJobsListResponse:
     await _rate_limit(current.user_id)
-    views = await media.list_jobs(user_id=current.user_id, limit=limit, kind=kind)
-    return MediaJobsListResponse(jobs=[_job_response(view) for view in views])
+    feed = await media.list_jobs(
+        user_id=current.user_id, limit=limit, kind=kind, cursor=_decode_cursor(cursor)
+    )
+    return MediaJobsListResponse(
+        jobs=[_job_response(view) for view in feed.items], nextCursor=feed.next_cursor
+    )
 
 
 @router.get(
@@ -256,3 +326,28 @@ async def get_media_job(
     await _rate_limit(current.user_id)
     view = await media.get_job(user_id=current.user_id, job_id=job_id)
     return _job_response(view)
+
+
+@router.delete(
+    "/jobs/{job_id}",
+    response_model=MediaJobDeleteResponse,
+    summary="Удалить задачу генерации",
+    description=(
+        "Убирает завершённую задачу из ленты. Удаляется только запись у нас — сам файл остаётся "
+        "у провайдера до истечения его срока хранения, мы им не владеем. Задачу в статусе "
+        "`queued`/`running` удалить нельзя (`409 job_not_terminal`): возврат кредитов при провале "
+        "у провайдера привязан к этой записи и срабатывает при опросе, поэтому сначала доведите "
+        "задачу опросом до `completed`/`failed`. Чужая или уже удалённая задача — `404`. "
+        "Удаление исходной задачи не удаляет сделанные из неё правки — у них просто обнуляется "
+        "`parentJobId`."
+    ),
+)
+async def delete_media_job(
+    request: Request,
+    current: CurrentUser,
+    media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
+    job_id: Annotated[uuid.UUID, Path(description="Идентификатор задачи генерации.")],
+) -> MediaJobDeleteResponse:
+    await _rate_limit(current.user_id)
+    await media.delete_job(user_id=current.user_id, job_id=job_id)
+    return MediaJobDeleteResponse(deleted=True)

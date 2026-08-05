@@ -94,6 +94,17 @@ class InsufficientCreditsError(ConflictError):
     code = "insufficient_credits"
 
 
+class JobNotTerminalError(ConflictError):
+    """A generation job cannot be deleted while it is still queued or running (ADR-063 §4).
+
+    The refund for a run the provider fails is attributed to the media_jobs row and triggered by
+    polling it; deleting the row first would destroy the only place that refund can happen and
+    leave the user paying for an outcome nobody will ever learn.
+    """
+
+    code = "job_not_terminal"
+
+
 class PayloadTooLargeError(AppError):
     status_code = 413
     code = "payload_too_large"

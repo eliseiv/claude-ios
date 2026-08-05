@@ -301,7 +301,8 @@ async def test_models_catalog_reports_per_mode_parameters(
     kling_text, kling_image = kling["modes"]
     assert kling["baseDurationSeconds"] == 5
     assert kling["resolutionMultipliers"] is None
-    assert kling["audioMultiplier"] is None
+    # Kling V3 bills audio at x1.5 upstream, so the multiplier is fractional (ADR-061 §2).
+    assert kling["audioMultiplier"] == 1.5
     assert kling_text["durations"] == [str(n) for n in range(3, 16)]
     assert "cfgScale" in kling_text["params"]
     # No aspect ratio at all in image-to-video: it comes from the start frame.
@@ -446,7 +447,7 @@ async def test_image_price_scales_with_resolution(
 async def test_veo_price_scales_with_4k_and_audio(
     media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
 ) -> None:
-    uid = await _seed(db_sessionmaker, balance=100)
+    uid = await _seed(db_sessionmaker, balance=200)
     fal.on_submit(200, _submit_body("fal-ai/veo3.1"))
 
     resp = await media_client.post(
@@ -462,8 +463,9 @@ async def test_veo_price_scales_with_4k_and_audio(
     )
 
     assert resp.status_code == 202, resp.text
-    assert resp.json()["creditsCharged"] == 60
-    assert await _balance(db_sessionmaker, uid) == 40
+    # 32 (one 4 s pack) x 2 (4k) x 2 (audio).
+    assert resp.json()["creditsCharged"] == 128
+    assert await _balance(db_sessionmaker, uid) == 72
 
 
 async def test_video_price_scales_with_duration(
@@ -480,15 +482,15 @@ async def test_video_price_scales_with_duration(
     )
 
     assert resp.status_code == 202, resp.text
-    assert resp.json()["creditsCharged"] == 30
-    assert await _balance(db_sessionmaker, uid) == 70
+    assert resp.json()["creditsCharged"] == 69
+    assert await _balance(db_sessionmaker, uid) == 31
 
 
 async def test_a_scaled_price_over_the_balance_is_409_without_submitting(
     media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
 ) -> None:
     """The balance is checked against the scaled price, not the base one."""
-    uid = await _seed(db_sessionmaker, balance=20)  # enough for 5s and 10s, not for 15s
+    uid = await _seed(db_sessionmaker, balance=50)  # enough for 5s and 10s, not for 15s
     fal.on_submit(200, _submit_body("fal-ai/kling-video/v3/pro/text-to-video"))
 
     resp = await media_client.post(
@@ -500,7 +502,7 @@ async def test_a_scaled_price_over_the_balance_is_409_without_submitting(
     assert resp.status_code == 409, resp.text
     assert resp.json()["error"]["code"] == "insufficient_credits"
     assert fal.calls == []
-    assert await _balance(db_sessionmaker, uid) == 20
+    assert await _balance(db_sessionmaker, uid) == 50
 
 
 async def test_video_submit_forwards_cfg_scale_seed_and_negative_prompt(
@@ -555,11 +557,15 @@ async def test_veo_takes_a_negative_prompt_and_a_seed(
     )
 
     assert resp.status_code == 202, resp.text
+    # duration/generateAudio were omitted, so the variant defaults are sent EXPLICITLY — the
+    # run we bill and the run we ask for must be the same one (ADR-061 §3).
     assert fal.submit_payload == {
         "prompt": "a city",
         "negative_prompt": "text overlays",
         "seed": 7,
         "resolution": "1080p",
+        "duration": "8s",
+        "generate_audio": False,
     }
 
 
@@ -609,7 +615,12 @@ async def test_image_submit_with_reference_images_uses_the_edit_endpoint(
 
     assert resp.status_code == 202, resp.text
     assert fal.submit_url == f"{_QUEUE_BASE}/fal-ai/nano-banana-pro/edit"
-    assert fal.submit_payload == {"prompt": "blend", "image_urls": urls}
+    assert fal.submit_payload == {
+        "prompt": "blend",
+        "image_urls": urls,
+        "resolution": "1K",
+        "num_images": 1,
+    }
 
 
 async def test_video_submit_uses_the_text_to_video_endpoint(
@@ -663,6 +674,7 @@ async def test_kling_v3_image_to_video_sends_start_image_url(
     assert fal.submit_payload == {
         "prompt": "pan right",
         "duration": "5",
+        "generate_audio": False,
         "start_image_url": "https://cdn.example.com/frame.png",
     }
 
@@ -688,6 +700,7 @@ async def test_kling_v25_image_to_video_sends_image_url(
     assert fal.submit_payload == {
         "prompt": "pan right",
         "negative_prompt": "blurry",
+        "duration": "5",
         "image_url": "https://cdn.example.com/frame.png",
     }
 
@@ -1134,3 +1147,179 @@ async def test_every_media_route_requires_a_bearer_token(
 
     assert resp.status_code == 401, resp.text
     assert resp.json()["error"]["code"] == "unauthorized"
+
+
+# ------------------------- ADR-061: priced defaults + asset retention -------------------------
+
+
+async def test_catalog_exposes_the_defaults_the_server_will_substitute(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The client prices a run before submitting it, so it needs the same defaults the server
+    applies — otherwise its estimate and `creditsCharged` disagree (ADR-061 §3)."""
+    uid = await _seed(db_sessionmaker, balance=0)
+
+    resp = await media_client.get(_MODELS_URL, headers=auth_headers(uid))
+
+    assert resp.status_code == 200, resp.text
+    by_id = {m["id"]: m for m in resp.json()["models"]}
+    veo_text, veo_image = by_id["veo-3.1"]["modes"]
+    assert veo_text["defaults"] == {
+        "duration": "8s",
+        "resolution": "720p",
+        "generateAudio": False,
+    }
+    assert veo_image["defaults"] == veo_text["defaults"]
+    assert by_id["kling-video-v3"]["modes"][0]["defaults"] == {
+        "duration": "5",
+        "generateAudio": False,
+    }
+    assert by_id["nano-banana-2"]["modes"][0]["defaults"] == {
+        "resolution": "1K",
+        "numImages": 1,
+    }
+
+
+async def test_an_omitted_knob_is_sent_explicitly_and_billed_as_sent(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    """The leak ADR-061 closes: fal defaults Veo to 8 s WITH audio, so a bare request used to
+    generate a $3.20 run while being charged for a silent 4 s one."""
+    uid = await _seed(db_sessionmaker, balance=500)
+    fal.on_submit(200, _submit_body("fal-ai/veo3.1"))
+
+    resp = await media_client.post(
+        _VIDEOS_URL, json={"model": "veo-3.1", "prompt": "a city"}, headers=auth_headers(uid)
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert fal.submit_payload == {
+        "prompt": "a city",
+        "duration": "8s",
+        "resolution": "720p",
+        "generate_audio": False,
+    }
+    # 32 per 4 s pack x 2 packs, no resolution or audio multiplier.
+    assert resp.json()["creditsCharged"] == 64
+    assert await _balance(db_sessionmaker, uid) == 436
+
+
+async def test_omitting_a_knob_costs_the_same_as_sending_its_default(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    uid = await _seed(db_sessionmaker, balance=500)
+    fal.on_submit(200, _submit_body("fal-ai/kling-video/v3/pro/text-to-video"))
+
+    bare = await media_client.post(
+        _VIDEOS_URL,
+        json={"model": "kling-video-v3", "prompt": "a river"},
+        headers=auth_headers(uid),
+    )
+    spelled_out = await media_client.post(
+        _VIDEOS_URL,
+        json={
+            "model": "kling-video-v3",
+            "prompt": "a river",
+            "duration": "5",
+            "generateAudio": False,
+        },
+        headers=auth_headers(uid),
+    )
+
+    assert bare.status_code == 202 and spelled_out.status_code == 202
+    assert bare.json()["creditsCharged"] == spelled_out.json()["creditsCharged"] == 23
+
+
+async def test_kling_v3_audio_costs_one_and_a_half_rounded_up(
+    media_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], fal: _Fal
+) -> None:
+    uid = await _seed(db_sessionmaker, balance=500)
+    fal.on_submit(200, _submit_body("fal-ai/kling-video/v3/pro/text-to-video"))
+
+    resp = await media_client.post(
+        _VIDEOS_URL,
+        json={
+            "model": "kling-video-v3",
+            "prompt": "a river",
+            "duration": "5",
+            "generateAudio": True,
+        },
+        headers=auth_headers(uid),
+    )
+
+    assert resp.status_code == 202, resp.text
+    # 23 x 1.5 = 34.5, rounded UP so the run is never priced below its cost.
+    assert resp.json()["creditsCharged"] == 35
+
+
+async def test_asset_retention_header_is_sent_on_submit_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fal: _Fal,
+) -> None:
+    """fal deletes generated files after ~7 days; the preference keeps the job list's URLs alive."""
+    monkeypatch.setenv("FAL_ASSET_RETENTION_SECONDS", "0")
+    uid = await _seed(db_sessionmaker, balance=500)
+    fal.on_submit(200, _submit_body("fal-ai/nano-banana-2"))
+
+    async with _build_client(monkeypatch, db_sessionmaker, fal, fal_key=_FAL_KEY) as client:
+        resp = await client.post(
+            _IMAGES_URL,
+            json={"model": "nano-banana-2", "prompt": "a cat"},
+            headers=auth_headers(uid),
+        )
+    get_settings.cache_clear()
+
+    assert resp.status_code == 202, resp.text
+    header = fal.calls[0]["headers"]["X-Fal-Object-Lifecycle-Preference"]
+    assert header == '{"expiration_duration_seconds": null}'
+
+
+async def test_no_retention_header_when_the_operator_expressed_no_preference(
+    monkeypatch: pytest.MonkeyPatch,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fal: _Fal,
+) -> None:
+    monkeypatch.setenv("FAL_ASSET_RETENTION_SECONDS", "")
+    uid = await _seed(db_sessionmaker, balance=500)
+    fal.on_submit(200, _submit_body("fal-ai/nano-banana-2"))
+
+    async with _build_client(monkeypatch, db_sessionmaker, fal, fal_key=_FAL_KEY) as client:
+        resp = await client.post(
+            _IMAGES_URL,
+            json={"model": "nano-banana-2", "prompt": "a cat"},
+            headers=auth_headers(uid),
+        )
+    get_settings.cache_clear()
+
+    assert resp.status_code == 202, resp.text
+    assert "X-Fal-Object-Lifecycle-Preference" not in fal.calls[0]["headers"]
+
+
+async def test_polling_never_carries_the_retention_preference(
+    monkeypatch: pytest.MonkeyPatch,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fal: _Fal,
+) -> None:
+    """The preference belongs to object creation; repeating it on GETs would be noise."""
+    monkeypatch.setenv("FAL_ASSET_RETENTION_SECONDS", "86400")
+    uid = await _seed(db_sessionmaker, balance=500)
+    fal.on_submit(200, _submit_body("fal-ai/nano-banana-2"))
+    fal.on_status("IN_PROGRESS")
+
+    async with _build_client(monkeypatch, db_sessionmaker, fal, fal_key=_FAL_KEY) as client:
+        headers = auth_headers(uid)
+        submitted = await client.post(
+            _IMAGES_URL, json={"model": "nano-banana-2", "prompt": "a cat"}, headers=headers
+        )
+        job_id = submitted.json()["jobId"]
+        polled = await client.get(f"{_JOBS_URL}/{job_id}", headers=headers)
+    get_settings.cache_clear()
+
+    assert polled.status_code == 200, polled.text
+    submit_call, poll_call = fal.calls[0], fal.calls[1]
+    assert (
+        submit_call["headers"]["X-Fal-Object-Lifecycle-Preference"]
+        == '{"expiration_duration_seconds": 86400}'
+    )
+    assert "X-Fal-Object-Lifecycle-Preference" not in poll_call["headers"]

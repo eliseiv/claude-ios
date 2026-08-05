@@ -313,5 +313,6 @@ def test_veo_run_price_scales_resolution_and_audio() -> None:
         == 60
     )
     assert run_price(model=veo, base_credits=15, duration="6s", resolution="1080p") == 30
-    # Kling: generateAudio is a generation knob but not a price knob.
-    assert run_price(model=kling, base_credits=10, duration="5", generate_audio=True) == 10
+    # Kling v3 DOES bill audio — x1.5 upstream, rounded up here (ADR-061 §2/§4).
+    assert run_price(model=kling, base_credits=10, duration="5", generate_audio=True) == 15
+    assert run_price(model=kling, base_credits=10, duration="5") == 10

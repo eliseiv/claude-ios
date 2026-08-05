@@ -80,6 +80,14 @@ class MediaModeSchema(StrictModel):
     durations: list[str] = Field(
         description="Допустимые значения `duration`. Пустой список — параметр не поддерживается."
     )
+    defaults: dict[str, str | int | bool] = Field(
+        default_factory=dict,
+        description=(
+            "Значения, которые сервер подставит сам, если поле не прислано. Перечислены только "
+            "параметры, влияющие на цену, — подставляйте их в свой расчёт стоимости, чтобы он "
+            "совпал с `creditsCharged`. Пустой объект — подставлять нечего."
+        ),
+    )
 
 
 class MediaModelSchema(StrictModel):
@@ -118,11 +126,14 @@ class MediaModelSchema(StrictModel):
             "resolution на цену не влияет."
         ),
     )
-    audioMultiplier: int | None = Field(
+    # int|float, not float: Veo's multiplier is a whole 2 and has always gone out as `2`, so
+    # widening it to `2.0` would break a client decoding it as an integer. Kling V3's is 1.5.
+    audioMultiplier: int | float | None = Field(
         default=None,
         description=(
-            "Video: множитель при `generateAudio: true` (Veo → 2). `null` — звук на цену не "
-            "влияет (даже если переключатель в UI есть)."
+            "Video: множитель при `generateAudio: true` (Veo → 2, Kling V3 → 1.5). Может быть "
+            "дробным — итоговая цена округляется вверх. `null` — звук на цену не влияет (даже "
+            "если переключатель в UI есть)."
         ),
     )
     supportsImageInput: bool = Field(
@@ -190,8 +201,17 @@ class ImageGenerationRequest(StrictModel):
         default=None,
         max_length=_MAX_IMAGE_URLS,
         description=(
-            "Референсные изображения (https-URL) — включают режим редактирования. Опущено или "
-            "null — генерация с нуля по промту."
+            "Референсные изображения (https-URL) — включают режим редактирования. Локальный файл "
+            "сначала загрузите через `POST /v1/media/uploads`. Опущено или null — генерация с "
+            "нуля по промту."
+        ),
+    )
+    sourceJobId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "«Отредактируй результат вот этой задачи»: сервер сам подставит её изображения как "
+            "референс. Задача должна принадлежать вам, быть `completed`, иметь `kind: image` и "
+            "непустой `assets`. Взаимоисключимо с `imageUrls`."
         ),
     )
     aspectRatio: str | None = Field(
@@ -261,8 +281,16 @@ class VideoGenerationRequest(StrictModel):
         default=None,
         max_length=_URL_MAX,
         description=(
-            "Стартовый кадр (https-URL) — включает режим image-to-video. Опущено или null — "
-            "генерация из текста."
+            "Стартовый кадр (https-URL) — включает режим image-to-video. Локальный файл сначала "
+            "загрузите через `POST /v1/media/uploads`. Опущено или null — генерация из текста."
+        ),
+    )
+    sourceJobId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "«Сделай видео из результата вот этой задачи»: сервер сам подставит её изображение "
+            "как стартовый кадр. Задача должна принадлежать вам, быть `completed`, иметь "
+            "`kind: image` и непустой `assets`. Взаимоисключимо с `imageUrl`."
         ),
     )
     negativePrompt: str | None = Field(
@@ -334,9 +362,91 @@ class MediaJobResponse(StrictModel):
     error: str | None = Field(
         default=None, description="Причина неудачи при `status = failed`, иначе null."
     )
+    parentJobId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Задача, из результата которой сделана эта (когда генерация запускалась с "
+            "`sourceJobId`). `null` — начало цепочки. Остаётся `null`, если исходную задачу "
+            "удалили."
+        ),
+    )
+    inputImageUrls: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Изображения, ушедшие на вход этой генерации — присланные в `imageUrls`/`imageUrl` "
+            "либо взятые из задачи `sourceJobId`. Пустой список — генерация из текста."
+        ),
+    )
     createdAt: datetime.datetime = Field(description="Когда задача была поставлена в очередь.")
     updatedAt: datetime.datetime = Field(
         description="Когда состояние задачи менялось последний раз."
+    )
+
+
+class MediaUploadRequest(StrictModel):
+    """Загрузка референсного изображения (inline base64) — ADR-062.
+
+    Форма тела совпадает с загрузкой файлов рабочего пространства, чтобы клиенту не понадобился
+    второй нормалайзер. Принимаются только изображения: и режим редактирования, и image-to-video
+    берут на вход картинку.
+    """
+
+    model_config = StrictModel.model_config | {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "type": "image",
+                    "mediaType": "image/jpeg",
+                    "filename": "photo.jpg",
+                    "data": "/9j/4AAQSkZJRgABAQAAAQABAAD…",
+                }
+            ]
+        }
+    }
+
+    type: Literal["image"] = Field(
+        description="Класс файла. Поддерживается только `image` — референс генерации."
+    )
+    mediaType: Literal["image/jpeg", "image/png", "image/gif", "image/webp"] = Field(
+        description="MIME-тип изображения из allowlist. Вне списка → `422`."
+    )
+    filename: str = Field(
+        min_length=1,
+        max_length=512,
+        description="Имя файла. Попадает в имя объекта у провайдера.",
+    )
+    data: str = Field(
+        min_length=1,
+        description=(
+            "Содержимое файла в base64. Только inline base64 — ссылки здесь не принимаются. "
+            "Размер после декодирования ограничен (превышение → `413`)."
+        ),
+    )
+
+    @field_validator("filename")
+    @classmethod
+    def _check_filename(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("filename must be a non-empty string")
+        return value
+
+
+class MediaUploadResponse(StrictModel):
+    url: str = Field(
+        description=(
+            "https-ссылка на загруженный файл. Подставляйте её в `imageUrls` "
+            "(`POST /v1/media/images`) или `imageUrl` (`POST /v1/media/videos`)."
+        )
+    )
+    mediaType: str = Field(description="MIME-тип загруженного файла.")
+    size: int = Field(description="Размер файла в байтах после декодирования.")
+    expiresAt: datetime.datetime | None = Field(
+        default=None,
+        description=(
+            "Когда ссылка перестанет работать, если срок задан на инстансе. `null` — срок не "
+            "ограничен либо определяется политикой провайдера; в этом случае не рассчитывайте на "
+            "бессрочность и сохраняйте нужный файл локально."
+        ),
     )
 
 
@@ -347,3 +457,13 @@ class MediaJobsListResponse(StrictModel):
             "задач отдаётся последнее известное состояние."
         )
     )
+    nextCursor: str | None = Field(
+        default=None,
+        description=(
+            "Курсор следующей страницы: передайте его в `cursor`. `null` — страниц больше нет."
+        ),
+    )
+
+
+class MediaJobDeleteResponse(StrictModel):
+    deleted: bool = Field(description="Признак успешного удаления.")

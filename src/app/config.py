@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -268,6 +268,35 @@ class Settings(BaseSettings):
     media_model_credits_raw: str = Field(default="{}", alias="MEDIA_MODEL_CREDITS")
     # Cap on how many jobs GET /v1/media/jobs returns in one page.
     media_jobs_page_limit: int = Field(default=50, alias="MEDIA_JOBS_PAGE_LIMIT")
+    # How long fal keeps a generated asset (ADR-061 §5). fal's own default is "at least 7 days",
+    # after which the CDN URL we hand to the client dies for good. Empty => send no preference and
+    # inherit that default; "0" => no expiration; a positive integer => that many seconds.
+    # Not a limit we enforce — it is a preference sent upstream with each submit.
+    fal_asset_retention_seconds_raw: str = Field(default="", alias="FAL_ASSET_RETENTION_SECONDS")
+
+    # --- Reference-image upload for image-to-image / image-to-video (ADR-062) ---
+    # PUBLIC host of the fal REST API used to obtain an upload slot. Fixed server-side.
+    fal_rest_base: str = Field(default="https://rest.fal.ai", alias="FAL_REST_BASE")
+    # Host suffixes we are willing to PUT a user's file to, and to hand back as an asset URL.
+    # `initiate` answers with an upload URL on a CDN/bucket host, NOT on FAL_REST_BASE, so the
+    # prefix check that guards status_url/response_url cannot be used here (ADR-062 §4). Comma-
+    # separated; a URL outside the list is an upstream error, never a request we go ahead and make.
+    fal_upload_host_suffixes_raw: str = Field(
+        default=".fal.ai,.fal.media,.fal.run,.storage.googleapis.com",
+        alias="FAL_UPLOAD_HOST_SUFFIXES",
+    )
+    # Per-file decoded-byte ceiling for POST /v1/media/uploads. Larger than the chat image cap
+    # (5 MB) on purpose: a chat image is fed to a model and paid for in tokens, a reference image
+    # decides the quality of a generation the user already paid credits for.
+    media_upload_max_bytes: int = Field(default=10 * 1024 * 1024, alias="MEDIA_UPLOAD_MAX_BYTES")
+    # Raised transport body limit applied ONLY to POST /v1/media/uploads (ADR-045 pattern).
+    # INVARIANT (single source of truth = MEDIA_UPLOAD_MAX_BYTES, this limit is derived):
+    #   media_upload_request_body_limit >= ceil(media_upload_max_bytes * 4/3) + JSON_OVERHEAD
+    # 10 MB of base64 is ~13.34 MB; 16 MB leaves ~2.66 MB for the JSON envelope. Must stay >= the
+    # invariant under any operator calibration.
+    media_upload_request_body_limit: int = Field(
+        default=16 * 1024 * 1024, alias="MEDIA_UPLOAD_REQUEST_BODY_LIMIT"
+    )
 
     # --- Admin auth (ADR-009, ADM-1) ---
     # Isolated admin secret (X-Admin-Token). High-entropy (>= 32 bytes), only via secret
@@ -458,6 +487,36 @@ class Settings(BaseSettings):
                 continue
             credits[key] = value
         return credits
+
+    def fal_asset_retention(self) -> int | None | Literal[False]:
+        """Parse FAL_ASSET_RETENTION_SECONDS into the lifecycle preference sent to fal (ADR-061 §5).
+
+        Three outcomes, because the upstream contract has three: ``False`` — send no preference at
+        all (fal's own "at least 7 days" applies); ``None`` — no expiration; a positive int — that
+        many seconds. Anything unparseable or negative degrades to ``False``, i.e. to fal's
+        default: a typo must not silently pin assets forever, nor delete them early. Pure (no I/O).
+        """
+        raw = self.fal_asset_retention_seconds_raw.strip()
+        if not raw:
+            return False
+        try:
+            seconds = int(raw)
+        except ValueError:
+            return False
+        if seconds == 0:
+            return None
+        return seconds if seconds > 0 else False
+
+    def fal_upload_host_suffixes(self) -> tuple[str, ...]:
+        """Host suffixes an upload URL from fal may live on (ADR-062 §4).
+
+        Empty/blank entries are dropped and comparison is done lowercase, so operator formatting
+        (spaces, trailing comma, mixed case) cannot silently widen or empty the allowlist. An empty
+        result means "trust nothing", which fails closed — we would rather not upload than PUT a
+        user's file to a host an upstream response named. Pure (no I/O).
+        """
+        parts = (item.strip().lower() for item in self.fal_upload_host_suffixes_raw.split(","))
+        return tuple(part for part in parts if part)
 
     def products_catalog(self) -> list[dict[str, Any]]:
         """Parse PRODUCTS_CATALOG (JSON array) into a list of display product dicts.
