@@ -17,6 +17,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -37,6 +38,10 @@ FAL_IN_PROGRESS = "IN_PROGRESS"
 FAL_COMPLETED = "COMPLETED"
 FAL_FAILED = "FAILED"
 FAL_CANCELED = "CANCELED"
+
+# Label for the storage calls in logs and error mapping. Not a generation endpoint — the observable
+# field is shared with submit/status/result so one query covers every outgoing fal call.
+_UPLOAD_ENDPOINT = "storage/upload"
 
 
 @dataclass(frozen=True)
@@ -141,6 +146,72 @@ class FalClient:
             response_url=response_url,
             queue_position=position if isinstance(position, int) else None,
         )
+
+    def _rest_base(self) -> str:
+        return self._settings.fal_rest_base.rstrip("/")
+
+    def _upload_host_allowed(self, url: str) -> bool:
+        """Whether a URL fal handed us may be PUT to / returned to the client (ADR-062 §4).
+
+        ``initiate`` answers with an upload URL on a CDN or bucket host, not on ``FAL_REST_BASE``,
+        so the prefix check used for the polling URLs does not apply. We match the host against an
+        operator allowlist instead, and require https: a PUT here carries a user's file, and
+        sending it to whatever host an upstream body named is worse than not sending it at all.
+        """
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return False
+        host = parsed.hostname.lower()
+        return any(
+            host == suffix.lstrip(".") or host.endswith(suffix)
+            for suffix in self._settings.fal_upload_host_suffixes()
+        )
+
+    async def upload(self, *, content: bytes, media_type: str, file_name: str) -> str:
+        """Store a reference image with the provider and return its public https URL (ADR-062).
+
+        Two steps, as fal's storage API is shaped: ask for an upload slot, then PUT the raw bytes
+        to the URL it names. The file has to be fetchable by fal itself, so the returned URL is
+        public-by-obscurity — the same property the generated assets already have.
+        """
+        slot = await self._request(
+            "POST",
+            f"{self._rest_base()}/storage/upload/initiate?storage_type=fal-cdn-v3",
+            endpoint=_UPLOAD_ENDPOINT,
+            json={"file_name": file_name, "content_type": media_type},
+            extra_headers={"Content-Type": "application/json", **self._lifecycle_header()},
+        )
+        upload_url = slot.get("upload_url") if isinstance(slot, dict) else None
+        file_url = slot.get("file_url") if isinstance(slot, dict) else None
+        if not isinstance(upload_url, str) or not isinstance(file_url, str):
+            raise self._upstream_error("malformed_upload_slot", endpoint=_UPLOAD_ENDPOINT)
+        if not self._upload_host_allowed(upload_url) or not self._upload_host_allowed(file_url):
+            raise self._upstream_error("untrusted_upload_url", endpoint=_UPLOAD_ENDPOINT)
+
+        await self._put_bytes(upload_url, content=content, media_type=media_type)
+        log_event(
+            logger,
+            logging.INFO,
+            "fal_upload_outcome",
+            result="stored",
+            bytes=len(content),
+            mediaType=media_type,
+        )
+        return file_url
+
+    async def _put_bytes(self, url: str, *, content: bytes, media_type: str) -> None:
+        """Upload the raw body to the slot URL. The slot URL carries its own authorization, so our
+        fal key is deliberately NOT sent to a host outside the API itself."""
+        try:
+            async with httpx.AsyncClient(timeout=self._settings.fal_timeout_seconds) as client:
+                response = await client.request(
+                    "PUT", url, headers={"Content-Type": media_type}, content=content
+                )
+        except httpx.TimeoutException as exc:
+            raise self._upstream_error("upload_timeout", endpoint=_UPLOAD_ENDPOINT) from exc
+        except httpx.RequestError as exc:
+            raise self._upstream_error("upload_connect_error", endpoint=_UPLOAD_ENDPOINT) from exc
+        self._raise_for_status(response, endpoint=_UPLOAD_ENDPOINT)
 
     async def status(self, *, status_url: str, endpoint: str) -> FalStatus:
         """Poll the queue state of a previously submitted request."""

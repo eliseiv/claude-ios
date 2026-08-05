@@ -351,6 +351,73 @@ class MediaJobResponse(StrictModel):
     )
 
 
+class MediaUploadRequest(StrictModel):
+    """Загрузка референсного изображения (inline base64) — ADR-062.
+
+    Форма тела совпадает с загрузкой файлов рабочего пространства, чтобы клиенту не понадобился
+    второй нормалайзер. Принимаются только изображения: и режим редактирования, и image-to-video
+    берут на вход картинку.
+    """
+
+    model_config = StrictModel.model_config | {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "type": "image",
+                    "mediaType": "image/jpeg",
+                    "filename": "photo.jpg",
+                    "data": "/9j/4AAQSkZJRgABAQAAAQABAAD…",
+                }
+            ]
+        }
+    }
+
+    type: Literal["image"] = Field(
+        description="Класс файла. Поддерживается только `image` — референс генерации."
+    )
+    mediaType: Literal["image/jpeg", "image/png", "image/gif", "image/webp"] = Field(
+        description="MIME-тип изображения из allowlist. Вне списка → `422`."
+    )
+    filename: str = Field(
+        min_length=1,
+        max_length=512,
+        description="Имя файла. Попадает в имя объекта у провайдера.",
+    )
+    data: str = Field(
+        min_length=1,
+        description=(
+            "Содержимое файла в base64. Только inline base64 — ссылки здесь не принимаются. "
+            "Размер после декодирования ограничен (превышение → `413`)."
+        ),
+    )
+
+    @field_validator("filename")
+    @classmethod
+    def _check_filename(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("filename must be a non-empty string")
+        return value
+
+
+class MediaUploadResponse(StrictModel):
+    url: str = Field(
+        description=(
+            "https-ссылка на загруженный файл. Подставляйте её в `imageUrls` "
+            "(`POST /v1/media/images`) или `imageUrl` (`POST /v1/media/videos`)."
+        )
+    )
+    mediaType: str = Field(description="MIME-тип загруженного файла.")
+    size: int = Field(description="Размер файла в байтах после декодирования.")
+    expiresAt: datetime.datetime | None = Field(
+        default=None,
+        description=(
+            "Когда ссылка перестанет работать, если срок задан на инстансе. `null` — срок не "
+            "ограничен либо определяется политикой провайдера; в этом случае не рассчитывайте на "
+            "бессрочность и сохраняйте нужный файл локально."
+        ),
+    )
+
+
 class MediaJobsListResponse(StrictModel):
     jobs: list[MediaJobResponse] = Field(
         description=(

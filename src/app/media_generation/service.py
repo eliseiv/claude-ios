@@ -17,13 +17,19 @@ callback surface and no signature scheme, and the iOS client is already polling-
 
 from __future__ import annotations
 
+import datetime
 import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from app.chat.attachments import (
+    _check_magic_bytes,
+    _decode_base64,
+    _decoded_len_from_base64,
+)
 from app.config import Settings
-from app.errors import NotFoundError, ValidationFailedError
+from app.errors import NotFoundError, PayloadTooLargeError, ValidationFailedError
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
@@ -61,6 +67,16 @@ class MediaAsset:
     url: str
     content_type: str | None
     file_name: str | None
+
+
+@dataclass(frozen=True)
+class UploadedFile:
+    """A reference image stored with the provider, as returned by ``POST /v1/media/uploads``."""
+
+    url: str
+    media_type: str
+    size: int
+    expires_at: datetime.datetime | None
 
 
 @dataclass(frozen=True)
@@ -198,6 +214,43 @@ class MediaGenerationService:
             falEndpoint=variant.endpoint,
         )
         return MediaJobView(job=job, assets=[])
+
+    # ---- reference-image upload ----
+
+    async def upload_reference_image(
+        self, *, media_type: str, file_name: str, data: str
+    ) -> UploadedFile:
+        """Store a client's local photo with the provider and return a URL it can generate from.
+
+        Exists because ``imageUrls``/``imageUrl`` accept only https URLs — fal fetches the picture
+        itself — while a phone only ever has local bytes (ADR-062). Costs no credits: the charge
+        belongs to the generation, and making a mis-picked reference cost money would be absurd.
+
+        Limits are checked BEFORE decoding (the base64 length bounds the decoded size), and the
+        magic bytes are checked after, so a renamed file cannot pass as an image.
+        """
+        if _decoded_len_from_base64(data) > self._settings.media_upload_max_bytes:
+            raise PayloadTooLargeError("file exceeds the maximum allowed size")
+        content = _decode_base64(data)
+        if len(content) > self._settings.media_upload_max_bytes:
+            raise PayloadTooLargeError("file exceeds the maximum allowed size")
+        _check_magic_bytes(media_type, content)
+
+        url = await self._fal.upload(content=content, media_type=media_type, file_name=file_name)
+        return UploadedFile(
+            url=url, media_type=media_type, size=len(content), expires_at=self._expires_at()
+        )
+
+    def _expires_at(self) -> datetime.datetime | None:
+        """When the uploaded file dies, if the instance pinned a lifetime (ADR-061 §5).
+
+        ``None`` covers both "never expires" and "provider decides": in either case we have no
+        honest timestamp to give, and inventing fal's default here would go stale silently.
+        """
+        preference = self._settings.fal_asset_retention()
+        if not isinstance(preference, int) or isinstance(preference, bool):
+            return None
+        return datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(seconds=preference)
 
     # ---- read / poll ----
 

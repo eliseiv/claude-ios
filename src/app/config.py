@@ -274,6 +274,30 @@ class Settings(BaseSettings):
     # Not a limit we enforce — it is a preference sent upstream with each submit.
     fal_asset_retention_seconds_raw: str = Field(default="", alias="FAL_ASSET_RETENTION_SECONDS")
 
+    # --- Reference-image upload for image-to-image / image-to-video (ADR-062) ---
+    # PUBLIC host of the fal REST API used to obtain an upload slot. Fixed server-side.
+    fal_rest_base: str = Field(default="https://rest.fal.ai", alias="FAL_REST_BASE")
+    # Host suffixes we are willing to PUT a user's file to, and to hand back as an asset URL.
+    # `initiate` answers with an upload URL on a CDN/bucket host, NOT on FAL_REST_BASE, so the
+    # prefix check that guards status_url/response_url cannot be used here (ADR-062 §4). Comma-
+    # separated; a URL outside the list is an upstream error, never a request we go ahead and make.
+    fal_upload_host_suffixes_raw: str = Field(
+        default=".fal.ai,.fal.media,.fal.run,.storage.googleapis.com",
+        alias="FAL_UPLOAD_HOST_SUFFIXES",
+    )
+    # Per-file decoded-byte ceiling for POST /v1/media/uploads. Larger than the chat image cap
+    # (5 MB) on purpose: a chat image is fed to a model and paid for in tokens, a reference image
+    # decides the quality of a generation the user already paid credits for.
+    media_upload_max_bytes: int = Field(default=10 * 1024 * 1024, alias="MEDIA_UPLOAD_MAX_BYTES")
+    # Raised transport body limit applied ONLY to POST /v1/media/uploads (ADR-045 pattern).
+    # INVARIANT (single source of truth = MEDIA_UPLOAD_MAX_BYTES, this limit is derived):
+    #   media_upload_request_body_limit >= ceil(media_upload_max_bytes * 4/3) + JSON_OVERHEAD
+    # 10 MB of base64 is ~13.34 MB; 16 MB leaves ~2.66 MB for the JSON envelope. Must stay >= the
+    # invariant under any operator calibration.
+    media_upload_request_body_limit: int = Field(
+        default=16 * 1024 * 1024, alias="MEDIA_UPLOAD_REQUEST_BODY_LIMIT"
+    )
+
     # --- Admin auth (ADR-009, ADM-1) ---
     # Isolated admin secret (X-Admin-Token). High-entropy (>= 32 bytes), only via secret
     # manager / env, never in code/repo/image. Not shared with JWT/KMS/ANTHROPIC/PREVIEW
@@ -482,6 +506,17 @@ class Settings(BaseSettings):
         if seconds == 0:
             return None
         return seconds if seconds > 0 else False
+
+    def fal_upload_host_suffixes(self) -> tuple[str, ...]:
+        """Host suffixes an upload URL from fal may live on (ADR-062 §4).
+
+        Empty/blank entries are dropped and comparison is done lowercase, so operator formatting
+        (spaces, trailing comma, mixed case) cannot silently widen or empty the allowlist. An empty
+        result means "trust nothing", which fails closed — we would rather not upload than PUT a
+        user's file to a host an upstream response named. Pure (no I/O).
+        """
+        parts = (item.strip().lower() for item in self.fal_upload_host_suffixes_raw.split(","))
+        return tuple(part for part in parts if part)
 
     def products_catalog(self) -> list[dict[str, Any]]:
         """Parse PRODUCTS_CATALOG (JSON array) into a list of display product dicts.

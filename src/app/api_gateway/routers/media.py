@@ -35,6 +35,8 @@ from app.schemas.media import (
     MediaModelSchema,
     MediaModelsResponse,
     MediaModeSchema,
+    MediaUploadRequest,
+    MediaUploadResponse,
     VideoGenerationRequest,
 )
 
@@ -215,6 +217,40 @@ async def generate_video(
         },
     )
     return _job_response(view)
+
+
+@router.post(
+    "/uploads",
+    response_model=MediaUploadResponse,
+    status_code=201,
+    summary="Загрузить изображение для генерации по референсу",
+    description=(
+        "Принимает изображение в base64 и возвращает https-ссылку на него. Ссылку подставляйте в "
+        "`imageUrls` (`POST /v1/media/images`, режим редактирования) или в `imageUrl` "
+        "(`POST /v1/media/videos`, image-to-video) — оба поля принимают только https-URL, потому "
+        "что файл скачивает сам провайдер. Кредитов не стоит. Допустимые типы: `image/jpeg`, "
+        "`image/png`, `image/gif`, `image/webp`; тип сверяется с реальной сигнатурой файла. "
+        "Файл больше допустимого размера — `413 payload_too_large`; провайдер недоступен — `502`; "
+        "генерация не настроена на инстансе — `503`. Срок жизни ссылки — в `expiresAt` (`null` — "
+        "срок не ограничен либо задан политикой провайдера, не полагайтесь на бессрочность)."
+    ),
+)
+async def upload_media_file(
+    body: MediaUploadRequest,
+    request: Request,
+    current: CurrentUser,
+    media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
+) -> MediaUploadResponse:
+    await _rate_limit(current.user_id)
+    uploaded = await media.upload_reference_image(
+        media_type=body.mediaType, file_name=body.filename, data=body.data
+    )
+    return MediaUploadResponse(
+        url=uploaded.url,
+        mediaType=uploaded.media_type,
+        size=uploaded.size,
+        expiresAt=uploaded.expires_at,
+    )
 
 
 @router.get(

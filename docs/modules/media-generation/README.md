@@ -19,6 +19,7 @@
 
 ## DoD (выполнено)
 - ✅ `GET /v1/media/models` — каталог моделей: id, тип, базовая цена в кредитах, поддержка референсных изображений и звука, **режимы** (`textToImage`/`imageToImage`/`textToVideo`/`imageToVideo`) с их параметрами и допустимыми значениями `aspectRatio`/`resolution`/`duration`.
+- ✅ `POST /v1/media/uploads` — загрузка локального изображения (inline base64) в хранилище провайдера, ответ `201` с https-ссылкой для `imageUrls`/`imageUrl` ([ADR-062](../../adr/ADR-062-media-upload-via-fal-storage.md)). Кредитов не стоит.
 - ✅ `POST /v1/media/images`, `POST /v1/media/videos` — постановка в очередь fal, ответ `202` с задачей в статусе `queued`; кредиты списаны по серверной цене (поля цены в теле нет — anti-tamper).
 - ✅ Оба режима в каждом маршруте: text-to-image / image-to-image и text-to-video / image-to-video — переключаются наличием `imageUrls`/`imageUrl`, endpoint провайдера выбирает сервер.
 - ✅ Параметры генерации: `aspectRatio`, `resolution`, `duration`, `numImages`, `outputFormat`, `negativePrompt`, `generateAudio`, `cfgScale`, `seed` — каждый валидируется против набора **режима** до списания.
