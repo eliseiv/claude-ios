@@ -90,6 +90,23 @@ def main() -> int:
                         f"{model.id}/{mode}: forwards {request_field} but offers no values"
                     )
 
+            # Defaults skip request validation (they are ours, not the client's), so a drifted
+            # default reaches fal unchecked — the same paid-run-without-output failure as above,
+            # except it hits every request that omits the field rather than a rare bad value.
+            for request_field, default in sorted(variant.defaults.items()):
+                prop = properties.get(fal_field_name(request_field))
+                if prop is None:
+                    problems.append(
+                        f"{model.id}/{mode}: defaults {request_field}, unknown upstream"
+                    )
+                    continue
+                upstream = _enum_of(prop)
+                if upstream is not None and default not in upstream:
+                    problems.append(
+                        f"{model.id}/{mode}: default {request_field}={default!r} "
+                        "is not a value upstream accepts"
+                    )
+
             print(f"checked {model.id}/{mode} -> {variant.endpoint}")
 
     if problems:

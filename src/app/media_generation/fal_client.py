@@ -13,6 +13,7 @@ message names the offending model parameter and is genuinely useful to the clien
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -76,6 +77,23 @@ class FalClient:
             "Accept": "application/json",
         }
 
+    def _lifecycle_header(self) -> dict[str, str]:
+        """Per-request retention preference for the files this run produces (ADR-061 §5).
+
+        fal keeps generated assets "at least 7 days" and then deletes them permanently; since we
+        hand the CDN URL straight to the client and store it in ``media_jobs.result``, that default
+        outlives neither a job list nor a user's memory of it. Sent only on submit — the object is
+        created there — and omitted entirely when the operator has expressed no preference.
+        """
+        preference = self._settings.fal_asset_retention()
+        if preference is False:
+            return {}
+        return {
+            "X-Fal-Object-Lifecycle-Preference": json.dumps(
+                {"expiration_duration_seconds": preference}
+            )
+        }
+
     def _queue_base(self) -> str:
         return self._settings.fal_queue_base.rstrip("/")
 
@@ -86,7 +104,9 @@ class FalClient:
     async def submit(self, *, endpoint: str, payload: dict[str, Any]) -> FalSubmission:
         """Enqueue a generation run and return its polling handle."""
         url = f"{self._queue_base()}/{endpoint}"
-        body = await self._request("POST", url, endpoint=endpoint, json=payload)
+        body = await self._request(
+            "POST", url, endpoint=endpoint, json=payload, extra_headers=self._lifecycle_header()
+        )
 
         request_id = body.get("request_id") if isinstance(body, dict) else None
         if not isinstance(request_id, str) or not request_id:
@@ -146,9 +166,17 @@ class FalClient:
         return body
 
     async def _request(
-        self, method: str, url: str, *, endpoint: str, json: dict[str, Any] | None = None
+        self,
+        method: str,
+        url: str,
+        *,
+        endpoint: str,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> Any:
         headers = self._headers()
+        if extra_headers:
+            headers.update(extra_headers)
         timeout = self._settings.fal_timeout_seconds
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:

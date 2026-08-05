@@ -1,6 +1,6 @@
 # ADR-060 — Генерация фото и видео через fal.ai: очередь задач вместо синхронного ответа
 
-- Статус: Accepted
+- Статус: Accepted (§4 «Биллинг» пересмотрен [ADR-061](ADR-061-fal-price-calibration-and-priced-defaults.md) 2026-08-05: цены видео подняты до двукратного покрытия закупки, влияющие на цену параметры получили серверные дефолты; тело этого ADR не переписано — immutability)
 - Дата: 2026-08-04
 - Тип: feature-ADR (новый модуль [media-generation](../modules/media-generation/README.md))
 - Связано: [ADR-005](ADR-005-idempotency-ledger.md) (идемпотентность ledger — ключ списания/возврата), [ADR-015](ADR-015-consumable-token-iap.md) (anti-tamper BR-TP-1 — цена только с сервера), [ADR-051](ADR-051-cloudpayments-checkout-payment-link.md) (паттерн исходящего httpx-клиента: таймаут, маппинг ошибок в `502` без утечки upstream), [ADR-033](ADR-033-llm-provider-abstraction.md) (провайдер LLM — **не** затронут: генерация медиа идёт мимо chat-оркестратора)

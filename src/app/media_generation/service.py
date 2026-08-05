@@ -31,6 +31,7 @@ from app.media_generation.catalog import (
     FalVariant,
     build_fal_input,
     find_model,
+    resolve_values,
     run_price,
 )
 from app.media_generation.fal_client import (
@@ -143,10 +144,14 @@ class MediaGenerationService:
         for parameter in ("aspectRatio", "resolution", "duration"):
             self._validate_enum(parameter, params.get(parameter), variant)
 
+        # One resolved mapping feeds BOTH the price and the upstream payload (ADR-061 §3). Pricing
+        # the raw request while letting fal fill the blanks meant billing a cheaper run than the
+        # one we asked for — fal defaults generate_audio to true and Veo's duration to 8s.
+        values = resolve_values(variant=variant, values={"prompt": prompt, **params})
         payload = build_fal_input(
             model=model,
             variant=variant,
-            values={"prompt": prompt, **params},
+            values=values,
             image_urls=image_urls,
         )
 
@@ -155,10 +160,10 @@ class MediaGenerationService:
         job_id = uuid.uuid4()
         cost = self.price_of(
             model=model,
-            num_images=_as_int(params.get("numImages")),
-            duration=_as_str(params.get("duration")),
-            resolution=_as_str(params.get("resolution")),
-            generate_audio=_as_bool(params.get("generateAudio")),
+            num_images=_as_int(values.get("numImages")),
+            duration=_as_str(values.get("duration")),
+            resolution=_as_str(values.get("resolution")),
+            generate_audio=_as_bool(values.get("generateAudio")),
         )
         await self._wallet.consume(
             user_id=user_id,

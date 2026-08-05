@@ -38,14 +38,16 @@ GET  /v1/media/jobs/{jobId}            → опрашивать до status = co
           "params": ["aspectRatio", "numImages", "outputFormat", "prompt", "resolution", "seed"],
           "aspectRatios": ["auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "4:1", "1:4", "8:1", "1:8"],
           "resolutions": ["0.5K", "1K", "2K", "4K"],
-          "durations": []
+          "durations": [],
+          "defaults": { "resolution": "1K", "numImages": 1 }
         },
         {
           "mode": "imageToImage",
           "params": ["aspectRatio", "numImages", "outputFormat", "prompt", "resolution", "seed"],
           "aspectRatios": ["auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "4:1", "1:4", "8:1", "1:8"],
           "resolutions": ["0.5K", "1K", "2K", "4K"],
-          "durations": []
+          "durations": [],
+          "defaults": { "resolution": "1K", "numImages": 1 }
         }
       ]
     }
@@ -61,7 +63,7 @@ GET  /v1/media/jobs/{jobId}            → опрашивать до status = co
 | `baseDurationSeconds` | длительность видео на одну пачку; `null` у image-моделей |
 | `resolutionCredits` | image: цена одного фото по `resolution` (целые ступени); `null` у video |
 | `resolutionMultipliers` | video: множитель пачки по `resolution` (Veo: `4k`→2); `null`/пусто — не влияет |
-| `audioMultiplier` | video: множитель при `generateAudio: true` (Veo→2); `null` — звук на цену не влияет |
+| `audioMultiplier` | video: множитель при `generateAudio: true` (Veo→2, Kling V3→1.5); итог округляется **вверх**. `null` — звук на цену не влияет |
 | `supportsImageInput` / `maxInputImages` | принимает ли модель референсные изображения и сколько (на цену не влияет) |
 | `supportsAudio` | имеет ли смысл показывать переключатель `generateAudio` |
 | `modes` | режимы генерации: первый — без референсного изображения, второй — с ним |
@@ -73,13 +75,28 @@ GET  /v1/media/jobs/{jobId}            → опрашивать до status = co
 | `mode` | `textToImage`/`imageToImage`/`textToVideo`/`imageToVideo`. Выбирается автоматически по наличию `imageUrls`/`imageUrl` в запросе |
 | `params` | какие параметры принимает **этот** режим. Параметра нет в списке → контрол не показывать, присланное значение будет проигнорировано |
 | `aspectRatios` / `resolutions` / `durations` | допустимые значения одноимённых полей **в этом режиме**. **Пустой список = параметр в режиме не поддерживается**: присланное значение вернёт `422` |
+| `defaults` | что сервер подставит, если поле не прислано. Только параметры, влияющие на цену. Пустой объект — подставлять нечего |
 
 Наборы намеренно даны по режимам, а не по модели, потому что они действительно различаются: у Veo в text-to-video нет `aspectRatio: "auto"`, а в image-to-video есть; Kling в image-to-video `aspectRatio` не принимает вовсе (берёт из стартового кадра). Каталог — источник истины: модели, значения и цены меняются на сервере без релиза клиента.
 
+**Дефолты режима — часть цены.** Поле, влияющее на стоимость и не пришедшее в запросе, сервер заполняет значением из `defaults` и **отправляет его провайдеру явно**. Поэтому расчёт на клиенте обязан подставлять ровно эти значения — иначе он разойдётся с `creditsCharged`. Действующие дефолты:
+
+| Модель | `duration` | `resolution` | `generateAudio` | `numImages` |
+|---|---|---|---|---|
+| `nano-banana-pro` | — | `1K` | — | `1` |
+| `nano-banana-2` | — | `1K` | — | `1` |
+| `kling-video` | `5` | — | — | — |
+| `kling-video-v3` | `5` | — | `false` | — |
+| `veo-3.1` | `8s` | `720p` | `false` | — |
+
+Звук по умолчанию **выключен**: включение — явное действие пользователя, а не молчаливое удвоение счёта. Параметры, не влияющие на цену (`aspectRatio`, `outputFormat`, `negativePrompt`, `cfgScale`, `seed`), дефолтов не имеют — их по-прежнему выбирает провайдер.
+
 **Как считается цена** (mode text/image не влияет):
 
-- изображения: `resolutionCredits[resolution] × numImages` — например `nano-banana-2` 4K × 2 = `8 × 2 = 16`; без `resolution` берётся цена `1K`;
-- видео: `credits × ceil(duration / baseDurationSeconds) × resolutionMultipliers[resolution] × (audioMultiplier если generateAudio)` — например 15 с Kling V3 = `10 × 3 = 30`; Veo `4s` + `4k` + audio = `15 × 1 × 2 × 2 = 60`.
+- изображения: `resolutionCredits[resolution] × numImages` — например `nano-banana-2` 4K × 2 = `8 × 2 = 16`; без `resolution` берётся цена `1K` (дефолт режима);
+- видео: `ceil(credits × ceil(duration / baseDurationSeconds) × resolutionMultipliers[resolution] × (audioMultiplier если generateAudio))` — например 15 с Kling V3 без звука = `23 × 3 = 69`, со звуком = `ceil(69 × 1.5) = 104`; Veo `8s` + `1080p` + audio = `32 × 2 × 1 × 2 = 128`.
+
+Округление итога **вверх**: множитель звука Kling V3 дробный (×1.5), а цена в кредитах — целая.
 
 Фактически списанное всегда приходит в `creditsCharged`; баланс проверяется по итоговой цене (`409` до списания).
 

@@ -23,7 +23,8 @@ POST /v1/media/images|videos
   ├─ catalog: resolve model id                  → 422 (неизвестна / не тот kind)
   ├─ catalog: variant = image_variant | text_variant   (наличие картинки решает endpoint)
   ├─ валидация значений против набора ВАРИАНТА    → 422 (до любого списания)
-  ├─ cost = base × (numImages | ceil(duration/base_duration))
+  ├─ resolve_values: дефолты варианта для полей, влияющих на цену   (ADR-061 §3)
+  ├─ cost = f(ЭТИХ ЖЕ значений)                 (что тарифицируем — то и отправляем)
   ├─ jobId = uuid4()                            (нужен как ключ идемпотентности раньше строки)
   ├─ wallet.consume(cost, key=media-gen:{jobId})→ 409 insufficient_credits
   ├─ fal.submit(endpoint, payload)              → 502 / 503 / 422 / 429

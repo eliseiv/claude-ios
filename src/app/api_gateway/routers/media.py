@@ -78,9 +78,12 @@ def _job_response(view: MediaJobView) -> MediaJobResponse:
         "Возвращает доступные модели генерации фото и видео: идентификатор для поля `model`, "
         "базовую цену и **ступени качества**. Image: `resolutionCredits[resolution] × numImages`. "
         "Video: `credits × ceil(duration/baseDurationSeconds) × resolutionMultipliers[resolution] "
-        "× (audioMultiplier при generateAudio)`. Mode text/image на цену не влияет. Режимов у "
-        "модели два — без референса и с ним; у каждого свои `params` и наборы значений. Пустой "
-        "список = параметр не поддерживается (`422` до списания). Стройте UI по режиму."
+        "× (audioMultiplier при generateAudio)`, итог округляется вверх. Mode text/image на цену "
+        "не влияет. Режимов у модели два — без референса и с ним; у каждого свои `params`, наборы "
+        "значений и `defaults`. Пустой список = параметр не поддерживается (`422` до списания). "
+        "Влияющий на цену параметр, который вы не пришлёте, сервер подставит из `defaults` — "
+        "используйте их в своём расчёте, иначе он разойдётся с `creditsCharged`. Стройте UI по "
+        "режиму."
     ),
 )
 async def list_media_models(
@@ -115,6 +118,7 @@ async def list_media_models(
                         aspectRatios=list(variant.aspect_ratios),
                         resolutions=list(variant.resolutions),
                         durations=list(variant.durations),
+                        defaults=dict(variant.defaults),
                     )
                     for mode, variant in model.variants()
                 ],
@@ -131,7 +135,9 @@ async def list_media_models(
     summary="Сгенерировать изображение",
     description=(
         "Ставит генерацию изображения в очередь и списывает кредиты по цене модели (цена берётся "
-        "с сервера): `resolutionCredits[resolution] × numImages` (без resolution — цена `1K`). "
+        "с сервера): `resolutionCredits[resolution] × numImages`. Не присланные `resolution` и "
+        "`numImages` подставляются из `defaults` режима и отправляются провайдеру явно, поэтому "
+        "цена всегда описывает именно тот запуск, который будет выполнен. "
         "Отвечает `202` с "
         "задачей в статусе `queued` — результат забирайте через `GET /v1/media/jobs/{jobId}`. "
         "Непустой `imageUrls` включает режим редактирования референсных изображений. Параметры "
@@ -172,8 +178,10 @@ async def generate_image(
     summary="Сгенерировать видео",
     description=(
         "Ставит генерацию видео в очередь и списывает кредиты по цене модели, масштабированной "
-        "длительностью и качеством: `credits × ceil(duration / baseDurationSeconds) × "
-        "resolutionMultipliers × audioMultiplier`. Отвечает `202` с "
+        "длительностью и качеством: `ceil(credits × ceil(duration / baseDurationSeconds) × "
+        "resolutionMultipliers × audioMultiplier)`. Не присланные `duration`/`resolution`/"
+        "`generateAudio` подставляются из `defaults` режима и отправляются провайдеру явно — "
+        "звук по умолчанию **выключен**, включайте его осознанно: он умножает цену. Отвечает `202` "
         "задачей в статусе `queued`: видео генерируется минутами, поэтому результат забирается "
         "опросом `GET /v1/media/jobs/{jobId}`. Заданный `imageUrl` включает режим image-to-video "
         "(стартовый кадр) — в нём `aspectRatio` берётся из кадра и моделями Kling не принимается. "

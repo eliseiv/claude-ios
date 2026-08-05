@@ -80,6 +80,14 @@ class MediaModeSchema(StrictModel):
     durations: list[str] = Field(
         description="Допустимые значения `duration`. Пустой список — параметр не поддерживается."
     )
+    defaults: dict[str, str | int | bool] = Field(
+        default_factory=dict,
+        description=(
+            "Значения, которые сервер подставит сам, если поле не прислано. Перечислены только "
+            "параметры, влияющие на цену, — подставляйте их в свой расчёт стоимости, чтобы он "
+            "совпал с `creditsCharged`. Пустой объект — подставлять нечего."
+        ),
+    )
 
 
 class MediaModelSchema(StrictModel):
@@ -118,11 +126,14 @@ class MediaModelSchema(StrictModel):
             "resolution на цену не влияет."
         ),
     )
-    audioMultiplier: int | None = Field(
+    # int|float, not float: Veo's multiplier is a whole 2 and has always gone out as `2`, so
+    # widening it to `2.0` would break a client decoding it as an integer. Kling V3's is 1.5.
+    audioMultiplier: int | float | None = Field(
         default=None,
         description=(
-            "Video: множитель при `generateAudio: true` (Veo → 2). `null` — звук на цену не "
-            "влияет (даже если переключатель в UI есть)."
+            "Video: множитель при `generateAudio: true` (Veo → 2, Kling V3 → 1.5). Может быть "
+            "дробным — итоговая цена округляется вверх. `null` — звук на цену не влияет (даже "
+            "если переключатель в UI есть)."
         ),
     )
     supportsImageInput: bool = Field(

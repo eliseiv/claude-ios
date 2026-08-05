@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -268,6 +268,11 @@ class Settings(BaseSettings):
     media_model_credits_raw: str = Field(default="{}", alias="MEDIA_MODEL_CREDITS")
     # Cap on how many jobs GET /v1/media/jobs returns in one page.
     media_jobs_page_limit: int = Field(default=50, alias="MEDIA_JOBS_PAGE_LIMIT")
+    # How long fal keeps a generated asset (ADR-061 §5). fal's own default is "at least 7 days",
+    # after which the CDN URL we hand to the client dies for good. Empty => send no preference and
+    # inherit that default; "0" => no expiration; a positive integer => that many seconds.
+    # Not a limit we enforce — it is a preference sent upstream with each submit.
+    fal_asset_retention_seconds_raw: str = Field(default="", alias="FAL_ASSET_RETENTION_SECONDS")
 
     # --- Admin auth (ADR-009, ADM-1) ---
     # Isolated admin secret (X-Admin-Token). High-entropy (>= 32 bytes), only via secret
@@ -458,6 +463,25 @@ class Settings(BaseSettings):
                 continue
             credits[key] = value
         return credits
+
+    def fal_asset_retention(self) -> int | None | Literal[False]:
+        """Parse FAL_ASSET_RETENTION_SECONDS into the lifecycle preference sent to fal (ADR-061 §5).
+
+        Three outcomes, because the upstream contract has three: ``False`` — send no preference at
+        all (fal's own "at least 7 days" applies); ``None`` — no expiration; a positive int — that
+        many seconds. Anything unparseable or negative degrades to ``False``, i.e. to fal's
+        default: a typo must not silently pin assets forever, nor delete them early. Pure (no I/O).
+        """
+        raw = self.fal_asset_retention_seconds_raw.strip()
+        if not raw:
+            return False
+        try:
+            seconds = int(raw)
+        except ValueError:
+            return False
+        if seconds == 0:
+            return None
+        return seconds if seconds > 0 else False
 
     def products_catalog(self) -> list[dict[str, Any]]:
         """Parse PRODUCTS_CATALOG (JSON array) into a list of display product dicts.
