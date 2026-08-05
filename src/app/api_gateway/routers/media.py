@@ -19,17 +19,19 @@ from fastapi import APIRouter, Depends, Path, Query, Request
 
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.deps import CurrentUser, get_media_generation_service, require_media_generation_configured
-from app.errors import RateLimitedError
+from app.errors import RateLimitedError, ValidationFailedError
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
     all_models,
     resolution_credits_for_api,
 )
+from app.media_generation.cursor import InvalidCursorError, MediaJobCursor
 from app.media_generation.service import MediaGenerationService, MediaJobView
 from app.schemas.media import (
     ImageGenerationRequest,
     MediaAssetSchema,
+    MediaJobDeleteResponse,
     MediaJobResponse,
     MediaJobsListResponse,
     MediaModelSchema,
@@ -67,9 +69,20 @@ def _job_response(view: MediaJobView) -> MediaJobResponse:
             for a in view.assets
         ],
         error=job.error,
+        parentJobId=job.parent_job_id,
+        inputImageUrls=list(job.input_image_urls or []),
         createdAt=job.created_at,
         updatedAt=job.updated_at,
     )
+
+
+def _decode_cursor(value: str | None) -> MediaJobCursor | None:
+    if value is None:
+        return None
+    try:
+        return MediaJobCursor.decode(value)
+    except InvalidCursorError as exc:
+        raise ValidationFailedError("invalid cursor") from exc
 
 
 @router.get(
@@ -162,6 +175,7 @@ async def generate_image(
         model_id=body.model,
         prompt=body.prompt,
         image_urls=list(body.imageUrls or []),
+        source_job_id=body.sourceJobId,
         params={
             "aspectRatio": body.aspectRatio,
             "resolution": body.resolution,
@@ -206,6 +220,7 @@ async def generate_video(
         model_id=body.model,
         prompt=body.prompt,
         image_urls=[body.imageUrl] if body.imageUrl else [],
+        source_job_id=body.sourceJobId,
         params={
             "negativePrompt": body.negativePrompt,
             "aspectRatio": body.aspectRatio,
@@ -258,9 +273,12 @@ async def upload_media_file(
     response_model=MediaJobsListResponse,
     summary="Список задач генерации",
     description=(
-        "Задачи генерации пользователя, новые сверху. Только чтение: у незавершённых задач "
+        "Лента генераций пользователя, новые сверху. Только чтение: у незавершённых задач "
         "отдаётся последнее известное состояние без обращения к провайдеру — обновляйте нужную "
-        "задачу через `GET /v1/media/jobs/{jobId}`. `kind` фильтрует по типу генерации."
+        "задачу через `GET /v1/media/jobs/{jobId}`. `kind` фильтрует по типу генерации. "
+        "Пролистывание — курсором: передайте `nextCursor` из предыдущего ответа в `cursor`; "
+        "`nextCursor: null` означает, что страниц больше нет. Фильтр `kind` при пролистывании "
+        "должен оставаться тем же."
     ),
 )
 async def list_media_jobs(
@@ -274,10 +292,18 @@ async def list_media_jobs(
         Literal["image", "video"] | None,
         Query(description="Фильтр по типу генерации. Опущен — задачи обоих типов."),
     ] = None,
+    cursor: Annotated[
+        str | None,
+        Query(description="Курсор следующей страницы — `nextCursor` из предыдущего ответа."),
+    ] = None,
 ) -> MediaJobsListResponse:
     await _rate_limit(current.user_id)
-    views = await media.list_jobs(user_id=current.user_id, limit=limit, kind=kind)
-    return MediaJobsListResponse(jobs=[_job_response(view) for view in views])
+    feed = await media.list_jobs(
+        user_id=current.user_id, limit=limit, kind=kind, cursor=_decode_cursor(cursor)
+    )
+    return MediaJobsListResponse(
+        jobs=[_job_response(view) for view in feed.items], nextCursor=feed.next_cursor
+    )
 
 
 @router.get(
@@ -300,3 +326,28 @@ async def get_media_job(
     await _rate_limit(current.user_id)
     view = await media.get_job(user_id=current.user_id, job_id=job_id)
     return _job_response(view)
+
+
+@router.delete(
+    "/jobs/{job_id}",
+    response_model=MediaJobDeleteResponse,
+    summary="Удалить задачу генерации",
+    description=(
+        "Убирает завершённую задачу из ленты. Удаляется только запись у нас — сам файл остаётся "
+        "у провайдера до истечения его срока хранения, мы им не владеем. Задачу в статусе "
+        "`queued`/`running` удалить нельзя (`409 job_not_terminal`): возврат кредитов при провале "
+        "у провайдера привязан к этой записи и срабатывает при опросе, поэтому сначала доведите "
+        "задачу опросом до `completed`/`failed`. Чужая или уже удалённая задача — `404`. "
+        "Удаление исходной задачи не удаляет сделанные из неё правки — у них просто обнуляется "
+        "`parentJobId`."
+    ),
+)
+async def delete_media_job(
+    request: Request,
+    current: CurrentUser,
+    media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
+    job_id: Annotated[uuid.UUID, Path(description="Идентификатор задачи генерации.")],
+) -> MediaJobDeleteResponse:
+    await _rate_limit(current.user_id)
+    await media.delete_job(user_id=current.user_id, job_id=job_id)
+    return MediaJobDeleteResponse(deleted=True)

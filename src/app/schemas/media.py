@@ -201,8 +201,17 @@ class ImageGenerationRequest(StrictModel):
         default=None,
         max_length=_MAX_IMAGE_URLS,
         description=(
-            "Референсные изображения (https-URL) — включают режим редактирования. Опущено или "
-            "null — генерация с нуля по промту."
+            "Референсные изображения (https-URL) — включают режим редактирования. Локальный файл "
+            "сначала загрузите через `POST /v1/media/uploads`. Опущено или null — генерация с "
+            "нуля по промту."
+        ),
+    )
+    sourceJobId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "«Отредактируй результат вот этой задачи»: сервер сам подставит её изображения как "
+            "референс. Задача должна принадлежать вам, быть `completed`, иметь `kind: image` и "
+            "непустой `assets`. Взаимоисключимо с `imageUrls`."
         ),
     )
     aspectRatio: str | None = Field(
@@ -272,8 +281,16 @@ class VideoGenerationRequest(StrictModel):
         default=None,
         max_length=_URL_MAX,
         description=(
-            "Стартовый кадр (https-URL) — включает режим image-to-video. Опущено или null — "
-            "генерация из текста."
+            "Стартовый кадр (https-URL) — включает режим image-to-video. Локальный файл сначала "
+            "загрузите через `POST /v1/media/uploads`. Опущено или null — генерация из текста."
+        ),
+    )
+    sourceJobId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "«Сделай видео из результата вот этой задачи»: сервер сам подставит её изображение "
+            "как стартовый кадр. Задача должна принадлежать вам, быть `completed`, иметь "
+            "`kind: image` и непустой `assets`. Взаимоисключимо с `imageUrl`."
         ),
     )
     negativePrompt: str | None = Field(
@@ -344,6 +361,21 @@ class MediaJobResponse(StrictModel):
     )
     error: str | None = Field(
         default=None, description="Причина неудачи при `status = failed`, иначе null."
+    )
+    parentJobId: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Задача, из результата которой сделана эта (когда генерация запускалась с "
+            "`sourceJobId`). `null` — начало цепочки. Остаётся `null`, если исходную задачу "
+            "удалили."
+        ),
+    )
+    inputImageUrls: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Изображения, ушедшие на вход этой генерации — присланные в `imageUrls`/`imageUrl` "
+            "либо взятые из задачи `sourceJobId`. Пустой список — генерация из текста."
+        ),
     )
     createdAt: datetime.datetime = Field(description="Когда задача была поставлена в очередь.")
     updatedAt: datetime.datetime = Field(
@@ -425,3 +457,13 @@ class MediaJobsListResponse(StrictModel):
             "задач отдаётся последнее известное состояние."
         )
     )
+    nextCursor: str | None = Field(
+        default=None,
+        description=(
+            "Курсор следующей страницы: передайте его в `cursor`. `null` — страниц больше нет."
+        ),
+    )
+
+
+class MediaJobDeleteResponse(StrictModel):
+    deleted: bool = Field(description="Признак успешного удаления.")

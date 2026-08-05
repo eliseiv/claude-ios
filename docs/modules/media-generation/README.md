@@ -25,7 +25,9 @@
 - ✅ Параметры генерации: `aspectRatio`, `resolution`, `duration`, `numImages`, `outputFormat`, `negativePrompt`, `generateAudio`, `cfgScale`, `seed` — каждый валидируется против набора **режима** до списания.
 - ✅ Цена масштабируется объёмом выпуска: `× numImages` у изображений, `× ceil(duration / baseDurationSeconds)` у видео; баланс проверяется по итоговой цене.
 - ✅ `GET /v1/media/jobs/{jobId}` — опрос провайдера, пока задача не терминальна; `completed` → `assets`, `failed` → `error` + возврат кредитов (идемпотентный).
-- ✅ `GET /v1/media/jobs` — листинг владельца newest-first, read-only (провайдер не опрашивается), фильтр `kind`.
+- ✅ `GET /v1/media/jobs` — лента владельца newest-first, read-only (провайдер не опрашивается), фильтр `kind`, курсорная пагинация ([ADR-063](../../adr/ADR-063-media-feed-edit-chains-and-job-deletion.md)).
+- ✅ `DELETE /v1/media/jobs/{jobId}` — убрать завершённую задачу из ленты; `409 job_not_terminal` на незавершённой (иначе некому вернуть кредиты при провале).
+- ✅ Цепочки правок: `sourceJobId` в запросе генерации, `parentJobId`/`inputImageUrls` в объекте задачи.
 - ✅ Реестр моделей на сервере (`media_generation/catalog.py`): публичный id → endpoint fal, allowlist входных полей и наборы значений per-variant, имя поля с референсным изображением per-family.
 - ✅ Списание и создание задачи — в одной транзакции: сабмит упал → списание откатилось.
 - ✅ Миграция `0018` (`media_jobs`), single head. Маппинг ошибок провайдера в `502`/`503`/`422`/`429` без утечки upstream-тела.
@@ -34,3 +36,6 @@
 ## Changelog
 - 2026-08-04: модуль создан и реализован — [ADR-060](../../adr/ADR-060-media-generation-fal.md). Backend: `src/app/media_generation/{catalog,fal_client,repository,service}.py`, `src/app/schemas/media.py`, `src/app/api_gateway/routers/media.py`, миграция `0018_media_jobs`, config `FAL_*`/`MEDIA_*`, ошибка `media_generation_not_configured`.
 - 2026-08-04: реестр сверен с опубликованными схемами fal; наборы значений перенесены на уровень режима (у Veo `aspectRatio: "auto"` только с картинкой), исправлены `0.5K` у Nano Banana 2, `4k` у Veo и `3`…`15` у Kling V3; добавлены `cfgScale`, `seed`, `generateAudio` у Kling V3, `negativePrompt` у Veo; цена масштабируется по `numImages`/`duration`.
+- 2026-08-05: цены откалиброваны под прайс fal, влияющие на цену параметры получили серверные дефолты — [ADR-061](../../adr/ADR-061-fal-price-calibration-and-priced-defaults.md); env `FAL_ASSET_RETENTION_SECONDS`.
+- 2026-08-05: `POST /v1/media/uploads` — загрузка локального изображения в хранилище провайдера — [ADR-062](../../adr/ADR-062-media-upload-via-fal-storage.md); env `FAL_REST_BASE`/`FAL_UPLOAD_HOST_SUFFIXES`/`MEDIA_UPLOAD_MAX_BYTES`/`MEDIA_UPLOAD_REQUEST_BODY_LIMIT`.
+- 2026-08-05: лента с курсорной пагинацией, цепочки правок (`sourceJobId` → `parentJobId`/`inputImageUrls`) и `DELETE /v1/media/jobs/{jobId}` — [ADR-063](../../adr/ADR-063-media-feed-edit-chains-and-job-deletion.md); миграция `0019_media_edit_chain`.

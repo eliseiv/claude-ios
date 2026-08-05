@@ -471,6 +471,15 @@ class MediaJob(Base):
     # Normalized output ({"assets": [...]}) — not the raw upstream body.
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Edit chain (ADR-063 §1): the job this run was made from, if any. SET NULL rather than
+    # CASCADE — deleting a bad source frame means "take it out of the feed", not "erase everything
+    # that grew from it".
+    parent_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("media_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    # The reference-image URLs actually sent upstream. Persisted rather than derived from the
+    # parent: the parent may be deleted, and the feed still has to show what this was made from.
+    input_image_urls: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )

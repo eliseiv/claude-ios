@@ -5,12 +5,14 @@
 | Файл | Роль |
 |---|---|
 | `src/app/media_generation/catalog.py` | реестр моделей: публичный id → endpoint fal, allowlist входных полей, имя поля с картинкой, цена по умолчанию |
-| `src/app/media_generation/fal_client.py` | исходящий httpx-клиент queue API fal: `submit` / `status` / `result`, маппинг ошибок |
+| `src/app/media_generation/fal_client.py` | исходящий httpx-клиент fal: `submit` / `status` / `result` очереди и `upload` хранилища, маппинг ошибок |
 | `src/app/media_generation/repository.py` | персистентность `media_jobs`, все запросы в скоупе владельца |
-| `src/app/media_generation/service.py` | use-cases: `submit` (цена → списание → сабмит → задача), `get_job` (опрос + переходы + возврат), `list_jobs` |
+| `src/app/media_generation/service.py` | use-cases: `submit` (цена → списание → сабмит → задача), `get_job` (опрос + переходы + возврат), `list_jobs` (лента), `delete_job`, `upload_reference_image` |
+| `src/app/media_generation/cursor.py` | непрозрачный keyset-курсор ленты `(created_at, id)` |
 | `src/app/schemas/media.py` | схемы запросов/ответов (camelCase, `extra=forbid`) |
 | `src/app/api_gateway/routers/media.py` | роутер `/v1/media/*`, rate limit, проекция в схемы ответа |
 | `migrations/versions/20260804_0018_media_jobs.py` | миграция таблицы |
+| `migrations/versions/20260805_0019_media_jobs_edit_chain.py` | цепочка правок: `parent_job_id`, `input_image_urls` |
 
 Wiring — `deps.get_media_generation_service` / `deps.get_fal_client`.
 
@@ -21,6 +23,7 @@ POST /v1/media/images|videos
   ├─ rate limit (enforce_other_limits)          → 429
   ├─ схема запроса (StrictModel)                → 422
   ├─ catalog: resolve model id                  → 422 (неизвестна / не тот kind)
+  ├─ sourceJobId? → ассеты родителя как референс   → 404 (чужой) / 422 (не тот статус/kind)
   ├─ catalog: variant = image_variant | text_variant   (наличие картинки решает endpoint)
   ├─ валидация значений против набора ВАРИАНТА    → 422 (до любого списания)
   ├─ resolve_values: дефолты варианта для полей, влияющих на цену   (ADR-061 §3)
@@ -58,13 +61,15 @@ GET /v1/media/jobs/{jobId}
 
 Возврат идемпотентен дважды: ключом ledger `media-refund:{jobId}` ([ADR-005](../../adr/ADR-005-idempotency-ledger.md)) и флагом `credits_refunded` в строке — флаг лишь избавляет от повторного вызова, гарантию даёт ключ.
 
-`GET /v1/media/jobs` (список) провайдера **не опрашивает**: N задач не должны разворачиваться в N исходящих вызовов.
+`GET /v1/media/jobs` (лента) провайдера **не опрашивает**: N задач не должны разворачиваться в N исходящих вызовов. Пагинация keyset-курсорная по `(created_at, id)`: лента растёт с головы, и при `offset` вставка новой задачи между запросами дала бы дубли и пропуски.
+
+`DELETE /v1/media/jobs/{jobId}` удаляет только нашу строку и только у терминальной задачи: возврат кредитов привязан к строке и срабатывает при опросе, поэтому удаление незавершённой уничтожило бы единственное место, где этот возврат может произойти ([ADR-063 §4](../../adr/ADR-063-media-feed-edit-chains-and-job-deletion.md)).
 
 ## Реестр моделей
 
 Каждая модель объявляет **два варианта** — prompt-only (`text_variant`) и «с референсным изображением» (`image_variant`), потому что у fal это разные endpoint'ы. Вариант выбирается по наличию картинки в запросе.
 
-Каждый вариант несёт **allowlist полей**, которые уходят наверх. `build_fal_input` отбрасывает `None` (чтобы применились дефолты провайдера) и всё, чего нет в allowlist. Это не косметика: fal отбивает неизвестные ключи, а входные схемы моделей различаются — у Veo нет `cfg_scale`, у Kling нет `resolution`, у image-to-video Kling нет `aspect_ratio`.
+Каждый вариант несёт **allowlist полей**, которые уходят наверх, и **дефолты** влияющих на цену полей. `resolve_values` подставляет дефолт вместо неприсланного поля **до** расчёта цены, и одно и то же значение идёт и в цену, и в запрос ([ADR-061 §3](../../adr/ADR-061-fal-price-calibration-and-priced-defaults.md)): дефолты провайдера в ценообразовании не участвуют, потому что они не наши и дороже наших. `build_fal_input` отбрасывает оставшиеся `None` и всё, чего нет в allowlist. Это не косметика: fal отбивает неизвестные ключи, а входные схемы моделей различаются — у Veo нет `cfg_scale`, у Kling нет `resolution`, у image-to-video Kling нет `aspect_ratio`.
 
 Там же лежат **наборы допустимых значений** `aspect_ratio`/`resolution`/`duration` — именно на варианте, а не на модели, потому что они различаются между режимами: Veo в text-to-video не принимает `aspect_ratio: "auto"`, а в image-to-video принимает. Валидация идёт против варианта, поэтому неверное значение отбивается до списания вместо оплаченного upstream-отказа. `GET /v1/media/models` отдаёт эти наборы как `modes[]`, чтобы UI строил контролы по режиму.
 
@@ -95,5 +100,7 @@ URL'ы опроса берутся из ответа на сабмит и **пе
 | `media_generation_submitted` | задача принята: `jobId`, `model`, `kind`, `credits`, `falEndpoint` |
 | `media_generation_completed` | задача завершилась: `jobId`, `model`, число ассетов |
 | `media_generation_failed` | провал: `jobId`, `model`, сколько кредитов возвращено (WARNING) |
+| `media_generation_deleted` | задача убрана из ленты: `jobId`, `model`, статус на момент удаления |
+| `fal_upload_outcome` | референсное изображение сохранено у провайдера: размер, mediaType |
 | `fal_submit_outcome` | сабмит принят провайдером |
 | `fal_call_outcome` | ошибка исходящего вызова: `reason`, `falEndpoint`, `upstreamStatus` |

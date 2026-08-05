@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import datetime
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.media_generation.cursor import MediaJobCursor
 from app.models import MediaJob
 
 STATUS_QUEUED = "queued"
@@ -23,6 +25,14 @@ STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 
 TERMINAL_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED})
+
+
+@dataclass(frozen=True)
+class MediaJobsPage:
+    """One page of the feed plus the cursor that resumes after it (``None`` = last page)."""
+
+    items: list[MediaJob]
+    next_cursor: str | None
 
 
 def _now() -> datetime.datetime:
@@ -47,6 +57,8 @@ class MediaJobsRepository:
         status: str,
         prompt: str,
         credits_charged: int,
+        parent_job_id: uuid.UUID | None = None,
+        input_image_urls: list[str] | None = None,
     ) -> MediaJob:
         row = MediaJob(
             id=job_id,
@@ -61,6 +73,8 @@ class MediaJobsRepository:
             prompt=prompt,
             credits_charged=credits_charged,
             credits_refunded=False,
+            parent_job_id=parent_job_id,
+            input_image_urls=input_image_urls or None,
         )
         self._session.add(row)
         await self._session.flush()
@@ -73,13 +87,46 @@ class MediaJobsRepository:
         return row
 
     async def list_for_user(
-        self, *, user_id: uuid.UUID, limit: int, kind: str | None = None
-    ) -> list[MediaJob]:
+        self,
+        *,
+        user_id: uuid.UUID,
+        limit: int,
+        kind: str | None = None,
+        cursor: MediaJobCursor | None = None,
+    ) -> MediaJobsPage:
+        """One page of the owner's feed, newest first, keyset-paginated on (created_at, id).
+
+        Fetches ``limit + 1`` rows so the next cursor is known without a second count query: if the
+        extra row came back there is more feed, and the cursor points at the last row we return.
+        """
         stmt = select(MediaJob).where(MediaJob.user_id == user_id)
         if kind is not None:
             stmt = stmt.where(MediaJob.kind == kind)
-        stmt = stmt.order_by(MediaJob.created_at.desc(), MediaJob.id.desc()).limit(limit)
-        return list((await self._session.scalars(stmt)).all())
+        if cursor is not None:
+            stmt = stmt.where(
+                (MediaJob.created_at < cursor.created_at)
+                | ((MediaJob.created_at == cursor.created_at) & (MediaJob.id < cursor.id))
+            )
+        stmt = stmt.order_by(MediaJob.created_at.desc(), MediaJob.id.desc()).limit(limit + 1)
+        rows = list((await self._session.scalars(stmt)).all())
+        has_more = len(rows) > limit
+        items = rows[:limit]
+        next_cursor = (
+            MediaJobCursor(created_at=items[-1].created_at, id=items[-1].id).encode()
+            if has_more and items
+            else None
+        )
+        return MediaJobsPage(items=items, next_cursor=next_cursor)
+
+    async def delete(self, job: MediaJob) -> None:
+        """Delete a job the caller has already fetched (and therefore already owner-checked).
+
+        Takes the row rather than an id so ownership is proven by the ``get`` that produced it —
+        there is no second place where the scoping could be forgotten. No commit: the
+        request-scoped session commits once, as everywhere in this repository.
+        """
+        await self._session.delete(job)
+        await self._session.flush()
 
     async def mark_running(self, job: MediaJob) -> None:
         if job.status == STATUS_RUNNING:

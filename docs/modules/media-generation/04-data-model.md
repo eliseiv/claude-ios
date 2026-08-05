@@ -1,6 +1,6 @@
 # 04 — Модель данных
 
-Одна новая таблица — `media_jobs` (миграция `0018_media_jobs`, down_revision `0017_subscription_will_renew`, single head). Существующие таблицы не изменяются: списание и возврат кредитов идут через существующий `WalletService` и ложатся в `ledger_transactions`.
+Одна таблица — `media_jobs` (миграция `0018_media_jobs`, down_revision `0017_subscription_will_renew`; миграция `0019_media_edit_chain` добавляет цепочку правок, single head). Существующие таблицы не изменяются: списание и возврат кредитов идут через существующий `WalletService` и ложатся в `ledger_transactions`.
 
 ## `media_jobs`
 
@@ -18,6 +18,8 @@
 | `prompt` | `text` NOT NULL | промт запуска (нужен для листинга и повторного показа в UI) |
 | `credits_charged` | `integer` NOT NULL default `0` | сколько списано при постановке |
 | `credits_refunded` | `boolean` NOT NULL default `false` | вернулись ли кредиты (только у `failed`) |
+| `parent_job_id` | `uuid` NULL FK → `media_jobs(id)` ON DELETE SET NULL | из результата какой задачи сделана эта ([ADR-063 §2](../../adr/ADR-063-media-feed-edit-chains-and-job-deletion.md)). `SET NULL`, а не `CASCADE`: удаление исходника убирает его из ленты, но не стирает выросшие из него правки |
+| `input_image_urls` | `jsonb` NULL | ссылки, реально ушедшие на вход. Хранится, а не выводится из родителя: родителя могут удалить, а «из чего сделано» лента показывать обязана |
 | `result` | `jsonb` NULL | **нормализованный** результат `{assets: [{url, contentType, fileName}], description?, seed?}` — не сырое тело провайдера |
 | `error` | `text` NULL | причина провала, ≤ 500 символов |
 | `created_at` | `timestamptz` NOT NULL default `now()` | постановка в очередь |
