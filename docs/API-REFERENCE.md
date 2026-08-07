@@ -14,7 +14,7 @@
 2. [Аутентификация и заголовки](#2-аутентификация-и-заголовки)
 3. [Коды ответа (общие)](#3-коды-ответа-общие)
 4. Эндпоинты по модулям:
-   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
+   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
 5. [blockReason — справочник (9 значений)](#12-blockreason--справочник)
 6. [Tool-протокол: client-side vs server-side](#13-tool-протокол)
 7. [Монетизация (кратко)](#14-монетизация-кратко)
@@ -52,7 +52,7 @@
 ### Пользовательский JWT (RS256)
 
 - Алгоритм подписи — **RS256** (асимметричный: приватный ключ — секрет подписи, публичный — для verify).
-- **Issuer встроен в backend** ([ADR-018](adr/ADR-018-embedded-auth-issuer.md)): токен выпускается через `/v1/auth/*` (см. [§21](#21-auth-выпуск-токена)) и верифицируется тем же сервисом (self-consistent, `iss=https://broadnova.shop`, `aud=claude-ios`).
+- **Issuer встроен в backend** ([ADR-018](adr/ADR-018-embedded-auth-issuer.md)): токен выпускается через `/v1/auth/*` (см. [§21](#21-auth-выпуск-токена)) и верифицируется тем же сервисом (self-consistent, `iss=https://<SERVICE_DOMAIN этого инстанса>` — per-instance, `aud=claude-ios` по умолчанию).
 - Обязательные claims: `sub` = `userId` (UUID), `exp` (срок), `iat`, `device_id`, `iss`, `aud`. Заголовок `kid`.
 - Просроченный/невалидный токен → `401`.
 - `userId` в теле запроса **обязан** совпадать с `sub` токена, иначе `403`.
@@ -170,6 +170,7 @@
 | `serverTools` | array `[{ toolCallId, toolName, status, summary? }]` | **server-side инструменты (`site.*`/`time.now`), выполненные backend за ЭТОТ вызов** ([ADR-028](adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)). Дополняет `toolCalls[]` (там — только client-side). `toolCallId` ([ADR-030](adr/ADR-030-toolcallid-in-server-tools.md)) — доменный uuid4 (= `tool_calls.id`), обязательный; **совпадает** с `toolCallId` соответствующего tool-шага истории `GET /v1/chats/{id}` (`steps[].payload.toolCallId`) → корреляция записи с историей; тот же домен id, что у `toolCalls[].id` (client-side). `status` = `completed`\|`errored`; `summary` — компактный итог (≤120, **без raw/путей/URL/токенов**; полный результат — в истории). Присутствует при `assistant_message`/`tool_call`/`blocked` (хотя бы `[]`); пустой `[]` при policy-`blocked`; может быть НЕ пустым при `max_tokens`. Биллинг неизменен. Семантика «за один вызов», не за сессию |
 | `blockReason` | enum, опц. | присутствует при `blocked` (см. [раздел 12](#12-blockreason--справочник)); `max_tokens` = обрезка ответа ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) |
 | `usage` | object `{ inputTokens, outputTokens, model }` | при `assistant_message`/`tool_call`; **также при `blocked`+`blockReason=max_tokens`**; нет при policy-`blocked` |
+| `quiz` | object \| null | Структура квиза ([ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md)). Схема ответа общая с `/v1/chat/v2/*`, поэтому поле присутствует и здесь, но на legacy-роуте **всегда `null`** (ни в одном ходе `/v1/chat/run` квиза не бывает): квиз выдаётся только в ходах режима `generationMode=study_learn`, а `/v1/chat/run` режимов не принимает. Семантика поля — [раздел 4a](#4a-chat-v2--режимы-генерации). |
 
 > **Синхронизация с историей чата ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)).** `messageStepId`/`stepId` дают клиенту ключ для склейки ответа генерации с шагами `GET /v1/chats/{id}` → `steps[]`: `stepId` = точный шаг (`steps[].id`), `messageStepId` = ход для группировки tool-loop-раундов (`steps[].messageStepId`). При `status=blocked` шаг/ход не создаются (блок до генерации) → оба `null`. На `/v1/chat/tool-result` `messageStepId` стабилен в пределах хода (равен исходному `/chat/run`), `stepId` — id нового шага этого ответа.
 
@@ -201,6 +202,102 @@
 **Response (200):** та же схема, что у `/v1/chat/run` (следующий шаг — снова `assistant_message` / `tool_call` / `blocked`).
 
 **Коды:** `200`; `401`; `403` (чужой `toolCallId`/`userId ≠ sub`); `404` (`toolCallId` не принадлежит сессии); `413`; `422` (`result` не соответствует схеме инструмента или > 256 KB); `429`; `502/5xx`.
+
+---
+
+## 4a. Chat v2 — режимы генерации
+
+Отдельный контракт генерации с **режимом на каждый ход** (`generationMode`). Legacy `/v1/chat/*` при этом **не меняется**: там режимов нет, цена фиксированная. Клиент выбирает, каким контрактом пользоваться; смешивать их в одной сессии нельзя (сессия помечается своим контрактом).
+
+Три эндпоинта, все с `Authorization: Bearer <JWT>`:
+
+| Метод и путь | Назначение |
+|---|---|
+| `POST /v1/chat/v2/run` | ход чата с выбором режима генерации |
+| `POST /v1/chat/v2/tool-result` | продолжение tool-loop v2-хода |
+| `GET /v1/chat/v2/capabilities` | список режимов и их цена для UI-переключателя |
+
+### POST /v1/chat/v2/run
+
+**Request:** все поля [`POST /v1/chat/run`](#post-v1chatrun) (семантика и коды идентичны) **плюс**:
+
+| Поле | Тип | Прим. |
+|---|---|---|
+| `generationMode` | `general` \| `research` \| `reasoning` \| `study_learn`, опц. | Режим **этого сообщения**, дефолт `general`. Не фиксируется на сессию: в одном `sessionId` режим можно менять от хода к ходу. Значение вне набора → `422`. Не путать с `mode` (`credits`/`byok` — чем платим) и `assistantMode` (`chat`/`code` — какой ассистент). |
+
+Что даёт режим:
+
+| Режим | Возможности | Цена (дефолт, в кредитах) |
+|---|---|---|
+| `general` | обычная генерация | 1 |
+| `research` | веб-поиск на стороне провайдера | 3 |
+| `reasoning` | усиленное рассуждение (reasoning / extended thinking) | 3 |
+| `study_learn` | **обучающий режим: ответ несёт квиз** — пул вопросов с вариантами ([ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md)) | 2 |
+
+Цена режима списывается **один раз** на финальном `assistant_message` (промежуточные tool-раунды не тарифицируются); проверка баланса до генерации использует ту же цену. Точные значения инстанса всегда отдаёт `GET /v1/chat/v2/capabilities` — **клиент обязан брать цену оттуда**, а не из этой таблицы.
+
+**Response (200):** та же схема, что у [`/v1/chat/run`](#post-v1chatrun), **плюс**:
+
+| Поле | Тип | Прим. |
+|---|---|---|
+| `usage.generationMode` | string | режим, которым выполнен ход |
+| `usage.creditsCharged` | int, опц. | сколько кредитов списано (когда списание фактически было) |
+| `quiz` | object \| null | **пул вопросов квиза** — содержимое **ХОДА** (`messageStepId`), не дельта вызова: при непустом значении приходит во **всех** ответах хода (и в `run`, и в последующих `tool-result`, и при повторе запроса). `null`, если квиза не было **в этом ходе**. Карточки заменяются, не накапливаются (см. ниже) |
+
+**Квиз (`quiz`, режим `study_learn`, [ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md)):**
+
+```json
+{
+  "quiz": {
+    "questions": [
+      {
+        "question": "Что делает оператор `await` в Swift?",
+        "options": ["Блокирует поток", "Приостанавливает задачу до готовности результата", "Создаёт новый поток"],
+        "correctIndex": 1,
+        "explanation": "`await` приостанавливает текущую задачу, не блокируя поток."
+      }
+    ]
+  }
+}
+```
+
+- `questions` — **3..10** вопросов; у каждого `options` — **2..10** вариантов, `correctIndex` — 0-based индекс правильного варианта, `explanation` — пояснение, которое UI показывает после ответа.
+- **Проверка ответов — на клиенте.** Пользователь отвечает локально, приложение сравнивает с `correctIndex` и показывает `explanation`. **Эндпоинта отправки/проверки ответов нет** — назад ничего не шлётся.
+- **Когда поле непусто:** во **всех** ответах того **хода** (`messageStepId`), в котором модель сформировала квиз, — и в ответе `/v1/chat/v2/run`, и в ответах последующих `/v1/chat/v2/tool-result` того же хода, и при повторе запроса. Это не «состояние сессии»: следующий ход вернёт `quiz: null`, если квиза в нём не было.
+- **Один и тот же пул может прийти несколько раз в пределах одного `messageStepId`** — карточки следует **заменять** (идемпотентно), а не добавлять к предыдущим.
+- **При непустом `quiz` поле `assistantMessage` = `null`** — при любом статусе ответа, включая `assistant_message` и обрыв `blocked`+`max_tokens`. Так сделано намеренно: иначе модель дублирует вопросы в тексте и раскрывает правильные ответы до того, как пользователь ответил. Весь контент хода несёт `quiz.questions[]`; вводную рамку рисует клиент.
+- **История чата не покажет текст квиз-хода.** В `GET /v1/chats/{id}` (и `/steps`) у ходов с квизом текстовые блоки ответа ассистента **не отдаются** — иначе после перезапуска приложения посреди квиза пользователь увидел бы вопросы и правильные ответы текстом. Сам пул остаётся доступен в истории как результат шага `quiz.generate` — карточки можно восстановить.
+- **Повторный запрос уже завершённого хода** (сетевой ретрай `/v1/chat/v2/tool-result`) вернёт **тот же квиз** — пул восстанавливается из сохранённого хода, `assistantMessage` так же `null`. Ретрай безопасен: клиент не теряет карточки. Пул доступен и в истории: `GET /v1/chats/{id}` → шаг с `toolName = "quiz.generate"` → `payload.result.questions`.
+- Квиз не тарифицируется отдельно: цена хода = цена режима `study_learn`.
+
+### POST /v1/chat/v2/tool-result
+
+Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result) (батч `results[]`, барьер хода, идемпотентность). Отличие: **поле `generationMode` в теле не принимается** — режим берётся из исходного `/v1/chat/v2/run` этого хода, поэтому и возможности, и цена всего tool-loop-хода остаются теми же. Ответ несёт `quiz` того же **хода** — и когда квиз сформирован на этом витке, и когда он был выдан раньше в рамках того же `messageStepId` (поле turn-scoped, см. выше).
+
+### GET /v1/chat/v2/capabilities
+
+Источник для UI-переключателя режимов. Баланс/подписку **не** проверяет — это делает сам `/v1/chat/v2/run` (ответом `blocked`).
+
+**Response (200):**
+```json
+{
+  "provider": "openai",
+  "defaultGenerationMode": "general",
+  "generationModes": [
+    { "mode": "general", "creditCost": 1, "available": true },
+    { "mode": "research", "creditCost": 3, "available": true },
+    { "mode": "reasoning", "creditCost": 3, "available": true }
+  ],
+  "reasoningLevel": "medium"
+}
+```
+
+- `generationModes[]` — режимы, которые **этот инстанс объявляет**, с фактической ценой инстанса. Состав задаётся конфигурацией инстанса: приложение без квиз-UI режим `study_learn` в списке **не увидит** (элемент отсутствует, а не помечен `available:false`). Гейт — **присутствие элемента**; `available` у присутствующих элементов всегда `true` и гейтом не является.
+- **Отсутствие режима в списке ≠ запрет:** `POST /v1/chat/v2/run` примет `generationMode=study_learn` и на инстансе, который его не объявляет, — приложение, знающее имя режима, работает.
+- Порядок фиксирован, новые режимы добавляются **в конец**. Клиент обязан **игнорировать неизвестные ему значения `mode`** — появление нового режима не ломает старые сборки приложения.
+- `reasoningLevel` — серверная настройка глубины для режима `reasoning`.
+
+**Коды:** `200`; `401`; `429`.
 
 ---
 
@@ -779,8 +876,11 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | Инструмент | Тип | Назначение |
 |---|---|---|
 | `time.now` | read | текущая дата/время. Args: `{ "tz"?: "<IANA, напр. Europe/Moscow>" }`. Result: всегда `{ utc, unix, weekday }`; при валидном `tz` — дополнительно `{ local, timezone }`. Невалидный `tz` → tool-result error `invalid_timezone` (ход не падает). |
+| `quiz.generate` | read | пул вопросов квиза для режима `study_learn` ([ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md)). Args/Result: `{ "questions": [ { question, options, correctIndex, explanation } ] }` (3..10 вопросов, 2..10 вариантов). Результат приходит клиенту полем `quiz` ответа чата, **не** как `tool_call`. Невалидный пул → tool-result error `invalid_quiz`, модель исправляется в том же ходе (ход не падает). |
 
 `time.now` исполняет backend в tool-loop (как `site.*`), но **без проекта** — предлагается Claude **всегда** (в т.ч. в «чистом чате»). Наружу как `tool_call` не отдаётся. Решает кейс «модель не знает текущую дату» — системный промт статичен (даты не несёт), модель получает время только из результата `time.now`. Read-only, без audit-мутации, без дополнительных списаний (1 кредит = 1 сообщение).
+
+`quiz.generate` тоже исполняет backend без проекта, **но предлагается модели только в режиме `generationMode=study_learn`** ([раздел 4a](#4a-chat-v2--режимы-генерации)): «global» здесь означает «не требует проекта», а не «доступен всегда». На legacy `/v1/chat/run` он не предлагается никогда. Read-only, без audit-мутации, без отдельных списаний. Каталог `GET /v1/tools` при этом перечисляет **все** инструменты, включая те, что в конкретном ходе не предлагались бы ([раздел 22](#22-tools-каталог-инструментов)).
 
 ### Формат
 - **tool_call** (от backend к iOS): `toolCalls = [ { "id": "<uuid>", "name": "<доменное имя, напр. files.read>", "args": { ... } }, ... ]` — **все** client-side вызовы хода ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). `id` — публичный стабильный идентификатор для `/chat/tool-result`. Поле `toolCall` (одиночное) = `toolCalls[0]`, **deprecated** — читайте `toolCalls[]`.
@@ -819,7 +919,7 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | Лимит | Значение | Нарушение |
 |---|---|---|
 | Общий размер тела запроса (все роуты, кроме upload-роутов ниже) | ≤ 512 KB | `413` |
-| Тело `/v1/chat/run` (повышенный — под inline base64-вложения, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) | ≤ 12 MB | `413` |
+| Тело `/v1/chat/run` и `/v1/chat/v2/run` (повышенный — под inline base64-вложения, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) | ≤ 12 MB | `413` |
 | Тело `POST /v1/workspaces/{id}/files` (повышенный — под inline base64 workspace-файлов, [ADR-045](adr/ADR-045-per-path-body-limit-workspace-files.md)) | ≤ 12 MB | `413` |
 | `message` (`/chat/run`) | ≤ 32 KB; опц. при ≥1 attachment ([ADR-039](adr/ADR-039-optional-message-with-attachments.md)), иначе пустой → `422` | `422` |
 | `context` (`/chat/run`) | ≤ 64 KB | `422` |
@@ -892,15 +992,15 @@ JWKS с публичным ключом (для самопроверки/отл�
 ## 22. Tools (каталог инструментов)
 
 ### GET /v1/tools
-Машиночитаемый каталог всех поддерживаемых backend tools (**14**, включая `time.now`). [ADR-019](adr/ADR-019-tools-catalog-endpoint.md), [ADR-026](adr/ADR-026-global-server-side-tools-and-time-now.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019).
+Машиночитаемый каталог **всех** поддерживаемых backend tools (включая `time.now` и `quiz.generate`; число записей — нормативно в [chat-orchestrator/02-api-contracts §GET /v1/tools](modules/chat-orchestrator/02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019)). [ADR-019](adr/ADR-019-tools-catalog-endpoint.md), [ADR-026](adr/ADR-026-global-server-side-tools-and-time-now.md), [ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019).
 **Заголовки:** `Authorization: Bearer <JWT>` (обязателен — как все `/v1/*`; каталог не секретен, но контур единый).
 **Response 200:**
 ```json
 { "tools": [ { "name": "files.read", "description": "...", "mutating": false,
   "execution": "client", "inputSchema": { "type": "object", "properties": { } } } ] }
 ```
-- `name` — доменное имя с точкой. `mutating` (bool) — требует ли audit. `execution` — `"client"` (исполняет iOS) или `"server"` (`site.*` — [ADR-011](adr/ADR-011-server-side-tools.md); `time.now` — [ADR-026](adr/ADR-026-global-server-side-tools-and-time-now.md); исполняет backend). `inputSchema` — JSON Schema args.
-- Возвращает **полный** реестр (не фильтруется по `assistantMode`/проекту). Список из 14: `files.read/write/list/mkdir`, `calendar.read/create_events`, `reminders.read/create` (client), `site.write_file/preview/list/read/delete` (server, project-scoped), `time.now` (server, global).
+- `name` — доменное имя с точкой. `mutating` (bool) — требует ли audit. `execution` — `"client"` (исполняет iOS) или `"server"` (`site.*` — [ADR-011](adr/ADR-011-server-side-tools.md); `time.now` — [ADR-026](adr/ADR-026-global-server-side-tools-and-time-now.md); `quiz.generate` — [ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md); исполняет backend). `inputSchema` — JSON Schema аргументов инструмента: типы, обязательные поля, ограничения и описания **полей**. Внутренняя метаинформация backend (имена Python-классов, их docstring'и, ссылки на внутренние решения) в схему **не попадает** — ни в этот ответ, ни в определения, уходящие LLM-провайдеру.
+- Возвращает **полный** реестр (не фильтруется ни по `assistantMode`, ни по проекту, ни по `generationMode`). Состав: `files.read/write/list/mkdir`, `calendar.read/create_events`, `reminders.read/create` (client), `site.write_file/preview/list/read/delete` (server, project-scoped), `time.now` (server, global), `quiz.generate` (server, global, предлагается модели только в режиме `study_learn` — [раздел 4a](#4a-chat-v2--режимы-генерации)).
 **Коды:** `200`; `401`; `429`.
 
 ---
@@ -987,7 +1087,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 
 ## 23. Как тестировать через Swagger
 
-Интерактивная документация — `/docs` (Swagger UI) при `DOCS_ENABLED=true` (dev/staging; на `broadnova.shop` сейчас включена). Порядок ручной проверки:
+Интерактивная документация — `/docs` (Swagger UI) при `DOCS_ENABLED=true` (dev/staging). Включена ли она на конкретном инстансе — определяется его `/opt/<dir>/.env`, в `docs/` не фиксируется ([07-deployment.md §Prod-readiness checklist](07-deployment.md#prod-readiness-checklist-must-configure-before-launch): `DOCS_ENABLED=false` — блокер публичного запуска, закрывается по каждому инстансу отдельно). Порядок ручной проверки:
 
 1. **Получить токен.** Открой `POST /v1/auth/register` → «Try it out» → тело `{}` (или `{ "deviceId": "my-test-device" }`) → «Execute». В ответе скопируй `accessToken`.
    - Повторно для того же `deviceId` — `POST /v1/auth/token`. Обновить пару — `POST /v1/auth/refresh` с `refreshToken`.

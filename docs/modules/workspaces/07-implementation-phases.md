@@ -1,6 +1,6 @@
 # Workspaces — Implementation Phases
 
-Поставка 3 (крупнейшая), 2 под-фазы — [ADR-036](../../adr/ADR-036-workspaces-implementation.md). Миграция **`0011`** (цепочка `0001`→`0011`, expand-only). Файлы-знания **самодостаточны** (собственная таблица `workspace_files` BYTEA) — **не** зависят от отложенного `attachments` ([TD-015](../../100-known-tech-debt.md)).
+Поставка 3 (крупнейшая), 2 под-фазы — [ADR-036](../../adr/ADR-036-workspaces-implementation.md). Миграция **`0011`** (expand-only; цепочка ревизий и head в `docs/` не перечисляются — [07-deployment.md §Миграции](../../07-deployment.md#миграции)). Файлы-знания **самодостаточны** (собственная таблица `workspace_files` BYTEA) — **не** зависят от отложенного `attachments` ([TD-015](../../100-known-tech-debt.md)).
 
 ## Под-фаза 3A — ядро
 

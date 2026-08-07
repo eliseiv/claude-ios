@@ -95,7 +95,7 @@
 ### Спринт 1 — ядро приложения (✅ РЕАЛИЗОВАН, offline-сьют 681/681, production-ready)
 Модули: **chats**, **profile**, **preferences**, расширение **byok** (ADR-016), поле **assistantMode** в `/chat/run` (ADR-012).
 - Реализовано: `GET /v1/chats` (список/поиск `q`/курсорная пагинация), `GET /v1/chats/{id}` (история), `GET /v1/chats/{id}/steps` (steps-view), `PATCH /v1/chats/{id}` (rename/pin), `DELETE /v1/chats/{id}`; `GET`/`PATCH /v1/profile`; `GET`/`PATCH /v1/preferences`; BYOK `keyStatus` 6 значений + `activeModel`; `assistantMode` (chat\|code) в `/chat/run` с fallback preferences→`chat`.
-- Зависимость закрыта: миграция `0004` применена (поля chat_sessions `title`/`assistant_mode`/`is_pinned` + индекс `ix_sessions_user_pinned_updated`, users.display_name, таблица user_preferences, enum assistant_mode, расширение byok_key_status). Цепочка `0001`→`0002`→`0003`→`0004`.
+- Зависимость закрыта: миграция `0004` применена (поля chat_sessions `title`/`assistant_mode`/`is_pinned` + индекс `ix_sessions_user_pinned_updated`, users.display_name, таблица user_preferences, enum assistant_mode, расширение byok_key_status). Цепочка ревизий и head в `docs/` не перечисляются — [07-deployment.md §Миграции](07-deployment.md#миграции).
 - assistant_mode фиксируется на сессию в orchestrator; fallback из preferences (`defaultAssistantMode`).
 - `chat_sessions.workspace_project_id` НЕ создан в `0004`; создаётся в миграции `0011` (Поставка 3, [ADR-036](adr/ADR-036-workspaces-implementation.md)). До `0011` в ответе `GET /v1/chats` поле `workspaceProjectId` = `null` (заглушка).
 

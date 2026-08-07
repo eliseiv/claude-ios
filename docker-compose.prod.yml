@@ -9,13 +9,18 @@
 # docker network `web` (created once on the server: `docker network create web`). postgres /
 # redis live ONLY on the internal `default` network with NO published ports.
 #
-# Image is BUILT ON THE SERVER from sources in /opt/claude-ios (`docker compose up -d --build`),
-# NOT pulled from a registry (ADR-017 — no immutable registry tag; rollback = git checkout
-# <prev-commit> + rebuild, see infra/deploy/README.md).
+# Image is BUILT ON THE SERVER from the sources in the instance's own stack dir /opt/<dir>
+# (`docker compose up -d --build`), NOT pulled from a registry (ADR-017 — no immutable registry
+# tag; rollback = git checkout <prev-commit> + rebuild, PER INSTANCE — see infra/deploy/README.md
+# §Rollback).
 #
-# Bring-up (on the server, in /opt/claude-ios, after `git pull`):
-#   docker compose -f docker-compose.prod.yml --env-file .env run --rm migrate
-#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+# Bring-up — PER INSTANCE (on the server, in that instance's /opt/<dir>, after `git pull`, with
+# that instance's -p <project>; dir/project pairs = the $INSTANCES value in
+# .github/workflows/ci.yml + deploy.yml, roster: docs/07-deployment.md §CI/CD-контракт:
+# INSTANCES-loop). It does not touch the other stacks:
+#   cd /opt/<dir>
+#   docker compose -p <project> -f docker-compose.prod.yml --env-file .env run --rm migrate
+#   docker compose -p <project> -f docker-compose.prod.yml --env-file .env up -d --build
 #
 # Secrets come from `.env` on the server (provisioned from the secret manager), loaded via
 # env_file — never baked into the image (docs/05-security.md). `.env` is gitignored;
@@ -108,10 +113,17 @@ services:
     # of any per-instance `.env` value. This is INFRASTRUCTURE wiring (the mount target is fixed by
     # this compose file), so it belongs here, not in per-instance `.env`. `environment:` overrides
     # `env_file`, guaranteeing storekit.py reads exactly the mounted dir.
-    # BACKWARD-COMPAT INVARIANT: this is a BEHAVIORAL no-op for instances with an EMPTY cert dir
-    # (broadnova/orvianix): _load_roots() globs the empty /etc/appstore-certs -> [] -> StoreKit
-    # path unchanged (test-mode / fail-closed exactly as before). Only avelyra, where the operator
-    # drops AppleRootCA-G3.cer into /opt/avelyra/certs/appstore, flips to real JWS verification.
+    # BACKWARD-COMPAT INVARIANT — stated as BEHAVIOUR, not as a list of instance names (a name list
+    # here goes stale the moment an instance is added or provisions its cert):
+    #   * cert dir EMPTY  -> _load_roots() globs the empty /etc/appstore-certs -> [] -> the StoreKit
+    #     path is exactly as before (test-mode / fail-closed). This pin is a no-op for it.
+    #   * cert dir HOLDS an Apple root (operator dropped AppleRootCA-G3.cer into
+    #     /opt/<instance>/certs/appstore) -> that instance flips to real JWS verification.
+    # WHICH instances must hold the cert is decided by the predicate in docs/07-deployment.md
+    # §Prod-readiness checklist (must-configure-before-launch) — item «STOREKIT_TEST_MODE=false +
+    # Apple root CA ...», applied per live instance (live set = registry table docs/07-deployment.md
+    # §CI/CD-контракт: INSTANCES-loop). Provisioning STEPS: §Apple root CA provisioning runbook in
+    # .env.prod.example.
     environment:
       APPSTORE_ROOT_CERT_DIR: /etc/appstore-certs
     # Embedded auth-issuer (ADR-018 §7) signs/verifies RS256 JWTs and reads its key PEMs
@@ -120,8 +132,9 @@ services:
     #   JWT_PUBLIC_KEY_PATH=/app/.secrets/jwt_public.pem
     # The keys are NOT baked into the image (.dockerignore excludes .secrets/ + *.pem; that
     # only affects the BUILD context — this is a RUNTIME bind mount, so it is unaffected).
-    # `./.secrets` resolves against the compose project dir (/opt/claude-ios on the server),
-    # where the operator placed the RSA pair; `.secrets/` is gitignored so `git pull` keeps it.
+    # `./.secrets` resolves against the compose project dir — i.e. the instance's own /opt/<dir>
+    # on the server, where THAT instance's operator placed its own RSA pair (never copied from a
+    # sibling); `.secrets/` is gitignored so `git pull` keeps it.
     # READ-ONLY (`:ro`) — the container only reads the keys, never writes them.
     #
     # Apple root CA for REAL StoreKit JWS verification (subscription/storekit.py reads
@@ -130,11 +143,13 @@ services:
     # mechanism as `.secrets`. READ-ONLY (`:ro`): the non-root runtime user (uid 10001, Dockerfile)
     # only READS the *.cer; it never writes. SAFE FOR ALL INSTANCES: the source dir always EXISTS
     # in the repo (committed `certs/appstore/.gitkeep`), so docker bind-mounts an existing host dir
-    # and never auto-creates a root-owned path. On instances WITHOUT a real cert (broadnova /
-    # orvianix), the dir is EMPTY -> `_load_roots` returns [] -> StoreKit stays test-mode (or
-    # fail-closed 422 on the real path); the container still starts normally (empty mount is benign,
-    # the app only globs *.cer/*.pem/*.der/*.crt). The real cert is dropped ONLY on avelyra (see
-    # the §Apple root CA provisioning runbook in .env.prod.example / the deploy notes).
+    # and never auto-creates a root-owned path. An instance WITHOUT a provisioned cert has an EMPTY
+    # dir -> `_load_roots` returns [] -> StoreKit stays test-mode (or fail-closed 422 on the real
+    # path); the container still starts normally (empty mount is benign, the app only globs
+    # *.cer/*.pem/*.der/*.crt). Whether a given instance MUST provision the cert is the predicate in
+    # docs/07-deployment.md §Prod-readiness checklist (must-configure-before-launch), applied per
+    # live instance of the registry table docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop;
+    # the STEPS are the §Apple root CA provisioning runbook in .env.prod.example.
     volumes:
       - ./.secrets:/app/.secrets:ro
       - ./certs/appstore:/etc/appstore-certs:ro

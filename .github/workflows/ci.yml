@@ -150,11 +150,13 @@ jobs:
   # loop over $INSTANCES, a space-separated `dir:project` list with claude-ios FIRST. For the live
   # instance `claude-ios:claude-ios` -> `-p claude-ios` is the SAME project name as the previous
   # deploy with no `-p` (basename of /opt/claude-ios) => a NO-OP for broadnova.shop (backward-
-  # compat). The other instances `avelyra:avelyra` (avelyraweb.shop) and `orvianix:orvianix`
-  # (orvianix.shop, OpenAI) are provisioned on the server (clone .env + .secrets/ per
-  # docs/07-deployment.md §Процедура провижининга клона) and are in the loop, so every push to main
-  # auto-deploys ALL instances. veltrio (veltriohub.shop) was decommissioned 2026-07-18 — its domain
-  # now belongs to a different service on the same server.
+  # compat). Every other entry of $INSTANCES is a clone provisioned on the server (clone .env +
+  # .secrets/ per docs/07-deployment.md §Процедура провижининга клона) and is in the loop, so every
+  # push to main auto-deploys ALL instances. The per-instance roster (dir / project / domain /
+  # provider) is NOT restated in this comment — it is the $INSTANCES value below, mirrored by
+  # docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop.
+  # veltrio (veltriohub.shop) was decommissioned 2026-07-18 — its domain now belongs to a different
+  # service on the same server; it MUST stay out of $INSTANCES.
   #
   # GitHub Secrets (Settings -> Secrets and variables -> Actions): NEVER hardcode these.
   #   SSH_HOST=87.239.135.154 / SSH_USER=root / SSH_PRIVATE_KEY (public half in server authorized_keys)
@@ -162,17 +164,26 @@ jobs:
   # PER-INSTANCE SMOKE (docs/07-deployment.md §CI/CD INSTANCES-loop: "Smoke-gate выполняется на
   # каждый инстанс по его SERVICE_DOMAIN"): the smoke check runs INSIDE the SSH loop, once per
   # instance, against the domain read from THAT instance's /opt/<dir>/.env (`SERVICE_DOMAIN=`).
-  # It is NOT the global repo Variable `vars.SERVICE_DOMAIN` (which would only cover one domain
-  # once a second instance like avelyra is added). Smoke is NON-FATAL (warning, not failure):
+  # It is NOT the global repo Variable `vars.SERVICE_DOMAIN`: a single repo-wide value carries one
+  # domain, so it cannot cover a fleet whose instances each have their own SERVICE_DOMAIN — it
+  # would smoke one domain and silently skip the rest. Smoke is NON-FATAL (warning, not failure):
   # on a first deploy the A-record / Traefik Let's Encrypt cert may still be settling. If an
   # instance's .env has no SERVICE_DOMAIN, its smoke is skipped for that instance only.
   #
-  # ROLLBACK (no registry/immutable tag): on the server, in /opt/claude-ios:
-  #   git log --oneline -n 5 ; git checkout <prev-commit>
-  #   docker compose -f docker-compose.prod.yml run --rm migrate   # if needed (expand/contract)
-  #   docker compose -f docker-compose.prod.yml up -d --build
+  # ROLLBACK (no registry/immutable tag) — PER INSTANCE, verbatim with infra/deploy/README.md
+  # §Rollback: run it in the /opt/<dir> of the instance being rolled back, with that instance's
+  # -p <project>. Other instances stay on the current commit unless rolled back too. The
+  # dir:project pair of the instance you are rolling back is an entry of $INSTANCES below
+  # (roster: docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop).
+  #   cd /opt/<dir>
+  #   git log --oneline -n 5                # find the previous good commit
+  #   git checkout <prev-commit>
+  #   docker compose -p <project> -f docker-compose.prod.yml --env-file .env run --rm migrate   # if needed
+  #   docker compose -p <project> -f docker-compose.prod.yml --env-file .env up -d --build
+  #   curl -fsS https://${SERVICE_DOMAIN}/healthz
+  #   # return to the branch tip once a fix is ready: git checkout main && git pull
   # Schema is NOT reverted (expand/contract migrations keep the old code compatible). See
-  # docs/07-deployment.md §Откат and infra/deploy/README.md.
+  # docs/07-deployment.md §Откат and infra/deploy/README.md §Rollback.
   deploy:
     name: ssh deploy (shared server + Traefik)
     runs-on: ubuntu-latest
@@ -239,17 +250,17 @@ jobs:
             #
             # INSTANCES — space-separated `dir:project` list, claude-ios FIRST (ADR-017 §CI/CD
             # INSTANCES-loop). `-p claude-ios` == basename of /opt/claude-ios => no-op vs the
-            # previous no-`-p` deploy (backward-compat for the live broadnova.shop). The second
-            # instance `avelyra:avelyra` (avelyraweb.shop) is provisioned on the server. The third
-            # instance `orvianix:orvianix` (orvianix.shop) and `elvarixa:elvarixa` are OpenAI
-            # clones (ADR-033: LLM_PROVIDER=openai + OPENAI_* in their own /opt/<dir>/.env) — same
-            # code, same per-instance deploy/readiness/smoke; only their .env differs. The fifth
-            # instance `corvionet:corvionet` (corvionet.shop) is an Anthropic clone (default
-            # LLM_PROVIDER=anthropic).
+            # previous no-`-p` deploy (backward-compat for the live broadnova.shop). Every other
+            # entry is a clone provisioned on the server: same code, same per-instance
+            # deploy/readiness/smoke — only its /opt/<dir>/.env differs (its SERVICE_DOMAIN and, on
+            # an OpenAI clone, LLM_PROVIDER=openai + OPENAI_* — ADR-033). Which clone runs which
+            # provider/domain is NOT narrated here: the value below IS the roster, mirrored by
+            # docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop (a narrated copy goes stale on
+            # the next instance added).
             # veltrio (veltriohub.shop) was decommissioned 2026-07-18: the domain was handed over to
             # a different service on the same server. It MUST stay out of this loop — redeploying it
             # would re-create its Traefik router and take the domain back.
-            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria"
+            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa"
             FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
             for entry in $INSTANCES; do
               dir="${entry%%:*}"; proj="${entry##*:}"

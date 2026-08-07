@@ -2,7 +2,7 @@
 
 - Статус: **Реализован** (MVP-расширение, 2026-06-02; **Sign in with Apple реализован 2026-06-19, [ADR-043](../../adr/ADR-043-sign-in-with-apple.md)**). Эндпоинты register/token/refresh/**apple**/jwks, device-based identity, refresh-token rotation, кросс-девайс через `auth_identities`; миграции `0005` (auth) + `0012_auth_identities` (single head). Production-ready (qa apple/auth-тесты зелёные). Prod-требование — сгенерировать RSA-пару подписи (без приватного ключа `/v1/auth/*` → `503`) + задать `APPLE_AUDIENCE` (или фолбэк `APPSTORE_BUNDLE_ID`, иначе `POST /v1/auth/apple` → `503`).
 - Ответственность: первичная аутентификация устройства и **выпуск** RS256 JWT собственным backend'ом ([ADR-018](../../adr/ADR-018-embedded-auth-issuer.md)). Закрывает [Q-005-1](../../99-open-questions.md) — issuer = встроенный, не внешний IdP.
-- Верификация выпущенных токенов — существующим `JwtVerifier` (`src/app/api_gateway/auth.py`), **без изменения** его логики (тот же RS256, `iss`/`aud`/`exp`/`sub`). Issuer/audience — собственные (`https://broadnova.shop` / `claude-ios`).
+- Верификация выпущенных токенов — существующим `JwtVerifier` (`src/app/api_gateway/auth.py`), **без изменения** его логики (тот же RS256, `iss`/`aud`/`exp`/`sub`). Issuer/audience — собственные и **per-instance**: `iss = https://<SERVICE_DOMAIN этого инстанса>`, `aud` = `claude-ios` по умолчанию (меняется только если у инстанса своё iOS-приложение/bundle).
 
 ## Документы
 - [00-overview.md](00-overview.md) — scope / out-of-scope
@@ -29,7 +29,7 @@
 - [x] Round-trip: выпущенный токен верифицируется собственным `JwtVerifier`.
 - [x] Lazy-provisioning ([ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)) сохранён как fallback; trial/policy не сломаны.
 - [x] Ключи: `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH` (файл) или `JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY` (`\n`-экранирование); приватный ключ под redaction. Issuer без сконфигурированного приватного ключа → `/v1/auth/*` отвечают `503`.
-- [x] Rate-limit `/v1/auth/*` per IP; миграция `0005` (`auth_devices`, `auth_refresh_tokens`), цепочка `0001`→`0005`.
+- [x] Rate-limit `/v1/auth/*` per IP; миграция `0005` (`auth_devices`, `auth_refresh_tokens`); цепочка ревизий и head в `docs/` не перечисляются — [07-deployment.md §Миграции](../../07-deployment.md#миграции).
 
 ## Changelog
 - 2026-06-19: **Sign in with Apple РЕАЛИЗОВАН** ([ADR-043](../../adr/ADR-043-sign-in-with-apple.md)) — `POST /v1/auth/apple`, `AppleIdentityVerifier` (`src/app/auth/apple.py`, результат `VerifiedAppleIdentity`, `email_verified: bool` дефолт `false`), таблица `auth_identities` (миграция `0012_auth_identities`, down_revision `0011_workspaces`, single head), связывание apple_sub↔userId (кросс-девайс). Backend approve + backend-reviewer approve, qa 140 apple/auth-тестов зелёные. Закрывает [Q-018-2](../../99-open-questions.md). Новые [Q-043-1](../../99-open-questions.md) (nonce/email/Services ID), [Q-043-2](../../99-open-questions.md) (авто-merge данных) — Open (неблокирующие).

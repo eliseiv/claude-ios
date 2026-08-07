@@ -12,9 +12,13 @@
 #   The Apple root CA `AppleRootCA-G3.cer` (public, https://www.apple.com/certificateauthority/).
 #   The app loads *.cer / *.der / *.pem / *.crt from this dir (subscription/storekit.py _load_roots).
 #
-# SAFE WHEN EMPTY: with no cert here (broadnova / orvianix), _load_roots() returns [] and StoreKit
-#   stays in test-mode (STOREKIT_TEST_MODE=true) or fails closed with 422 on the real path — the
-#   container still starts normally. Only avelyra drops the real .cer (see provisioning runbook).
+# SAFE WHEN EMPTY: with no cert here, _load_roots() returns [] and StoreKit stays in test-mode
+#   (STOREKIT_TEST_MODE=true) or fails closed with 422 on the real path — the container still starts
+#   normally. WHICH instance must hold a real .cer is not listed here (a name list goes stale on the
+#   next instance added): the predicate is docs/07-deployment.md §Prod-readiness checklist
+#   (must-configure-before-launch), applied per live instance of the registry table
+#   docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop. Provisioning STEPS: §Apple root CA
+#   provisioning runbook in .env.prod.example.
 #
 # DO NOT commit private keys here (.gitignore already blocks *.pem/*.key). The Apple ROOT CA is a
 # PUBLIC certificate; we still provision it on the server rather than committing it (operator step).

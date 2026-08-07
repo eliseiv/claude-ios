@@ -27,6 +27,7 @@
 }
 ```
 - `sessionId` отсутствует → создаётся новая сессия. На сессию фиксируются: `mode` (billing_mode, credits|byok — **способ оплаты**, [ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)), `assistantMode` (тип ассистента chat|code), `model` (опц., см. ниже), `projectId` (опц., см. ниже) и `workspaceProjectId` (привязка к рабочему пространству, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+<a id="model-опц-session-fixed-adr-034"></a>
 - **`model` (опц., session-fixed, [ADR-034](../../adr/ADR-034-user-model-selection.md)).** Выбор модели из разрешённого инстансом набора (`GET /v1/models`). Фиксируется на сессию при создании (как `mode`/`assistantMode`/`projectId`):
   - **без `model`** → сессия создаётся с `chat_sessions.model = NULL` = «дефолтная модель инстанса» (`ANTHROPIC_MODEL`/`OPENAI_MODEL` активного провайдера) — обратная совместимость;
   - **с `model`** → должен быть непустой строкой после `strip` (пустая/whitespace → `422`) **и** входить в allowlist активного провайдера (`GET /v1/models`); иначе → **`422 unsupported_model`** (`"model '<x>' is not available on this instance"`). Тихого фолбэка на дефолт нет — явный контракт ([ADR-034 §3](../../adr/ADR-034-user-model-selection.md)).
@@ -90,7 +91,7 @@
   - **Кэш-инвариант / провайдер-агностичность.** `system`+`tools` от `context` не зависят → prompt-кэш Anthropic не инвалидируется; блок — обычный текст в user-content → одинаково на Anthropic и OpenAI ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)).
   - **Не виден в истории/превью ([ADR-042](../../adr/ADR-042-hide-context-block-from-user-facing-history.md)).** Блок персистится внутри текста user-шага (для replay), но **в user-facing выводе скрыт**: при отдаче истории `GET /v1/chats/{id}` и превью `GET /v1/chats` ведущий блок `[Conversation settings for this message: …]` срезается (read-time strip, единый helper). Хранение `chat_steps.payload` и реплей модели (`_build_messages`) **не меняются** — модель по-прежнему получает блок. См. [chats/02-api-contracts.md §GET /v1/chats/{id}](../chats/02-api-contracts.md#get-v1chatsid).
   - **Обратная совместимость.** Без `context` / пустой объект / нет валидных ключей → user-сообщение = только `message` (поведение неизменно). Биллинг неизменен (1 кредит, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Расширение allowlist → [Q-037-1](../../99-open-questions.md); связь с `preferences.code_defaults` (вне scope) → [TD-028](../../100-known-tech-debt.md).
-- Size-лимиты: `message` ≤ 32KB, `context` ≤ 64KB (см. [05-security.md](../../05-security.md)). **Тело `/v1/chat/run` имеет повышенный transport-лимит** (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB) для inline base64-вложений — общий лимит `≤512KB` прочих роутов **не меняется**, повышение применяется только к роуту `/v1/chat/run` ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md), [05-security.md](../../05-security.md)). Лимиты на вложения: одно ≤ `ATTACHMENT_MAX_BYTES_IMAGE` (дефолт 5 MB) / `ATTACHMENT_MAX_BYTES_DOCUMENT` (дефолт 8 MB), суммарно ≤ `ATTACHMENT_TOTAL_BYTES` (дефолт 10 MB).
+- Size-лимиты: `message` ≤ 32KB, `context` ≤ 64KB (см. [05-security.md](../../05-security.md)). **Тело `/v1/chat/run` и `/v1/chat/v2/run` имеет повышенный transport-лимит** (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB) для inline base64-вложений — общий лимит `≤512KB` прочих роутов **не меняется**, повышение применяется точным сравнением пути к этим двум роутам (`tool-result` под него не подпадает) ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md), [05-security.md](../../05-security.md)). Лимиты на вложения: одно ≤ `ATTACHMENT_MAX_BYTES_IMAGE` (дефолт 5 MB) / `ATTACHMENT_MAX_BYTES_DOCUMENT` (дефолт 8 MB), суммарно ≤ `ATTACHMENT_TOTAL_BYTES` (дефолт 10 MB).
 - При старте нового пользовательского message-шага Orchestrator генерирует `messageStepId` (UUID), персистирует его в `chat_steps.message_step_id` и `tool_calls.message_step_id`. Он един для всех tool-раундов шага (включая re-entry через `/chat/tool-result`) и используется как ключ идемпотентности credits-debit ([ADR-005](../../adr/ADR-005-idempotency-ledger.md), [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). `messageStepId` — внутренняя величина биллинга, не путать с gateway correlation `requestId` (`X-Request-Id`).
 
 ### Response (200)
@@ -105,7 +106,8 @@
   "toolCalls": [ { "id": "uuid", "name": "string", "args": { } } ],
   "serverTools": [ { "toolCallId": "uuid", "toolName": "string (dot)", "status": "completed | errored", "summary": "string | null" } ],
   "blockReason": "enum (optional, при blocked)",
-  "usage": { "inputTokens": 0, "outputTokens": 0, "model": "string" }
+  "usage": { "inputTokens": 0, "outputTokens": 0, "model": "string" },
+  "quiz": null
 }
 ```
 - **`toolCalls[]` (множественный, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) присутствует только при `status=tool_call`** — **ВСЕ** client-side tool-вызовы текущего assistant-хода (parallel tool use), в порядке блоков ответа Claude. Каждый элемент `{ id (доменный UUID = tool_calls.id), name (dot), args }`. **Server-side `site.*` в `toolCalls[]` НЕ попадают** (исполняются на бэке в tool-loop, [ADR-011](../../adr/ADR-011-server-side-tools.md)) — массив несёт только client-side (`files.*`/`calendar.*`/`reminders.*`).
@@ -118,15 +120,16 @@
   - `summary` (опц., `string | null`) — **компактный** человекочитаемый итог, лимит длины `_SUMMARY_MAX_CHARS` (120, как в steps-view). **НЕ raw result.** Для `completed` — дефолт `"ok"` или короткий доменный итог (например имя файла) **без путей/URL/signed-token**; для `errored` — короткий код ошибки (например `invalid_timezone`). **Полный** результат server-side инструмента доступен только в истории `GET /v1/chats/{id}` → `steps[].payload` tool-шага ([ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)) и steps-view — `serverTools[]` это **индикатор**, не канал доставки результата.
   - **Семантика «за один вызов» (не за сессию):** перечисляет server-side, выполненные в этом обращении. Дубликаты с историей `/chats` — ожидаемы (удобство флоу, не замена истории).
   - **Присутствие по статусам:** при `status=assistant_message` и `status=tool_call` — **присутствует** (может быть пустым `[]`, если server-side не выполнялись; при `tool_call` перечисляет server-side, отработавшие **до** того, как ход уперся в client-side вызов). При `status=blocked`+**policy** (`blockReason ≠ max_tokens`) — **пустой `[]`** (policy-block до генерации, tool-loop не запускался). При `status=blocked`+**`max_tokens`** ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) — **может быть НЕ пустым** (server-side раунды могли отработать до обрыва финального витка). Поле присутствует всегда (хотя бы как `[]`) при `assistant_message`/`tool_call`/`blocked`.
-  - **Idempotent replay → `serverTools=[]` (by-design, [ADR-028](../../adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)):** повторный `/chat/tool-result` для **уже закрытого** хода возвращает сохранённый финальный шаг (`_render_saved_step`, continuation выполняется один раз на закрытие барьера — [ADR-005](../../adr/ADR-005-idempotency-ledger.md)/[ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); при таком реплее `serverTools=[]` — server-side выполнения **НЕ** реконструируются (реплей отдаёт финальный результат, не воспроизводит tool-loop). Полный набор server-side выполнений хода доступен в истории `GET /v1/chats/{id}`.
-  - **Биллинг неизменен ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)):** server-side раунды не списывают кредиты; `serverTools[]` информационно, на amount не влияет. Аддитивно/обратносовместимо: старые клиенты игнорируют. Каталог инструментов и их число (14) не меняются.
+  - **Idempotent replay → `serverTools=[]` (by-design, [ADR-028](../../adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)):** повторный `/chat/tool-result` для **уже закрытого** хода возвращает сохранённый финальный шаг (`_render_saved_step`, continuation выполняется один раз на закрытие барьера — [ADR-005](../../adr/ADR-005-idempotency-ledger.md)/[ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); при таком реплее `serverTools=[]` — server-side выполнения **НЕ** реконструируются (реплей отдаёт финальный результат, не воспроизводит tool-loop). Полный набор server-side выполнений хода доступен в истории `GET /v1/chats/{id}`. **Контраст (обе стороны помечены):** поле `quiz` ([ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) на том же реплее ведёт себя **противоположно** — оно **восстанавливается** из шагов хода, потому что несёт контент хода, а не индикатор выполнения в этом вызове. Правило `serverTools[]` на `quiz` не переносить и наоборот.
+  - **Биллинг неизменен ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)):** server-side раунды не списывают кредиты; `serverTools[]` информационно, на amount не влияет. Аддитивно/обратносовместимо: старые клиенты игнорируют. Каталог инструментов от `serverTools[]` не зависит и им не меняется (число записей каталога — [§GET /v1/tools](#get-v1tools--каталог-инструментов-adr-019), раздел-первоисточник; здесь оно не дублируется).
   - **Связь со steps-view:** идея `summary` переиспользована из `StepsViewStepSchema`, но это **отдельное** поле — только server-side выполнения, `status` (`completed`/`errored`) вместо `kind`. steps-view (`GET /v1/chats/{id}/steps`) — отдельный диагностический срез истории; `serverTools[]` — inline-индикатор в самом ответе генерации.
 - **Контракт Anthropic tool-loop ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** на КАЖДЫЙ `tool_use` ассистент-хода в следующем витке обязан быть `tool_result`. Поэтому клиент обязан исполнить и вернуть результаты на **все** `toolCalls[]` (см. `/chat/tool-result` батч) — иначе continuation не соберётся (Anthropic `400` → `502`). Одиночный `toolCall` достаточен только когда `len(toolCalls)==1`.
 - `blockReason` присутствует только при `status=blocked`.
+- **`quiz` ([ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) — схема ответа общая с `/v1/chat/v2/*`, поэтому поле присутствует и здесь, но на legacy-роуте оно ВСЕГДА `null`.** Квиз порождает инструмент `quiz.generate`, который предлагается модели только при `generationMode=study_learn`, а legacy-путь принудительно использует `general` → инструмент не предлагается, пул не появляется. Поведение legacy `/v1/chat/run` этим полем не меняется (аддитивно, старые клиенты игнорируют). Семантика поля — [§Chat v2 → Response](#quiz-adr-064).
 - `usage` присутствует при `assistant_message`/`tool_call`, **а также при `blocked` с `blockReason=max_tokens`** ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); при policy-blocked (генерация не выполнялась) — отсутствует.
 - **`status=blocked` + `blockReason=max_tokens` (обрезка по лимиту output-токенов, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** Claude обрезан на `ANTHROPIC_MAX_TOKENS` (`stop_reason="max_tokens"`); обрезанные `tool_use` **неполны** и наружу **НЕ** отдаются (`toolCall`/`toolCalls` отсутствуют). В отличие от policy-blocked: `messageStepId`/`stepId` **НЕ null** (ход и обрезанный assistant-шаг созданы), `usage` присутствует, `assistantMessage` — частичный текст хода (если был). **Кредит НЕ списывается** (обрыв — не успешный финальный `assistant_message`, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Клиенту рекомендуется повторить/сократить запрос. С дефолтом `ANTHROPIC_MAX_TOKENS=16000` кейс редкий (safety-net).
 - **`assistantMessage` ([Q-024-1](../../99-open-questions.md) Closed = вариант A, [ADR-024 §Decision п.3](../../adr/ADR-024-history-payload-domain-normalization.md)):**
-  - `status=assistant_message` — финальный текст Claude (как и раньше, без изменений).
+  - `status=assistant_message` — финальный текст Claude (как и раньше, без изменений). **Исключение ([ADR-064 §7](../../adr/ADR-064-study-learn-quiz-generation-mode.md)):** если в ответе непусто поле [`quiz`](#quiz-adr-064), `assistantMessage = null` при **любом** статусе. На legacy `/v1/chat/run` исключение не наблюдается (`quiz` там всегда `null`).
   - `status=tool_call` — **опционально присутствует**: текст из `text`-блоков **того же** assistant-шага, чей `tool_use` вернулся как `toolCall` (тот шаг, на который указывает `stepId`). Значение = текст/конкатенация `text`-блоков этого шага. Если Claude вернул `tool_use` **без** сопутствующего текста — `assistantMessage = null`/опущено. `toolCall` при этом **обязателен** (семантика не меняется); добавление `assistantMessage` аддитивно/обратносовместимо (поле уже опционально-nullable в схеме; новизна — оно теперь может быть НЕ-null при `tool_call`). Backend перестаёт отбрасывать сопутствующий текст (`orchestrator.py:661`) и кладёт его в `assistantMessage`.
   - `status=blocked` — `assistantMessage = null` (генерация не выполнялась).
   - **Согласование с историей и [ADR-023](../../adr/ADR-023-sync-ids-in-chat-response.md):** `assistantMessage` при `tool_call` = тот же текст, что отдают `text`-блоки `GET /v1/chats/{id}` → `steps[].payload.content[]` шага `stepId` (нормализация истории текстовые блоки не меняет — байт-в-байт хранилище). Инвариант: `ChatResponse.stepId` указывает на этот же assistant-шаг, поэтому run-проекция и история несут один и тот же сопутствующий текст.
@@ -196,6 +199,121 @@
   - continuation-виток к Anthropic выполняется **один раз** на закрытие барьера хода (дополнительно защищён `messageStepId`-идемпотентностью дебита, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)).
 - `result` валидируется по схеме соответствующего tool (см. ниже); несоответствие → `422`.
 
+---
+
+## Chat v2: режимный контракт `/v1/chat/v2/*`
+
+Новый контракт генерации живёт **отдельно** от legacy `/v1/chat/*`: legacy остаётся прежним (полный локальный replay истории, фиксированная цена, без `generationMode`), режимные возможности доступны только здесь. Устройство слоёв (клиенты провайдеров, `provider_state`, repository) — [10-generation-modes-implementation.md](10-generation-modes-implementation.md); ниже — **wire-контракт**.
+
+Три эндпоинта, все JWT-protected, как прочие `/v1/*`:
+
+| Endpoint | Назначение |
+|---|---|
+| `POST /v1/chat/v2/run` | ход чата с выбором `generationMode` |
+| `POST /v1/chat/v2/tool-result` | continuation tool-loop v2-хода (**без** `generationMode` в теле) |
+| `GET /v1/chat/v2/capabilities` | список режимов и их цена для UI-переключателя |
+
+### POST /v1/chat/v2/run
+
+#### Request
+Все поля [`POST /v1/chat/run`](#post-v1chatrun) (`userId`, `sessionId`, `projectId`, `message`, `mode`, `assistantMode`, `model`, `workspaceProjectId`, `attachments`, `context`, `editMessageStepId` — семантика, валидация и коды **идентичны**) **плюс одно**:
+
+```json
+{ "generationMode": "general | research | reasoning | study_learn" }
+```
+<a id="generationmode-adr-064"></a>
+- **`generationMode` (опц., дефолт `general`, per-turn).** Не фиксируется на сессию: в одном `sessionId` ход может быть `research`, следующий — `general`, затем `study_learn`. Значение вне набора → `422` (`StrictModel`/`Literal`). Отдельной оси «режим диалога» (`dialogMode`) в контракте **нет** — режим один ([ADR-064 §1](../../adr/ADR-064-study-learn-quiz-generation-mode.md)).
+- Значение персистится в user-шаге хода (`chat_steps.payload.generationMode`) — из него continuation восстанавливает режим (см. `/v1/chat/v2/tool-result`).
+- **Что даёт режим:**
+
+  | Режим | Провайдерские возможности | Инструменты сверх обычного набора | Цена (дефолт) |
+  |---|---|---|---|
+  | `general` | обычная генерация | — | `CHAT_CREDIT_COST_GENERAL` = 1 |
+  | `research` | hosted web search (оба провайдера) | — | `CHAT_CREDIT_COST_RESEARCH` = 3 |
+  | `reasoning` | reasoning effort (OpenAI) / extended thinking (Anthropic) | — | `CHAT_CREDIT_COST_REASONING` = 3 |
+  | `study_learn` | **никаких** (по knobs = `general`) | **`quiz.generate`** ([§ниже](#quizgenerate--server-side-global-tool-режимный-adr-064)) | `CHAT_CREDIT_COST_STUDY_LEARN` = 2 |
+
+- **Биллинг:** цена режима берётся **единственным** мостом `chat_generation_credit_cost(mode)` и используется и для проверки баланса до генерации, и для финального идемпотентного дебита по `messageStepId` ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Режим не может быть допущен по одной цене и списан по другой. BYOK/trial внутренние кредиты не тратят (как раньше).
+- **Сессия и backend contract:** сессия помечается `generation_backend='v2'`; legacy-роут не может продолжить v2-сессию, а `/v1/chat/v2/run` может явно апгрейдить старую/`NULL`-сессию в v2 ([10-generation-modes-implementation.md](10-generation-modes-implementation.md#_ensure_session_backend)).
+
+#### Response (200)
+Та же схема `ChatResponse`, что у [`POST /v1/chat/run`](#response-200) — те же `status`/`sessionId`/`messageStepId`/`stepId`/`assistantMessage`/`toolCalls[]`/`toolCall`/`blockReason`/`serverTools[]`/`usage` — **плюс два отличия**:
+
+1. `usage` дополнительно несёт `generationMode` и (при фактическом дебите) `creditsCharged`.
+2. <a id="quiz-adr-064"></a>**`quiz` (аддитивно, nullable, **turn-scoped**, [ADR-064 §7](../../adr/ADR-064-study-learn-quiz-generation-mode.md))** — структура квиза **хода** (`messageStepId`), а не текущего вызова:
+
+```json
+{
+  "quiz": {
+    "questions": [
+      {
+        "question": "Что делает оператор `await` в Swift?",
+        "options": ["Блокирует поток", "Приостанавливает задачу до готовности результата", "Создаёт новый поток"],
+        "correctIndex": 1,
+        "explanation": "`await` приостанавливает текущую задачу, не блокируя поток."
+      }
+    ]
+  }
+}
+```
+
+- Поле присутствует **всегда**; `null` = «квиза не было **в этом ходе** (`messageStepId`)», **не** «не было в этом вызове» (см. turn-scope ниже) — аддитивно и обратносовместимо: клиенты, не знающие о поле, игнорируют.
+- **Семантика — TURN-scoped (нормативно, НЕ «за один вызов»).** `quiz` любого ответа = **последний валидный пул этого ХОДА** (`messageStepId`). Одинаково на **всех** ногах хода: `/v1/chat/v2/run`, каждый `/v1/chat/v2/tool-result`-continuation, идемпотентный реплей закрытого хода, `blocked`+`max_tokens`.
+  - **Producer 1 — аккумулятор текущего вызова.** Несколько валидных вызовов инструмента в одном обращении → **last-wins**; пулы не склеиваются.
+  - **Producer 2 — фолбэк.** Аккумулятор этого вызова пуст **И** эффективный режим хода = `study_learn` → взять последний tool-шаг хода с `toolName = quiz.generate` и непустым `result`. Нет такого шага → `null`. Предикат режима обязателен: вне квиз-ходов (все прочие режимы и весь legacy) дополнительной выборки не делается.
+- **Зачем turn-scope (несущая конструкция анти-спойлерной гарантии).** Подавление `assistantMessage` (ниже) ключевано на непустом `quiz`. Штатный ход, где модель в одном assistant-шаге вызвала `quiz.generate` **и** client-side инструмент, состоит из двух ног: `run` → `tool_call` (+пул) и `tool-result` → финальный `assistant_message`. При семантике «за один вызов» вторая нога отдала бы `quiz=null`, подавление не сработало бы и пользователь получил бы дубль вопросов с раскрытыми ответами. То же — на сетевом ретрае закрытого хода. Turn-scoped-правило закрывает обе ноги и ретрай одним предикатом.
+- **Клиент трактует `quiz` как содержимое хода, а не дельту:** один и тот же пул может прийти в нескольких ответах одного `messageStepId` — карточки **заменяются** (идемпотентно), не накапливаются.
+  > **Контраст с `serverTools[]` — намеренно противоположно.** `serverTools[]` **per-call** и при реплее **пуст** ([ADR-028](../../adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)): это индикатор «что выполнилось в ЭТОМ вызове», реконструкция была бы ложью. `quiz` — **контент хода**, и его пропажа на любой ноге немедленно снимает подавление текста (спойлер вместо карточек). Не переносить правило одного поля на другое ни в одну сторону.
+- **`assistantMessage = null` при непустом `quiz` (нормативно).** Это **исключение** из описания `assistantMessage` выше: текст не отдаётся, когда в ответе есть `quiz`, — **при любом статусе**, где `quiz` непуст (`assistant_message`, `tool_call`, `blocked`+`max_tokens`; в последнем случае подавляется и частичный текст обрыва, прочие правила `max_tokens` — `usage`/`messageStepId`/`stepId` присутствуют, кредит не списан — не меняются). Причина — детерминированная защита от дубля вопросов и спойлера правильных ответов в свободном тексте; правило применяется в единственной точке маппинга ответа и ключевано **на присутствии `quiz`**, поэтому не может сработать на legacy-ходе. Частично переопределяет [ADR-024 п.3](../../adr/ADR-024-history-payload-domain-normalization.md) — **только** для ходов с квизом. **Хранение** и **реплей провайдеру** при этом не меняются: сырой assistant-шаг (с текстом, если он был) сохраняется и реплеится как есть. **Отдача истории — меняется ([ADR-065 §2](../../adr/ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md), пересматривает [ADR-064 §7](../../adr/ADR-064-study-learn-quiz-generation-mode.md)):** у ходов с непустым квизом текстовые блоки assistant-шагов **срезаются** при отдаче `GET /v1/chats/{id}`/`/steps`/превью — иначе холодный старт приложения посреди квиза показывал бы спойлер. Правило и контраст с [ADR-042](../../adr/ADR-042-hide-context-block-from-user-facing-history.md) — [chats/02-api-contracts.md §квиз-ход](../chats/02-api-contracts.md#quiz-strip-adr-065).
+- Проверка ответов пользователя — **на клиенте**; эндпоинта отправки/проверки ответов нет и не вводится ([ADR-064 §8](../../adr/ADR-064-study-learn-quiz-generation-mode.md)).
+- Все прочие правила ответа (blocked=200, `max_tokens`, sync-id, барьер хода) — без изменений.
+
+### POST /v1/chat/v2/tool-result
+
+Request/Response — **идентичны** [`POST /v1/chat/tool-result`](#post-v1chattool-result) (батч `results[]`, deprecated одиночная форма, барьер хода, идемпотентность), с одним нормативным отличием:
+
+- **`generationMode` в теле НЕ принимается** (лишнее поле → `422`). Режим хода восстанавливается из user-шага исходного `/v1/chat/v2/run` (`chat_steps.payload.generationMode`). Восстановленный режим определяет **и цену continuation-а, и tool-набор** очередного витка — включая `quiz.generate` для `study_learn`. Допустимый набор восстановления — все четыре режима; неизвестное значение деградирует к `general`.
+- `/v1/chat/v2/tool-result` **не** апгрейдит legacy-сессию в v2 (continuation уже начатого хода), а legacy `/v1/chat/tool-result` не может продолжить v2-ход.
+
+### GET /v1/chat/v2/capabilities
+
+Backend-level объявление режимов для UI-переключателя. Пользовательские баланс/подписка здесь **не** проверяются — это решает конкретный `/v1/chat/v2/run` (blocked=200, [ADR-004](../../adr/ADR-004-blocked-http-200.md)).
+
+#### Auth
+- **JWT-protected** (как `GET /v1/tools`/`GET /v1/models`). Метод `GET` (read-only, кэшируемо), per-user rate-limit как у прочих read-эндпоинтов.
+
+#### Response (200)
+```json
+{
+  "provider": "openai",
+  "defaultGenerationMode": "general",
+  "generationModes": [
+    {"mode": "general", "creditCost": 1, "available": true},
+    {"mode": "research", "creditCost": 3, "available": true},
+    {"mode": "reasoning", "creditCost": 3, "available": true}
+  ],
+  "reasoningLevel": "medium"
+}
+```
+- `provider` — активный LLM-провайдер инстанса (`LLM_PROVIDER`, нормализован).
+- `defaultGenerationMode` — режим при отсутствии поля в запросе (`general`).
+<a id="generationmodes--гейт-объявления-adr-065"></a>
+- **`generationModes[]` — режимы, которые этот инстанс ОБЪЯВЛЯЕТ (не «все, которые backend понимает», [ADR-065 §1](../../adr/ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md)).** Состав задаётся env-allowlist **`CHAT_ADVERTISED_GENERATION_MODES`** (образец — allowlist моделей `ANTHROPIC_MODELS`/`OPENAI_MODELS`, [ADR-034](../../adr/ADR-034-user-model-selection.md): env управляет тем, что показано в каталоге, а не тем, что умеет backend):
+  - **режим вне allowlist ОТСУТСТВУЕТ в массиве** (не помечается `available:false`);
+  - **дефолт** (env не задан / пуст / целиком невалиден) — `general,research,reasoning`; **`study_learn` по умолчанию НЕ объявляется** (fail-closed: цена ошибки «не показали» — нет фичи, цена обратной — списанные кредиты и пустой экран у приложения без квиз-UI);
+  - **`general` присутствует всегда**, даже если не перечислен в env (`defaultGenerationMode` обязан быть в списке);
+  - **неизвестные значения игнорируются + WARNING** (graceful-разбор, не startup-crash);
+  - `creditCost` — из `chat_generation_credit_cost(mode)` (тот же источник, что у списания).
+- **Гейт ОБЪЯВЛЕНИЯ ≠ гейт ПОВЕДЕНИЯ (нормативно).** [`POST /v1/chat/v2/run`](#post-v1chatv2run) принимает `generationMode=study_learn` **на любом инстансе**, независимо от allowlist: приложение, знающее имя режима, работает. Allowlist влияет **только** на состав этого массива. Per-instance флаг **включения** режима (запрос отвергается) — отклонён и не вводится; цена выключателем служить не может (кламп `≤0 → 1`, [§Config](10-generation-modes-implementation.md#config)).
+- **`available`** — у **присутствующих** элементов всегда `true`; producer'а, возвращающего `false`, **нет**. Клиент обязан читать гейт как **присутствие/отсутствие элемента**, а не как значение `available` ([ADR-065 §1.8](../../adr/ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md)). Поле сохранено для совместимости и зарезервировано под будущее «объявлен, но недоступен» — это будет отдельное решение.
+- **Порядок фиксирован и каноничен:** `general`, `research`, `reasoning`, `study_learn` — независимо от порядка перечисления в env; новые режимы добавляются **в конец**, позиции существующих не сдвигаются (клиент вправе рендерить список как есть).
+- `reasoningLevel` — серверный effort/budget level для `reasoning` (`low|medium|high`, `CHAT_REASONING_LEVEL`).
+- **Forward-compat:** клиент обязан игнорировать неизвестные ему значения `mode` в списке — появление нового режима не является breaking change.
+
+**Коды:** `200`; `401` нет/невалидный JWT; `429` rate-limit.
+
+---
+
 ## Классы tools: client-side vs server-side ([ADR-011](../../adr/ADR-011-server-side-tools.md), [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md))
 Три класса инструментов ([ADR-026 §1](../../adr/ADR-026-global-server-side-tools-and-time-now.md)):
 - **client-side** (`files.*`, `calendar.*`, `reminders.*`) — исполняет **iOS-клиент**: backend отдаёт `status=tool_call`,
@@ -203,11 +321,13 @@
 - **server-side, project-scoped** (`site.*`, website-builder, `SERVER_SIDE_TOOLS`) — исполняет **backend** немедленно в tool-loop, формирует `tool_result` сам
   и продолжает к Anthropic **без** round-trip к iOS; **НЕ** отдаётся клиенту как `status=tool_call`. **Требует проекта.** Схемы и поведение —
   [modules/website-builder/02-api-contracts.md](../website-builder/02-api-contracts.md), [ADR-011](../../adr/ADR-011-server-side-tools.md).
-- **server-side, global** (`time.now`, `GLOBAL_SERVER_SIDE_TOOLS`, [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)) — исполняет **backend** немедленно в tool-loop (как `site.*`), но **НЕ требует проекта** и предлагается Claude **всегда** (включая «чистый чат» без проекта). В `toolCalls[]` наружу **НЕ** попадает. Контракт — [§`time.now`](#timenow--server-side-global-tool-adr-026) ниже.
-- Orchestrator различает класс по доменному имени (статические реестры `SERVER_SIDE_TOOLS = {site.*}`, `GLOBAL_SERVER_SIDE_TOOLS = {time.now}`, непересекающиеся). domain↔anthropic
+- **server-side, global** (`time.now`, `quiz.generate`, `GLOBAL_SERVER_SIDE_TOOLS`, [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)/[ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) — исполняет **backend** немедленно в tool-loop (как `site.*`), но **НЕ требует проекта**. В `toolCalls[]` наружу **НЕ** попадают. Контракты — [§`time.now`](#timenow--server-side-global-tool-adr-026) и [§`quiz.generate`](#quizgenerate--server-side-global-tool-режимный-adr-064) ниже.
+  - **Предложение модели внутри класса различается (не переносить по аналогии!):** `time.now` предлагается **ВСЕГДА** (utility, [ADR-026 §3](../../adr/ADR-026-global-server-side-tools-and-time-now.md)); `quiz.generate` — **только** когда эффективный режим хода = `study_learn` (ось C, [ADR-064 §3](../../adr/ADR-064-study-learn-quiz-generation-mode.md)). «Global» означает «без проекта», а не «без гейта».
+- Orchestrator различает класс по доменному имени (статические реестры `SERVER_SIDE_TOOLS = {site.*}`, `GLOBAL_SERVER_SIDE_TOOLS = {time.now, quiz.generate}`, непересекающиеся). Дополнительный реестр `TOOL_GENERATION_MODES` (`quiz.generate → {study_learn}`) задаёт ось C; инструменты вне этого реестра по режиму не гейтятся. domain↔anthropic
   mapping (точка→подчёркивание) расширяется server-side именами (`site.write_file ↔ site_write_file`, `time.now ↔ time_now`, …). Guard на число
   server-side раундов — `MAX_SERVER_TOOL_ROUNDS` (дефолт 16) — общий для project-scoped и global server-side раундов.
 - **Гейтинг по наличию проекта ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)):** `site.*` (`SERVER_SIDE_TOOLS`) предлагаются Claude **только** когда у сессии есть `project_id` (создана с `projectId`). В «чистом чате» (`chat_sessions.project_id IS NULL`) `site.*` в tool-набор **не включаются** — Claude их не видит и не вызывает. **`time.now` (`GLOBAL_SERVER_SIDE_TOOLS`) под этот гейт НЕ подпадает** — предлагается всегда ([ADR-026 §3](../../adr/ADR-026-global-server-side-tools-and-time-now.md)). См. [03-architecture.md §Гейтинг tools](03-architecture.md#гейтинг-site-tools-по-наличию-проекта-adr-022).
+- **Гейтинг по режиму генерации (ось C, [ADR-064 §3](../../adr/ADR-064-study-learn-quiz-generation-mode.md)):** инструмент из `TOOL_GENERATION_MODES` предлагается **только** в перечисленных режимах. Гейт считается по **эффективному** режиму хода — тому же значению, которое уходит провайдеру и в биллинг; legacy-путь принудительно использует `general`, поэтому mode-gated инструменты на `/v1/chat/run` не предлагаются **по построению** (без отдельной ветки-исключения). Оси A/B/C складываются по И — таблица «инструмент × оси» в [03-architecture.md §Оси гейтинга tool-набора](03-architecture.md#оси-гейтинга-tool-набора-adr-022--adr-026--adr-064).
 
 ## `time.now` — server-side global tool ([ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md))
 Инструмент текущей даты/времени. Исполняет **backend** в tool-loop (без round-trip к iOS, как `site.*`), но **БЕЗ проекта** — доступен в любом ходе, включая основной flow чат-агрегатора ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)). Решает репорт «модель отвечает 2024 год»: системный промт статичен и не несёт даты, модель получает время только из результата `time.now`. Не мутирующий (нет `tool_mutation` audit). В `toolCalls[]` наружу не отдаётся (исполнен на бэке).
@@ -242,6 +362,70 @@
 - **Биллинг:** раунд `time.now` не добавляет списаний — 1 кредит = 1 сообщение ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)); списание один раз на финальном `assistant_message`.
 - **Clock-провайдер:** время берётся через инъектируемый `Clock` (детерминизм qa, [ADR-026 §8](../../adr/ADR-026-global-server-side-tools-and-time-now.md), [06-testing-strategy.md](../../06-testing-strategy.md)), не прямой `datetime.now()`.
 
+<a id="quizgenerate--server-side-global-tool-режимный-adr-064"></a>
+## `quiz.generate` — server-side global tool, режимный ([ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md))
+
+Инструмент выдачи **пула вопросов** обучающего квиза. Исполняет **backend** в tool-loop (без round-trip к iOS, как `time.now`), проекта не требует, **предлагается модели только при эффективном `generationMode = study_learn`** (ось C). Не мутирующий (нет `tool_mutation` audit), отдельных списаний не вводит. В `toolCalls[]` наружу не отдаётся; результат поднимается в [`ChatResponse.quiz`](#quiz-adr-064).
+
+«Исполнение» = **валидация аргументов + эхо-возврат** того же объекта как tool-result.
+
+### Args (`QuizGenerateArgs`, Pydantic v2, `extra="forbid"` на обёртке и на каждом вопросе)
+```json
+{
+  "questions": [
+    {
+      "question": "Что делает `await` в Swift?",
+      "options": ["Блокирует поток", "Приостанавливает задачу", "Создаёт поток"],
+      "correctIndex": 1,
+      "explanation": "`await` приостанавливает задачу, не блокируя поток."
+    }
+  ]
+}
+```
+
+| Поле | Тип | Ограничение (нормативно) |
+|---|---|---|
+| `questions` | array\<object\> | **3..10** элементов (нижняя граница = осмысленный пул, верхняя = потолок токенов/латентности) |
+| `questions[].question` | string | непустая, ≤ **1000** символов |
+| `questions[].options` | array\<string\> | **2..10** вариантов, каждый непустой, ≤ **400** символов |
+| `questions[].correctIndex` | integer | 0-based, `0 ≤ correctIndex < len(options)`; **`bool` не принимается** (в Python `bool` — подтип `int`, проверять явно) |
+| `questions[].explanation` | string | непустая, ≤ **2000** символов |
+
+- Все поля **обязательны**; любой иной ключ → ошибка валидации args.
+- **JSON Schema инструмента (`inputSchema` в `GET /v1/tools` и `input_schema`/`parameters`, уходящие провайдеру) обязана быть self-contained — без `$ref`/`$defs`:** вложенная модель вопроса инлайнится. Поддержка `$ref` у двух разных провайдеров не гарантирована, и опираться на неё контракт не должен.
+- **Ограничивающие ключи (`minItems`/`maxItems`/`maxLength`) в схеме — ОБЯЗАТЕЛЬНЫ, а не «остаются» ([ADR-065 §4](../../adr/ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md)).** Strict-режим у tools в этой интеграции выключен, провайдер эти ключи не отвергает, поэтому **каждое** числовое ограничение пула, выразимое в JSON Schema, обязано быть в ней выражено — включая `options.items.maxLength` (лимит длины **варианта ответа**). Реализация ограничения кастомным валидатором **вместо** ключа схемы — дефект: модель узнаёт о нарушении только из degrade-раунда, а это лишний upstream-вызов на ходу ценой 2 кредита. Серверная проверка остаётся авторитетной и не отменяется — ключи схемы это **подсказка**, а не гарантия.
+- **Структура вопроса объявляется ОДИН раз ([ADR-065 §5](../../adr/ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md)).** Модель аргументов инструмента и wire-модель поля `quiz` ответа обязаны иметь **общий источник** (вторая переиспользует/строится из первой). Если реализация держит два объявления — обязателен **механический тест паритета** (имена полей, типы, обязательность, границы): иначе расхождение проявится не на сборке, а как ошибка валидации на живом ходе у пользователя.
+
+### Result (эхо)
+```json
+{ "questions": [ { "question": "…", "options": ["…", "…"], "correctIndex": 1, "explanation": "…" } ] }
+```
+Тот же объект, что пришёл в args, после успешной валидации. Он же: (а) сохраняется как обычный tool-результат в `chat_steps.payload` tool-шага (`toolName = quiz.generate`, поле `result`); (б) поднимается в `ChatResponse.quiz` вызова.
+
+### Ошибки и инварианты
+- **Любое** нарушение ограничений выше → **tool-result error** `{"error":{"code":"invalid_quiz","message":"…"}}`, ход **НЕ падает** (не `422`, не `502`). Модель видит ошибку в том же ходе и перегенерирует пул. Это **исключение** из общего правила «невалидные args инструмента → `422`»: `quiz.generate` входит в реестр `ARGS_DEGRADE_TOOLS`. Обоснование — провайдерского strict-режима нет, межполевые инварианты (`correctIndex < len(options)`, число вопросов/вариантов, длины) не гарантирует никто, кроме нас, поэтому нарушение — **ожидаемый**, а не аномальный сценарий ([ADR-064 §5](../../adr/ADR-064-study-learn-quiz-generation-mode.md)). Прецедент в этом же коде — `invalid_timezone` у [`time.now`](#timenow--server-side-global-tool-adr-026).
+  > **Контраст (не переносить по аналогии):** для **всех остальных** инструментов невалидные args по-прежнему дают `ValidationFailedError` → **`422`** на ход. Их схемы фиксированы контрактом, и кривой args там — настоящая аномалия. Ветки соседние, поведение противоположно — намеренно.
+- **All-or-nothing:** невалидный **любой** вопрос делает невалидным **весь** пул (вопросов вне `3..10`, пустой список, вариантов вне `2..10`, over-length поле, `correctIndex` булев/отрицательный/вне диапазона) → один `invalid_quiz`, модель перегенерирует весь пул. Частичное принятие (выкинуть плохой вопрос) — запрещено.
+<a id="degrade-message--нормативные-границы"></a>
+- **`message` ошибки — content-free И ограничен по размеру (нормативно).** Строится из пути поля (`loc`) и типа ошибки валидации (например `questions.2.correctIndex: out of range; expected 3-10 questions, 2-10 options, 0-based correctIndex < len(options)`), **без значений** полей — текст квиза в сообщение не попадает. Сверх этого действуют **три обязательных предела**, все — жёсткие срезы, а не семантические ограничения:
+
+  | Измерение | Значение | Зачем именно так |
+  |---|---|---|
+  | число записей об ошибках в сообщении | **5** | ошибок в пуле может быть десятки (по одной на каждый вопрос); модели для исправления достаточно первых |
+  | длина одной записи | **120** символов | переиспользуется **существующий** лимит компактной строки `serverTools[].summary` — второе число для той же задачи «короткая машинно-адресованная строка» не вводится |
+  | длина склейки (итогового `message`) | **400** символов | **не** `5 × 120`: сообщение обязано остаться пригодной **инструкцией для модели**, а вызывающая сторона дописывает к нему подсказку про ограничения пула; персистируемый результат должен остаться читаемым |
+
+  - **Нужны ВСЕ ТРИ предела, а не один.** Ограничение только числа записей оставляет размер зависимым от ввода: при лишнем ключе (`extra_forbidden`) в `loc` попадает **имя ключа, которое придумала модель**, то есть произвольная строка. Поэтому режется и каждая часть, и склейка. Это тот же защитный паттерн, что жёсткий cap на `serverTools[].summary`.
+  - **Почему это нормативное требование, а не деталь реализации.** Сообщение **персистится** в `chat_steps` tool-шага и **реплеится модели** на следующем витке — то есть его размер входит и в объём БД, и в каждый последующий промпт хода. Размер артефакта, который порождает модель и потребляет она же, не может зависеть от того, что она прислала.
+  - Пределы применяются и к не-pydantic ошибкам валидации args (там сообщение уже content-free по построению, но срез по длине склейки действует).
+- **Вызов вне режима** (модель вернула `quiz.generate` там, где он не предлагался — upstream-аномалия): backend инструмент **не исполняет** → tool-result error `{"error":{"code":"tool_not_available", …}}`, tool_call → `errored`, ход продолжается, `quiz` в ответе остаётся `null`.
+- **Приоритет двух отказов (нормативно):** проверка режима выполняется **раньше** валидации аргументов. При пересечении (инструмент вызван вне режима **и** с невалидным пулом) отдаётся **`tool_not_available`**, а не `invalid_quiz`. Иначе модель получила бы задание чинить пул и продолжила бы упираться в недоступный инструмент, сжигая server-side раунды до `MAX_SERVER_TOOL_ROUNDS`. Порядок фиксируется явно, а не следует из расположения веток в коде.
+  > **Контраст с `site.*` ([ADR-022 §guard](../../adr/ADR-022-optional-project-and-tool-gating.md)):** `site.*` в сессии без проекта → **жёсткий** отказ хода (`UpstreamError` → `502`), потому что исполнение потребовало бы резолва проекта — это граница изоляции данных (IDOR). У `quiz.generate` побочных эффектов нет вообще, поэтому отказ **мягкий**. Поведение этих двух guard'ов различается намеренно.
+- **Граница повторов:** каждая неудачная попытка расходует server-side раунд tool-loop'а; упорство модели упирается в общий `MAX_SERVER_TOOL_ROUNDS` (дефолт 16) → audit `max_server_tool_rounds_exceeded`, `502`, **без биллинга** ([ADR-011 §2](../../adr/ADR-011-server-side-tools.md)). Квиз-специфичной «мягкой посадки» нет.
+- **`serverTools[]`:** выполнение отражается обычной записью ([ADR-028](../../adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)/[ADR-030](../../adr/ADR-030-toolcallid-in-server-tools.md)) — `toolName = "quiz.generate"`, `status = completed|errored`, `summary` = `"ok"` либо код ошибки (`invalid_quiz`/`tool_not_available`). **Содержимое квиза в `summary` не попадает.**
+- **Биллинг:** раунд `quiz.generate` списаний не добавляет; списание — один раз на финальном `assistant_message` по цене режима `study_learn` ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)).
+- **Приватность:** `correctIndex` намеренно уходит клиенту (обучающий сценарий, не экзамен). Audit хранит только `toolCallId`/`toolName`/`status` — текст квиза туда не пишется.
+
 ## Tools (backend ↔ iOS, client-side) — строго типизированные схемы
 Backend только инициирует tool-call; исполняет клиент. Все мутирующие tools (`files.write`, `files.mkdir`, `calendar.create_events`, `reminders.create`) → audit-запись. Server-side `site.write_file`/`site.delete` также мутирующие (audit) — см. website-builder.
 
@@ -262,7 +446,7 @@ Backend только инициирует tool-call; исполняет клие
 | `reminders.create` | `reminders_create` |
 
 **Правила маппинга (нормативно):**
-- Маппинг — единственный источник истины для соответствия имён; набор tools фиксирован (8 шт.), поэтому маппинг — статическая таблица (двунаправленный dict), а не «слепое» преобразование строк на лету. Обратный маппинг (`anthropic-name → domain-name`) валидирует, что Claude вернул известный tool; неизвестное имя → ошибка обработки tool_use (трактуется как upstream-аномалия, не доходит до iOS).
+- Маппинг — единственный источник истины для соответствия имён; набор tools фиксирован (по одной паре на каждый инструмент реестра — состав и число см. [§GET /v1/tools](#get-v1tools--каталог-инструментов-adr-019), раздел-первоисточник; таблица выше показывает только client-side пары, server-side `site.*`/`time.now`/`quiz.generate` маппятся тем же правилом `.`→`_`), поэтому маппинг — статическая таблица (двунаправленный dict), а не «слепое» преобразование строк на лету. Обратный маппинг (`anthropic-name → domain-name`) валидирует, что Claude вернул известный tool; неизвестное имя → ошибка обработки tool_use (трактуется как upstream-аномалия, не доходит до iOS).
 - При **сборке запроса** к Anthropic (`messages.create`, поле `tools[].name`) backend подставляет **anthropic-name**.
 - При **парсинге ответа** Claude (`content` block `type=tool_use`, поле `name`) backend применяет **обратный маппинг** → доменное имя. Наружу — в `toolCall.name` ответов `/v1/chat/run` и `/v1/chat/tool-result`, а также в `tool_calls.tool_name` (БД/audit) — идёт **только доменный формат с точкой**.
 - Строгая типизация args/result привязана к **доменным именам** (таблица схем ниже не меняется). Anthropic-имена — исключительно транспортная деталь слоя Anthropic-клиента и нигде, кроме поля `tools[].name`/`tool_use.name` протокола Anthropic, не фигурируют.
@@ -293,7 +477,7 @@ Backend только инициирует tool-call; исполняет клие
 - **Семантика диапазона — end-exclusive:** интервал `[start, end)` — `start` включительно, `end` исключительно. «Весь день D» = `start="D T00:00:00"`, `end="D+1 T00:00:00"` (полночь следующего дня), а **не** `end="D T23:59:59"` ([ADR-027 §Decision 5](../../adr/ADR-027-calendar-read-contract-alignment.md)). Это даёт достижимость диапазона по времени внутри дня (например 09:00–18:00) и однозначность смежных дней.
 - **Валидация формата — НЕ серверная:** `start`/`end` — простой `str` в Pydantic-схеме (без datetime-валидации), **симметрично для read и create** ([ADR-027 §Decision 3](../../adr/ADR-027-calendar-read-contract-alignment.md)). Формат доводится до модели через `TOOL_DESCRIPTIONS` (см. ниже), фактический парсинг datetime — на стороне iOS (EventKit), как и подобает client-side tool ([ADR-011](../../adr/ADR-011-server-side-tools.md)).
 - **Описание для модели (`TOOL_DESCRIPTIONS`) — самодостаточно по формату.** Описания `calendar.read` и `calendar.create_events` обязаны явно указывать ISO8601-datetime-формат `start`/`end` (local, no offset, пример `"2026-06-11T09:00:00"`) и end-exclusive-конвенцию «весь день», чтобы модель генерировала datetime, а не date-only. **Корень устранённого бага:** ранее формат жил только в docs и не доходил до модели — модель генерировала date-only ([ADR-027 §Context](../../adr/ADR-027-calendar-read-contract-alignment.md)).
-- **Breaking change iOS-контракта `calendar.read`** ([ADR-027 §Consequences](../../adr/ADR-027-calendar-read-contract-alignment.md)): iOS-клиент обязан читать args `start`/`end` (не `startDate`/`endDate`) и трактовать значения как datetime. Требуется скоординированный релиз iOS. Каталог `/v1/tools` остаётся 14 инструментов — меняется только `inputSchema` записи `calendar.read` (генерируется из `_ARGS_BY_TOOL`). BUG-3 name-map (имена инструментов) не затрагивается — меняются имена **аргументов**, не имя tool.
+- **Breaking change iOS-контракта `calendar.read`** ([ADR-027 §Consequences](../../adr/ADR-027-calendar-read-contract-alignment.md)): iOS-клиент обязан читать args `start`/`end` (не `startDate`/`endDate`) и трактовать значения как datetime. Требуется скоординированный релиз iOS. **Состав** каталога `/v1/tools` этим изменением не затрагивается — меняется только `inputSchema` записи `calendar.read` (генерируется из `_ARGS_BY_TOOL`); число записей каталога здесь не фиксируется, актуальное значение — [§GET /v1/tools](#get-v1tools--каталог-инструментов-adr-019) (раздел-первоисточник). BUG-3 name-map (имена инструментов) не затрагивается — меняются имена **аргументов**, не имя tool.
 - **Исторические сессии:** старые `chat_steps`/`tool_calls` хранят прежние `startDate`/`endDate`-вызовы как есть; нормализация истории ([ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)) не переписывает `tool_use.input`. Миграция не требуется ([Q-027-2](../../99-open-questions.md)).
 
 ### blockReason enum (повтор для удобства)
@@ -302,7 +486,7 @@ Backend только инициирует tool-call; исполняет клие
 ---
 
 ## GET /v1/tools — каталог инструментов ([ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md))
-Машиночитаемый каталог всех поддерживаемых backend tools (**14**, включая `time.now`, [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)). Источник — `src/app/chat/tools.py` (single source of truth: `_ARGS_BY_TOOL`, `MUTATING_TOOLS`, `SERVER_SIDE_TOOLS`, `GLOBAL_SERVER_SIDE_TOOLS`, `anthropic_tool_definitions()`). Эндпоинт **не** параметризуется ни `assistantMode`, ни наличием проекта — возвращает полный технический реестр backend (включая `site.*` и `time.now`). Runtime-фильтрация tool-набора, предлагаемого Claude (гейтинг `site.*` по наличию `project_id`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md); фильтрация по режиму, [Q-012-1](../../99-open-questions.md)), — concern tool-loop'а, а не каталога. `time.now` предлагается всегда и в каталоге всегда присутствует.
+Машиночитаемый каталог всех поддерживаемых backend tools (**15**, включая `time.now` [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md) и `quiz.generate` [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)). Источник — `src/app/chat/tools.py` (single source of truth: `_ARGS_BY_TOOL`, `MUTATING_TOOLS`, `SERVER_SIDE_TOOLS`, `GLOBAL_SERVER_SIDE_TOOLS`, `TOOL_GENERATION_MODES`, `anthropic_tool_definitions()`). Эндпоинт **не** параметризуется ни `assistantMode`, ни наличием проекта, ни `generationMode` — возвращает полный технический реестр backend (включая `site.*`, `time.now` и `quiz.generate`). Runtime-фильтрация tool-набора, предлагаемого модели (ось A — `project_id`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md); ось B — `assistantMode`, [Q-012-1](../../99-open-questions.md); ось C — режим генерации, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)), — concern tool-loop'а, а не каталога. Поэтому `quiz.generate` присутствует в каталоге **всегда**, хотя предлагается модели только в режиме `study_learn`.
 
 ### Auth
 - **JWT-protected** (как все `/v1/*`, кроме `/v1/preview/*`): `Authorization: Bearer <JWT>` обязателен. Каталог не секретен, но единообразие gateway-auth и снижение анонимного API-surface — обоснование в [ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md). Клиент к этому моменту уже имеет JWT (получен через `/v1/auth/register`, [ADR-018](../../adr/ADR-018-embedded-auth-issuer.md)).
@@ -333,10 +517,14 @@ Backend только инициирует tool-call; исполняет клие
 - `description` — из `descriptions` в `anthropic_tool_definitions()`.
 - `mutating` — `name ∈ MUTATING_TOOLS` (требует audit при исполнении).
 - `execution` — `"server"` если `name ∈ SERVER_SIDE_TOOLS ∪ GLOBAL_SERVER_SIDE_TOOLS` (`site.*` — [ADR-011](../../adr/ADR-011-server-side-tools.md); `time.now` — [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md); исполняет backend); иначе `"client"` (исполняет iOS).
-- `inputSchema` — JSON Schema args (`_ARGS_BY_TOOL[name].model_json_schema()`).
+<a id="inputschema--нормативный-формат"></a>
+- **`inputSchema` — JSON Schema аргументов инструмента (нормативно).** Строится из `model_json_schema()` модели args, из которой **вырезана модельная метаинформация**: корневые `title` (= имя Python-класса) и `description` (= docstring класса), а у инструментов с self-contained-схемой ([§`quiz.generate`](#quizgenerate--server-side-global-tool-режимный-adr-064)) — те же два ключа и у **инлайненных** определений вложенных моделей. **Сохраняются:** пофилдовые `title`/`description` (из `Field(...)`), `type`/`properties`/`items`/`required`/`enum`/`additionalProperties` и ограничивающие ключи (`minItems`/`maxItems`/`maxLength`/…). Формат **не** определяется как «сырой вывод `model_json_schema()`»: равенство сырому выводу нарушало бы инвариант ниже.
+  - **Инвариант «внутренние идентификаторы не покидают процесс» (нормативно, шире этого поля).** Ни один артефакт, уходящий наружу — `inputSchema` в `GET /v1/tools`, `description` записи каталога (`TOOL_DESCRIPTIONS`), `input_schema`/`parameters` и `description`, уходящие **провайдеру** — не должен содержать внутренних идентификаторов разработки: ссылок `ADR-NNN`/`TD-NNN`/`Q-NNN-N`/`BUG-N`, имён внутренних классов (`*Args`, `GlobalToolHandlers`, `SiteToolHandlers`), имён внутренних констант/реестров (`MAX_SERVER_TOOL_ROUNDS`, `_ARGS_BY_TOOL`). Это та же норма, что [08-api-documentation.md §R2ter](../../08-api-documentation.md) предъявляет к user-facing текстам OpenAPI, распространённая на **вторую** поверхность утечки — tool-контракт: docstring внутренней модели, попавший в схему, уезжает и клиенту, и в промпт модели.
+  - **Способ соблюдения — вырезание на границе, а не дисциплина docstring'ов.** Требование адресовано **генератору схемы** (одна точка, `tool_input_schema`), а не авторам моделей: правило «не писать ADR-ссылок в docstring» не проверяемо и ломается первым же новым инструментом. Docstring'и внутренних моделей остаются нормальной внутренней документацией.
+  - **Покрытие — тест-детектор, а не ревью глазами:** скан **всех** записей каталога и **всех** определений, уходящих провайдеру, регуляркой на перечисленные классы идентификаторов → ноль совпадений; плюс проверка, что пофилдовые описания при этом **не** пусты (вырезание не должно выкосить полезную часть). См. [09-testing.md](09-testing.md#unit--каталог-инструментов-и-утечка-внутренних-идентификаторов).
 - Порядок — детерминированный (по `_ARGS_BY_TOOL`).
 
-### Полный список (14)
+### Полный список (15)
 | name | execution | mutating |
 |---|---|---|
 | files.read | client | нет |
@@ -353,8 +541,9 @@ Backend только инициирует tool-call; исполняет клие
 | site.read | **server** | нет |
 | site.delete | **server** | **да** |
 | time.now | **server** (global, [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)) | нет |
+| quiz.generate | **server** (global, режимный, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) | нет |
 
-> `time.now` — единственный **global** server-side tool ([ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)): `execution=server`, но в отличие от `site.*` **не требует проекта** и предлагается Claude всегда. domain↔anthropic: `time.now ↔ time_now`.
+> **Global server-side tools** (`time.now`, `quiz.generate`): `execution=server`, но в отличие от `site.*` **не требуют проекта**. Предложение модели внутри класса различается: `time.now` — всегда; `quiz.generate` — только при `generationMode=study_learn` (ось C). domain↔anthropic: `time.now ↔ time_now`, `quiz.generate ↔ quiz_generate`.
 
 **Коды:** `200`; `401` нет/невалидный JWT; `429` rate-limit.
 
@@ -384,7 +573,7 @@ Backend только инициирует tool-call; исполняет клие
 
 ## GET /v1/presets — пресеты промтов ([ADR-035](../../adr/ADR-035-prompt-presets-endpoint.md))
 
-Источник для чипов-пресетов на главном экране чата iOS (экран 4). Тап по чипу подставляет `prompt` в композер. Набор и тексты меняются деплоем backend **без релиза iOS-приложения**. Провайдер/инстанс-агностично: идентичный ответ на всех 3 инстансах. Источник — статический реестр в коде (`src/app/chat/presets.py`, single source of truth, по образцу [`GET /v1/tools`](#get-v1tools--каталог-инструментов-adr-019)).
+Источник для чипов-пресетов на главном экране чата iOS (экран 4). Тап по чипу подставляет `prompt` в композер. Набор и тексты меняются деплоем backend **без релиза iOS-приложения**. Провайдер/инстанс-агностично: идентичный ответ на всех действующих инстансах. Источник — статический реестр в коде (`src/app/chat/presets.py`, single source of truth, по образцу [`GET /v1/tools`](#get-v1tools--каталог-инструментов-adr-019)).
 
 ### Auth
 - **JWT-protected** (как `GET /v1/tools`/`GET /v1/models`): `Authorization: Bearer <JWT>` обязателен. Каталог не секретен, контур авторизации единый. Per-user rate-limit как у прочих read-эндпоинтов (`enforce_other_limits`). Метод `GET` (read-only, без побочных эффектов: не создаёт сессию, не пишет ledger/audit).

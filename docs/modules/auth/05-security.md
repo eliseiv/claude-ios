@@ -19,7 +19,7 @@
 - `.env` в `.gitignore`; в prod — секрет-менеджер ([Q-002-1](../../99-open-questions.md) дефолт).
 
 ## Issuer / audience (self-consistent)
-- `JWT_ISSUER = https://broadnova.shop` (= `SERVICE_DOMAIN`, [Q-017-1](../../99-open-questions.md)).
+- `JWT_ISSUER = https://<SERVICE_DOMAIN этого инстанса>` — **per-instance**, всегда совпадает с `SERVICE_DOMAIN` из реестра [07-deployment.md §CI/CD INSTANCES-loop](../../07-deployment.md#cicd-контракт-instances-loop-мульти-инстанс) (для первого инстанса значение закрыто [Q-017-1](../../99-open-questions.md)).
 - `JWT_AUDIENCE = claude-ios`.
 - Verifier проверяет `iss`/`aud` против тех же значений (тот же config) — токен, выпущенный backend'ом, проходит собственную верификацию.
 
