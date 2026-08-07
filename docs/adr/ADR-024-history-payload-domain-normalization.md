@@ -3,6 +3,7 @@
 - Статус: Accepted
 - Дата: 2026-06-10
 - Связан с: [ADR-008](ADR-008-provider-tool-use-id.md) (provider `tool_use.id` vs доменный `toolCall.id`; dot↔underscore имена / BUG-3/BUG-4), [ADR-021](ADR-021-deterministic-step-order-and-block-normalization.md) (нормализация блоков **перед персистом**, порядок `seq`), [ADR-023](ADR-023-sync-ids-in-chat-response.md) (`messageStepId`/`stepId` в `ChatResponse`), [ADR-011](ADR-011-server-side-tools.md) (server-side tool-loop), [modules/chats/02-api-contracts.md](../modules/chats/02-api-contracts.md), [modules/chat-orchestrator/02-api-contracts.md](../modules/chat-orchestrator/02-api-contracts.md), [modules/chat-orchestrator/04-data-model.md](../modules/chat-orchestrator/04-data-model.md)
+- **Пересмотр 2026-08-07 → [ADR-064 §7](ADR-064-study-learn-quiz-generation-mode.md):** правило §Decision п.3 «сопутствующий текст assistant-шага пробрасывается в `ChatResponse.assistantMessage`» **частично переопределено** — на ходе с непустым `ChatResponse.quiz` (режим `study_learn`) `assistantMessage` принудительно `null` (детерминированная защита от дубля вопросов и спойлера ответа). Переопределение действует **только** при непустом `quiz`; все прочие ходы (включая весь legacy `/v1/chat/run`) и хранение/отдача истории `GET /v1/chats/{id}` — без изменений. Тело §Decision п.3 не переписано (immutability); актуальное правило для квиз-хода — в [ADR-064 §7](ADR-064-study-learn-quiz-generation-mode.md).
 
 ## Context
 

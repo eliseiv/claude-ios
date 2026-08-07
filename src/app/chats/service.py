@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from app.chat.tools import UnknownToolNameError, to_domain_tool_name
+from app.chat.tools import TOOL_QUIZ_GENERATE, UnknownToolNameError, to_domain_tool_name
 from app.chats.cursor import ChatCursor, InvalidCursorError
 from app.chats.provider_blocks import to_domain_blocks
 from app.chats.repository import ChatsRepository, strip_context_block
@@ -156,6 +156,8 @@ class ChatsService:
         # query, no N+1). Every tool_use/tool_result block of every step resolves its public id
         # through this map; provider ids (toolu_...) never surface in the history response.
         provider_to_domain = await self._repo.provider_id_to_domain_id(session_id)
+        # ADR-065 §2: turns whose assistant text must not be served (see _quiz_turn_ids).
+        quiz_turns = self._quiz_turn_ids(steps)
         return ChatHistoryView(
             id=session.id,
             title=session.title,
@@ -166,7 +168,7 @@ class ChatsService:
                     id=step.id,
                     message_step_id=step.message_step_id,
                     role=step.role,
-                    payload=self._normalize_payload(step, provider_to_domain),
+                    payload=self._normalize_payload(step, provider_to_domain, quiz_turns),
                     usage=step.usage,
                     created_at=step.created_at,
                 )
@@ -175,8 +177,29 @@ class ChatsService:
         )
 
     @staticmethod
+    def _quiz_turn_ids(steps: list[ChatStep]) -> set[uuid.UUID]:
+        """Ids of the turns that produced a valid quiz pool (ADR-065 §2).
+
+        A turn qualifies when it has a tool step with ``toolName == "quiz.generate"`` and a
+        NON-EMPTY ``result`` — an errored quiz round (``result`` null, ``error`` set) is not a quiz
+        and must not suppress anything.
+
+        Cost is zero extra queries: this is one pass over the steps ALREADY loaded for the response,
+        so there is no N+1 and no second round-trip.
+        """
+        return {
+            step.message_step_id
+            for step in steps
+            if step.role == "tool"
+            and step.payload.get("toolName") == TOOL_QUIZ_GENERATE
+            and step.payload.get("result")
+        }
+
+    @staticmethod
     def _normalize_payload(
-        step: ChatStep, provider_to_domain: dict[str, uuid.UUID]
+        step: ChatStep,
+        provider_to_domain: dict[str, uuid.UUID],
+        quiz_turns: set[uuid.UUID] | None = None,
     ) -> dict[str, Any]:
         """Normalize a step's stored wire payload to the domain view for the history response.
 
@@ -210,6 +233,25 @@ class ChatsService:
         # stored payload stays wire-valid for replay. assistant/tool steps carry no block → skip.
         if step.role == "user":
             ChatsService._strip_leading_context_block(content)
+        # ADR-065 §2: an assistant step of a QUIZ turn loses ALL its text blocks. The live response
+        # already suppresses that text (assistantMessage = null when quiz is non-empty, ADR-064 §7),
+        # but history served it unfiltered — so the routine mobile path «OS evicts the app
+        # mid-quiz → cold start → load history» handed the user the cards TOGETHER with the
+        # duplicated questions and the revealed answers. Same deep copy as everything else here:
+        # storage and provider replay keep the full text.
+        # CONTRAST with the ADR-042 strip two lines above — do not merge them: that one cuts the
+        # LEADING block of a USER step by its SYNTAX; this one cuts ALL text blocks of ASSISTANT
+        # steps and is triggered by a NEIGHBOURING step of the turn (a valid quiz exists), not by
+        # the block's content. Neither rule works in the other's place: a syntax match would not
+        # catch a spoiler (it is ordinary prose), and cutting «all text of the turn» in the
+        # settings case would destroy the user's own message.
+        if step.role == "assistant" and quiz_turns and step.message_step_id in quiz_turns:
+            content = [
+                block
+                for block in content
+                if not (isinstance(block, dict) and block.get("type") == "text")
+            ]
+            payload["content"] = content
         for block in content:
             if not isinstance(block, dict):
                 continue
@@ -286,6 +328,10 @@ class ChatsService:
         if not steps:
             raise NotFoundError("message step not found")
         tool_calls = await self._repo.tool_calls_for_message(session_id, target)
+        # ADR-065 §2: on a quiz turn the assistant summary is NOT built from the step text —
+        # otherwise the spoiler would come back through steps-view, bypassing the history strip.
+        # Computed from the steps of THIS turn, already loaded above (no extra query).
+        is_quiz_turn = bool(self._quiz_turn_ids(steps))
         # Map raw provider tool_use.id → domain tool name so assistant tool_use blocks (which
         # carry the raw anthropic name/id) resolve to the public dotted name without exposing
         # the raw id (ADR-008).
@@ -293,7 +339,9 @@ class ChatsService:
 
         view_steps: list[StepsViewStep] = []
         for step in steps:
-            view_steps.extend(self._render_step(step, tool_calls, by_provider_id))
+            view_steps.extend(
+                self._render_step(step, tool_calls, by_provider_id, is_quiz_turn=is_quiz_turn)
+            )
         return StepsView(
             message_step_id=target,
             step_count=len(view_steps),
@@ -305,18 +353,24 @@ class ChatsService:
         step: ChatStep,
         tool_calls: dict[uuid.UUID, ToolCall],
         by_provider_id: dict[str, ToolCall],
+        *,
+        is_quiz_turn: bool = False,
     ) -> list[StepsViewStep]:
         """Flatten one chat_step into UI steps (reasoning/tool_call/tool_result/assistant_message).
 
         Never emits secrets or raw provider tool_use.id — only domain tool names (with a dot)
         and short human summaries (ADR-008, chats/06-rbac).
+
+        ADR-065 §2: on a quiz turn (``is_quiz_turn``) the assistant summary is not derived from the
+        step's text, so the spoiler cannot re-enter through this view. The presence of the steps and
+        their ``kind`` are unchanged.
         """
         out: list[StepsViewStep] = []
         if step.role == "assistant":
             # ADR-058: provider-agnostic view of the assistant content (OpenAI stores its message).
             content = to_domain_blocks(step.payload.get("content"))
             has_tool_use = any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content)
-            summary = _text_summary(step.payload)
+            summary = "" if is_quiz_turn else _text_summary(step.payload)
             if summary:
                 out.append(
                     StepsViewStep(

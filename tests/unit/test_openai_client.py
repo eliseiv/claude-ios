@@ -500,6 +500,28 @@ async def test_responses_reasoning_sends_effort_and_parses_reasoning_tokens() ->
 
 
 @pytest.mark.asyncio
+async def test_responses_study_learn_adds_no_provider_knob_and_forwards_quiz_tool() -> None:
+    # ADR-064 §3 / 10-generation-modes-implementation §7: `study_learn` is, by request parameters,
+    # an ordinary Responses call — no hosted web search, no reasoning effort. The mode whitelist of
+    # the client lists all four modes; the difference lives in the orchestrator's tool-set/prompt.
+    client, fake = _client_with_responses_fake()
+    fake.responses.next_response = _response(text="explained")
+
+    await client.create_message(
+        system_prompt="s",
+        messages=[NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "q"}])],
+        tools=neutral_tool_definitions(include_server_side=False, generation_mode="study_learn"),
+        attachments=None,
+        generation_mode="study_learn",
+    )
+
+    sent = fake.responses.calls[0]
+    assert {"type": "web_search"} not in sent["tools"]
+    assert sent["reasoning"] is openai.NOT_GIVEN
+    assert any(t.get("name") == "quiz_generate" for t in sent["tools"])
+
+
+@pytest.mark.asyncio
 async def test_responses_function_call_maps_to_domain_tool_use() -> None:
     client, fake = _client_with_responses_fake()
     fake.responses.next_response = _response(

@@ -220,6 +220,10 @@ class ChatRepository:
         pending tool-use turn, it must reuse the exact mode chosen by the original
         ``/v1/chat/v2/run`` request so provider options and wallet billing stay stable across the
         whole message step.
+
+        The accepted set MUST list ALL four modes (ADR-064 §12). A mode missing here degrades
+        SILENTLY to ``general``: nothing raises, but the continuation of a quiz turn loses BOTH its
+        price AND ``quiz.generate`` from the offered tool-set (axis C is computed from this value).
         """
         value = await self._session.scalar(
             select(ChatStep.payload["generationMode"].astext)
@@ -233,9 +237,41 @@ class ChatRepository:
         )
         return (
             value
-            if isinstance(value, str) and value in {"general", "research", "reasoning"}
+            if isinstance(value, str)
+            and value in {"general", "research", "reasoning", "study_learn"}
             else "general"
         )
+
+    async def last_tool_result_for_message_step(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID, tool_name: str
+    ) -> dict[str, Any] | None:
+        """Last non-empty ``result`` of ``tool_name`` within ONE turn (``message_step_id``).
+
+        Turn-scoped fallback producer for ``ChatResponse.quiz`` (ADR-064 §7): when the accumulator
+        of the CURRENT call is empty, the pool of the TURN is recovered from its tool steps, so
+        every leg of the turn (continuation, idempotent replay, ``blocked+max_tokens``) carries the
+        same pool and the ``assistantMessage`` suppression keyed on it never silently lapses.
+
+        Ordered by ``seq`` DESC (last wins, ADR-021 insertion order). ``payload->>'result'`` is SQL
+        NULL both for a missing key and for a JSON ``null``, so the filter means «has a real
+        result» — an errored quiz round (``error`` set, ``result`` null) is never returned.
+
+        The caller MUST gate this read by the effective turn mode: outside quiz turns (all other
+        modes and the whole legacy path) it is not executed at all.
+        """
+        value = await self._session.scalar(
+            select(ChatStep.payload["result"])
+            .where(
+                ChatStep.session_id == session_id,
+                ChatStep.message_step_id == message_step_id,
+                ChatStep.role == "tool",
+                ChatStep.payload["toolName"].astext == tool_name,
+                ChatStep.payload["result"].astext.isnot(None),
+            )
+            .order_by(ChatStep.seq.desc())
+            .limit(1)
+        )
+        return value if isinstance(value, dict) else None
 
     async def create_tool_call(
         self,

@@ -360,9 +360,12 @@ class FakeAnthropicClient:
         # tests can assert create_message(model=<session.model>) (None → client uses its default).
         model = kwargs.get("model")
         generation_mode = kwargs.get("generation_mode", "general")
+        # Mirror the REAL clients' whitelist, which lists all four modes (ADR-064): a fake that
+        # collapsed `study_learn` to `general` would record a mode the production client never
+        # records and would silently invalidate every mode assertion on calls[*].
         generation_mode = (
             generation_mode
-            if generation_mode in {"general", "research", "reasoning"}
+            if generation_mode in {"general", "research", "reasoning", "study_learn"}
             else "general"
         )
         provider_state = kwargs.get("provider_state")

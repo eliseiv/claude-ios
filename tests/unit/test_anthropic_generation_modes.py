@@ -116,6 +116,27 @@ def test_anthropic_usage_parses_thinking_and_web_search_counts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_study_learn_generation_mode_adds_no_provider_knob() -> None:
+    # ADR-064 §3 / 10-generation-modes-implementation §7: by request parameters `study_learn` IS
+    # `general` — no hosted web search, no thinking budget. Its whole difference (tool-set + system
+    # suffix) lives one layer up, in the orchestrator. The client whitelist lists all four modes.
+    client, fake = _client_with_fake_sdk()
+
+    await client.create_message(
+        system_prompt="s",
+        messages=[NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "q"}])],
+        tools=neutral_tool_definitions(include_server_side=False, generation_mode="study_learn"),
+        generation_mode="study_learn",
+    )
+
+    sent = fake.messages.calls[0]
+    assert "extra_body" not in sent  # identical to the `general` call shape below
+    assert all(t.get("name") != "web_search" for t in sent["tools"])
+    # The mode-gated tool the orchestrator selected is forwarded verbatim (wire underscore name).
+    assert any(t["name"] == "quiz_generate" for t in sent["tools"])
+
+
+@pytest.mark.asyncio
 async def test_general_generation_mode_sends_plain_messages_call() -> None:
     client, fake = _client_with_fake_sdk()
 

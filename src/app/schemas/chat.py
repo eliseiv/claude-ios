@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import Field, model_validator
 
+from app.chat.tools import Quiz, QuizQuestion
 from app.config import get_settings
 from app.schemas.common import StrictModel
 
@@ -48,7 +49,19 @@ class AttachmentIn(StrictModel):
     )
 
 
-GenerationMode = Literal["general", "research", "reasoning"]
+GenerationMode = Literal["general", "research", "reasoning", "study_learn"]
+
+# Canonical order of generation modes — DERIVED from the Literal above so the two can never drift.
+# It is the order of `generationModes[]` in GET /v1/chat/v2/capabilities: new modes are appended to
+# the END of the Literal, existing positions never shift, and the advertisement allowlist
+# (ADR-065 §1.5) re-orders whatever the operator typed back into this order.
+GENERATION_MODE_ORDER: tuple[str, ...] = get_args(GenerationMode)
+# Mode used when the request omits the field; must always be advertised (ADR-065 §1.3).
+DEFAULT_GENERATION_MODE = "general"
+# Fail-closed default of the advertisement allowlist (ADR-065 §1.2): the modes that need no
+# dedicated client UI. `study_learn` requires a quiz renderer, so it is advertised only where an
+# instance opts in explicitly via CHAT_ADVERTISED_GENERATION_MODES.
+DEFAULT_ADVERTISED_GENERATION_MODES: tuple[str, ...] = ("general", "research", "reasoning")
 
 
 class ChatRunRequest(StrictModel):
@@ -178,9 +191,10 @@ class ChatV2RunRequest(ChatRunRequest):
         default="general",
         description=(
             "Режим генерации для ЭТОГО сообщения: `general` — обычный чат, `research` — чат с "
-            "web search, `reasoning` — чат с reasoning/thinking. Не фиксируется на сессию и может "
-            "меняться между сообщениями одного чата. Не путать с `mode` (`credits|byok`) и "
-            "`assistantMode` (`chat|code`)."
+            "web search, `reasoning` — чат с reasoning/thinking, `study_learn` — обучающий режим, "
+            "в котором ответ несёт квиз (поле `quiz`, при этом `assistantMessage` = `null`). "
+            "Не фиксируется на сессию и может меняться между сообщениями одного чата. Не путать "
+            "с `mode` (`credits|byok`) и `assistantMode` (`chat|code`)."
         ),
     )
 
@@ -311,7 +325,9 @@ class ToolCallSchema(StrictModel):
 
 
 class GenerationModeCapability(StrictModel):
-    mode: GenerationMode = Field(description="Режим генерации: `general`, `research`, `reasoning`.")
+    mode: GenerationMode = Field(
+        description="Режим генерации: `general`, `research`, `reasoning`, `study_learn`."
+    )
     creditCost: int = Field(
         description="Сколько внутренних кредитов списывается за финальный ответ в этом режиме."
     )
@@ -368,6 +384,37 @@ class ServerToolExecutionSchema(StrictModel):
     )
 
 
+# ADR-065 §5 — ONE declaration of the quiz question structure, reused rather than re-declared.
+# The wire model of `ChatResponse.quiz` IS the model the tool validates against
+# (`app.chat.tools.Quiz`/`QuizQuestion`), re-exported here under the names the API layer uses.
+# A second, independent declaration would drift silently and surface as a validation error on a
+# live user turn instead of at build time; reuse makes the drift impossible rather than detectable.
+# Both are strict (`extra='forbid'`) and carry the same bounds, so serialization cannot emit a pool
+# the validator would have rejected. The field-level meaning for API readers lives in the `quiz`
+# field description (`_QUIZ_DOC`) and the endpoint examples; the pool constraints (3-10 questions,
+# 2-10 options, per-field lengths) are in the schema itself.
+QuizQuestionSchema = QuizQuestion
+QuizSchema = Quiz
+
+
+_QUIZ_DOC = (
+    "Квиз режима `study_learn` — **содержимое ХОДА** (`messageStepId`), а не дельта отдельного "
+    "запроса.\n\n"
+    "- Поле присутствует всегда; `null` означает «квиза не было в этом **ходе**».\n"
+    "- Если квиз в ходе сформирован, он приходит во **всех** ответах этого хода: в ответе "
+    "`/v1/chat/v2/run`, в ответах последующих `/v1/chat/v2/tool-result` того же хода и при "
+    "повторе запроса уже завершённого хода. Один и тот же пул может прийти несколько раз — "
+    "клиент обязан **заменять** карточки, а не накапливать.\n"
+    "- **При непустом `quiz` поле `assistantMessage` = `null`** — при ЛЮБОМ статусе ответа, "
+    "включая `assistant_message` и `blocked` с `blockReason=max_tokens`. Это сделано намеренно: "
+    "иначе модель дублирует вопросы в тексте и раскрывает правильные ответы до того, как "
+    "пользователь ответил. Весь контент такого хода несёт `quiz.questions[]`.\n"
+    "- Проверка ответов — на клиенте; эндпоинта отправки ответов нет.\n"
+    "- На legacy `/v1/chat/run` поле всегда `null` (режимы генерации там не принимаются).\n"
+    "- Отдельной тарификации нет: цена хода = цена режима `study_learn`."
+)
+
+
 _BLOCK_REASON_DOC = (
     "Причина бизнес-блокировки (присутствует только при `status=blocked`). Значения:\n\n"
     "- `trial_used` — бесплатная пробная генерация использована, подписки нет. "
@@ -404,9 +451,13 @@ class ChatResponse(StrictModel):
     `messageStepId`/`stepId` присутствуют при `assistant_message`/`tool_call` и при
     `blocked`+`max_tokens`; `null` при policy-`blocked` (шаг/ход не создаются).
 
-    `serverTools` — server-side выполнения (`site.*`/`time.now`) этого вызова; всегда
-    присутствует (возможно `[]`). Пустой при policy-`blocked`; может быть НЕпустым при
+    `serverTools` — server-side выполнения (`site.*`/`time.now`/`quiz.generate`) этого вызова;
+    всегда присутствует (возможно `[]`). Пустой при policy-`blocked`; может быть НЕпустым при
     `blocked`+`max_tokens`.
+
+    `quiz` — пул вопросов режима `study_learn`, **содержимое хода** (`messageStepId`). Когда он
+    непуст, `assistantMessage` = `null` при любом статусе (исключение из правил выше). На legacy
+    `/v1/chat/run` `quiz` всегда `null`.
     """
 
     status: Literal["assistant_message", "tool_call", "blocked"] = Field(
@@ -435,7 +486,10 @@ class ChatResponse(StrictModel):
         description=(
             "Текст ответа ассистента. При `status=assistant_message` — финальный ответ. При "
             "`status=tool_call` — опционально текст того же шага, если модель выдала его вместе "
-            "с вызовом инструмента (иначе `null`). При `status=blocked` — `null`."
+            "с вызовом инструмента (иначе `null`). При `status=blocked` — `null` (кроме "
+            "`blockReason=max_tokens`, где приходит частичный текст оборванного хода). "
+            "**Исключение:** если поле `quiz` непусто, `assistantMessage` = `null` при ЛЮБОМ "
+            "статусе — весь контент такого хода несёт `quiz.questions[]` (см. описание `quiz`)."
         ),
     )
     toolCalls: list[ToolCallSchema] | None = Field(
@@ -460,10 +514,12 @@ class ChatResponse(StrictModel):
         default=None,
         description="Потребление токенов модели (при `assistant_message`/`tool_call`).",
     )
+    quiz: QuizSchema | None = Field(default=None, description=_QUIZ_DOC)
     serverTools: list[ServerToolExecutionSchema] = Field(
         default_factory=list,
         description=(
-            "Server-side инструменты (`site.*`, `time.now`), выполненные backend за ЭТОТ вызов "
+            "Server-side инструменты (`site.*`, `time.now`, `quiz.generate`), выполненные backend "
+            "за ЭТОТ вызов "
             "`/chat/run` (или один `/chat/tool-result`-continuation), в порядке выполнения. "
             "Присутствует всегда: пустой `[]` — server-side не выполнялись (в т.ч. "
             "policy-`blocked`, где tool-loop не запускался); при `blocked=max_tokens` может быть "

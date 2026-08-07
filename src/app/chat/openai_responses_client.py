@@ -505,9 +505,13 @@ class OpenAIResponsesClient(OpenAIClient):
         full-history Responses input reconstructed from local `chat_steps`.
         """
         model = model if model is not None else self._default_model
+        # The whitelist DECLARES the modes this client supports and must list all four (ADR-064).
+        # `study_learn` adds no provider knob (by request parameters it IS `general`); its whole
+        # difference lives in the tool-set and the system prompt on the orchestrator side. Relying
+        # on the silent fallback instead of listing it would mask an axis de-sync later.
         generation_mode = (
             generation_mode
-            if generation_mode in {"general", "research", "reasoning"}
+            if generation_mode in {"general", "research", "reasoning", "study_learn"}
             else "general"
         )
         client = self._client

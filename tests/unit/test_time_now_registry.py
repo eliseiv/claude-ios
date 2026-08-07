@@ -24,6 +24,7 @@ from app.chat.tools import (
     to_anthropic_tool_name,
     to_domain_tool_name,
 )
+from tests.tool_registry import TOOLS_OFFERED_IN_EVERY_MODE, TOOLS_OFFERED_WITHOUT_PROJECT
 
 
 def test_global_and_project_scoped_registries_are_disjoint() -> None:
@@ -46,9 +47,12 @@ def test_offer_set_without_project_includes_time_now_excludes_site() -> None:
     names = {to_domain_tool_name(d["name"]) for d in defs}
     assert TOOL_TIME_NOW in names
     assert names.isdisjoint(SERVER_SIDE_TOOLS)
-    # client-side tools remain offered; total = 8 client-side + time.now.
+    # client-side tools remain offered (axis A does not touch them).
     assert "files.read" in names
-    assert len(defs) == 9
+    # Composition + count against the REGISTRY, never a literal (06-testing-strategy.md §time.now).
+    # The default mode is `general`, so the mode-gated quiz.generate is out of this set.
+    assert names == set(TOOLS_OFFERED_WITHOUT_PROJECT)
+    assert len(defs) == len(TOOLS_OFFERED_WITHOUT_PROJECT)
 
 
 def test_offer_set_with_project_includes_both_time_now_and_site() -> None:
@@ -56,7 +60,8 @@ def test_offer_set_with_project_includes_both_time_now_and_site() -> None:
     names = {to_domain_tool_name(d["name"]) for d in defs}
     assert TOOL_TIME_NOW in names
     assert names >= SERVER_SIDE_TOOLS
-    assert len(defs) == 14
+    assert names == set(TOOLS_OFFERED_IN_EVERY_MODE)
+    assert len(defs) == len(TOOLS_OFFERED_IN_EVERY_MODE)
 
 
 def test_time_now_definition_carries_description_and_schema() -> None:

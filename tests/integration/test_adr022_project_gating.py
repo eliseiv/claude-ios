@@ -5,7 +5,8 @@ follow_up scenarios):
 1. Contract: /chat/run without projectId creates a session (project_id NULL) and answers normally;
    blank projectId → 422 and no session.
 2. Axis-A gating: no-project session → tools to Anthropic exclude site.* but keep client-side;
-   project session → full 13-tool set. Checked on both /chat/run and /chat/tool-result.
+   project session → the full axis-A set (the registry minus the mode-gated tools — the size is
+   taken from the registry, never spelled out here). Checked on /chat/run and /chat/tool-result.
 3. Resume session-fixed: session created with project A; resume body projectId=B → A is used
    (request field ignored, not an error); resume without projectId keeps site.* offered.
 4. Defensive-guard: fake Anthropic returns a site.* tool_use on a project-less session → 502
@@ -29,6 +30,7 @@ from app.chat.anthropic_client import AnthropicResult, AnthropicUsage
 from app.chat.tools import SERVER_SIDE_TOOLS, to_domain_tool_name
 from app.config import get_settings
 from tests.conftest import FakeAnthropicClient, auth_headers, seed_user
+from tests.tool_registry import TOOLS_OFFERED_IN_EVERY_MODE, TOOLS_OFFERED_WITHOUT_PROJECT
 
 
 # --- helpers -------------------------------------------------------------------------------
@@ -131,11 +133,13 @@ async def test_no_project_session_does_not_offer_site_tools_on_run(
     assert "reminders.read" in offered
     # ADR-026: time.now (global server-side) is offered even without a project.
     assert "time.now" in offered
-    assert len(offered) == 9  # 8 client-side + time.now
+    # Composition against the REGISTRY, not a literal count with a hand-written breakdown
+    # (06-testing-strategy.md §time.now: «ассерт — против реестра, не против литерала»).
+    assert offered == set(TOOLS_OFFERED_WITHOUT_PROJECT)
 
 
 @pytest.mark.asyncio
-async def test_project_session_offers_full_13_tools_on_run(
+async def test_project_session_offers_the_full_axis_a_set_on_run(
     client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     fake_anthropic: FakeAnthropicClient,
@@ -152,7 +156,9 @@ async def test_project_session_offers_full_13_tools_on_run(
     offered = _offered_domain_tools(fake_anthropic.calls[0])
     assert offered >= SERVER_SIDE_TOOLS  # site.* present
     assert "time.now" in offered  # ADR-026: global server-side, always offered
-    assert len(offered) == 14  # 8 client-side + 5 site.* + time.now
+    # The whole registry minus the mode-gated tools (ADR-064 axis C: legacy /chat/run forces
+    # `general`, so quiz.generate is never offered here) — derived, not a literal.
+    assert offered == set(TOOLS_OFFERED_IN_EVERY_MODE)
 
 
 @pytest.mark.asyncio

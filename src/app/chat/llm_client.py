@@ -222,7 +222,7 @@ def generation_llm_client_for(provider: str) -> LLMClient:
 
     Used by `/v1/chat/v2/*`, including BYOK calls. OpenAI routes to the Responses API-only client.
     Anthropic has no second API type in this backend, so it reuses the regular Messages client; the
-    orchestrator decides whether to pass `general`, `research` or `reasoning`.
+    orchestrator decides whether to pass `general`, `research`, `reasoning` or `study_learn`.
     """
     normalized = provider.strip().lower()
     if normalized == "openai":

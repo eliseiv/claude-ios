@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Body, Depends, Header, Request
 
@@ -19,12 +19,15 @@ from app.deps import (
 from app.errors import RateLimitedError
 from app.observability.context import set_session_id
 from app.schemas.chat import (
+    DEFAULT_GENERATION_MODE,
     ChatCapabilitiesResponse,
     ChatResponse,
     ChatRunRequest,
     ChatToolResultRequest,
     ChatV2RunRequest,
+    GenerationMode,
     GenerationModeCapability,
+    QuizSchema,
     ServerToolExecutionSchema,
     ToolCallSchema,
 )
@@ -197,6 +200,88 @@ _V2_RUN_REQUEST_EXAMPLES = {
             "generationMode": "reasoning",
         },
     },
+    "study_learn_mode": {
+        "summary": "V2: study_learn (квиз)",
+        "description": (
+            "Обучающий ход: ответ приходит с полем `quiz` (пул вопросов для карточек), а "
+            "`assistantMessage` при этом `null`. Режим выбирается на конкретный ход."
+        ),
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "sessionId": _SESSION_ID,
+            "message": "Объясни async/await в Swift и проверь меня.",
+            "mode": "credits",
+            "generationMode": "study_learn",
+        },
+    },
+}
+
+# Quiz pool shared by the v2 run and v2 tool-result examples: the SAME pool of the SAME turn comes
+# back on every leg (turn-scoped field), which is exactly what the two examples must demonstrate.
+_EXAMPLE_QUIZ = {
+    "questions": [
+        {
+            "question": "Что делает оператор `await` в Swift?",
+            "options": [
+                "Блокирует поток",
+                "Приостанавливает задачу до готовности результата",
+                "Создаёт новый поток",
+            ],
+            "correctIndex": 1,
+            "explanation": "`await` приостанавливает текущую задачу, не блокируя поток.",
+        },
+        {
+            "question": "Где можно вызывать `await`?",
+            "options": ["В любой функции", "Только в async-контексте"],
+            "correctIndex": 1,
+            "explanation": "`await` допустим только внутри `async`-функции или Task.",
+        },
+        {
+            "question": "Что помечает ключевое слово `async`?",
+            "options": [
+                "Функцию, которая может приостанавливаться",
+                "Функцию, которая всегда выполняется в фоне",
+            ],
+            "correctIndex": 0,
+            "explanation": "`async` помечает функцию, которая может приостановить выполнение.",
+        },
+    ]
+}
+
+_V2_RUN_RESPONSE_EXAMPLES = {
+    **_RUN_RESPONSE_EXAMPLES,
+    "study_learn_quiz": {
+        "summary": "Ответ с квизом (режим study_learn)",
+        "description": (
+            "Ход в режиме `study_learn`: содержимое ответа несёт `quiz.questions[]`, а "
+            "`assistantMessage` = `null` — иначе модель продублировала бы вопросы текстом и "
+            "раскрыла правильные ответы. Клиент рендерит карточки и проверяет ответы локально по "
+            "`correctIndex`; отправлять их назад не нужно. Тот же пул придёт во всех ответах "
+            "этого `messageStepId` — карточки заменяются, а не накапливаются."
+        ),
+        "value": {
+            "status": "assistant_message",
+            "sessionId": _SESSION_ID,
+            "messageStepId": _MESSAGE_STEP_ID,
+            "stepId": _STEP_ID_FINAL,
+            "assistantMessage": None,
+            "usage": {
+                "inputTokens": 1310,
+                "outputTokens": 540,
+                "generationMode": "study_learn",
+                "creditsCharged": 2,
+            },
+            "quiz": _EXAMPLE_QUIZ,
+            "serverTools": [
+                {
+                    "toolCallId": _TOOL_CALL_ID,
+                    "toolName": "quiz.generate",
+                    "status": "completed",
+                    "summary": "ok",
+                }
+            ],
+        },
+    },
 }
 
 _TOOL_RESULT_RESPONSE_EXAMPLES = {
@@ -239,6 +324,35 @@ _TOOL_RESULT_RESPONSE_EXAMPLES = {
                 "name": "files.write",
                 "args": {"path": "style.css", "content": "body{…}"},
             },
+        },
+    },
+}
+
+_V2_TOOL_RESULT_RESPONSE_EXAMPLES = {
+    **_TOOL_RESULT_RESPONSE_EXAMPLES,
+    "study_learn_quiz": {
+        "summary": "Continuation квиз-хода: тот же quiz",
+        "description": (
+            "Продолжение того же хода (`messageStepId` не менялся). Поле `quiz` — содержимое "
+            "ХОДА, а не дельта запроса: приходит тот же пул, что и в ответе `/v1/chat/v2/run`, "
+            "и `assistantMessage` так же `null`. Клиент заменяет карточки тем же содержимым — "
+            "трактовать поле как «новый квиз» нельзя. `serverTools` при этом относится только к "
+            "текущему вызову и может быть пустым."
+        ),
+        "value": {
+            "status": "assistant_message",
+            "sessionId": _SESSION_ID,
+            "messageStepId": _MESSAGE_STEP_ID,
+            "stepId": _STEP_ID_TOOL_RESULT_FINAL,
+            "assistantMessage": None,
+            "usage": {
+                "inputTokens": 1620,
+                "outputTokens": 180,
+                "generationMode": "study_learn",
+                "creditsCharged": 2,
+            },
+            "quiz": _EXAMPLE_QUIZ,
+            "serverTools": [],
         },
     },
 }
@@ -323,16 +437,31 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
         )
         for st in out.server_tools
     ]
+    # ADR-064 §7: the quiz pool of the TURN (turn-scoped — the orchestrator already resolved it for
+    # this leg, whether it was produced in this call or recovered from the turn's steps).
+    quiz = QuizSchema.model_validate(out.quiz) if out.quiz is not None else None
+    # ADR-064 §7, HARD half of the anti-spoiler guarantee — the single point where it is applied.
+    # Keyed on the PRESENCE OF A QUIZ, not on the endpoint, the status or the generation mode:
+    # - not on the mode, because a study_learn turn where the model produced NO quiz must still
+    #   return its text (otherwise the user gets nothing at all);
+    # - not on the status, because a truncated turn (blocked+max_tokens) would otherwise leak the
+    #   partial text with duplicated questions and revealed answers. Every OTHER max_tokens rule
+    #   (usage/messageStepId/stepId present, no debit) is untouched.
+    # Because the key is the quiz itself, this can never fire on a legacy turn (quiz is always null
+    # there), and non-quiz turns keep the ADR-024 п.3 behaviour verbatim.
+    # History is NOT rewritten: chat_steps keeps the assistant step with its text as-is.
+    assistant_message = None if quiz is not None else out.assistant_message
     return ChatResponse(
         status=out.status,
         sessionId=out.session_id,
         messageStepId=out.message_step_id,
         stepId=out.step_id,
-        assistantMessage=out.assistant_message,
+        assistantMessage=assistant_message,
         toolCalls=tool_calls,
         toolCall=tool_call,
         blockReason=out.block_reason,
         usage=out.usage,
+        quiz=quiz,
         serverTools=server_tools,
     )
 
@@ -342,34 +471,38 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
     response_model=ChatCapabilitiesResponse,
     summary="Получить доступные режимы генерации",
     description=(
-        "Возвращает режимы генерации, которые backend понимает в `generationMode`: `general`, "
-        "`research`, `reasoning`, плюс стоимость каждого режима в кредитах. Это backend contract "
-        "для UI single-select; конкретная подписка/баланс проверяются в `/v1/chat/v2/run`."
+        "Возвращает режимы генерации, которые ЭТОТ инстанс объявляет для UI-переключателя, плюс "
+        "стоимость каждого режима в кредитах. Состав списка настраивается на инстансе: режим, "
+        "который инстанс не объявляет, в массиве ОТСУТСТВУЕТ — читайте гейт как наличие/отсутствие "
+        "элемента, а не как значение `available`. Отсутствие режима в списке НЕ означает, что "
+        "`/v1/chat/v2/run` его не примет: это гейт объявления, а не поведения. Порядок элементов "
+        "фиксирован, новые режимы добавляются в конец — клиент обязан игнорировать неизвестные ему "
+        "значения `mode`. Подписка и баланс здесь не проверяются — это решает `/v1/chat/v2/run`."
     ),
 )
 async def chat_v2_capabilities(current: CurrentUser) -> ChatCapabilitiesResponse:
     _ = current  # endpoint is authenticated but does not need per-user state.
     settings = get_settings()
     provider = settings.llm_provider.strip().lower()
+    # ADR-065 §1: the ADVERTISED set, not «every mode the backend understands». A mode outside the
+    # instance allowlist is ABSENT from the array — deliberately not `available: false`, because the
+    # clients this protects are already-released binaries that may ignore that field. The list is
+    # already in canonical order and always contains `general` (= defaultGenerationMode).
+    # This does NOT gate behaviour: /v1/chat/v2/run accepts every mode on every instance.
+    # `available` is `true` for every element by construction — there is no producer of `false`
+    # (ADR-065 §1.8); the field is kept for compatibility and reserved for a future, separate
+    # «advertised but temporarily unavailable» decision.
     return ChatCapabilitiesResponse(
         provider=provider,
-        defaultGenerationMode="general",
+        defaultGenerationMode=DEFAULT_GENERATION_MODE,
         generationModes=[
             GenerationModeCapability(
-                mode="general",
-                creditCost=settings.chat_generation_credit_cost("general"),
+                mode=cast(GenerationMode, mode),
+                # Same single bridge as the balance gate and the debit — never a second price.
+                creditCost=settings.chat_generation_credit_cost(mode),
                 available=True,
-            ),
-            GenerationModeCapability(
-                mode="research",
-                creditCost=settings.chat_generation_credit_cost("research"),
-                available=True,
-            ),
-            GenerationModeCapability(
-                mode="reasoning",
-                creditCost=settings.chat_generation_credit_cost("reasoning"),
-                available=True,
-            ),
+            )
+            for mode in settings.advertised_generation_modes()
         ],
         reasoningLevel=settings.resolved_reasoning_level(),
     )
@@ -433,15 +566,16 @@ async def chat_run(
     response_model=ChatResponse,
     summary="Запустить шаг диалога через chat v2",
     description=(
-        "Новая provider-neutral ручка для режимов `general`, `research`, `reasoning`. "
-        "`generationMode` выбирается на каждый ход и может меняться внутри одной сессии. "
-        "OpenAI-ветка использует Responses API и `previous_response_id` там, где он сохранён; "
-        "Anthropic-ветка использует Messages API с hosted web search или extended thinking для "
-        "соответствующих режимов. Стоимость в credits зависит от режима. "
+        "Новая provider-neutral ручка для режимов `general`, `research`, `reasoning`, "
+        "`study_learn`. `generationMode` выбирается на каждый ход и может меняться внутри одной "
+        "сессии. OpenAI-ветка использует Responses API и `previous_response_id` там, где он "
+        "сохранён; Anthropic-ветка использует Messages API с hosted web search или extended "
+        "thinking для соответствующих режимов. В режиме `study_learn` ответ несёт пул вопросов в "
+        "поле `quiz`, а `assistantMessage` = `null`. Стоимость в credits зависит от режима. "
         "Tool-loop продолжается через `/v1/chat/v2/tool-result`."
     ),
     responses={
-        200: {"content": {"application/json": {"examples": _RUN_RESPONSE_EXAMPLES}}},
+        200: {"content": {"application/json": {"examples": _V2_RUN_RESPONSE_EXAMPLES}}},
         **_CHAT_RESPONSES,
     },
 )
@@ -533,10 +667,12 @@ async def chat_tool_result(
     description=(
         "V2 continuation для tool-loop, начатого через `/v1/chat/v2/run`. Режим генерации и "
         "стоимость восстанавливаются из исходного user-step этого хода, поэтому body не содержит "
-        "`generationMode`. Legacy tool-call продолжайте через `/v1/chat/tool-result`."
+        "`generationMode`. Ответ несёт `quiz` того же ХОДА — и когда пул сформирован на этом "
+        "витке, и когда он был выдан раньше в рамках того же `messageStepId`. "
+        "Legacy tool-call продолжайте через `/v1/chat/tool-result`."
     ),
     responses={
-        200: {"content": {"application/json": {"examples": _TOOL_RESULT_RESPONSE_EXAMPLES}}},
+        200: {"content": {"application/json": {"examples": _V2_TOOL_RESULT_RESPONSE_EXAMPLES}}},
         **_CHAT_RESPONSES,
     },
 )

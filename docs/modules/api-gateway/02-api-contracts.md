@@ -16,6 +16,9 @@ Gateway не добавляет собственных бизнес-endpoint, к
 | GET | /v1/auth/jwks | auth | [link](../auth/02-api-contracts.md) |
 | POST | /v1/chat/run | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md) |
 | POST | /v1/chat/tool-result | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md) |
+| POST | /v1/chat/v2/run | chat-orchestrator (режимы генерации; `study_learn` — [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) | [link](../chat-orchestrator/02-api-contracts.md#post-v1chatv2run) |
+| POST | /v1/chat/v2/tool-result | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#post-v1chatv2tool-result) |
+| GET | /v1/chat/v2/capabilities | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#get-v1chatv2capabilities) |
 | GET | /v1/tools | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019) |
 | GET | /v1/policy/effective | policy-engine | [link](../policy-engine/02-api-contracts.md) |
 | GET | /v1/wallet | wallet-ledger | [link](../wallet-ledger/02-api-contracts.md) |

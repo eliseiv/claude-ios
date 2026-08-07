@@ -2,8 +2,12 @@
 
 JWT-protected like all /v1/* reads. Uses the shared hermetic `client` (real PG container, faked
 external clients, rate limits forced open). Verifies the auth gate (401 without token) and the
-response contract (14 tools — ADR-026 added time.now; dotted domain names; mutating/execution
-flags; inputSchema present).
+response contract (dotted domain names; mutating/execution flags; inputSchema present) and full
+coverage of the tool registry. The catalog is the FULL technical registry and is not filtered by
+generationMode, so quiz.generate is listed here as well (02-api-contracts §GET /v1/tools).
+
+The number of entries is asserted **against the registry, never as a literal**
+(06-testing-strategy.md §time.now: «ассерт — против реестра, не против литерала»).
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.conftest import auth_headers, seed_user
+from tests.tool_registry import ALL_REGISTERED_TOOL_NAMES
 
 _EXPECTED_NAMES = {
     "files.read",
@@ -31,6 +36,7 @@ _EXPECTED_NAMES = {
     "site.read",
     "site.delete",
     "time.now",
+    "quiz.generate",
 }
 _MUTATING = {
     "files.write",
@@ -55,7 +61,7 @@ async def test_tools_broken_bearer_401(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tools_returns_fourteen_with_token(
+async def test_tools_returns_the_whole_registry_with_token(
     client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     async with db_sessionmaker() as s:
@@ -63,8 +69,10 @@ async def test_tools_returns_fourteen_with_token(
     r = await client.get("/v1/tools", headers=auth_headers(uid))
     assert r.status_code == 200, r.text
     tools = r.json()["tools"]
-    assert len(tools) == 14
-    assert {t["name"] for t in tools} == _EXPECTED_NAMES
+    # Composition against the doc-mirrored list AND the registry; the LIST length (not the set)
+    # additionally rules out a duplicated entry in the serialized response.
+    assert {t["name"] for t in tools} == _EXPECTED_NAMES == set(ALL_REGISTERED_TOOL_NAMES)
+    assert len(tools) == len(ALL_REGISTERED_TOOL_NAMES)
 
 
 @pytest.mark.asyncio
@@ -81,8 +89,13 @@ async def test_tools_descriptor_contract(
         assert "." in name and "_" not in name.split(".")[0]
         assert set(tool.keys()) == {"name", "description", "mutating", "execution", "inputSchema"}
         assert tool["mutating"] is (name in _MUTATING), name
-        # ADR-026: server-side == site.* (project-scoped) OR time.now (global); else client.
-        expected_exec = "server" if name.startswith("site.") or name == "time.now" else "client"
+        # ADR-026/ADR-064: server-side == site.* (project-scoped) OR the global time.now /
+        # quiz.generate; else client.
+        expected_exec = (
+            "server"
+            if name.startswith("site.") or name in {"time.now", "quiz.generate"}
+            else "client"
+        )
         assert tool["execution"] == expected_exec, (name, tool["execution"])
         assert isinstance(tool["inputSchema"], dict) and tool["inputSchema"].get("type") == "object"
         assert tool["description"]
@@ -96,4 +109,4 @@ async def test_tools_user_mismatch_in_token_still_serves_own_catalog(
     # token for an unprovisioned subject still gets a 200 (lazy provisioning, ADR-007).
     r = await client.get("/v1/tools", headers=auth_headers(uuid.uuid4()))
     assert r.status_code == 200
-    assert len(r.json()["tools"]) == 14
+    assert len(r.json()["tools"]) == len(ALL_REGISTERED_TOOL_NAMES)

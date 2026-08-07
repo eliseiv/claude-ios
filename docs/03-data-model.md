@@ -158,6 +158,8 @@ CREATE TABLE chat_sessions (
     assistant_mode       assistant_mode NOT NULL DEFAULT 'chat',  -- тип ассистента, ADR-012
     model                TEXT,           -- выбранная модель (provider-id из allowlist), NULLABLE с миграции 0010 (ADR-034): NULL = дефолтная модель инстанса (ANTHROPIC_MODEL/OPENAI_MODEL). Фиксируется при создании сессии, на resume берётся из сессии. Биллинг не зависит от модели (ADR-006).
     workspace_project_id UUID REFERENCES workspace_projects(id) ON DELETE SET NULL,  -- привязка к workspace, ADR-013/ADR-036, nullable; Поставка 3 (миграция 0011). До 0011 — колонки нет (workspaceProjectId в списке чатов = заглушка null).
+    provider_state       JSONB,          -- миграция 0016: непрозрачный continuation-handle провайдера для chat v2 (сейчас только OpenAI Responses: {"provider","responseId","model"}). NULL = состояния нет. Не история сообщений. modules/chat-orchestrator/10-generation-modes-implementation.md
+    generation_backend   TEXT,           -- миграция 0016: контракт сессии — NULL|'legacy' (роуты /v1/chat/*) либо 'v2' (роуты /v1/chat/v2/*). Защита от смешивания legacy/v2 continuation. Режим генерации (generationMode) здесь НЕ хранится — он per-turn, в chat_steps.payload (ADR-064).
     is_pinned            BOOLEAN NOT NULL DEFAULT FALSE,  -- закрепление в списке чатов
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()

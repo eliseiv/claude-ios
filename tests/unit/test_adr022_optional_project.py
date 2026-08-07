@@ -18,13 +18,19 @@ import pytest
 from pydantic import ValidationError
 
 from app.chat.tools import (
-    ALL_TOOL_NAMES,
     SERVER_SIDE_TOOLS,
     anthropic_tool_definitions,
     to_anthropic_tool_name,
     to_domain_tool_name,
 )
 from app.schemas.chat import ChatRunRequest
+from tests.tool_registry import TOOLS_OFFERED_IN_EVERY_MODE, TOOLS_OFFERED_WITHOUT_PROJECT
+
+# ADR-064 axis C: `quiz.generate` is mode-gated and is NOT offered in the default `general` mode
+# these axis-A tests exercise, so the axis-A set is the registry minus the mode-gated tools (size
+# taken from the registry, never spelled out). Axis C itself is covered in
+# tests/unit/test_study_learn_registry_adr064.py.
+_AXIS_A_NAMES = set(TOOLS_OFFERED_IN_EVERY_MODE)
 
 _UID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
@@ -54,16 +60,26 @@ def test_run_request_blank_project_id_rejected(blank: str) -> None:
 
 
 # ----------------------------- axis-A tool gating (scenario 2) -----------------------------
+def _definitions(*, include_server_side: bool) -> list[dict[str, object]]:
+    return anthropic_tool_definitions(include_server_side=include_server_side)
+
+
 def _domain_names(*, include_server_side: bool) -> set[str]:
-    defs = anthropic_tool_definitions(include_server_side=include_server_side)
     # definitions carry the anthropic wire (underscore) names — reverse-map to domain for asserts.
-    return {to_domain_tool_name(d["name"]) for d in defs}
+    return {
+        to_domain_tool_name(d["name"])
+        for d in _definitions(include_server_side=include_server_side)
+    }
 
 
-def test_definitions_with_project_include_full_set_of_14() -> None:
+def test_definitions_with_project_include_the_full_axis_a_set() -> None:
     names = _domain_names(include_server_side=True)
-    assert names == set(ALL_TOOL_NAMES)
-    assert len(names) == 14  # ADR-026: +time.now
+    # ADR-064 §3: the default generation mode is `general`, so the mode-gated quiz.generate is out;
+    # axis A leaves every other tool of the registry untouched.
+    assert names == _AXIS_A_NAMES
+    # Count against the registry, not a literal: the LIST length additionally rules out a
+    # duplicated definition, which the set comparison above would silently collapse.
+    assert len(_definitions(include_server_side=True)) == len(_AXIS_A_NAMES)
     # site.* present.
     assert names >= SERVER_SIDE_TOOLS
 
@@ -73,8 +89,8 @@ def test_definitions_without_project_exclude_site_tools() -> None:
     # No site.* at all.
     assert names.isdisjoint(SERVER_SIDE_TOOLS)
     # Exactly the complement of project-scoped site.* (ADR-026: time.now stays — global, not gated).
-    assert names == set(ALL_TOOL_NAMES) - set(SERVER_SIDE_TOOLS)
-    assert len(names) == 9  # 8 client-side + time.now (14 - 5 site.*)
+    assert names == set(TOOLS_OFFERED_WITHOUT_PROJECT) == _AXIS_A_NAMES - set(SERVER_SIDE_TOOLS)
+    assert len(_definitions(include_server_side=False)) == len(TOOLS_OFFERED_WITHOUT_PROJECT)
     assert "time.now" in names
 
 
@@ -90,10 +106,9 @@ def test_definitions_without_project_keep_all_client_side_tools() -> None:
 
 
 def test_default_include_server_side_is_true() -> None:
-    # Backwards-compatible default: omitting the flag keeps the full set (pre-ADR-022 behavior).
-    assert {to_domain_tool_name(d["name"]) for d in anthropic_tool_definitions()} == set(
-        ALL_TOOL_NAMES
-    )
+    # Backwards-compatible default: omitting the flag keeps the full axis-A set (pre-ADR-022
+    # behavior). ADR-064: the default generation mode `general` still excludes quiz.generate.
+    assert {to_domain_tool_name(d["name"]) for d in anthropic_tool_definitions()} == _AXIS_A_NAMES
 
 
 def test_emitted_names_are_wire_underscore_form() -> None:

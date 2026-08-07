@@ -2,7 +2,7 @@
 
 | Phase | Задача | Зависит от |
 |---|---|---|
-| CO-1 | Tool-схемы (Pydantic, 8 tools, args/result, `extra=forbid`). | — |
+| CO-1 | Tool-схемы (Pydantic, args/result, `extra=forbid`) — 8 client-side инструментов **в объёме этой фазы**; реестр с тех пор расширен (актуальный состав — [02-api-contracts.md §GET /v1/tools](02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019)). | — |
 | CO-2 | Anthropic client wrapper (messages API, prompt caching, tools definition, usage parsing). | CO-1, GW config |
 | CO-3 | Session/steps repository, реконструкция контекста из chat_steps. | DB schema |
 | CO-4 | `/chat/run`: Policy call → generate → status mapping → chat_steps + audit. | CO-2, CO-3, Policy Engine |

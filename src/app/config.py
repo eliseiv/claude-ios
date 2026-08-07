@@ -152,6 +152,18 @@ class Settings(BaseSettings):
     chat_credit_cost_general: int = Field(default=1, alias="CHAT_CREDIT_COST_GENERAL")
     chat_credit_cost_research: int = Field(default=3, alias="CHAT_CREDIT_COST_RESEARCH")
     chat_credit_cost_reasoning: int = Field(default=3, alias="CHAT_CREDIT_COST_REASONING")
+    # ADR-064 §9: study_learn sits between general (1) and research/reasoning (3) — the turn
+    # deterministically makes >=2 upstream calls and produces a bulky pool, but uses neither hosted
+    # web search nor a thinking budget. MUST stay inside _positive_chat_credit_cost below (a 0 or
+    # negative env would silently make the mode free: the balance gate passes, the debit takes 0).
+    chat_credit_cost_study_learn: int = Field(default=2, alias="CHAT_CREDIT_COST_STUDY_LEARN")
+    # ADR-065 §1: per-instance allowlist of generation modes this instance ADVERTISES in
+    # GET /v1/chat/v2/capabilities. Same shape of knob as ANTHROPIC_MODELS/OPENAI_MODELS (ADR-034):
+    # env controls what the CATALOG shows, never what the backend can do. Empty (the default) means
+    # «not configured» → the fail-closed default set, see advertised_generation_modes().
+    chat_advertised_generation_modes_raw: str = Field(
+        default="", alias="CHAT_ADVERTISED_GENERATION_MODES"
+    )
     # Server-side defaults for the single public "reasoning" mode. The app exposes only the mode;
     # these knobs let operators tune provider cost/quality without changing the mobile contract.
     chat_reasoning_level: str = Field(default="medium", alias="CHAT_REASONING_LEVEL")
@@ -613,10 +625,18 @@ class Settings(BaseSettings):
         "chat_credit_cost_general",
         "chat_credit_cost_research",
         "chat_credit_cost_reasoning",
+        "chat_credit_cost_study_learn",
     )
     @classmethod
     def _positive_chat_credit_cost(cls, value: int) -> int:
-        """Generation-mode prices must stay positive so wallet debits are always valid."""
+        """Generation-mode prices must stay positive so wallet debits are always valid.
+
+        EVERY ``CHAT_CREDIT_COST_*`` field belongs in THIS validator (ADR-064 §9): a price left out
+        of it fails silently — a ``0``/negative env raises no start-up error and no block, the
+        balance gate passes and the debit takes zero, so the mode quietly becomes free on that
+        instance. Adding a new generation-mode price without adding it here is the same class of
+        defect as «declared but not wired»: the field exists, the guard is not applied to it.
+        """
         return value if value > 0 else 1
 
     @field_validator("anthropic_thinking_budget_tokens")
@@ -629,16 +649,75 @@ class Settings(BaseSettings):
         """Return the wallet debit amount for one completed assistant turn.
 
         This is the single bridge between the public chat generation mode
-        (``general|research|reasoning``) and the existing integer-credit wallet. The value is used
-        both for the pre-generation balance gate and for the final idempotent debit, so a mode
-        cannot be allowed at one price and charged at another inside the same request.
+        (``general|research|reasoning|study_learn``) and the existing integer-credit wallet. The
+        value is used for the pre-generation balance gate, for the final idempotent debit AND for
+        ``creditCost`` in ``GET /v1/chat/v2/capabilities``, so a mode cannot be advertised at one
+        price, allowed at another and charged at a third. No second pricing mechanism exists
+        (ADR-064 §9). An unknown mode falls back to the ``general`` price.
         """
         normalized = generation_mode.strip().lower()
         if normalized == "research":
             return self.chat_credit_cost_research
         if normalized == "reasoning":
             return self.chat_credit_cost_reasoning
+        if normalized == "study_learn":
+            return self.chat_credit_cost_study_learn
         return self.chat_credit_cost_general
+
+    def advertised_generation_modes(self) -> tuple[str, ...]:
+        """Generation modes this instance ADVERTISES in GET /v1/chat/v2/capabilities (ADR-065 §1).
+
+        This is an ADVERTISEMENT gate, NOT a behaviour gate: ``POST /v1/chat/v2/run`` accepts every
+        mode the backend understands on EVERY instance regardless of this list. The list only
+        decides which elements appear in ``generationModes[]`` — a mode outside it is ABSENT from
+        the array rather than marked ``available: false``, because the hole this closes was opened
+        by ALREADY-RELEASED binaries whose handling of that field we do not control.
+
+        Parsing rules (all normative, ADR-065 §1.2-1.5):
+        - comma-separated, ``strip().lower()`` per entry;
+        - unknown values are IGNORED with a WARNING — never a startup crash (graceful config
+          parsing, same as ``resolved_presets_default_locale``/``allowed_models_for``);
+        - env unset / blank / entirely invalid → the FAIL-CLOSED default
+          ``general,research,reasoning``: the modes that need no dedicated UI. ``study_learn`` is
+          NOT advertised by default — an instance whose app can draw the quiz lists it explicitly.
+          The asymmetry is deliberate: mis-advertising costs the user 2 debited credits and an
+          empty screen, while under-advertising costs only a hidden feature;
+        - ``general`` is ALWAYS present, even when a non-empty env omits it, because
+          ``defaultGenerationMode`` must exist in the list;
+        - the result is in CANONICAL order (the declaration order of ``GenerationMode``), never the
+          order the operator typed, so a client may render the list as-is.
+
+        Pure (no I/O beyond logging); cached via ``get_settings()``'s lru_cache, so the WARNING
+        fires once per process.
+        """
+        from app.observability.logging import get_logger
+        from app.schemas.chat import (
+            DEFAULT_ADVERTISED_GENERATION_MODES,
+            DEFAULT_GENERATION_MODE,
+            GENERATION_MODE_ORDER,
+        )
+
+        selected: set[str] = set()
+        unknown: list[str] = []
+        for entry in self.chat_advertised_generation_modes_raw.split(","):
+            normalized = entry.strip().lower()
+            if not normalized:
+                continue
+            if normalized in GENERATION_MODE_ORDER:
+                selected.add(normalized)
+            else:
+                unknown.append(normalized)
+        if unknown:
+            get_logger("app.config").warning(
+                "CHAT_ADVERTISED_GENERATION_MODES contains unknown mode(s) %r; ignoring them",
+                unknown,
+            )
+        if not selected:
+            # Unset, blank, or entirely invalid → fail-closed default (never «everything»).
+            selected = set(DEFAULT_ADVERTISED_GENERATION_MODES)
+        # defaultGenerationMode must always be offered, otherwise the UI switcher has no default.
+        selected.add(DEFAULT_GENERATION_MODE)
+        return tuple(mode for mode in GENERATION_MODE_ORDER if mode in selected)
 
     def resolved_reasoning_level(self) -> str:
         """Provider-safe reasoning effort for the public ``generationMode=reasoning`` mode."""

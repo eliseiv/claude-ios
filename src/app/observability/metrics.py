@@ -55,6 +55,18 @@ preview_request_total = Counter(
     "Count of preview endpoint requests by result (ok | forbidden | not_found).",
     ["result"],
 )
+# quiz.generate outcomes (ADR-065 §3): bounded-enum label only, never quiz content.
+# Required rather than nice-to-have: quiz.generate is the first tool whose contract EXPECTS
+# failures and DESIGNS a retry, so a systematically malformed model burns up to
+# MAX_SERVER_TOOL_ROUNDS upstream calls per turn, ends the turn with an error and debits NO credit
+# — the operator pays and nothing else signals it (blocked_requests_total does not move: it is not
+# a policy block; llm_upstream_errors_total does not move: upstream answers 200). Without this
+# counter a degrading model is indistinguishable from silence.
+quiz_generate_total = Counter(
+    "quiz_generate_total",
+    "Count of quiz.generate tool executions by result (ok | invalid_quiz | tool_not_available).",
+    ["result"],
+)
 # Anthropic upstream errors (TD-014): bounded enum labels only (no user-content).
 # status_code is the numeric HTTP status or "none" for timeout/connection errors;
 # error_type is the Anthropic error.type (or "unknown" when the body has none).

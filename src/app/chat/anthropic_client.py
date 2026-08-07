@@ -321,9 +321,13 @@ class AnthropicClient:
         """
         _ = provider_state  # Anthropic Messages API is stateless in this integration.
         model = model if model is not None else self._default_model
+        # The whitelist DECLARES the modes this client supports and must list all four (ADR-064).
+        # `study_learn` needs no provider knob (by knobs it IS `general`: no web search, no
+        # thinking) — but relying on «an unknown mode collapses to general anyway» would hide an
+        # axis de-sync at the next change, so it is listed explicitly.
         generation_mode = (
             generation_mode
-            if generation_mode in {"general", "research", "reasoning"}
+            if generation_mode in {"general", "research", "reasoning", "study_learn"}
             else "general"
         )
         client = self._client

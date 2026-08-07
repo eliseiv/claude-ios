@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,10 +40,17 @@ from app.chat.llm_client import (
 from app.chat.openai_client import OpenAIAuthError
 from app.chat.repository import ChatRepository, derive_title
 from app.chat.tools import (
+    ARGS_DEGRADE_TOOLS,
     GLOBAL_SERVER_SIDE_TOOLS,
     MUTATING_TOOLS,
+    QUIZ_CONSTRAINTS_HINT,
+    QUIZ_INVALID_ERROR_CODE,
     SERVER_SIDE_TOOLS,
+    TOOL_GENERATION_MODES,
+    TOOL_QUIZ_GENERATE,
+    content_free_args_error,
     neutral_tool_definitions,
+    offered_in_generation_mode,
     validate_tool_args,
 )
 from app.config import get_settings
@@ -60,6 +67,7 @@ from app.observability.logging import log_event
 from app.observability.metrics import (
     blocked_requests_total,
     byok_usage_share,
+    quiz_generate_total,
     token_usage_total,
 )
 from app.policy.engine import (
@@ -145,9 +153,34 @@ _SYSTEM_PROMPT_CODE = (
 
 GenerationBackend = Literal["legacy", "v2"]
 
+# ADR-064 §7 (soft level) / 03-architecture §Режим study_learn: static EN suffix appended to the
+# base assistant_mode prompt ONLY on a study_learn turn. It is the SOFT half of the anti-spoiler
+# guarantee (the hard half is the assistantMessage suppression in the single response mapping).
+# STATIC — no date, no counters, no turn content — so the prompt prefix stays byte-stable inside the
+# mode and the provider prompt cache is not invalidated per request. study_learn does get its OWN
+# cache entry (its prefix differs from general by both this suffix and the tool-set): expected, not
+# a defect. Workspace instructions (ADR-036 §3) are still appended AFTER this suffix.
+_STUDY_LEARN_INSTRUCTION = (
+    "This turn is a Study & Learn turn. Explain the topic briefly, then ask the learner questions "
+    "ONLY by calling the quiz.generate tool with the whole pool of questions in a single call. "
+    "Never repeat the question wording in your reply text, and never reveal the correct options or "
+    "the explanations there — the app shows them to the learner after they answer. Keep any "
+    "accompanying text short."
+)
 
-def _system_prompt_for(assistant_mode: str) -> str:
-    return _SYSTEM_PROMPT_CODE if assistant_mode == "code" else _SYSTEM_PROMPT_CHAT
+
+def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") -> str:
+    """Base system prompt for the turn: assistant_mode prompt + the generation-mode suffix.
+
+    The mode suffix is added ONLY for the modes that declare one (today: ``study_learn``, ADR-064).
+    ``generation_mode`` MUST be the EFFECTIVE mode of the turn, so the legacy path (forced
+    ``general``) never carries a mode suffix. Workspace instructions are layered on top of this by
+    ``_system_prompt_with_workspace`` and therefore stay LAST (ADR-036 §3).
+    """
+    base = _SYSTEM_PROMPT_CODE if assistant_mode == "code" else _SYSTEM_PROMPT_CHAT
+    if generation_mode == "study_learn":
+        return f"{base}\n\n{_STUDY_LEARN_INSTRUCTION}"
+    return base
 
 
 # ADR-037 §1,§3: allowlist for ChatRunRequest.context — a fixed registry of known per-message
@@ -261,14 +294,18 @@ def _compose_turn0_text(block: str | None, msg: str) -> str:
     return msg
 
 
-def _system_prompt_with_workspace(assistant_mode: str, instructions: str | None) -> str:
+def _system_prompt_with_workspace(
+    assistant_mode: str, instructions: str | None, generation_mode: str = "general"
+) -> str:
     """Compose the system prompt for a workspace session (ADR-036 §3).
 
-    ``base(assistant_mode)`` → ``\\n\\n`` → ``workspace.instructions`` when instructions are
-    non-empty; otherwise the base prompt unchanged (so the prompt cache is not broken for sessions
-    without instructions). Provider-agnostic (part of ``system``, identical for both providers).
+    ``base(assistant_mode[, generation_mode])`` → ``\\n\\n`` → ``workspace.instructions`` when
+    instructions are non-empty; otherwise the base prompt unchanged (so the prompt cache is not
+    broken for sessions without instructions). Provider-agnostic (part of ``system``, identical for
+    both providers). Layer order is normative: base prompt → generation-mode suffix (ADR-064) →
+    workspace instructions LAST (ADR-036 §3).
     """
-    base = _system_prompt_for(assistant_mode)
+    base = _system_prompt_for(assistant_mode, generation_mode)
     if instructions and instructions.strip():
         return f"{base}\n\n{instructions.strip()}"
     return base
@@ -392,6 +429,26 @@ class ChatRunOut:
     # empty). Empty for policy-blocked (tool-loop never ran); may be NON-empty for
     # blocked+max_tokens (server-side rounds could run before the final turn was truncated).
     server_tools: list[ServerToolExecutionOut] = field(default_factory=list)
+    # ADR-064 §7: the quiz pool of THIS TURN (message_step_id) — turn-scoped CONTENT, not a per-call
+    # indicator. Set on EVERY leg of a study_learn turn (run, each tool-result continuation,
+    # idempotent replay, blocked+max_tokens) from the call accumulator or, when that is empty, from
+    # the turn's persisted quiz tool-step. None = «no quiz in THIS TURN».
+    # DELIBERATE CONTRAST with server_tools above, which is per-call and NOT reconstructed on
+    # replay: server_tools answers «what ran in this call», quiz answers «what this turn contains».
+    # Do not carry the rule of either field over to the other.
+    quiz: dict[str, Any] | None = None
+
+
+@dataclass
+class _QuizAccumulator:
+    """Quiz pool produced by the CURRENT call (ADR-064 §7, producer 1).
+
+    Mutable on purpose: it is threaded through the tool-loop so a pool produced in any round of this
+    call reaches the terminal branch. LAST-WINS when the model calls the tool several times — pools
+    are never merged (merging would give a non-deterministic size and duplicate questions).
+    """
+
+    pool: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -539,6 +596,11 @@ class ChatOrchestrator:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
         requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
         use_generation_v2 = requested_backend == "v2"
+        # ADR-064 §3 invariant «the effective mode is ONE value»: computed once, here, and reused
+        # for the system-prompt suffix, the axis-C tool gate, the provider call and the price. The
+        # legacy path forces `general`, which is why mode-gated tools are never offered there BY
+        # CONSTRUCTION — there is no separate legacy exception branch anywhere.
+        effective_generation_mode = generation_mode if use_generation_v2 else "general"
         # ADR-034 §3: resolve the session-fixed model. None (no field) → NULL (= instance default,
         # never substituted in the DB so the row stays "instance default" even if env default
         # changes). The schema guarantees a non-empty value here, so .strip() is safe.
@@ -634,7 +696,7 @@ class ChatOrchestrator:
         # For a non-workspace chat the system prompt is unchanged (base) → no double-injection and
         # the provider prompt cache stays intact.
         workspace_attachments: PreparedAttachments | None = None
-        system_prompt = _system_prompt_for(sess.assistant_mode)
+        system_prompt = _system_prompt_for(sess.assistant_mode, effective_generation_mode)
         if sess.workspace_project_id is not None:
             if ctx.is_new:
                 ws_context = await self._deps.workspaces.context_for_session(
@@ -642,14 +704,16 @@ class ChatOrchestrator:
                 )
                 if ws_context is not None:
                     system_prompt = _system_prompt_with_workspace(
-                        sess.assistant_mode, ws_context.instructions
+                        sess.assistant_mode, ws_context.instructions, effective_generation_mode
                     )
                     workspace_attachments = ws_context.attachments
             else:
                 instructions = await self._deps.workspaces.instructions_for_session(
                     sess.workspace_project_id, user_id
                 )
-                system_prompt = _system_prompt_with_workspace(sess.assistant_mode, instructions)
+                system_prompt = _system_prompt_with_workspace(
+                    sess.assistant_mode, instructions, effective_generation_mode
+                )
 
         # ADR-020 / ADR-033 §3,§5: validate inline attachments (provider-aware) and split into
         # (a) the PreparedAttachments handed to the client ONCE on turn 0 — the client builds the
@@ -700,7 +764,6 @@ class ChatOrchestrator:
             ),
         )
 
-        effective_generation_mode = generation_mode if use_generation_v2 else "general"
         generation_credit_cost = (
             get_settings().chat_generation_credit_cost(effective_generation_mode)
             if use_generation_v2
@@ -789,6 +852,18 @@ class ChatOrchestrator:
 
         assert message_step_id is not None  # noqa: S101 - results is non-empty
 
+        # ADR-064 §12 / 03-architecture axis invariant 2: restore the turn's generation mode ONCE,
+        # here — BEFORE any leg can return — so every leg of this continuation (barrier still open,
+        # idempotent replay, real continuation) uses the SAME effective mode for the axis-C tool
+        # gate, the price and the turn-scoped `quiz` fallback. Reading it later would leave the two
+        # early-return legs without a mode and silently drop their `quiz`. Legacy stays `general`
+        # with no read at all.
+        generation_mode = (
+            await self._deps.repo.generation_mode_for_message_step(session_id, message_step_id)
+            if use_generation_v2
+            else "general"
+        )
+
         # Apply each result (per-item idempotency, ADR-005): already completed/errored → skip
         # the write (do NOT overwrite, do NOT re-audit). New ones transition pending → done.
         for item, tool_call in resolved:
@@ -826,13 +901,18 @@ class ChatOrchestrator:
             assistant_step_id = await self._deps.repo.assistant_tool_step_id(
                 session_id, message_step_id
             )
-            return ChatRunOut(
-                status="tool_call",
-                session_id=session_id,
-                tool_calls=remaining,
-                tool_call=remaining[0],
+            return await self._with_turn_quiz(
+                ChatRunOut(
+                    status="tool_call",
+                    session_id=session_id,
+                    tool_calls=remaining,
+                    tool_call=remaining[0],
+                    message_step_id=message_step_id,
+                    step_id=assistant_step_id,
+                ),
                 message_step_id=message_step_id,
-                step_id=assistant_step_id,
+                accumulated=None,
+                generation_mode=generation_mode,
             )
 
         # Barrier closed. Idempotent replay: if a continuation step was already saved for this turn
@@ -840,14 +920,17 @@ class ChatOrchestrator:
         anchor_id = resolved[0][1].id
         saved = await self._deps.repo.next_step_after(session_id, message_step_id, anchor_id)
         if saved is not None and self._all_already_done_before(resolved):
-            return self._render_saved_step(session_id, message_step_id, saved)
+            # ADR-064 §7: the replay is NOT a special rule — it is the ordinary turn-scoped fallback
+            # (no accumulator in this call → read the turn's quiz step). server_tools stays empty
+            # here by contrast (ADR-028): it is a per-call indicator, quiz is turn content.
+            return await self._with_turn_quiz(
+                self._render_saved_step(session_id, message_step_id, saved),
+                message_step_id=message_step_id,
+                accumulated=None,
+                generation_mode=generation_mode,
+            )
 
         mode = Mode(sess.mode)
-        generation_mode = (
-            await self._deps.repo.generation_mode_for_message_step(session_id, message_step_id)
-            if use_generation_v2
-            else "general"
-        )
         generation_credit_cost = (
             get_settings().chat_generation_credit_cost(generation_mode) if use_generation_v2 else 1
         )
@@ -868,12 +951,17 @@ class ChatOrchestrator:
         # helper used on turn 0 (identical behavior). Read ONLY instructions (light single-column);
         # do NOT re-inject knowledge files. Empty/missing instructions or a deleted workspace → base
         # system prompt unchanged (graceful).
-        system_prompt = _system_prompt_for(sess.assistant_mode)
+        # ADR-064: the continuation carries the SAME mode suffix as the original run leg (the mode
+        # was restored from the user step above), so the model keeps the quiz instructions for the
+        # rest of the turn.
+        system_prompt = _system_prompt_for(sess.assistant_mode, generation_mode)
         if sess.workspace_project_id is not None:
             instructions = await self._deps.workspaces.instructions_for_session(
                 sess.workspace_project_id, user_id
             )
-            system_prompt = _system_prompt_with_workspace(sess.assistant_mode, instructions)
+            system_prompt = _system_prompt_with_workspace(
+                sess.assistant_mode, instructions, generation_mode
+            )
         return await self._generate_loop(
             user_id=user_id,
             session_id=session_id,
@@ -1077,6 +1165,69 @@ class ChatOrchestrator:
         await self._deps.repo.set_generation_backend(session, "v2")
         await self._deps.repo.clear_provider_state(session.id)
 
+    async def _resolve_turn_quiz(
+        self,
+        *,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        accumulated: dict[str, Any] | None,
+        generation_mode: str,
+    ) -> dict[str, Any] | None:
+        """The quiz pool of the TURN, by the single turn-scoped predicate (ADR-064 §7).
+
+        Two producers, in order:
+        1. the accumulator of the CURRENT call (last-wins across rounds of this call);
+        2. FALLBACK — the accumulator is empty AND the effective mode of the turn is
+           ``study_learn`` → the last quiz tool-step of this ``message_step_id`` with a non-empty
+           result. No such step → ``None``.
+
+        The mode predicate is MANDATORY, not an optimization guard: it keeps the extra read strictly
+        on quiz turns, so every other mode and the whole legacy path issue no additional query.
+
+        One predicate covers ALL legs of the turn (run, each continuation, idempotent replay,
+        blocked+max_tokens). That is the load-bearing part of the §7 guarantee: the
+        ``assistantMessage`` suppression is keyed on a non-empty ``quiz``, so a leg that lost the
+        pool would silently un-suppress the text and show the learner duplicated questions with the
+        answers revealed — which is exactly the multi-call turn (`quiz.generate` + a client-side
+        tool in one assistant step) that a per-call accumulator would break.
+        """
+        if accumulated is not None:
+            return accumulated
+        if generation_mode != "study_learn":
+            return None
+        return await self._deps.repo.last_tool_result_for_message_step(
+            session_id, message_step_id, TOOL_QUIZ_GENERATE
+        )
+
+    async def _with_turn_quiz(
+        self,
+        out: ChatRunOut,
+        *,
+        message_step_id: uuid.UUID,
+        accumulated: dict[str, Any] | None,
+        generation_mode: str,
+    ) -> ChatRunOut:
+        """Attach the turn-scoped quiz pool to a terminal ``ChatRunOut`` (ADR-064 §7).
+
+        Applied at EVERY leg that returns a turn's content, so the rule lives in one place instead
+        of being re-derived per branch.
+
+        A response with ``message_step_id is None`` carries no turn at all (policy-block before
+        generation, or the credits_empty block that rolls the assistant step back), so there is
+        nothing to attribute a pool to and no read is issued — ``quiz`` stays ``null``. The
+        ``blocked``+``max_tokens`` leg is NOT this case: its turn and step ids are set, so it does
+        get the turn's pool.
+        """
+        if out.message_step_id is None:
+            return out
+        quiz = await self._resolve_turn_quiz(
+            session_id=out.session_id,
+            message_step_id=message_step_id,
+            accumulated=accumulated,
+            generation_mode=generation_mode,
+        )
+        return replace(out, quiz=quiz)
+
     async def _build_messages(self, session_id: uuid.UUID) -> list[NeutralMessage]:
         """Reconstruct the provider-NEUTRAL history from chat_steps (TD-002, ADR-033 §3).
 
@@ -1125,6 +1276,12 @@ class ChatOrchestrator:
         generation_backend: GenerationBackend = "legacy",
     ) -> ChatRunOut:
         use_generation_v2 = generation_backend == "v2"
+        # ADR-064 §3 / 03-architecture axis invariant 1: ONE effective mode value drives the axis-C
+        # tool gate, the provider call and (upstream) the price. Computing it twice — once for the
+        # tools, once for the provider — is exactly how the gate and the generation drift apart.
+        effective_generation_mode = generation_mode if use_generation_v2 else "general"
+        # ADR-064 §7 producer 1: pool of THIS call, last-wins, threaded through every round.
+        quiz_accumulator = _QuizAccumulator()
         # ADR-044 §5: select the generation client + the effective model by mode.
         # - credits → the injected active-provider client (self._deps.llm); stale-model guard
         #   against the ACTIVE provider allowlist (a session model fixed for another provider after
@@ -1192,7 +1349,13 @@ class ChatOrchestrator:
                     # NOT offered. Axis B (assistant_mode, Q-012-1) is not yet implemented; the
                     # effective set = this project gate over current behavior. Neutral tool defs;
                     # the client serializes them per provider (ADR-033 §4).
-                    tools=neutral_tool_definitions(include_server_side=has_project),
+                    # ADR-064 §3 axis C: mode-gated tools (quiz.generate) are offered only when the
+                    # EFFECTIVE mode of the turn allows them — the same value passed as
+                    # generation_mode below, never a second computation.
+                    tools=neutral_tool_definitions(
+                        include_server_side=has_project,
+                        generation_mode=effective_generation_mode,
+                    ),
                     attachments=turn0_attachments,
                     api_key=api_key,
                     # ADR-034 §4 / ADR-044 §5: the effective model resolved above (stale-model
@@ -1200,7 +1363,7 @@ class ChatOrchestrator:
                     # client uses its provider default; the orchestrator never blindly forwards a
                     # foreign model.
                     model=effective_model,
-                    generation_mode=generation_mode if use_generation_v2 else "general",
+                    generation_mode=effective_generation_mode,
                     provider_state=provider_state,
                 )
             except (AnthropicAuthError, OpenAIAuthError):
@@ -1241,13 +1404,21 @@ class ChatOrchestrator:
                 api_key = None
                 # ADR-028: blocked+max_tokens may carry NON-empty server_tools (server-side rounds
                 # could have run before the final turn was truncated).
-                return await self._handle_max_tokens(
-                    user_id=user_id,
-                    session_id=session_id,
+                # ADR-064 §7: it also carries the turn's quiz — including a pool produced on an
+                # EARLIER leg of the turn — and the partial truncated text is then suppressed in
+                # _to_response like any other status.
+                return await self._with_turn_quiz(
+                    await self._handle_max_tokens(
+                        user_id=user_id,
+                        session_id=session_id,
+                        message_step_id=message_step_id,
+                        result=result,
+                        usage=usage,
+                        server_tools=server_tools,
+                    ),
                     message_step_id=message_step_id,
-                    result=result,
-                    usage=usage,
-                    server_tools=server_tools,
+                    accumulated=quiz_accumulator.pool,
+                    generation_mode=effective_generation_mode,
                 )
 
             if result.stop_reason == STOP_REASON_TOOL_USE and result.tool_uses:
@@ -1259,6 +1430,8 @@ class ChatOrchestrator:
                     usage=usage,
                     has_project=has_project,
                     server_tools=server_tools,
+                    generation_mode=effective_generation_mode,
+                    quiz_accumulator=quiz_accumulator,
                 )
                 # Persist the tool_use step + tool_calls + tool_results + audit (no billing here).
                 await self._session.commit()
@@ -1267,20 +1440,33 @@ class ChatOrchestrator:
                     # server_tools carries any server-side tools executed in this same turn BEFORE
                     # the client-side hand-off (ADR-028).
                     api_key = None
-                    return outcome.client_out
+                    # ADR-064 §7: this is the leg of the MAIN quiz scenario — the model called
+                    # quiz.generate AND a client-side tool in one assistant step. The pool must ride
+                    # along here, and (turn-scope) again on the tool-result leg that finishes it.
+                    return await self._with_turn_quiz(
+                        outcome.client_out,
+                        message_step_id=message_step_id,
+                        accumulated=quiz_accumulator.pool,
+                        generation_mode=effective_generation_mode,
+                    )
                 # Pure server-side turn: results are persisted; continue the loop to Anthropic.
                 continue
 
             # Final assistant_message — break out of the server-side loop and bill once.
             api_key = None
-            return await self._finalize_assistant(
-                user_id=user_id,
-                session_id=session_id,
+            return await self._with_turn_quiz(
+                await self._finalize_assistant(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message_step_id=message_step_id,
+                    billing=billing,
+                    result=result,
+                    usage=usage,
+                    server_tools=server_tools,
+                ),
                 message_step_id=message_step_id,
-                billing=billing,
-                result=result,
-                usage=usage,
-                server_tools=server_tools,
+                accumulated=quiz_accumulator.pool,
+                generation_mode=effective_generation_mode,
             )
 
         # Exceeded MAX_SERVER_TOOL_ROUNDS consecutive server-side rounds (ADR-011 §2): controlled
@@ -1499,6 +1685,8 @@ class ChatOrchestrator:
         usage: dict[str, Any],
         has_project: bool,
         server_tools: list[ServerToolExecutionOut],
+        generation_mode: str = "general",
+        quiz_accumulator: _QuizAccumulator | None = None,
     ) -> _TurnOutcome:
         """Process a tool_use turn (ADR-008/011): persist tool_calls, branch server/client-side.
 
@@ -1513,6 +1701,21 @@ class ChatOrchestrator:
           turn — surfacing only the first would orphan the rest → Anthropic 400 → 502.
         If the turn contains any client-side tool, client_out is set (hand off to iOS). If the turn
         is purely server-side, client_out is None and the orchestrator continues the loop.
+
+        Two SOFT refusals apply to mode-gated tools (ADR-064 §5/§6), both keeping the turn alive,
+        and their ORDER IS NORMATIVE — the mode check runs FIRST, before args validation:
+        - the tool was NOT offered in this mode (upstream anomaly) → tool-result
+          `tool_not_available`, nothing is executed;
+        - its args fail validation AND it is in ARGS_DEGRADE_TOOLS → tool-result `invalid_quiz`,
+          the model fixes the pool within the same turn.
+        On the intersection `tool_not_available` wins: validating the args of a tool that was never
+        offered is pointless, and an `invalid_quiz` message would send the model off to repair a
+        pool for a tool it still cannot use, burning server-side rounds up to
+        MAX_SERVER_TOOL_ROUNDS. Both are deliberately UNLIKE the neighbouring guards: a `site.*`
+        call without a project stays a HARD failure (UpstreamError) because executing it would
+        resolve someone's project — a data isolation boundary — while quiz.generate has no side
+        effects at all; and for every tool outside ARGS_DEGRADE_TOOLS bad args remain a 422 on the
+        whole turn.
         """
         # Persist the assistant tool_use step (no debit on tool-rounds). ADR-023: this is the
         # step-of-record for a status=tool_call response — ChatResponse.stepId = its ChatStep.id
@@ -1543,10 +1746,58 @@ class ChatOrchestrator:
             if tool_name in SERVER_SIDE_TOOLS and not has_project:
                 raise UpstreamError("server-side site.* tool requested for a project-less session")
 
+            raw_args = dict(block["input"])
+
+            # ADR-064 §6 defensive-guard, FIRST — before args validation (normative order, see the
+            # docstring). A mode-gated tool called outside its modes is not executed at all.
+            if tool_name in TOOL_GENERATION_MODES and not offered_in_generation_mode(
+                tool_name, generation_mode
+            ):
+                await self._record_refused_tool_call(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message_step_id=message_step_id,
+                    tool_name=tool_name,
+                    raw_args=raw_args,
+                    provider_tool_use_id=provider_tool_use_id,
+                    execution=ToolExecution.error(
+                        "tool_not_available",
+                        f"tool {tool_name} is not available in this generation mode",
+                    ),
+                    server_tools=server_tools,
+                )
+                continue
+
             try:
-                validated_args = validate_tool_args(tool_name, dict(block["input"]))
+                validated_args = validate_tool_args(tool_name, raw_args)
             except ValueError as exc:
-                raise ValidationFailedError(str(exc)) from exc
+                if tool_name not in ARGS_DEGRADE_TOOLS:
+                    # Unchanged behaviour for every other tool: their args come from fixed schemas,
+                    # so malformed args ARE an anomaly → 422 on the whole turn. This branch and the
+                    # degrade branch below sit side by side and behave OPPOSITELY on purpose; do not
+                    # transfer one to the other in either direction (ADR-064 §5).
+                    raise ValidationFailedError(str(exc)) from exc
+                # ADR-064 §5: no provider in this integration guarantees the quiz constraints
+                # (types, counts, lengths, correctIndex < len(options)), so a violation is an
+                # EXPECTED outcome, not an anomaly — failing the turn would throw away the
+                # explanation the model already generated. Degrade to a tool-result error and let
+                # the loop continue: the model sees it in the SAME turn and regenerates the pool.
+                # The message is content-free (field path + error kind) — never str(exc), which
+                # pydantic renders with the offending quiz text.
+                await self._record_refused_tool_call(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message_step_id=message_step_id,
+                    tool_name=tool_name,
+                    raw_args=raw_args,
+                    provider_tool_use_id=provider_tool_use_id,
+                    execution=ToolExecution.error(
+                        QUIZ_INVALID_ERROR_CODE,
+                        f"{content_free_args_error(exc)}; {QUIZ_CONSTRAINTS_HINT}",
+                    ),
+                    server_tools=server_tools,
+                )
+                continue
 
             tool_call_id = uuid.uuid4()  # domain id: fresh UUID, independent of anthropic id
             await self._deps.repo.create_tool_call(
@@ -1567,10 +1818,11 @@ class ChatOrchestrator:
             )
 
             if tool_name in GLOBAL_SERVER_SIDE_TOOLS:
-                # ADR-026 §4: global server-side (time.now) is routed BEFORE the project-scoped
-                # branch — executed immediately WITHOUT external_project_id and WITHOUT the
-                # has_project guard. «Нет проекта» is the normal mode here, not an anomaly.
-                await self._execute_global_server_side_tool(
+                # ADR-026 §4: global server-side (time.now, quiz.generate) is routed BEFORE the
+                # project-scoped branch — executed immediately WITHOUT external_project_id and
+                # WITHOUT the has_project guard. «Нет проекта» is the normal mode here, not an
+                # anomaly.
+                execution = await self._execute_global_server_side_tool(
                     user_id=user_id,
                     session_id=session_id,
                     message_step_id=message_step_id,
@@ -1580,6 +1832,15 @@ class ChatOrchestrator:
                     provider_tool_use_id=provider_tool_use_id,
                     server_tools=server_tools,
                 )
+                if (
+                    tool_name == TOOL_QUIZ_GENERATE
+                    and quiz_accumulator is not None
+                    and not execution.is_error
+                    and isinstance(execution.result, dict)
+                ):
+                    # ADR-064 §7 producer 1: last-wins. A later valid pool in the same call
+                    # REPLACES an earlier one — pools are never merged.
+                    quiz_accumulator.pool = execution.result
             elif tool_name in SERVER_SIDE_TOOLS:
                 # Invariant (ADR-022): reaching here implies has_project is True (the project-less
                 # site.* anomaly raised above), so external_project_id is a resolved string. The
@@ -1707,21 +1968,115 @@ class ChatOrchestrator:
         args: dict[str, Any],
         provider_tool_use_id: str,
         server_tools: list[ServerToolExecutionOut],
-    ) -> None:
-        """Execute a global server-side tool (time.now) on the backend (ADR-026 §4, §6).
+    ) -> ToolExecution:
+        """Execute a global server-side tool (time.now, quiz.generate) on the backend (ADR-026 §4).
 
         Mirrors _execute_server_side_tool but is PROJECT-INDEPENDENT: no external_project_id is
-        resolved or passed (time.now is global). The tool_call is moved to status=completed
-        immediately (no client tool_result is awaited); the tool step stores providerToolUseId so
-        _build_messages replays the continuation with a consistent id pair (ADR-008). time.now is
-        NOT in MUTATING_TOOLS → no tool_mutation audit; only the standard tool_call_completed audit
-        is recorded. Billing is unchanged (server-side round adds no debit, ADR-006).
-        ADR-028: append a COMPACT (status + summary, NO raw result) entry to server_tools.
+        resolved or passed (these tools are global). The tool_call is moved to status
+        completed/errored immediately (no client tool_result is awaited); the tool step stores
+        providerToolUseId so _build_messages replays the continuation with a consistent id pair
+        (ADR-008). Neither tool is in MUTATING_TOOLS → no tool_mutation audit; only the standard
+        tool_call_completed audit is recorded. Billing is unchanged (a server-side round adds no
+        debit, ADR-006). ADR-028: a COMPACT (status + summary, NO raw result) entry is appended to
+        server_tools — for quiz.generate that means "ok" / a short error code, never quiz content.
+
+        Returns the ToolExecution so the caller can lift a successful quiz pool into the turn's
+        accumulator (ADR-064 §7) without re-reading the persisted step.
         """
         execution = await self._deps.global_tools.execute(tool_name=tool_name, args=args)
+        await self._persist_tool_execution(
+            user_id=user_id,
+            session_id=session_id,
+            message_step_id=message_step_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            provider_tool_use_id=provider_tool_use_id,
+            execution=execution,
+            server_tools=server_tools,
+        )
+        return execution
+
+    async def _record_refused_tool_call(
+        self,
+        *,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        tool_name: str,
+        raw_args: dict[str, Any],
+        provider_tool_use_id: str,
+        execution: ToolExecution,
+        server_tools: list[ServerToolExecutionOut],
+    ) -> None:
+        """Refuse a tool_use SOFTLY: persist it as an errored tool-call, keep the turn alive.
+
+        Used by the two mode-gated soft refusals of ADR-064 (`tool_not_available` §6 and
+        `invalid_quiz` §5). The tool is NOT executed; the model receives the machine-readable error
+        as an ordinary tool-result on the next round of the same turn and can correct itself.
+
+        The tool_call row stores the model's RAW input (it never passed validation, so there is no
+        validated form) — it is the record of what was attempted. Everything downstream is identical
+        to a normally-executed server-side tool, so history replay, the turn barrier (server-side
+        calls are excluded from it) and serverTools[] all behave as usual.
+        """
+        tool_call_id = uuid.uuid4()  # domain id: fresh UUID, independent of the provider id
+        await self._deps.repo.create_tool_call(
+            session_id=session_id,
+            message_step_id=message_step_id,
+            tool_name=tool_name,
+            args=raw_args,
+            tool_call_id=tool_call_id,
+            provider_tool_use_id=provider_tool_use_id,
+        )
+        await self._deps.audit.record(
+            AuditEvent(
+                user_id=user_id,
+                session_id=session_id,
+                event_type=EVENT_TOOL_CALL_INITIATED,
+                payload={"toolCallId": str(tool_call_id), "toolName": tool_name},
+            )
+        )
+        await self._persist_tool_execution(
+            user_id=user_id,
+            session_id=session_id,
+            message_step_id=message_step_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            provider_tool_use_id=provider_tool_use_id,
+            execution=execution,
+            server_tools=server_tools,
+        )
+
+    async def _persist_tool_execution(
+        self,
+        *,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        tool_call_id: uuid.UUID,
+        tool_name: str,
+        provider_tool_use_id: str,
+        execution: ToolExecution,
+        server_tools: list[ServerToolExecutionOut],
+    ) -> None:
+        """Persist the outcome of a backend-side tool: tool_call → tool step → audit → serverTools.
+
+        Shared by the global-tool execution path and the soft-refusal path so both produce exactly
+        the same shape of record (one place to keep the ADR-008 id pairing and the ADR-028 compact
+        summary correct).
+        """
         payload = execution.to_tool_result_payload()
         status = "errored" if execution.is_error else "completed"
-        # ADR-028 Решение 2: record the time.now execution (domain name, status, compact summary).
+        # ADR-065 §3: per-tool outcome counter for quiz.generate. THIS is the single point every
+        # outcome of the tool passes through — normal execution AND both soft refusals
+        # (tool_not_available, invalid_quiz) — so the counter cannot miss a path. Labels are a
+        # bounded enum (the tool's own error codes); no quiz content ever reaches a label.
+        if tool_name == TOOL_QUIZ_GENERATE:
+            quiz_generate_total.labels(
+                result=(execution.error_code or "errored") if execution.is_error else "ok"
+            ).inc()
+        # ADR-028 Решение 2: compact indicator only — _server_tool_summary deliberately ignores the
+        # raw payload ("ok" / a short error code), so no quiz text or path can reach the response.
         server_tools.append(
             ServerToolExecutionOut(
                 tool_call_id=tool_call_id,

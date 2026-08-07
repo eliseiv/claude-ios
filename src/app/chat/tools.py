@@ -13,9 +13,10 @@ site.write_file, site.delete) require an audit record. Args/result are strictly 
 
 from __future__ import annotations
 
+import copy
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 # Tool names (fixed list — validated at the API boundary).
 TOOL_FILES_READ = "files.read"
@@ -39,6 +40,13 @@ TOOL_SITE_DELETE = "site.delete"
 # routed before the project-scoped branch (no external_project_id, no has_project guard).
 TOOL_TIME_NOW = "time.now"
 
+# Global server-side tool, MODE-GATED (quiz.generate, ADR-064): executed by the backend like
+# time.now and equally project-independent, but — unlike time.now — offered to the model ONLY when
+# the effective generation mode of the turn is `study_learn` (axis C, TOOL_GENERATION_MODES below).
+# «Global» means «needs no project», NOT «offered always»: the rule of one tool in this registry
+# must not be carried over to its neighbour.
+TOOL_QUIZ_GENERATE = "quiz.generate"
+
 # Project-scoped server-side tools (site.*, ADR-011/022): executed by the backend in the
 # tool-loop; offered to Claude ONLY when the session has a project (project_id IS NOT NULL).
 SERVER_SIDE_TOOLS = frozenset(
@@ -55,7 +63,29 @@ SERVER_SIDE_TOOLS = frozenset(
 # the two registries are mutually exclusive (invariant GLOBAL_SERVER_SIDE_TOOLS ∩ SERVER_SIDE_TOOLS
 # = ∅). Combined server-side = SERVER_SIDE_TOOLS ∪ GLOBAL_SERVER_SIDE_TOOLS; everything else in
 # ALL_TOOL_NAMES is client-side.
-GLOBAL_SERVER_SIDE_TOOLS = frozenset({TOOL_TIME_NOW})
+GLOBAL_SERVER_SIDE_TOOLS = frozenset({TOOL_TIME_NOW, TOOL_QUIZ_GENERATE})
+
+# Axis C — generation-mode gate (ADR-064 §3). A tool listed here is offered to the model IF AND
+# ONLY IF the EFFECTIVE generation mode of the turn is in its set. A tool ABSENT from this registry
+# is not mode-gated at all (all 14 others behave exactly as before). The gate is evaluated against
+# the same single value that goes to the provider and to billing
+# (`generation_mode if use_generation_v2 else "general"`), never against the request field — hence
+# the legacy path (forced `general`) never offers a mode-gated tool BY CONSTRUCTION, with no
+# special-case branch. Axes A (project) / B (assistant_mode) / C compose with logical AND.
+TOOL_GENERATION_MODES: dict[str, frozenset[str]] = {
+    TOOL_QUIZ_GENERATE: frozenset({"study_learn"}),
+}
+
+# Tools whose ARGUMENT-VALIDATION FAILURE degrades instead of failing the turn (ADR-064 §5).
+# For a tool in this registry a failed `validate_tool_args` becomes a tool-result error and the
+# tool-loop CONTINUES (the model fixes itself within the same turn); for every OTHER tool the
+# behaviour is unchanged — ValidationFailedError → 422 on the whole turn.
+# The two neighbouring branches of the same `except` behave OPPOSITELY ON PURPOSE: quiz constraints
+# (cross-field `correctIndex < len(options)`, counts, lengths) are guaranteed by NO provider in this
+# integration — strict tool-args mode is off for both — so a violation is an EXPECTED scenario, not
+# an anomaly. Other tools' args come from fixed schemas, where a malformed args IS an anomaly.
+# Do not transfer the behaviour of either branch to the other.
+ARGS_DEGRADE_TOOLS = frozenset({TOOL_QUIZ_GENERATE})
 
 ALL_TOOL_NAMES = frozenset(
     {
@@ -97,6 +127,8 @@ _DOMAIN_TO_ANTHROPIC: dict[str, str] = {
     TOOL_SITE_DELETE: "site_delete",
     # Global server-side time.now (ADR-026 §2): same dot→underscore mapping.
     TOOL_TIME_NOW: "time_now",
+    # Global server-side, mode-gated quiz.generate (ADR-064 §2): same dot→underscore mapping.
+    TOOL_QUIZ_GENERATE: "quiz_generate",
 }
 _ANTHROPIC_TO_DOMAIN: dict[str, str] = {a: d for d, a in _DOMAIN_TO_ANTHROPIC.items()}
 
@@ -264,6 +296,89 @@ class TimeNowArgs(_StrictModel):
     tz: str | None = None
 
 
+# --- global server-side, mode-gated quiz.generate (ADR-064 §4) ---
+# Normative pool constraints. They live in the schema handed to the provider as a HINT
+# (minItems/maxItems/maxLength stay in the JSON Schema — strict tool-args mode is off for both
+# providers, so neither rejects them), but the AUTHORITATIVE check is this server-side model:
+# no provider guarantees types or cross-field invariants here.
+QUIZ_MIN_QUESTIONS = 3
+QUIZ_MAX_QUESTIONS = 10
+QUIZ_MIN_OPTIONS = 2
+QUIZ_MAX_OPTIONS = 10
+QUIZ_QUESTION_MAX_LENGTH = 1000
+QUIZ_OPTION_MAX_LENGTH = 400
+QUIZ_EXPLANATION_MAX_LENGTH = 2000
+
+# Machine-readable tool-result error code for a pool that violates any constraint above (ADR-064
+# §5). All-or-nothing: ONE code for the whole pool — partial acceptance (dropping the bad question)
+# is forbidden, it would silently shrink the pool and deprive the model of feedback.
+QUIZ_INVALID_ERROR_CODE = "invalid_quiz"
+# Content-FREE constraint reminder appended to the degrade message so the model can fix the pool
+# without the message ever carrying quiz text (ADR-064 §5).
+QUIZ_CONSTRAINTS_HINT = (
+    f"expected {QUIZ_MIN_QUESTIONS}-{QUIZ_MAX_QUESTIONS} questions, "
+    f"{QUIZ_MIN_OPTIONS}-{QUIZ_MAX_OPTIONS} options, 0-based correctIndex < len(options)"
+)
+
+
+# ADR-065 §4: the per-option length limit is expressed ON THE ITEM TYPE, not in a custom validator,
+# so it lands in the JSON Schema as `options.items.maxLength` and reaches the model as a hint — like
+# every neighbouring bound. While it lived only in a validator, the model learned about a too-long
+# option ONLY from a degrade round: one extra upstream call on a turn that costs 2 credits.
+# Annotated keeps BOTH properties in one declaration: the schema keyword AND the authoritative
+# server-side check (the server check is not weakened, it is the same constraint).
+QuizOption = Annotated[str, Field(min_length=1, max_length=QUIZ_OPTION_MAX_LENGTH)]
+
+
+# ADR-065 §5 — the SINGLE declaration of the quiz question structure. The wire model of the response
+# field `ChatResponse.quiz` reuses this very class (see `app.schemas.chat`) instead of declaring its
+# own copy, so the validated pool and the serialized pool cannot drift: a change to a field name,
+# type, requiredness or bound is impossible to make in only one of them.
+#
+# The class DOCSTRING is user-facing on purpose: unlike the tool `inputSchema` — where model
+# metainformation is cut at the boundary (`_INTERNAL_SCHEMA_KEYS`) — this model is also an OpenAPI
+# component, and there the docstring IS the published `description`. Engineering rationale therefore
+# lives in these comments, never in the docstring (no ADR/TD/Q references there).
+class QuizQuestion(_StrictModel):
+    """Один вопрос квиза: формулировка, варианты ответа, индекс правильного и пояснение."""
+
+    question: str = Field(min_length=1, max_length=QUIZ_QUESTION_MAX_LENGTH)
+    options: list[QuizOption] = Field(min_length=QUIZ_MIN_OPTIONS, max_length=QUIZ_MAX_OPTIONS)
+    correctIndex: int
+    explanation: str = Field(min_length=1, max_length=QUIZ_EXPLANATION_MAX_LENGTH)
+
+    @field_validator("correctIndex", mode="before")
+    @classmethod
+    def _reject_bool_index(cls, value: Any) -> Any:
+        # In Python `bool` IS a subclass of `int` and pydantic's lax mode coerces True→1, so a
+        # `correctIndex: true` would silently pass as index 1 (ADR-064 §4 requires rejecting it).
+        # Checked BEFORE coercion — the declared `int` type alone does not catch this.
+        if isinstance(value, bool):
+            raise ValueError("correctIndex must be an integer, not a boolean")
+        return value
+
+    @model_validator(mode="after")
+    def _index_in_range(self) -> QuizQuestion:
+        # The ONLY constraint that JSON Schema cannot express (it relates two fields), which is why
+        # it stays a validator while every numeric bound above is a schema keyword (ADR-065 §4).
+        if not 0 <= self.correctIndex < len(self.options):
+            raise ValueError("correctIndex out of range")
+        return self
+
+
+# The WHOLE pool travels in ONE `quiz.generate` call (ADR-064 §4): one call, not N — every
+# server-side tool call spends a round of the tool-loop, and N calls would give a non-deterministic
+# number of questions, extra latency and duplicate questions. "Execution" of the tool = validation
+# + echo of this object. ADR-065 §5: this is ALSO the wire model of `ChatResponse.quiz`
+# (re-exported by `app.schemas.chat`). Docstring stays user-facing — see QuizQuestion above.
+class Quiz(_StrictModel):
+    """Пул вопросов квиза, который клиент рендерит карточками."""
+
+    questions: list[QuizQuestion] = Field(
+        min_length=QUIZ_MIN_QUESTIONS, max_length=QUIZ_MAX_QUESTIONS
+    )
+
+
 _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_FILES_READ: FilesReadArgs,
     TOOL_FILES_WRITE: FilesWriteArgs,
@@ -279,6 +394,7 @@ _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_SITE_READ: SiteReadArgs,
     TOOL_SITE_DELETE: SiteDeleteArgs,
     TOOL_TIME_NOW: TimeNowArgs,
+    TOOL_QUIZ_GENERATE: Quiz,
 }
 
 
@@ -327,6 +443,18 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Call this whenever the request depends on the current date, time, or day of the week — "
         "do not guess."
     ),
+    # ADR-064 §7 (soft level): the description itself instructs the model to keep the questions
+    # OUT of the free text — the hard, deterministic guarantee is the assistantMessage suppression
+    # in the single response-mapping point.
+    TOOL_QUIZ_GENERATE: (
+        "Generate an interactive quiz for the learner: a pool of multiple-choice questions about "
+        f"the topic you are explaining. Send the WHOLE pool in ONE call: {QUIZ_MIN_QUESTIONS} to "
+        f"{QUIZ_MAX_QUESTIONS} questions, each with {QUIZ_MIN_OPTIONS} to {QUIZ_MAX_OPTIONS} "
+        "answer options, a 0-based 'correctIndex' pointing at the correct option, and a short "
+        "'explanation' shown to the learner after they answer. Ask the questions ONLY through this "
+        "tool: never repeat the question wording in your reply text and never reveal the correct "
+        "options or explanations there. Keep any accompanying text short."
+    ),
 }
 
 
@@ -338,10 +466,136 @@ def validate_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     return model.model_validate(args).model_dump()
 
 
+# Bounds on a degrade message. All three are hard caps, not semantic limits — the message is
+# persisted in a chat step and replayed to the model on the next round, so its size must not depend
+# on what the model sent. Capping the ITEM COUNT alone is not enough: a `loc` segment can be an
+# arbitrary key name invented by the model (`extra_forbidden` reports the offending key), so each
+# part is capped too and the joined result is capped again. Same defensive pattern as the hard cap
+# on serverTools[].summary.
+_ARGS_ERROR_MAX_ITEMS = 5
+_ARGS_ERROR_MAX_PART_CHARS = 120
+_ARGS_ERROR_MAX_CHARS = 400
+
+
+def content_free_args_error(exc: Exception) -> str:
+    """Build a CONTENT-FREE description of an args-validation failure (ADR-064 §5).
+
+    Only the field PATH (``loc``) and the error KIND are used — never ``exc``'s own string form,
+    which pydantic renders WITH the offending input values. For ``quiz.generate`` that difference is
+    the whole point: the quiz text must not leak into the tool-result echo that is persisted, logged
+    and replayed to the model. ``value_error`` entries carry OUR OWN validator message (a fixed
+    string written in this module), so they are content-free by construction.
+
+    The result is also LENGTH-BOUNDED (see ``_ARGS_ERROR_MAX_*``): a ``loc`` segment can be a key
+    name the model invented, so neither an individual part nor the whole message may grow with the
+    input.
+    """
+    if not isinstance(exc, ValidationError):
+        # Non-pydantic ValueError (e.g. «unknown tool: …») — already content-free by construction.
+        return str(exc)[:_ARGS_ERROR_MAX_CHARS]
+    parts: list[str] = []
+    for err in exc.errors()[:_ARGS_ERROR_MAX_ITEMS]:
+        location = ".".join(str(part) for part in err.get("loc", ()))
+        kind = str(err.get("type", "invalid"))
+        if kind == "value_error":
+            detail = str(err.get("msg", "")).removeprefix("Value error, ").strip() or kind
+        else:
+            detail = kind
+        part = f"{location}: {detail}" if location else detail
+        parts.append(part[:_ARGS_ERROR_MAX_PART_CHARS])
+    return ("; ".join(parts) or "invalid arguments")[:_ARGS_ERROR_MAX_CHARS]
+
+
+def offered_in_generation_mode(tool_name: str, generation_mode: str) -> bool:
+    """Axis C predicate (ADR-064 §3): may ``tool_name`` be offered in ``generation_mode``?
+
+    A tool ABSENT from ``TOOL_GENERATION_MODES`` is not mode-gated and is always allowed by this
+    axis (the other 14 tools keep their previous behaviour). ``generation_mode`` MUST be the
+    EFFECTIVE mode of the turn — the same value that goes to the provider and to billing.
+    """
+    modes = TOOL_GENERATION_MODES.get(tool_name)
+    return modes is None or generation_mode in modes
+
+
+# Tools whose args JSON Schema MUST be self-contained — no ``$ref``/``$defs`` (ADR-064 §4).
+# Reason: ``input_schema``/``parameters`` are shipped to TWO different providers and the contract
+# must not rely on either supporting ``$ref``. Scoped deliberately: the pre-existing schemas of
+# calendar.*/reminders.* are part of an already-published catalog shape (they keep their ``$defs``);
+# widening this set is a contract change for architect, not a drive-by here.
+_SELF_CONTAINED_SCHEMA_TOOLS = frozenset({TOOL_QUIZ_GENERATE})
+
+# MODEL metainformation that pydantic derives from the class itself rather than from the tool
+# contract: root ``title`` (= the Python class name) and root ``description`` (= the class
+# docstring). Both are cut out of every args schema — normative requirement, 02-api-contracts.md
+# §inputSchema («вырезана модельная метаинформация»).
+#
+# Why: no artifact that LEAVES THE PROCESS may carry internal development identifiers (ADR-NNN /
+# TD-NNN / Q-NNN-N / BUG-N references, internal class names, internal constant and registry names),
+# and a tool's args schema leaves through TWO such surfaces — the public GET /v1/tools body and the
+# ``input_schema``/``parameters`` shipped to the provider on every round of the turn (where it is
+# also paid-for prompt payload).
+#
+# Why HERE and not by policing docstrings: the requirement is addressed to the SCHEMA GENERATOR —
+# one point — precisely because a rule like «never write an ADR reference in a docstring» is not
+# checkable and breaks with the very next tool added. Model docstrings stay normal internal
+# documentation; the human-facing text of a tool is TOOL_DESCRIPTIONS.
+#
+# NOT stripped (normative, must survive): PER-FIELD ``title``/``description`` coming from
+# ``Field(...)``, plus ``type``/``properties``/``items``/``required``/``enum``/
+# ``additionalProperties`` and the constraint keywords.
+_INTERNAL_SCHEMA_KEYS = ("title", "description")
+
+
+def _inline_schema_refs(node: Any, defs: dict[str, Any]) -> Any:
+    """Recursively replace ``{"$ref": "#/$defs/X"}`` nodes with a copy of the definition ``X``.
+
+    The definition's own ``title``/``description`` are dropped on the way in: they are the nested
+    model's class name and docstring, and inlining would otherwise smuggle them past the root-level
+    strip — which is why 02-api-contracts.md §inputSchema requires the same two keys to be cut
+    «у инлайненных определений вложенных моделей», not only at the root. Sibling keys next to a
+    ``$ref`` are preserved and win over the definition's own keys. Only local ``#/$defs/``
+    references are resolved; anything else is left untouched (there are none in these models — this
+    is defensive, not a feature).
+    """
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            target = defs.get(ref.removeprefix("#/$defs/"))
+            if isinstance(target, dict):
+                inlined = {
+                    k: v for k, v in copy.deepcopy(target).items() if k not in _INTERNAL_SCHEMA_KEYS
+                }
+                siblings = {k: v for k, v in node.items() if k != "$ref"}
+                return _inline_schema_refs({**inlined, **siblings}, defs)
+        return {key: _inline_schema_refs(value, defs) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_inline_schema_refs(item, defs) for item in node]
+    return node
+
+
 def tool_input_schema(tool_name: str) -> dict[str, Any]:
-    """JSON Schema of a tool's args (``model_json_schema()`` of its model), title stripped."""
+    """JSON Schema of a tool's args, with the model's metainformation cut out (NORMATIVE format).
+
+    Built from ``model_json_schema()`` MINUS the model metainformation — root ``title`` and root
+    ``description`` (see ``_INTERNAL_SCHEMA_KEYS``), and for self-contained schemas the same two
+    keys on the inlined nested definitions. The format is deliberately NOT «the raw output of
+    ``model_json_schema()``»: equality with the raw output would violate the invariant that internal
+    identifiers never leave the process (02-api-contracts.md §inputSchema).
+
+    For tools in ``_SELF_CONTAINED_SCHEMA_TOOLS`` the nested models are INLINED and ``$defs`` is
+    dropped, so the schema handed to a provider carries no ``$ref`` (ADR-064 §4). Per-field
+    ``title``/``description`` and the constraint keywords
+    (``minItems``/``maxItems``/``maxLength``) are KEPT — they are a hint for the model; the
+    authoritative check stays server-side.
+    """
     schema = _ARGS_BY_TOOL[tool_name].model_json_schema()
-    schema.pop("title", None)
+    for internal_key in _INTERNAL_SCHEMA_KEYS:
+        schema.pop(internal_key, None)
+    if tool_name in _SELF_CONTAINED_SCHEMA_TOOLS:
+        defs = schema.pop("$defs", None) or {}
+        inlined = _inline_schema_refs(schema, defs)
+        assert isinstance(inlined, dict)  # noqa: S101 - schema root is always an object
+        return inlined
     return schema
 
 
@@ -371,7 +625,9 @@ def tool_catalog() -> list[dict[str, Any]]:
     return catalog
 
 
-def anthropic_tool_definitions(*, include_server_side: bool = True) -> list[dict[str, Any]]:
+def anthropic_tool_definitions(
+    *, include_server_side: bool = True, generation_mode: str = "general"
+) -> list[dict[str, Any]]:
     """Tool definitions for the Anthropic messages API (input_schema per tool).
 
     ADR-022 (axis A — project presence): when ``include_server_side`` is False, PROJECT-SCOPED
@@ -389,12 +645,20 @@ def anthropic_tool_definitions(*, include_server_side: bool = True) -> list[dict
     code. Until it is, the effective offer-set = this project_id gate over the current behavior
     (all client-side tools always offered; site.* gated only by project presence; time.now always
     offered). When axis B lands, it composes by logical AND with this flag (time.now stays exempt).
+
+    ADR-064 §3 (axis C — generation mode): a tool listed in ``TOOL_GENERATION_MODES`` is offered
+    only when ``generation_mode`` (the EFFECTIVE mode of the turn) is in its set. The default
+    ``general`` therefore excludes ``quiz.generate`` — including on the legacy path, which forces
+    ``general``. Axes A and C compose by logical AND.
     """
     definitions: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
         if not include_server_side and name in SERVER_SIDE_TOOLS:
             # Axis A gate: drop project-scoped site.* when the session has no project (ADR-022 §2).
             # GLOBAL_SERVER_SIDE_TOOLS (time.now) are deliberately NOT under this gate (ADR-026 §3).
+            continue
+        if not offered_in_generation_mode(name, generation_mode):
+            # Axis C gate: a mode-gated tool (quiz.generate) outside its modes (ADR-064 §3).
             continue
         definitions.append(
             {
@@ -408,7 +672,9 @@ def anthropic_tool_definitions(*, include_server_side: bool = True) -> list[dict
     return definitions
 
 
-def neutral_tool_definitions(*, include_server_side: bool = True) -> list[dict[str, Any]]:
+def neutral_tool_definitions(
+    *, include_server_side: bool = True, generation_mode: str = "general"
+) -> list[dict[str, Any]]:
     """Provider-neutral tool definitions (ADR-033 §4): ``{name(domain dotted), description,
     input_schema}``.
 
@@ -416,11 +682,14 @@ def neutral_tool_definitions(*, include_server_side: bool = True) -> list[dict[s
     its provider wire format (Anthropic underscore names / OpenAI function-tool wrapper).
     The ``include_server_side`` gate is identical to ``anthropic_tool_definitions`` (ADR-022 axis A:
     drop project-scoped ``site.*`` when there is no project; ``GLOBAL_SERVER_SIDE_TOOLS`` like
-    ``time.now`` are never gated — ADR-026 §3).
+    ``time.now`` are never gated — ADR-026 §3), and so is the ``generation_mode`` gate (ADR-064 §3
+    axis C: ``quiz.generate`` only in ``study_learn``; the ``general`` default excludes it).
     """
     definitions: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
         if not include_server_side and name in SERVER_SIDE_TOOLS:
+            continue
+        if not offered_in_generation_mode(name, generation_mode):
             continue
         definitions.append(
             {
@@ -463,15 +732,20 @@ def openai_tool_function(neutral_def: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def openai_tool_definitions(*, include_server_side: bool = True) -> list[dict[str, Any]]:
+def openai_tool_definitions(
+    *, include_server_side: bool = True, generation_mode: str = "general"
+) -> list[dict[str, Any]]:
     """Tool definitions for the OpenAI Chat Completions API (ADR-033 §4).
 
     SSOT for the OpenAI offered tool-set: builds neutral defs (``neutral_tool_definitions``) and
     serializes each via ``openai_tool_function`` (the one OpenAI-wire wrapper). The
     ``include_server_side`` gate is identical to ``anthropic_tool_definitions`` (ADR-022 §A;
-    ``GLOBAL_SERVER_SIDE_TOOLS`` never gated — ADR-026 §3).
+    ``GLOBAL_SERVER_SIDE_TOOLS`` never gated — ADR-026 §3), and so is the ``generation_mode``
+    axis-C gate (ADR-064 §3).
     """
     return [
         openai_tool_function(d)
-        for d in neutral_tool_definitions(include_server_side=include_server_side)
+        for d in neutral_tool_definitions(
+            include_server_side=include_server_side, generation_mode=generation_mode
+        )
     ]

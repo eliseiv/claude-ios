@@ -8,8 +8,8 @@ ADR-027 made calendar.read's range args consistent with calendar.create_events:
 
 These assertions exercise tools.py directly (no app/DB): the catalog inputSchema, the strict
 arg validation (extra='forbid' rejects the old startDate/endDate), the description parity, the
-14-tool catalog invariant + client/non-mutating flags, and the Anthropic tool definition schema.
-The HTTP catalog wiring lives in tests/integration/test_tools_endpoint.py.
+catalog↔registry count invariant + client/non-mutating flags, and the Anthropic tool definition
+schema. The HTTP catalog wiring lives in tests/integration/test_tools_endpoint.py.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from app.chat.tools import (
+    ALL_TOOL_NAMES,
     TOOL_DESCRIPTIONS,
     anthropic_tool_definitions,
     tool_catalog,
@@ -138,9 +139,14 @@ def test_calendar_read_and_create_share_identical_format_clause() -> None:
 # --- Scenario 4: catalog invariants (count + flags) ------------------------------------------
 
 
-def test_catalog_still_has_fourteen_tools() -> None:
-    # ADR-027 §6: only calendar.read's inputSchema changes; the tool COUNT is unchanged.
-    assert len(tool_catalog()) == 14
+def test_catalog_count_unchanged_by_adr027() -> None:
+    # ADR-027 §6: only calendar.read's inputSchema changes; ADR-027 itself adds no tool. The count
+    # is asserted against the REGISTRY, never as a literal (06-testing-strategy.md §time.now) —
+    # a number here would have to be edited by every unrelated tool addition.
+    # NOTE: «unchanged BY ADR-027» is not expressible as an assertion (the registry legitimately
+    # grows); the ADR-027-specific claim is carried by test_other_tools_unchanged_by_adr027 below,
+    # which pins the exact NAME set. This test only keeps the catalog and the registry in step.
+    assert len(tool_catalog()) == len(ALL_TOOL_NAMES)
 
 
 def test_calendar_read_is_client_side_and_non_mutating() -> None:
@@ -172,6 +178,7 @@ def test_other_tools_unchanged_by_adr027() -> None:
         "site.read",
         "site.delete",
         "time.now",
+        "quiz.generate",
     }
 
 

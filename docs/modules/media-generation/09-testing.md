@@ -53,7 +53,7 @@
 
 ## Контрактные тесты, затронутые модулем
 
-`tests/integration/test_api_documentation.py` — пять эндпоинтов добавлены в `_ENDPOINT_TAG`, тег `Media` — в `_TAG_ORDER` (порядок должен совпадать с `_OPENAPI_TAGS` в `app.main`). Тесты каталога инструментов (`14 tools`) и пресетов **не** затронуты: генерация медиа не инструмент tool-loop.
+`tests/integration/test_api_documentation.py` — пять эндпоинтов добавлены в `_ENDPOINT_TAG`, тег `Media` — в `_TAG_ORDER` (порядок должен совпадать с `_OPENAPI_TAGS` в `app.main`). Тесты каталога инструментов (его состав/счётчик — [chat-orchestrator/02-api-contracts §GET /v1/tools](../chat-orchestrator/02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019); здесь число не дублируется) и пресетов **не** затронуты: генерация медиа не инструмент tool-loop.
 
 ## Живой прогон против fal
 

@@ -1,14 +1,23 @@
 """Unit tests for the GET /v1/tools catalog payload (ADR-019, chat-orchestrator/02).
 
 ``tool_catalog()`` is the single source of truth backing the endpoint; these tests assert the
-catalog contract (14 tools — ADR-026 added the global server-side ``time.now`` — dotted domain
-names, correct mutating/execution flags, inputSchema) without an app/DB round-trip. The HTTP
-wiring (JWT-protection, response shape) is exercised in tests/integration/test_tools_endpoint.py.
+catalog contract (dotted domain names, correct mutating/execution flags, inputSchema, and full
+coverage of the tool registry) without an app/DB round-trip. The HTTP wiring (JWT-protection,
+response shape) is exercised in tests/integration/test_tools_endpoint.py.
+
+The number of tools is asserted **against the registry, never as a literal** (09-testing.md
+§Study & Learn / 06-testing-strategy.md): a literal count would duplicate the registry on the test
+surface and make the next tool addition fail on the number instead of on the substance.
+
+The catalog is NOT filtered by axis A/B/C (02-api-contracts §GET /v1/tools): it is the full
+technical registry, so ``quiz.generate`` is present here even though the model is offered it only
+in ``study_learn``.
 """
 
 from __future__ import annotations
 
 from app.chat.tools import (
+    _ARGS_BY_TOOL,
     ALL_TOOL_NAMES,
     GLOBAL_SERVER_SIDE_TOOLS,
     MUTATING_TOOLS,
@@ -16,8 +25,9 @@ from app.chat.tools import (
     tool_catalog,
 )
 
-# Per ADR-011 / ADR-026 / chat-orchestrator/02: 8 client-side iOS tools + 5 server-side site.*
-# tools + 1 global server-side tool (time.now) = 14.
+# Composition per ADR-011 / ADR-026 / ADR-064 / chat-orchestrator/02 §Полный список: client-side
+# iOS tools + server-side site.* + global server-side (time.now, quiz.generate). The COUNT is
+# never spelled out here — it is asserted against the registry (see the first test).
 _EXPECTED_NAMES = {
     "files.read",
     "files.write",
@@ -33,13 +43,21 @@ _EXPECTED_NAMES = {
     "site.read",
     "site.delete",
     "time.now",
+    "quiz.generate",
 }
 
 
-def test_catalog_has_fourteen_tools() -> None:
+def test_catalog_covers_the_whole_tool_registry() -> None:
     catalog = tool_catalog()
-    assert len(catalog) == 14
+    # Composition — the load-bearing assertion. `_EXPECTED_NAMES` mirrors 02-api-contracts
+    # §Полный список, and `ALL_TOOL_NAMES` is a registry declared INDEPENDENTLY of the
+    # `_ARGS_BY_TOOL` map the catalog is generated from, so a tool added to one and forgotten in
+    # the other fails right here.
     assert {t["name"] for t in catalog} == _EXPECTED_NAMES == set(ALL_TOOL_NAMES)
+    # Count — against the REGISTRY, never a literal (09-testing.md §Study & Learn → Каталог). The
+    # list length (not the set) is compared, so a DUPLICATED entry — which set equality above
+    # silently collapses — fails too.
+    assert len(catalog) == len(_ARGS_BY_TOOL) == len(ALL_TOOL_NAMES)
 
 
 def test_every_tool_name_is_dotted_domain_not_underscore() -> None:
@@ -75,9 +93,12 @@ def test_execution_is_server_for_site_and_global_and_client_otherwise() -> None:
             "server" if name in SERVER_SIDE_TOOLS or name in GLOBAL_SERVER_SIDE_TOOLS else "client"
         )
         assert tool["execution"] == expected, (name, tool["execution"])
-    # Cross-check: site.* and time.now are the server-side set.
+    # Cross-check: site.*, time.now and quiz.generate are the server-side set.
     assert by_name["time.now"]["execution"] == "server"
     assert by_name["time.now"]["mutating"] is False
+    # ADR-064: quiz.generate is server-side (backend validates + echoes) and non-mutating.
+    assert by_name["quiz.generate"]["execution"] == "server"
+    assert by_name["quiz.generate"]["mutating"] is False
     for name in SERVER_SIDE_TOOLS:
         assert by_name[name]["execution"] == "server"
 

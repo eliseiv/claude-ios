@@ -7,6 +7,7 @@ import pytest
 from app.chat.tools import (
     ALL_TOOL_NAMES,
     MUTATING_TOOLS,
+    TOOL_QUIZ_GENERATE,
     anthropic_tool_definitions,
     to_anthropic_tool_name,
     to_domain_tool_name,
@@ -69,13 +70,19 @@ def test_anthropic_definitions_cover_all_tools() -> None:
     # BUG-3: definitions sent to Anthropic carry the WIRE (underscore) names, NOT the dotted
     # domain names. Anthropic rejects a dot in tool.name with 400 → backend 502. The domain
     # contract (toolCall.name, DB, audit) stays dotted; only the transport boundary maps.
+    # ADR-064 axis C: the mode-gated quiz.generate is offered ONLY in `study_learn`, so the set
+    # covered by the default (`general`) call is ALL_TOOL_NAMES minus that one tool.
+    expected_domain = set(ALL_TOOL_NAMES) - {TOOL_QUIZ_GENERATE}
     defs = anthropic_tool_definitions()
     names = {d["name"] for d in defs}
     # The emitted names are the underscore wire names (no dots), one per domain tool.
-    assert names == {to_anthropic_tool_name(n) for n in ALL_TOOL_NAMES}
+    assert names == {to_anthropic_tool_name(n) for n in expected_domain}
     assert all("." not in n for n in names)
     # Each wire name reverse-maps back to exactly the domain tool set (bijective, lossless).
-    assert {to_domain_tool_name(n) for n in names} == set(ALL_TOOL_NAMES)
+    assert {to_domain_tool_name(n) for n in names} == expected_domain
     for d in defs:
         assert "input_schema" in d
         assert d["description"]
+    # In its own mode the full registry is covered (nothing else was dropped along the way).
+    study_names = {d["name"] for d in anthropic_tool_definitions(generation_mode="study_learn")}
+    assert {to_domain_tool_name(n) for n in study_names} == set(ALL_TOOL_NAMES)
