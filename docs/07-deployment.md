@@ -432,7 +432,7 @@ Deploy-job (gated в `ci.yml` и ручной `deploy.yml`) получает н�
 
 **Нормативное значение (совпадает с фактическим `ci.yml` + `deploy.yml`):**
 ```
-INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa"
+INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo"
 ```
 **Нормативный список инстансов (источник истины, docs ↔ оба workflow совпадают).** Число действующих = число строк таблицы ниже; отдельной цифрой оно нигде не записывается (записанная цифра расходится с таблицей на первом же добавлении).
 
@@ -453,6 +453,8 @@ INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elva
 | `taluneri` | `taluneri` | `taluneri.shop` | OpenAI (`LLM_PROVIDER=openai`) | 11-й |
 | `webmoria` | `webmoria` | `webmoria.shop` | OpenAI (`LLM_PROVIDER=openai`) | 12-й |
 | `velunixa` | `velunixa` | `velunixa.shop` | OpenAI (`LLM_PROVIDER=openai`) | 13-й |
+| `ravelumi` | `ravelumi` | `ravelumi.shop` | OpenAI (`LLM_PROVIDER=openai`) | 14-й |
+| `qorimelo` | `qorimelo` | `qorimelo.shop` | OpenAI (`LLM_PROVIDER=openai`) | 15-й |
 
 > **Строка таблицы = провизионированный и работающий инстанс, а не цель.** Запись появляется здесь **шагом 9** [§Процедуры провижининга клона](#процедура-провижининга-клона-пошагово-для-devops) — то есть после того, как её шаги 1–8 выполнены (они идут **без** записи в реестре, и это норма) и `GET https://<домен>/healthz` отвечает `200` с этого инстанса. Подготовить правку в рабочем дереве заранее можно; **коммитить/пушить до `healthz 200` — нельзя**. Обратный порядок запрещён: запись, закоммиченная авансом, роняет свою deploy-итерацию на `cd /opt/<dir>` и попадает в `$FAILED` (остальные инстансы при этом не страдают — loop идёт без `set -e`, [§Процедура деплоя](#процедура-деплоя-github-actions--ssh)), то есть каждый прогон CI краснеет по несуществующему каталогу. **Прохождение [prod-checklist](#prod-readiness-checklist-must-configure-before-launch) строкой таблицы НЕ подразумевается** — чек-лист применяется к каждому инстансу отдельно и закрывается независимо от факта работы.
 
