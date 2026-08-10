@@ -197,6 +197,11 @@ class ChatSession(Base):
     is_pinned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa_text("false")
     )
+    # Temporary chat (v2): session-fixed at create via POST /v1/chat/v2/run ``temporary``.
+    # Hidden from GET /v1/chats; still addressable by id for multi-turn / DELETE.
+    is_temporary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("false")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )
@@ -212,6 +217,13 @@ class ChatSession(Base):
             "user_id",
             sa_text("is_pinned DESC"),
             sa_text("updated_at DESC"),
+        ),
+        # List path only reads non-temporary sessions.
+        Index(
+            "ix_sessions_user_non_temporary_updated",
+            "user_id",
+            sa_text("updated_at DESC"),
+            postgresql_where=sa_text("is_temporary = false"),
         ),
         # ADR-036: filter «чаты проекта» (GET /v1/chats?workspaceProjectId=) and chatCount.
         Index("ix_sessions_workspace", "workspace_project_id"),

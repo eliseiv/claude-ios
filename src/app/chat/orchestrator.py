@@ -592,6 +592,7 @@ class ChatOrchestrator:
         edit_message_step_id: uuid.UUID | None = None,
         generation_mode: GenerationMode = "general",
         generation_backend: GenerationBackend = "legacy",
+        temporary: bool = False,
     ) -> ChatRunOut:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
         requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
@@ -652,6 +653,8 @@ class ChatOrchestrator:
             workspace_project_id=workspace_project_id if will_create else None,
             # Public chat backend contract: legacy `/v1/chat/*` or v2 `/v1/chat/v2/*`.
             generation_backend=requested_backend,
+            # Temporary chat (v2): session-fixed; only written on create (resume ignores request).
+            temporary=bool(temporary) if will_create else False,
         )
         sess = ctx.session
         await self._ensure_session_backend(

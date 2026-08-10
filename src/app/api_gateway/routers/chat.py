@@ -214,6 +214,19 @@ _V2_RUN_REQUEST_EXAMPLES = {
             "generationMode": "study_learn",
         },
     },
+    "temporary_chat": {
+        "summary": "V2: temporary chat",
+        "description": (
+            "Новая сессия не появится в GET /v1/chats. Удаляйте через DELETE /v1/chats/{id}."
+        ),
+        "value": {
+            "userId": "11111111-2222-3333-4444-555555555555",
+            "message": "Быстрый вопрос без сохранения в истории.",
+            "mode": "credits",
+            "generationMode": "general",
+            "temporary": True,
+        },
+    },
 }
 
 # Quiz pool shared by the v2 run and v2 tool-result examples: the SAME pool of the SAME turn comes
@@ -568,10 +581,13 @@ async def chat_run(
     description=(
         "Новая provider-neutral ручка для режимов `general`, `research`, `reasoning`, "
         "`study_learn`. `generationMode` выбирается на каждый ход и может меняться внутри одной "
-        "сессии. OpenAI-ветка использует Responses API и `previous_response_id` там, где он "
-        "сохранён; Anthropic-ветка использует Messages API с hosted web search или extended "
-        "thinking для соответствующих режимов. В режиме `study_learn` ответ несёт пул вопросов в "
-        "поле `quiz`, а `assistantMessage` = `null`. Стоимость в credits зависит от режима. "
+        "сессии. `temporary: true` при создании сессии (без `sessionId`) делает чат временным: "
+        "он не попадает в `GET /v1/chats`, но доступен по `sessionId` для multi-turn; клиент "
+        "удаляет через `DELETE /v1/chats/{id}`. На resume поле игнорируется. OpenAI-ветка "
+        "использует Responses API и `previous_response_id` там, где он сохранён; Anthropic-ветка "
+        "использует Messages API с hosted web search или extended thinking для соответствующих "
+        "режимов. В режиме `study_learn` ответ несёт пул вопросов в поле `quiz`, а "
+        "`assistantMessage` = `null`. Стоимость в credits зависит от режима. "
         "Tool-loop продолжается через `/v1/chat/v2/tool-result`."
     ),
     responses={
@@ -607,6 +623,7 @@ async def chat_v2_run(
         edit_message_step_id=body.editMessageStepId,
         generation_mode=body.generationMode,
         generation_backend="v2",
+        temporary=body.temporary,
     )
     return _to_response(out)
 

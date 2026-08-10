@@ -54,6 +54,21 @@ def test_legacy_chat_run_request_rejects_generation_mode() -> None:
         ChatRunRequest.model_validate(_run_payload(generationMode="research"))
 
 
+def test_temporary_defaults_to_false_on_v2() -> None:
+    req = ChatV2RunRequest.model_validate(_run_payload())
+    assert req.temporary is False
+
+
+def test_temporary_accepts_true_on_v2() -> None:
+    req = ChatV2RunRequest.model_validate(_run_payload(temporary=True))
+    assert req.temporary is True
+
+
+def test_legacy_chat_run_request_rejects_temporary() -> None:
+    with pytest.raises(ValidationError):
+        ChatRunRequest.model_validate(_run_payload(temporary=True))
+
+
 def test_generation_mode_credit_costs_are_configurable_positive_values() -> None:
     settings = Settings(
         CHAT_CREDIT_COST_GENERAL=2,

@@ -93,6 +93,7 @@ class ChatRepository:
         model: str | None = None,
         workspace_project_id: uuid.UUID | None = None,
         generation_backend: str | None = None,
+        temporary: bool = False,
     ) -> SessionContext:
         """Resume an owned, non-expired session or create a new one.
 
@@ -106,7 +107,9 @@ class ChatRepository:
         workspace (``chat_sessions.workspace_project_id = NULL`` — ADR-036; NOT the website-builder
         ``project_id``). ``generation_backend`` is also fixed on create so legacy `/v1/chat/*`
         sessions and `/v1/chat/v2/*` sessions do not accidentally mix provider-state and billing
-        contracts. Ownership of the workspace is validated by the caller before creation.
+        contracts. ``temporary`` (v2) is session-fixed the same way: hidden from ``GET /v1/chats``,
+        still addressable by id. Ownership of the workspace is validated by the caller before
+        creation.
         """
         if session_id is not None:
             existing = await self.get_session(session_id, user_id)
@@ -122,6 +125,7 @@ class ChatRepository:
             model=model,
             workspace_project_id=workspace_project_id,
             generation_backend=generation_backend,
+            is_temporary=temporary,
         )
         self._session.add(new_session)
         await self._session.flush()

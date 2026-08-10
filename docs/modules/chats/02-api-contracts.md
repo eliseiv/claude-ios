@@ -9,7 +9,8 @@
 - `q` (опц.) — поиск: ILIKE по `title` и по тексту первого user-сообщения.
 - `cursor` (опц.) — пагинация (opaque, по `updated_at`+`id`).
 - `limit` (опц., дефолт 30, max 100).
-- `workspaceProjectId` (опц., uuid, [ADR-036](../../adr/ADR-036-workspaces-implementation.md)) — **фильтр «чаты проекта»**: возвращает только чаты, привязанные к указанному workspace (`chat_sessions.workspace_project_id = :id`). Чужой/несуществующий workspace → пустой список (изоляция по `sub`, не `404` для фильтра-параметра). Без параметра — все чаты пользователя (поведение неизменно).
+- `workspaceProjectId` (опц., uuid, [ADR-036](../../adr/ADR-036-workspaces-implementation.md)) — **фильтр «чаты проекта»**: возвращает только чаты, привязанные к указанному workspace (`chat_sessions.workspace_project_id = :id`). Чужой/несуществующий workspace → пустой список (изоляция по `sub`, не `404` для фильтра-параметра). Без параметра — все **не-temporary** чаты пользователя.
+- **Temporary-чаты скрыты:** сессии с `chat_sessions.is_temporary = true` (созданы через `POST /v1/chat/v2/run` с `temporary: true`) **никогда** не попадают в список (в т.ч. с `workspaceProjectId`). Они доступны по id (`GET /v1/chats/{id}`) и удаляются клиентом через `DELETE /v1/chats/{id}`.
 
 ### Response (200)
 ```json

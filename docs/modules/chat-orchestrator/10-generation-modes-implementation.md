@@ -38,6 +38,7 @@ Legacy request для `/v1/chat/run`. В нем больше нет `generationM
 
 ```python
 generationMode: Literal["general", "research", "reasoning", "study_learn"] = "general"
+temporary: bool = False
 ```
 
 Режим не фиксируется на сессию. В одном `sessionId` можно сделать ход `research`, следующий ход
@@ -47,6 +48,11 @@ generationMode: Literal["general", "research", "reasoning", "study_learn"] = "ge
 ЭТОЙ оси, а не отдельная ось: ось `dialogMode` в проект не вводится. Полный контракт режима —
 [§Режим study_learn](#режим-study_learn-квиз-adr-064) ниже и
 [02-api-contracts.md §POST /v1/chat/v2/run](02-api-contracts.md#post-v1chatv2run).
+
+`temporary` — session-fixed при создании (как `model` / `workspaceProjectId`): пишется только
+когда создаётся новая сессия; на resume игнорируется. Temporary-сессия скрыта из
+`GET /v1/chats`, остаётся доступна по `sessionId` / `GET /v1/chats/{id}` для multi-turn; клиент
+удаляет через `DELETE /v1/chats/{id}`. Legacy `/v1/chat/run` поле отвергает (`422`).
 
 ### `chat_run`
 

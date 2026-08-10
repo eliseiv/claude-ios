@@ -185,6 +185,10 @@ class ChatV2RunRequest(ChatRunRequest):
     `research` for one message and then `general` for the next message in the same `sessionId`.
     The backend persists the selected mode on the user step so any `/v1/chat/v2/tool-result`
     continuation keeps using the same provider options and billing cost as the original turn.
+
+    `temporary` is session-fixed at creation (like `model` / `workspaceProjectId`): a temporary
+    session is hidden from ``GET /v1/chats`` but still usable by ``sessionId`` for multi-turn;
+    the client deletes it via ``DELETE /v1/chats/{id}``. Legacy ``/v1/chat/run`` rejects the field.
     """
 
     generationMode: GenerationMode = Field(
@@ -195,6 +199,15 @@ class ChatV2RunRequest(ChatRunRequest):
             "в котором ответ несёт квиз (поле `quiz`, при этом `assistantMessage` = `null`). "
             "Не фиксируется на сессию и может меняться между сообщениями одного чата. Не путать "
             "с `mode` (`credits|byok`) и `assistantMode` (`chat|code`)."
+        ),
+    )
+    temporary: bool = Field(
+        default=False,
+        description=(
+            "Временный чат. Учитывается только при создании сессии (`sessionId` отсутствует); "
+            "на продолжении игнорируется. Такой чат не появляется в `GET /v1/chats`; клиент "
+            "удаляет его через `DELETE /v1/chats/{id}` при выходе из UI. Не путать с "
+            "`generationMode`."
         ),
     )
 

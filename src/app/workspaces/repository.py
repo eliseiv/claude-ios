@@ -147,7 +147,11 @@ class WorkspacesRepository:
             return {}
         rows = await self._session.execute(
             select(ChatSession.workspace_project_id, func.count())
-            .where(ChatSession.workspace_project_id.in_(workspace_ids))
+            .where(
+                ChatSession.workspace_project_id.in_(workspace_ids),
+                # Temporary chats are hidden from history; do not inflate workspace chatCount.
+                ChatSession.is_temporary.is_(False),
+            )
             .group_by(ChatSession.workspace_project_id)
         )
         return {wid: int(count) for wid, count in rows.tuples().all() if wid is not None}

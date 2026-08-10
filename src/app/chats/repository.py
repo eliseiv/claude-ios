@@ -102,9 +102,14 @@ class ChatsRepository:
 
         Search ``query`` matches title ILIKE OR the text of the first user step ILIKE
         (chats/03). ``workspace_project_id`` (ADR-036) filters to «чаты проекта» when provided.
+        Temporary v2 sessions (``is_temporary``) are always excluded — they are not part of the
+        history list; the client addresses them by id and deletes via ``DELETE /v1/chats/{id}``.
         Fetch limit+1 to compute next_cursor without a second count query.
         """
-        stmt = select(ChatSession).where(ChatSession.user_id == user_id)
+        stmt = select(ChatSession).where(
+            ChatSession.user_id == user_id,
+            ChatSession.is_temporary.is_(False),
+        )
 
         if workspace_project_id is not None:
             stmt = stmt.where(ChatSession.workspace_project_id == workspace_project_id)
