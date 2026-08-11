@@ -387,7 +387,9 @@ async def test_no_quiz_step_lookup_outside_study_learn_turns(
     async def _spy(
         self: ChatRepository, session_id: uuid.UUID, message_step_id: uuid.UUID, tool_name: str
     ) -> dict[str, Any] | None:
-        lookups["n"] += 1
+        # Count only quiz recovery (ADR-064). media.ask_params may also use this helper (ADR-070).
+        if tool_name == _QUIZ_DOMAIN:
+            lookups["n"] += 1
         return await original(self, session_id, message_step_id, tool_name)
 
     monkeypatch.setattr(ChatRepository, "last_tool_result_for_message_step", _spy)

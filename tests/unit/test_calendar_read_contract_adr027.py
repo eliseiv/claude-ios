@@ -181,6 +181,7 @@ def test_other_tools_unchanged_by_adr027() -> None:
         "quiz.generate",
         "media.generate_image",
         "media.generate_video",
+        "media.ask_params",
     }
 
 

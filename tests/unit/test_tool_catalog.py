@@ -46,6 +46,7 @@ _EXPECTED_NAMES = {
     "quiz.generate",
     "media.generate_image",
     "media.generate_video",
+    "media.ask_params",
 }
 
 
