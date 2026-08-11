@@ -165,7 +165,9 @@ class ChatRunRequest(StrictModel):
         # non-empty after strip OR at least one attachment is present in the request. A
         # whitespace-only message with no attachment is also rejected (→ 422). The size limit below
         # still applies (an empty string trivially passes); a non-empty message is unchanged.
-        if not self.message.strip() and not self.attachments:
+        # ADR-070: ChatV2RunRequest may carry mediaSelection instead of message/attachments.
+        has_media_selection = getattr(self, "mediaSelection", None) is not None
+        if not self.message.strip() and not self.attachments and not has_media_selection:
             raise ValueError("message or at least one attachment is required")
         settings = get_settings()
         if len(self.message.encode("utf-8")) > settings.size_limit_message:
@@ -176,6 +178,18 @@ class ChatRunRequest(StrictModel):
             if len(json.dumps(self.context).encode("utf-8")) > settings.size_limit_context:
                 raise ValueError("context exceeds size limit")
         return self
+
+
+class MediaSelectionIn(StrictModel):
+    """Client tap answers for an in-flight mediaChoices wizard (ADR-070)."""
+
+    selectionId: uuid.UUID = Field(description="Id wizard-а из `mediaChoices.selectionId`.")
+    answers: dict[str, str] = Field(
+        description=(
+            "Накопленные ответы: ключ = `questions[].id` (`model`, `resolution`, …), "
+            "значение = `options[].value`. Клиент шлёт полный накопленный набор."
+        ),
+    )
 
 
 class ChatV2RunRequest(ChatRunRequest):
@@ -210,6 +224,20 @@ class ChatV2RunRequest(ChatRunRequest):
             "`generationMode`."
         ),
     )
+    mediaSelection: MediaSelectionIn | None = Field(
+        default=None,
+        description=(
+            "Ответ на `mediaChoices` (ADR-070): тапы пользователя по вариантам модели/качества. "
+            "Требует `sessionId`. При наличии допускается пустой `message` (без вложений). "
+            "Ветка без LLM: следующий шаг wizard-а или сабмит media job."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _media_selection_requires_session(self) -> ChatV2RunRequest:
+        if self.mediaSelection is not None and self.sessionId is None:
+            raise ValueError("mediaSelection requires sessionId")
+        return self
 
 
 class ToolErrorBody(StrictModel):
@@ -422,6 +450,34 @@ QuizQuestionSchema = QuizQuestion
 QuizSchema = Quiz
 
 
+class MediaChoiceOptionSchema(StrictModel):
+    """One tappable option in a mediaChoices question (ADR-070)."""
+
+    value: str = Field(description="Машиночитаемое значение (id модели, `1K`, `8s`, …).")
+    label: str = Field(description="Подпись для UI.")
+
+
+class MediaChoiceQuestionSchema(StrictModel):
+    """One wizard question — same interaction pattern as quiz cards, without correctIndex."""
+
+    id: str = Field(description="Ключ ответа: `model` | `resolution` | `duration` | …")
+    question: str = Field(description="Текст вопроса для карточки.")
+    options: list[MediaChoiceOptionSchema] = Field(min_length=1)
+
+
+class MediaChoicesSchema(StrictModel):
+    """Catalog-backed parameter picker for media generation (ADR-070)."""
+
+    selectionId: uuid.UUID = Field(description="Коррелятор wizard-а для `mediaSelection`.")
+    kind: Literal["image", "video"]
+    prompt: str = Field(description="Промпт, с которым будет сабмит после выбора.")
+    step: str = Field(description="Текущий шаг wizard-а (`model`, `resolution`, …).")
+    questions: list[MediaChoiceQuestionSchema] = Field(
+        min_length=1,
+        description="Обычно один вопрос (каскад по шагам).",
+    )
+
+
 _QUIZ_DOC = (
     "Квиз режима `study_learn` — **содержимое ХОДА** (`messageStepId`), а не дельта отдельного "
     "запроса.\n\n"
@@ -540,6 +596,15 @@ class ChatResponse(StrictModel):
         description="Потребление токенов модели (при `assistant_message`/`tool_call`).",
     )
     quiz: QuizSchema | None = Field(default=None, description=_QUIZ_DOC)
+    mediaChoices: MediaChoicesSchema | None = Field(
+        default=None,
+        description=(
+            "Пикер параметров media (ADR-070) — **не** учебный `quiz`. Options из серверного "
+            "каталога; один шаг wizard-а за ответ. Клиент рендерит карточки и шлёт "
+            "`mediaSelection` на `/v1/chat/v2/run`. `null` — пикера не было. "
+            "`assistantMessage` при этом НЕ глушится."
+        ),
+    )
     mediaJobs: list[MediaJobRefSchema] | None = Field(
         default=None,
         description=(
@@ -554,8 +619,8 @@ class ChatResponse(StrictModel):
         default_factory=list,
         description=(
             "Server-side инструменты (`site.*`, `time.now`, `quiz.generate`, "
-            "`media.generate_image`/`media.generate_video`), выполненные backend "
-            "за ЭТОТ вызов "
+            "`media.generate_image`/`media.generate_video`/`media.ask_params`), выполненные "
+            "backend за ЭТОТ вызов "
             "`/chat/run` (или один `/chat/tool-result`-continuation), в порядке выполнения. "
             "Присутствует всегда: пустой `[]` — server-side не выполнялись (в т.ч. "
             "policy-`blocked`, где tool-loop не запускался); при `blocked=max_tokens` может быть "

@@ -229,6 +229,8 @@ class FakeAnthropicClient:
         self.offline_keys: set[str] = set()
         self.auth_error_keys: set[str] = set()
         self.raise_upstream = False
+        # ADR-069: optional per-call delta scripts for stream_message (None → auto-chunk text).
+        self.stream_chunks: list[list[str] | None] = []
 
     def text_result(self, text: str = "hello") -> Any:
         usage = self._AnthropicUsage(
@@ -442,6 +444,33 @@ class FakeAnthropicClient:
         if not self.responses:
             return self.text_result()
         return self.responses.pop(0)
+
+    async def stream_message(self, **kwargs: Any) -> Any:
+        """LLMClient.stream_message double (ADR-069): text deltas then completed.
+
+        Optional ``stream_chunks`` queue: each entry is a list of delta strings for the next
+        call (``None`` → auto-split ``result.text`` into up to 3 non-empty chunks). Matches
+        create_message scripting via ``responses``.
+        """
+        from app.chat.llm_client import StreamEvent
+
+        result = await self.create_message(**kwargs)
+        chunks: list[str] | None = self.stream_chunks.pop(0) if self.stream_chunks else None
+        if chunks is None:
+            text = getattr(result, "text", "") or ""
+            if not text:
+                chunks = []
+            elif len(text) < 3:
+                chunks = [text]
+            else:
+                # Prefer equal-ish thirds so integration tests can assert 3 deltas.
+                n = len(text)
+                a, b = n // 3, (2 * n) // 3
+                chunks = [text[:a], text[a:b], text[b:]]
+                chunks = [c for c in chunks if c]
+        for chunk in chunks:
+            yield StreamEvent.text_delta(chunk)
+        yield StreamEvent.completed(result)
 
     async def validate_key(self, api_key: str) -> Any:
         # ADR-016: production BYOKService.set_key expects a KeyValidation enum

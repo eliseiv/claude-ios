@@ -16,8 +16,9 @@ the orchestrator never compares against provider-specific literals.
 from __future__ import annotations
 
 import enum
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from app.chat.attachments import PreparedAttachments
 from app.config import get_settings
@@ -103,6 +104,27 @@ class LLMResult:
 
 
 @dataclass(frozen=True)
+class StreamEvent:
+    """One item from ``LLMClient.stream_message`` (ADR-069).
+
+    - ``kind="text_delta"``: incremental assistant text (``text`` set).
+    - ``kind="completed"``: final neutral ``LLMResult`` for the round (``result`` set).
+    """
+
+    kind: Literal["text_delta", "completed"]
+    text: str = ""
+    result: LLMResult | None = None
+
+    @classmethod
+    def text_delta(cls, text: str) -> StreamEvent:
+        return cls(kind="text_delta", text=text)
+
+    @classmethod
+    def completed(cls, result: LLMResult) -> StreamEvent:
+        return cls(kind="completed", result=result)
+
+
+@dataclass(frozen=True)
 class NeutralMessage:
     """One step of the provider-neutral history passed to ``LLMClient.create_message`` (ADR-033 §3).
 
@@ -153,6 +175,25 @@ class LLMClient(Protocol):
         # future compatibility because the normal Messages API is stateless.
         provider_state: dict[str, Any] | None = None,
     ) -> LLMResult: ...
+
+    def stream_message(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[NeutralMessage],
+        tools: list[dict[str, Any]],
+        attachments: PreparedAttachments | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        generation_mode: str = "general",
+        provider_state: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream one provider round: zero+ ``text_delta`` then exactly one ``completed`` (ADR-069).
+
+        Implementations SHOULD emit progressive text; a fallback that yields a single delta of the
+        full text before ``completed`` is acceptable only when the provider stream API is unavailable.
+        """
+        ...
 
     async def validate_key(self, api_key: str) -> KeyValidation: ...
 

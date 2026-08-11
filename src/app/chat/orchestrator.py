@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -47,6 +48,7 @@ from app.chat.tools import (
     QUIZ_INVALID_ERROR_CODE,
     SERVER_SIDE_TOOLS,
     TOOL_GENERATION_MODES,
+    TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
     TOOL_MEDIA_GENERATE_VIDEO,
     TOOL_QUIZ_GENERATE,
@@ -58,6 +60,7 @@ from app.chat.tools import (
 from app.config import get_settings
 from app.errors import (
     InsufficientCreditsError,
+    MediaGenerationNotConfiguredError,
     MessageNotFoundError,
     NotFoundError,
     UpstreamError,
@@ -108,13 +111,15 @@ _TIME_NOW_INSTRUCTION = (
     "do not guess."
 )
 
-# ADR-068: steer the model to media.generate_* for photo/video requests. STATIC — no catalog dump
-# (prices/models change per instance); ask clarifying questions, submit once, never wait for fal.
+# ADR-068 / ADR-070: prefer media.ask_params (catalog-backed taps) when model/quality unclear;
+# media.generate_* only when parameters are already known. STATIC — no catalog dump.
 _MEDIA_GENERATE_INSTRUCTION = (
-    "When the user asks you to generate a photo or video, use media.generate_image or "
-    "media.generate_video. Ask briefly for model and quality (and duration for video) if unclear, "
-    "then call the tool once. The tool only queues the job and returns a jobId — tell the user "
-    "generation has started; do not claim the media is ready until the app reports it."
+    "When the user asks you to generate a photo or video and has not already chosen the model "
+    "and quality (and duration for video), call media.ask_params once with kind and prompt, then "
+    "wait — the app shows tappable choices. Do not invent model ids or resolutions. Only call "
+    "media.generate_image or media.generate_video when those parameters are already known. "
+    "Generate tools only queue a job and return a jobId — tell the user generation has started; "
+    "do not claim the media is ready until the app reports it."
 )
 
 # ADR-059: state, in the system prompt, that the assistant has the full conversation so far and
@@ -427,6 +432,29 @@ class ToolResultIn:
 
 
 @dataclass(frozen=True)
+class ChatStreamEvent:
+    """One SSE event for ``/v1/chat/v2/run/stream`` (ADR-069)."""
+
+    kind: Literal["delta", "done", "error"]
+    text: str = ""
+    out: ChatRunOut | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+    @classmethod
+    def delta(cls, text: str) -> ChatStreamEvent:
+        return cls(kind="delta", text=text)
+
+    @classmethod
+    def done(cls, out: ChatRunOut) -> ChatStreamEvent:
+        return cls(kind="done", out=out)
+
+    @classmethod
+    def error(cls, code: str, message: str) -> ChatStreamEvent:
+        return cls(kind="error", error_code=code, error_message=message)
+
+
+@dataclass(frozen=True)
 class ChatRunOut:
     status: str  # assistant_message | tool_call | blocked
     session_id: uuid.UUID
@@ -460,6 +488,9 @@ class ChatRunOut:
     # ADR-068: media jobs submitted in THIS TURN via media.generate_* — turn-scoped like quiz.
     # None = «no media jobs in this turn»; a list (possibly recovered from tool steps) otherwise.
     media_jobs: list[dict[str, Any]] | None = None
+    # ADR-070: catalog-backed mediaChoices wizard step for this turn (from media.ask_params /
+    # mediaSelection continuation). None = no picker in this response.
+    media_choices: dict[str, Any] | None = None
 
 
 @dataclass
@@ -483,6 +514,13 @@ class _MediaJobsAccumulator:
     """
 
     jobs: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class _MediaChoicesAccumulator:
+    """mediaChoices wizard state produced in the CURRENT call (ADR-070). Last-wins."""
+
+    state: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -627,6 +665,8 @@ class ChatOrchestrator:
         generation_mode: GenerationMode = "general",
         generation_backend: GenerationBackend = "legacy",
         temporary: bool = False,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        media_selection: dict[str, Any] | None = None,
     ) -> ChatRunOut:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
         requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
@@ -698,6 +738,19 @@ class ChatOrchestrator:
         )
         # mode is fixed on the session; use the session's stored mode.
         effective_mode = Mode(sess.mode)
+
+        # ADR-070: mediaChoices wizard continuation — no LLM, no chat debit.
+        if media_selection is not None:
+            if not use_generation_v2:
+                raise ValidationFailedError("mediaSelection is only supported on /v1/chat/v2/*")
+            return await self._handle_media_selection(
+                user_id=user_id,
+                session_id=sess.id,
+                message_step_id=message_step_id,
+                media_selection=media_selection,
+                message=message,
+                generation_mode=effective_generation_mode,
+            )
 
         # ADR-040 §2,§3: edit+regenerate. Truncate the session history from the edited turn (its
         # user-step and EVERYTHING after) BEFORE persisting the new user-step of this turn, in the
@@ -841,7 +894,242 @@ class ChatOrchestrator:
             model=sess.model or None,
             generation_mode=effective_generation_mode,
             generation_backend=requested_backend,
+            on_text_delta=on_text_delta,
         )
+
+    async def _handle_media_selection(
+        self,
+        *,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        media_selection: dict[str, Any],
+        message: str,
+        generation_mode: str,
+    ) -> ChatRunOut:
+        """Continue or complete a mediaChoices wizard without calling the LLM (ADR-070)."""
+        from app.chat.media_choices import (
+            build_wizard_state,
+            media_choices_response,
+            submit_params_from_answers,
+            validate_and_merge_answers,
+        )
+
+        raw_sid = media_selection.get("selectionId")
+        try:
+            selection_id = raw_sid if isinstance(raw_sid, uuid.UUID) else uuid.UUID(str(raw_sid))
+        except (TypeError, ValueError) as exc:
+            raise ValidationFailedError("mediaSelection.selectionId must be a UUID") from exc
+        incoming = media_selection.get("answers")
+        if not isinstance(incoming, dict):
+            raise ValidationFailedError("mediaSelection.answers must be an object")
+
+        prior = await self._deps.repo.find_media_wizard_state(session_id, selection_id)
+        if prior is None:
+            raise ValidationFailedError("unknown mediaSelection.selectionId")
+
+        kind = str(prior.get("kind") or "")
+        prompt = str(prior.get("prompt") or "")
+        source_job_id = prior.get("sourceJobId")
+        source_job_id_str = str(source_job_id) if source_job_id else None
+        existing_answers = prior.get("answers") if isinstance(prior.get("answers"), dict) else {}
+
+        try:
+            merged = validate_and_merge_answers(
+                kind=kind,
+                source_job_id=source_job_id_str,
+                existing={str(k): str(v) for k, v in existing_answers.items()},
+                incoming=incoming,
+            )
+        except ValueError as exc:
+            raise ValidationFailedError(str(exc)) from exc
+
+        media_svc = self._deps.global_tools._media  # noqa: SLF001 — request-scoped service
+        if media_svc is None:
+            raise ValidationFailedError("media generation is not configured on this instance")
+
+        def _credits(model: Any) -> int:
+            return media_svc.credits_for(model)
+
+        next_state = build_wizard_state(
+            selection_id=str(selection_id),
+            kind=kind,
+            prompt=prompt,
+            source_job_id=source_job_id_str,
+            answers=merged,
+            credits_for=_credits,
+        )
+
+        label = message.strip() or f"[media selection {selection_id}]"
+        user_payload: dict[str, Any] = {
+            "content": [{"type": "text", "text": label}],
+            "generationMode": generation_mode,
+        }
+        if next_state is not None:
+            user_payload["mediaWizard"] = next_state
+            await self._deps.repo.add_step(
+                session_id=session_id,
+                message_step_id=message_step_id,
+                role="user",
+                payload=user_payload,
+            )
+            assistant_step = await self._deps.repo.add_step(
+                session_id=session_id,
+                message_step_id=message_step_id,
+                role="assistant",
+                payload={"content": [{"type": "text", "text": "Please choose the next option."}]},
+            )
+            await self._session.commit()
+            return ChatRunOut(
+                status="assistant_message",
+                session_id=session_id,
+                assistant_message="Please choose the next option.",
+                message_step_id=message_step_id,
+                step_id=assistant_step.id,
+                media_choices=media_choices_response(next_state),
+            )
+
+        # Wizard complete → submit media job (media debit only; no chat debit).
+        model_id = merged.get("model")
+        if not model_id:
+            raise ValidationFailedError("mediaSelection is missing model")
+        params = submit_params_from_answers(merged)
+        source_uuid = uuid.UUID(source_job_id_str) if source_job_id_str else None
+        user_payload["mediaWizard"] = {
+            "selectionId": str(selection_id),
+            "kind": kind,
+            "prompt": prompt,
+            "sourceJobId": source_job_id_str,
+            "answers": merged,
+            "step": "done",
+            "questions": [],
+        }
+        await self._deps.repo.add_step(
+            session_id=session_id,
+            message_step_id=message_step_id,
+            role="user",
+            payload=user_payload,
+        )
+        try:
+            view = await media_svc.submit(
+                user_id=user_id,
+                kind=kind,
+                model_id=model_id,
+                prompt=prompt,
+                image_urls=[],
+                params=params,
+                source_job_id=source_uuid,
+            )
+        except MediaGenerationNotConfiguredError as exc:
+            raise ValidationFailedError("media generation is not configured") from exc
+        except InsufficientCreditsError:
+            raise
+        except NotFoundError as exc:
+            raise ValidationFailedError("sourceJobId not found") from exc
+        except ValidationFailedError:
+            raise
+        except UpstreamError as exc:
+            raise UpstreamError("media provider unavailable; try again later") from exc
+
+        job = view.job
+        job_ref = {
+            "jobId": str(job.id),
+            "kind": job.kind,
+            "status": job.status,
+            "model": job.model_id,
+            "creditsCharged": job.credits_charged,
+        }
+        assistant_step = await self._deps.repo.add_step(
+            session_id=session_id,
+            message_step_id=message_step_id,
+            role="assistant",
+            payload={
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Generation started. I will let you know when it is ready.",
+                    }
+                ]
+            },
+        )
+        await self._session.commit()
+        return ChatRunOut(
+            status="assistant_message",
+            session_id=session_id,
+            assistant_message="Generation started. I will let you know when it is ready.",
+            message_step_id=message_step_id,
+            step_id=assistant_step.id,
+            media_jobs=[job_ref],
+        )
+
+    async def run_stream(
+        self,
+        *,
+        user_id: uuid.UUID,
+        project_id: str | None,
+        session_id: uuid.UUID | None,
+        message: str,
+        mode: str,
+        assistant_mode: str | None = None,
+        attachments: list[AttachmentIn] | None = None,
+        model: str | None = None,
+        workspace_project_id: uuid.UUID | None = None,
+        context: dict[str, Any] | None = None,
+        edit_message_step_id: uuid.UUID | None = None,
+        generation_mode: GenerationMode = "general",
+        generation_backend: GenerationBackend = "legacy",
+        temporary: bool = False,
+        media_selection: dict[str, Any] | None = None,
+    ) -> AsyncIterator[ChatStreamEvent]:
+        """SSE text stream for one chat turn (ADR-069).
+
+        Runs the turn on the caller's task (same AsyncSession), collects text deltas, then
+        yields them followed by ``done``. Mid-stream failures after at least one delta yield
+        ``error``; pre-stream failures propagate as exceptions for normal 4xx handling.
+
+        Note: deltas are flushed after the provider round(s) complete inside ``run`` — the
+        ASGI generator and DB session stay single-task (SQLAlchemy AsyncSession is not
+        multi-task safe). Progressive flush during ``stream_message`` still happens at the
+        LLM client boundary; the SSE frames are emitted as soon as ``run`` returns its
+        collected deltas before ``done``.
+        """
+        deltas: list[str] = []
+
+        async def _on_delta(text: str) -> None:
+            deltas.append(text)
+
+        try:
+            out = await self.run(
+                user_id=user_id,
+                project_id=project_id,
+                session_id=session_id,
+                message=message,
+                mode=mode,
+                assistant_mode=assistant_mode,
+                attachments=attachments,
+                model=model,
+                workspace_project_id=workspace_project_id,
+                context=context,
+                edit_message_step_id=edit_message_step_id,
+                generation_mode=generation_mode,
+                generation_backend=generation_backend,
+                temporary=temporary,
+                on_text_delta=_on_delta,
+                media_selection=media_selection,
+            )
+        except BaseException as exc:
+            if deltas:
+                for chunk in deltas:
+                    yield ChatStreamEvent.delta(chunk)
+                code = getattr(exc, "code", None) or type(exc).__name__
+                msg = str(exc) or type(exc).__name__
+                yield ChatStreamEvent.error(str(code), msg)
+                return
+            raise
+
+        for chunk in deltas:
+            yield ChatStreamEvent.delta(chunk)
+        yield ChatStreamEvent.done(out)
 
     async def tool_result(
         self,
@@ -1299,6 +1587,44 @@ class ChatOrchestrator:
         )
         return replace(out, media_jobs=media_jobs)
 
+    async def _resolve_turn_media_choices(
+        self,
+        *,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        accumulated: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """mediaChoices of the TURN (ADR-070): call accumulator, else last ask_params result."""
+        from app.chat.media_choices import media_choices_response
+
+        if accumulated is not None:
+            return media_choices_response(accumulated)
+        recovered = await self._deps.repo.last_tool_result_for_message_step(
+            session_id, message_step_id, TOOL_MEDIA_ASK_PARAMS
+        )
+        if recovered is None or "questions" not in recovered:
+            return None
+        return media_choices_response(recovered)
+
+    async def _with_turn_media_choices(
+        self,
+        out: ChatRunOut,
+        *,
+        message_step_id: uuid.UUID,
+        accumulated: dict[str, Any] | None,
+    ) -> ChatRunOut:
+        """Attach turn-scoped mediaChoices (ADR-070). Prefer an already-set field on ``out``."""
+        if out.media_choices is not None:
+            return out
+        if out.message_step_id is None:
+            return out
+        choices = await self._resolve_turn_media_choices(
+            session_id=out.session_id,
+            message_step_id=message_step_id,
+            accumulated=accumulated,
+        )
+        return replace(out, media_choices=choices)
+
     async def _decorate_turn_out(
         self,
         out: ChatRunOut,
@@ -1307,18 +1633,24 @@ class ChatOrchestrator:
         quiz_accumulated: dict[str, Any] | None,
         media_accumulated: list[dict[str, Any]] | None,
         generation_mode: str,
+        media_choices_accumulated: dict[str, Any] | None = None,
     ) -> ChatRunOut:
-        """Attach turn-scoped quiz + mediaJobs at every terminal leg (ADR-064 / ADR-068)."""
+        """Attach turn-scoped quiz + mediaJobs + mediaChoices (ADR-064 / ADR-068 / ADR-070)."""
         decorated = await self._with_turn_quiz(
             out,
             message_step_id=message_step_id,
             accumulated=quiz_accumulated,
             generation_mode=generation_mode,
         )
-        return await self._with_turn_media_jobs(
+        decorated = await self._with_turn_media_jobs(
             decorated,
             message_step_id=message_step_id,
             accumulated=media_accumulated,
+        )
+        return await self._with_turn_media_choices(
+            decorated,
+            message_step_id=message_step_id,
+            accumulated=media_choices_accumulated,
         )
 
     async def _build_messages(self, session_id: uuid.UUID) -> list[NeutralMessage]:
@@ -1367,16 +1699,21 @@ class ChatOrchestrator:
         model: str | None = None,
         generation_mode: str = "general",
         generation_backend: GenerationBackend = "legacy",
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> ChatRunOut:
         use_generation_v2 = generation_backend == "v2"
         # ADR-064 §3 / 03-architecture axis invariant 1: ONE effective mode value drives the axis-C
         # tool gate, the provider call and (upstream) the price. Computing it twice — once for the
         # tools, once for the provider — is exactly how the gate and the generation drift apart.
         effective_generation_mode = generation_mode if use_generation_v2 else "general"
+        # ADR-069: stream text deltas only for non-study turns (anti-spoiler for quiz).
+        emit_text_deltas = on_text_delta is not None and effective_generation_mode != "study_learn"
         # ADR-064 §7 producer 1: pool of THIS call, last-wins, threaded through every round.
         quiz_accumulator = _QuizAccumulator()
         # ADR-068: media jobs of THIS call (append), threaded through every round.
         media_accumulator = _MediaJobsAccumulator()
+        # ADR-070: mediaChoices wizard of THIS call, last-wins.
+        media_choices_accumulator = _MediaChoicesAccumulator()
         # ADR-044 §5: select the generation client + the effective model by mode.
         # - credits → the injected active-provider client (self._deps.llm); stale-model guard
         #   against the ACTIVE provider allowlist (a session model fixed for another provider after
@@ -1436,31 +1773,46 @@ class ChatOrchestrator:
             # connection is not held open for the whole LLM generation. Each subsequent
             # server-side round commits its own persisted tool_use/tool_result before re-calling.
             await self._session.commit()
-            try:
-                result: LLMResult = await llm.create_message(
-                    system_prompt=system_prompt,
-                    messages=messages,
-                    # ADR-022 axis A: in «чистый чат» (no project) site.* (SERVER_SIDE_TOOLS) are
-                    # NOT offered. Axis B (assistant_mode, Q-012-1) is not yet implemented; the
-                    # effective set = this project gate over current behavior. Neutral tool defs;
-                    # the client serializes them per provider (ADR-033 §4).
-                    # ADR-064 §3 axis C: mode-gated tools (quiz.generate) are offered only when the
-                    # EFFECTIVE mode of the turn allows them — the same value passed as
-                    # generation_mode below, never a second computation.
-                    tools=neutral_tool_definitions(
-                        include_server_side=has_project,
-                        generation_mode=effective_generation_mode,
-                    ),
-                    attachments=turn0_attachments,
-                    api_key=api_key,
-                    # ADR-034 §4 / ADR-044 §5: the effective model resolved above (stale-model
-                    # guard for credits; key-provider allowlist + BYOK default for byok). None → the
-                    # client uses its provider default; the orchestrator never blindly forwards a
-                    # foreign model.
-                    model=effective_model,
+            # Shared kwargs for create_message / stream_message (ADR-069).
+            llm_kwargs: dict[str, Any] = {
+                "system_prompt": system_prompt,
+                "messages": messages,
+                # ADR-022 axis A: in «чистый чат» (no project) site.* (SERVER_SIDE_TOOLS) are
+                # NOT offered. Axis B (assistant_mode, Q-012-1) is not yet implemented; the
+                # effective set = this project gate over current behavior. Neutral tool defs;
+                # the client serializes them per provider (ADR-033 §4).
+                # ADR-064 §3 axis C: mode-gated tools (quiz.generate) are offered only when the
+                # EFFECTIVE mode of the turn allows them — the same value passed as
+                # generation_mode below, never a second computation.
+                "tools": neutral_tool_definitions(
+                    include_server_side=has_project,
                     generation_mode=effective_generation_mode,
-                    provider_state=provider_state,
-                )
+                ),
+                "attachments": turn0_attachments,
+                "api_key": api_key,
+                # ADR-034 §4 / ADR-044 §5: the effective model resolved above (stale-model
+                # guard for credits; key-provider allowlist + BYOK default for byok). None → the
+                # client uses its provider default; the orchestrator never blindly forwards a
+                # foreign model.
+                "model": effective_model,
+                "generation_mode": effective_generation_mode,
+                "provider_state": provider_state,
+            }
+            try:
+                result: LLMResult
+                if on_text_delta is not None:
+                    # ADR-069: progressive text deltas as the provider emits them; never for
+                    # study_learn (quiz anti-spoiler). toolCalls/quiz/mediaJobs arrive only in done.
+                    result = None  # type: ignore[assignment]
+                    async for event in llm.stream_message(**llm_kwargs):
+                        if event.kind == "text_delta" and event.text and emit_text_deltas:
+                            await on_text_delta(event.text)
+                        elif event.kind == "completed" and event.result is not None:
+                            result = event.result
+                    if result is None:
+                        raise RuntimeError("stream_message ended without completed event")
+                else:
+                    result = await llm.create_message(**llm_kwargs)
             except (AnthropicAuthError, OpenAIAuthError):
                 if mode is Mode.byok:
                     # ADR-016: a previously-valid BYOK key rejected with 401 on use → expired
@@ -1515,6 +1867,7 @@ class ChatOrchestrator:
                     quiz_accumulated=quiz_accumulator.pool,
                     media_accumulated=media_accumulator.jobs or None,
                     generation_mode=effective_generation_mode,
+                    media_choices_accumulated=media_choices_accumulator.state,
                 )
 
             if result.stop_reason == STOP_REASON_TOOL_USE and result.tool_uses:
@@ -1529,6 +1882,7 @@ class ChatOrchestrator:
                     generation_mode=effective_generation_mode,
                     quiz_accumulator=quiz_accumulator,
                     media_accumulator=media_accumulator,
+                    media_choices_accumulator=media_choices_accumulator,
                 )
                 # Persist the tool_use step + tool_calls + tool_results + audit (no billing here).
                 await self._session.commit()
@@ -1546,6 +1900,7 @@ class ChatOrchestrator:
                         quiz_accumulated=quiz_accumulator.pool,
                         media_accumulated=media_accumulator.jobs or None,
                         generation_mode=effective_generation_mode,
+                        media_choices_accumulated=media_choices_accumulator.state,
                     )
                 # Pure server-side turn: results are persisted; continue the loop to Anthropic.
                 continue
@@ -1566,6 +1921,7 @@ class ChatOrchestrator:
                 quiz_accumulated=quiz_accumulator.pool,
                 media_accumulated=media_accumulator.jobs or None,
                 generation_mode=effective_generation_mode,
+                media_choices_accumulated=media_choices_accumulator.state,
             )
 
         # Exceeded MAX_SERVER_TOOL_ROUNDS consecutive server-side rounds (ADR-011 §2): controlled
@@ -1787,6 +2143,7 @@ class ChatOrchestrator:
         generation_mode: str = "general",
         quiz_accumulator: _QuizAccumulator | None = None,
         media_accumulator: _MediaJobsAccumulator | None = None,
+        media_choices_accumulator: _MediaChoicesAccumulator | None = None,
     ) -> _TurnOutcome:
         """Process a tool_use turn (ADR-008/011): persist tool_calls, branch server/client-side.
 
@@ -1952,6 +2309,14 @@ class ChatOrchestrator:
                 ):
                     # ADR-068: append — several media jobs in one turn are all surfaced.
                     media_accumulator.jobs.append(execution.result)
+                if (
+                    tool_name == TOOL_MEDIA_ASK_PARAMS
+                    and media_choices_accumulator is not None
+                    and not execution.is_error
+                    and isinstance(execution.result, dict)
+                ):
+                    # ADR-070: last-wins wizard state for ChatResponse.mediaChoices.
+                    media_choices_accumulator.state = execution.result
             elif tool_name in SERVER_SIDE_TOOLS:
                 # Invariant (ADR-022): reaching here implies has_project is True (the project-less
                 # site.* anomaly raised above), so external_project_id is a resolved string. The

@@ -128,6 +128,7 @@
 - **`quiz` ([ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) — схема ответа общая с `/v1/chat/v2/*`, поэтому поле присутствует и здесь, но на legacy-роуте оно ВСЕГДА `null`.** Квиз порождает инструмент `quiz.generate`, который предлагается модели только при `generationMode=study_learn`, а legacy-путь принудительно использует `general` → инструмент не предлагается, пул не появляется. Поведение legacy `/v1/chat/run` этим полем не меняется (аддитивно, старые клиенты игнорируют). Семантика поля — [§Chat v2 → Response](#quiz-adr-064).
 - `usage` присутствует при `assistant_message`/`tool_call`, **а также при `blocked` с `blockReason=max_tokens`** ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); при policy-blocked (генерация не выполнялась) — отсутствует.
 - **`mediaJobs` ([ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)) — аддитивно:** список задач `{ jobId, kind, status, model, creditsCharged }`, поставленных в этом **ходе** tools `media.generate_image` / `media.generate_video`. `null` — задач не было. Клиент опрашивает `GET /v1/media/jobs/{jobId}` (и/или push ADR-067). Биллинг media отдельный от хода чата. Контракт `/v1/media/*` не меняется.
+- **`mediaChoices` ([ADR-070](../../adr/ADR-070-media-choices-wizard.md)) — аддитивно, не `quiz`:** пикер параметров media (`selectionId`, `kind`, `prompt`, `step`, `questions[].options`). Options только из серверного каталога. Клиент тапает как квиз-карточки и шлёт `mediaSelection` на `/v1/chat/v2/run`. `assistantMessage` не глушится. На SSE — только в `done`.
 
 - **`status=blocked` + `blockReason=max_tokens` (обрезка по лимиту output-токенов, [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** Claude обрезан на `ANTHROPIC_MAX_TOKENS` (`stop_reason="max_tokens"`); обрезанные `tool_use` **неполны** и наружу **НЕ** отдаются (`toolCall`/`toolCalls` отсутствуют). В отличие от policy-blocked: `messageStepId`/`stepId` **НЕ null** (ход и обрезанный assistant-шаг созданы), `usage` присутствует, `assistantMessage` — частичный текст хода (если был). **Кредит НЕ списывается** (обрыв — не успешный финальный `assistant_message`, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Клиенту рекомендуется повторить/сократить запрос. С дефолтом `ANTHROPIC_MAX_TOKENS=16000` кейс редкий (safety-net).
 - **`assistantMessage` ([Q-024-1](../../99-open-questions.md) Closed = вариант A, [ADR-024 §Decision п.3](../../adr/ADR-024-history-payload-domain-normalization.md)):**
@@ -212,6 +213,7 @@
 | Endpoint | Назначение |
 |---|---|
 | `POST /v1/chat/v2/run` | ход чата с выбором `generationMode` |
+| `POST /v1/chat/v2/run/stream` | SSE text deltas + финальный `ChatResponse` ([ADR-069](../../adr/ADR-069-sse-text-streaming.md)) |
 | `POST /v1/chat/v2/tool-result` | continuation tool-loop v2-хода (**без** `generationMode` в теле) |
 | `GET /v1/chat/v2/capabilities` | список режимов и их цена для UI-переключателя |
 
@@ -270,6 +272,22 @@
 - Проверка ответов пользователя — **на клиенте**; эндпоинта отправки/проверки ответов нет и не вводится ([ADR-064 §8](../../adr/ADR-064-study-learn-quiz-generation-mode.md)).
 - Все прочие правила ответа (blocked=200, `max_tokens`, sync-id, барьер хода) — без изменений.
 
+### POST /v1/chat/v2/run/stream — SSE text streaming ([ADR-069](../../adr/ADR-069-sse-text-streaming.md))
+
+Тот же body/auth/rate-limit, что у [`POST /v1/chat/v2/run`](#post-v1chatv2run). Ответ: `Content-Type: text/event-stream`.
+
+| event | data | когда |
+|-------|------|--------|
+| `delta` | `{ "text": "<incremental>" }` | кусок текста ассистента (не в `study_learn`) |
+| `done` | полный `ChatResponse` | конец хода |
+| `error` | `{ "code", "message" }` | сбой после старта стрима |
+
+Наращивать UI по `delta`; истина — `done.assistantMessage`. В `study_learn` дельт нет. JSON `/v2/run` без изменений; `/v2/tool-result` без stream в этой итерации.
+
+**Бриф для iOS (код не в этом репо):** новый URL `/v1/chat/v2/run/stream`; парсить SSE (`event` + JSON `data`); UI растёт по `delta.text` вместо индикатора «думает»; на `done` применить полный `ChatResponse` (`toolCalls` / `mediaJobs` / `mediaChoices` / `quiz` как у JSON `/v2/run`); keep-alive / reconnect в v1 не обязателен (один запрос = один ход).
+
+**Бриф mediaChoices (ADR-070):** при непустом `mediaChoices` — карточки как квиз (`question` + tap по `options[].label`); накопить `answers[id]=value` и слать `mediaSelection` на `/v2/run` (пустой `message` ок); повторять до `mediaJobs`; каталог `GET /v1/media/models` для отдельного media-UI по-прежнему валиден.
+
 ### POST /v1/chat/v2/tool-result
 
 Request/Response — **идентичны** [`POST /v1/chat/tool-result`](#post-v1chattool-result) (батч `results[]`, deprecated одиночная форма, барьер хода, идемпотентность), с одним нормативным отличием:
@@ -325,7 +343,7 @@ Backend-level объявление режимов для UI-переключат
   [modules/website-builder/02-api-contracts.md](../website-builder/02-api-contracts.md), [ADR-011](../../adr/ADR-011-server-side-tools.md).
 - **server-side, global** (`time.now`, `quiz.generate`, `GLOBAL_SERVER_SIDE_TOOLS`, [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)/[ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) — исполняет **backend** немедленно в tool-loop (как `site.*`), но **НЕ требует проекта**. В `toolCalls[]` наружу **НЕ** попадают. Контракты — [§`time.now`](#timenow--server-side-global-tool-adr-026) и [§`quiz.generate`](#quizgenerate--server-side-global-tool-режимный-adr-064) ниже.
   - **Предложение модели внутри класса различается (не переносить по аналогии!):** `time.now` предлагается **ВСЕГДА** (utility, [ADR-026 §3](../../adr/ADR-026-global-server-side-tools-and-time-now.md)); `quiz.generate` — **только** когда эффективный режим хода = `study_learn` (ось C, [ADR-064 §3](../../adr/ADR-064-study-learn-quiz-generation-mode.md)). «Global» означает «без проекта», а не «без гейта».
-- Orchestrator различает класс по доменному имени (статические реестры `SERVER_SIDE_TOOLS = {site.*}`, `GLOBAL_SERVER_SIDE_TOOLS = {time.now, quiz.generate, media.generate_image, media.generate_video}`, непересекающиеся). Дополнительный реестр `TOOL_GENERATION_MODES` (`quiz.generate → {study_learn}`) задаёт ось C; инструменты вне этого реестра по режиму не гейтятся. domain↔anthropic
+- Orchestrator различает класс по доменному имени (статические реестры `SERVER_SIDE_TOOLS = {site.*}`, `GLOBAL_SERVER_SIDE_TOOLS = {time.now, quiz.generate, media.generate_image, media.generate_video, media.ask_params}`, непересекающиеся). Дополнительный реестр `TOOL_GENERATION_MODES` (`quiz.generate → {study_learn}`) задаёт ось C; инструменты вне этого реестра по режиму не гейтятся. domain↔anthropic
   mapping (точка→подчёркивание) расширяется server-side именами (`site.write_file ↔ site_write_file`, `time.now ↔ time_now`, …). Guard на число
   server-side раундов — `MAX_SERVER_TOOL_ROUNDS` (дефолт 16) — общий для project-scoped и global server-side раундов.
 - **Гейтинг по наличию проекта ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)):** `site.*` (`SERVER_SIDE_TOOLS`) предлагаются Claude **только** когда у сессии есть `project_id` (создана с `projectId`). В «чистом чате» (`chat_sessions.project_id IS NULL`) `site.*` в tool-набор **не включаются** — Claude их не видит и не вызывает. **`time.now` (`GLOBAL_SERVER_SIDE_TOOLS`) под этот гейт НЕ подпадает** — предлагается всегда ([ADR-026 §3](../../adr/ADR-026-global-server-side-tools-and-time-now.md)). См. [03-architecture.md §Гейтинг tools](03-architecture.md#гейтинг-site-tools-по-наличию-проекта-adr-022).
@@ -488,7 +506,7 @@ Backend только инициирует tool-call; исполняет клие
 ---
 
 ## GET /v1/tools — каталог инструментов ([ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md))
-Машиночитаемый каталог всех поддерживаемых backend tools (**15**, включая `time.now` [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md) и `quiz.generate` [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)). Источник — `src/app/chat/tools.py` (single source of truth: `_ARGS_BY_TOOL`, `MUTATING_TOOLS`, `SERVER_SIDE_TOOLS`, `GLOBAL_SERVER_SIDE_TOOLS`, `TOOL_GENERATION_MODES`, `anthropic_tool_definitions()`). Эндпоинт **не** параметризуется ни `assistantMode`, ни наличием проекта, ни `generationMode` — возвращает полный технический реестр backend (включая `site.*`, `time.now` и `quiz.generate`). Runtime-фильтрация tool-набора, предлагаемого модели (ось A — `project_id`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md); ось B — `assistantMode`, [Q-012-1](../../99-open-questions.md); ось C — режим генерации, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)), — concern tool-loop'а, а не каталога. Поэтому `quiz.generate` присутствует в каталоге **всегда**, хотя предлагается модели только в режиме `study_learn`.
+Машиночитаемый каталог всех поддерживаемых backend tools (**17**, включая `time.now` [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md), `quiz.generate` [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md), media generate/ask_params [ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)/[ADR-070](../../adr/ADR-070-media-choices-wizard.md)). Источник — `src/app/chat/tools.py` (single source of truth: `_ARGS_BY_TOOL`, `MUTATING_TOOLS`, `SERVER_SIDE_TOOLS`, `GLOBAL_SERVER_SIDE_TOOLS`, `TOOL_GENERATION_MODES`, `anthropic_tool_definitions()`). Эндпоинт **не** параметризуется ни `assistantMode`, ни наличием проекта, ни `generationMode` — возвращает полный технический реестр backend (включая `site.*`, `time.now` и `quiz.generate`). Runtime-фильтрация tool-набора, предлагаемого модели (ось A — `project_id`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md); ось B — `assistantMode`, [Q-012-1](../../99-open-questions.md); ось C — режим генерации, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)), — concern tool-loop'а, а не каталога. Поэтому `quiz.generate` присутствует в каталоге **всегда**, хотя предлагается модели только в режиме `study_learn`.
 
 ### Auth
 - **JWT-protected** (как все `/v1/*`, кроме `/v1/preview/*`): `Authorization: Bearer <JWT>` обязателен. Каталог не секретен, но единообразие gateway-auth и снижение анонимного API-surface — обоснование в [ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md). Клиент к этому моменту уже имеет JWT (получен через `/v1/auth/register`, [ADR-018](../../adr/ADR-018-embedded-auth-issuer.md)).

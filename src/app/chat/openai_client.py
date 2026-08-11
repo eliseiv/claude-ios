@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import openai
@@ -37,6 +38,7 @@ from app.chat.llm_client import (
     LLMResult,
     LLMUsage,
     NeutralMessage,
+    StreamEvent,
 )
 from app.chat.tools import (
     UnknownToolNameError,
@@ -351,6 +353,158 @@ class OpenAIClient:
             usage=self._parse_usage(completion, model),
             text=text,
             tool_uses=tool_uses,
+        )
+
+    async def stream_message(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[NeutralMessage] | list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        attachments: PreparedAttachments | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        generation_mode: str = "general",
+        provider_state: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream Chat Completions (ADR-069): content deltas then a completed LLMResult."""
+        _ = (generation_mode, provider_state)
+        model = model if model is not None else self._default_model
+        client = self._client
+        if api_key is not None:
+            client = client.with_options(api_key=api_key)
+
+        wire_messages = self._build_provider_messages(messages, system_prompt)
+        if attachments is not None:
+            self._inject_attachments(wire_messages, attachments)
+        openai_tools = self._serialize_tools(tools)
+
+        try:
+            stream = await client.chat.completions.create(
+                model=model,
+                max_tokens=self._max_tokens,
+                messages=wire_messages,  # type: ignore[arg-type]
+                tools=openai_tools or openai.NOT_GIVEN,  # type: ignore[arg-type]
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+        except openai.AuthenticationError as exc:
+            _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", 401))
+            raise OpenAIAuthError(str(exc)) from exc
+        except (openai.APITimeoutError, openai.APIConnectionError) as exc:
+            _log_upstream_error(exc, model=model, status_code=None)
+            raise UpstreamError("openai upstream error") from exc
+        except openai.APIStatusError as exc:
+            _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", None))
+            raise UpstreamError("openai upstream error") from exc
+
+        text_parts: list[str] = []
+        # tool_index -> {id, name, arguments}
+        tool_acc: dict[int, dict[str, str]] = {}
+        finish_reason: str | None = None
+        usage_obj: Any = None
+
+        try:
+            async for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    usage_obj = chunk.usage
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
+                if delta is None:
+                    continue
+                if delta.content:
+                    text_parts.append(delta.content)
+                    yield StreamEvent.text_delta(delta.content)
+                for tc in delta.tool_calls or []:
+                    idx = int(tc.index)
+                    slot = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function is not None:
+                        if tc.function.name:
+                            slot["name"] = (slot["name"] or "") + tc.function.name
+                        if tc.function.arguments:
+                            slot["arguments"] = (slot["arguments"] or "") + tc.function.arguments
+        except openai.AuthenticationError as exc:
+            _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", 401))
+            raise OpenAIAuthError(str(exc)) from exc
+        except (openai.APITimeoutError, openai.APIConnectionError) as exc:
+            _log_upstream_error(exc, model=model, status_code=None)
+            raise UpstreamError("openai upstream error") from exc
+        except openai.APIStatusError as exc:
+            _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", None))
+            raise UpstreamError("openai upstream error") from exc
+
+        text = "".join(text_parts)
+        tool_uses: list[dict[str, Any]] = []
+        normalized_tool_calls: list[dict[str, Any]] = []
+        for idx in sorted(tool_acc):
+            slot = tool_acc[idx]
+            try:
+                domain_name = to_domain_tool_name(slot["name"])
+            except UnknownToolNameError as exc:
+                raise ValidationFailedError(str(exc)) from exc
+            try:
+                parsed_args = json.loads(slot["arguments"]) if slot["arguments"] else {}
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise ValidationFailedError(
+                    f"invalid tool_call arguments JSON for {slot['name']}"
+                ) from exc
+            if not isinstance(parsed_args, dict):
+                raise ValidationFailedError(
+                    f"tool_call arguments for {slot['name']} must be a JSON object"
+                )
+            tool_uses.append({"id": slot["id"], "name": domain_name, "input": parsed_args})
+            normalized_tool_calls.append(
+                {
+                    "id": slot["id"],
+                    "type": "function",
+                    "function": {"name": slot["name"], "arguments": slot["arguments"]},
+                }
+            )
+
+        assistant_message: dict[str, Any] = {"role": "assistant", "content": text or None}
+        if normalized_tool_calls:
+            assistant_message["tool_calls"] = normalized_tool_calls
+        content_blocks: list[dict[str, Any]] = [assistant_message]
+
+        if usage_obj is not None:
+            usage = self._parse_usage_from_usage(usage_obj, model)
+        else:
+            usage = LLMUsage(
+                input_tokens=0,
+                output_tokens=0,
+                model=model,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
+            )
+
+        yield StreamEvent.completed(
+            LLMResult(
+                stop_reason=_to_neutral_stop_reason(finish_reason),
+                content_blocks=content_blocks,
+                usage=usage,
+                text=text,
+                tool_uses=tool_uses,
+            )
+        )
+
+    def _parse_usage_from_usage(self, usage: Any, model: str) -> LLMUsage:
+        """Build LLMUsage from a streamed ``completion.usage`` object."""
+        cache_read = 0
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is not None:
+            cache_read = int(getattr(details, "cached_tokens", 0) or 0)
+        return LLMUsage(
+            input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+            model=model,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=0,
         )
 
     async def validate_key(self, api_key: str) -> KeyValidation:

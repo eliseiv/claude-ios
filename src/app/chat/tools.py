@@ -53,6 +53,8 @@ TOOL_QUIZ_GENERATE = "quiz.generate"
 # model MUST NOT wait for fal completion inside the tool-loop (minutes; ADR-060).
 TOOL_MEDIA_GENERATE_IMAGE = "media.generate_image"
 TOOL_MEDIA_GENERATE_VIDEO = "media.generate_video"
+# ADR-070: present catalog-backed quiz-like choices (model/resolution/…) before submit.
+TOOL_MEDIA_ASK_PARAMS = "media.ask_params"
 
 # Project-scoped server-side tools (site.*, ADR-011/022): executed by the backend in the
 # tool-loop; offered to Claude ONLY when the session has a project (project_id IS NOT NULL).
@@ -76,6 +78,7 @@ GLOBAL_SERVER_SIDE_TOOLS = frozenset(
         TOOL_QUIZ_GENERATE,
         TOOL_MEDIA_GENERATE_IMAGE,
         TOOL_MEDIA_GENERATE_VIDEO,
+        TOOL_MEDIA_ASK_PARAMS,
     }
 )
 
@@ -102,7 +105,12 @@ TOOL_GENERATION_MODES: dict[str, frozenset[str]] = {
 # Media args can be wrong enums / mutually exclusive refs from the model; degrade like quiz so the
 # turn survives and the model can ask clarifying questions instead of 422-ing the whole chat turn.
 ARGS_DEGRADE_TOOLS = frozenset(
-    {TOOL_QUIZ_GENERATE, TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO}
+    {
+        TOOL_QUIZ_GENERATE,
+        TOOL_MEDIA_GENERATE_IMAGE,
+        TOOL_MEDIA_GENERATE_VIDEO,
+        TOOL_MEDIA_ASK_PARAMS,
+    }
 )
 
 ALL_TOOL_NAMES = frozenset(
@@ -147,9 +155,10 @@ _DOMAIN_TO_ANTHROPIC: dict[str, str] = {
     TOOL_TIME_NOW: "time_now",
     # Global server-side, mode-gated quiz.generate (ADR-064 §2): same dot→underscore mapping.
     TOOL_QUIZ_GENERATE: "quiz_generate",
-    # Global server-side media tools (ADR-068): same dot→underscore mapping.
+    # Global server-side media tools (ADR-068 / ADR-070): same dot→underscore mapping.
     TOOL_MEDIA_GENERATE_IMAGE: "media_generate_image",
     TOOL_MEDIA_GENERATE_VIDEO: "media_generate_video",
+    TOOL_MEDIA_ASK_PARAMS: "media_ask_params",
 }
 _ANTHROPIC_TO_DOMAIN: dict[str, str] = {a: d for d, a in _DOMAIN_TO_ANTHROPIC.items()}
 
@@ -472,6 +481,14 @@ class MediaGenerateVideoArgs(_StrictModel):
         return self
 
 
+class MediaAskParamsArgs(_StrictModel):
+    """Args for media.ask_params — start a catalog-backed choices wizard (ADR-070)."""
+
+    kind: Literal["image", "video"]
+    prompt: str = Field(min_length=1, max_length=_MEDIA_PROMPT_MAX)
+    sourceJobId: str | None = None
+
+
 _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_FILES_READ: FilesReadArgs,
     TOOL_FILES_WRITE: FilesWriteArgs,
@@ -490,6 +507,7 @@ _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_QUIZ_GENERATE: Quiz,
     TOOL_MEDIA_GENERATE_IMAGE: MediaGenerateImageArgs,
     TOOL_MEDIA_GENERATE_VIDEO: MediaGenerateVideoArgs,
+    TOOL_MEDIA_ASK_PARAMS: MediaAskParamsArgs,
 }
 
 
@@ -550,20 +568,27 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "tool: never repeat the question wording in your reply text and never reveal the correct "
         "options or explanations there. Keep any accompanying text short."
     ),
+    TOOL_MEDIA_ASK_PARAMS: (
+        "Present tappable choices so the user picks image/video parameters (model, resolution, "
+        "duration, …) before generation. Call this when the user wants a photo or video and has "
+        "not already chosen those parameters. Pass kind ('image'|'video') and the prompt to use. "
+        "Do NOT invent model ids or resolutions — the app shows catalog options. After this tool, "
+        "wait for the user to tap; do not call media.generate_* in the same turn."
+    ),
     TOOL_MEDIA_GENERATE_IMAGE: (
-        "Submit an image generation job. Returns immediately with jobId and status 'queued' — "
-        "do NOT wait for the image; the app polls GET /v1/media/jobs/{jobId}. Ask the user for "
-        "model and quality (resolution/aspectRatio) when unclear. 'model' is a catalog id such as "
-        "'nano-banana-2' or 'nano-banana-pro'. Optional imageUrls (https) or sourceJobId starts "
-        "an edit of a prior image. This costs media credits in addition to the chat turn."
+        "Submit an image generation job when model and quality are ALREADY known (e.g. the user "
+        "stated them). Prefer media.ask_params when parameters are unclear. Returns immediately "
+        "with jobId and status 'queued' — do NOT wait for the image; the app polls "
+        "GET /v1/media/jobs/{jobId}. 'model' is a catalog id such as 'nano-banana-2'. Optional "
+        "imageUrls (https) or sourceJobId starts an edit. Costs media credits in addition to the "
+        "chat turn."
     ),
     TOOL_MEDIA_GENERATE_VIDEO: (
-        "Submit a video generation job. Returns immediately with jobId and status 'queued' — "
-        "do NOT wait for the video (it can take minutes); the app polls "
-        "GET /v1/media/jobs/{jobId}. "
-        "Ask the user for model, duration, and quality when unclear. 'model' is a catalog id such "
-        "as 'veo-3.1' or 'kling-video-v3'. Optional imageUrl (https) or sourceJobId starts "
-        "image-to-video from a prior image. This costs media credits in addition to the chat turn."
+        "Submit a video generation job when model, duration, and quality are ALREADY known. "
+        "Prefer media.ask_params when parameters are unclear. Returns immediately with jobId and "
+        "status 'queued' — do NOT wait for the video; the app polls GET /v1/media/jobs/{jobId}. "
+        "'model' is a catalog id such as 'veo-3.1'. Optional imageUrl or sourceJobId starts "
+        "image-to-video. Costs media credits in addition to the chat turn."
     ),
 }
 

@@ -246,6 +246,30 @@ class ChatRepository:
             else "general"
         )
 
+    async def find_media_wizard_state(
+        self, session_id: uuid.UUID, selection_id: uuid.UUID
+    ) -> dict[str, Any] | None:
+        """Latest persisted mediaChoices wizard state for ``selectionId`` (ADR-070).
+
+        Looks at user-step ``mediaWizard`` payloads (wizard continuations without LLM) and
+        ``media.ask_params`` tool results, newest ``seq`` first.
+        """
+        from app.chat.tools import TOOL_MEDIA_ASK_PARAMS
+
+        sid = str(selection_id)
+        steps = await self.list_steps(session_id)
+        for step in reversed(steps):
+            payload = step.payload if isinstance(step.payload, dict) else {}
+            if step.role == "user":
+                wizard = payload.get("mediaWizard")
+                if isinstance(wizard, dict) and wizard.get("selectionId") == sid:
+                    return wizard
+            if step.role == "tool" and payload.get("toolName") == TOOL_MEDIA_ASK_PARAMS:
+                result = payload.get("result")
+                if isinstance(result, dict) and result.get("selectionId") == sid:
+                    return result
+        return None
+
     async def last_tool_result_for_message_step(
         self, session_id: uuid.UUID, message_step_id: uuid.UUID, tool_name: str
     ) -> dict[str, Any] | None:

@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Body, Depends, Header, Request
+from fastapi.responses import StreamingResponse
 
 from app.api_gateway.rate_limit import enforce_chat_limits
-from app.chat.orchestrator import ChatOrchestrator, ChatRunOut, ToolResultIn
+from app.chat.orchestrator import ChatOrchestrator, ChatRunOut, ChatStreamEvent, ToolResultIn
 from app.config import get_settings
 from app.deps import (
     CurrentUser,
     client_ip,
+    get_db,
     get_orchestrator,
     get_v2_orchestrator,
     require_owner,
@@ -27,6 +33,7 @@ from app.schemas.chat import (
     ChatV2RunRequest,
     GenerationMode,
     GenerationModeCapability,
+    MediaChoicesSchema,
     MediaJobRefSchema,
     QuizSchema,
     ServerToolExecutionSchema,
@@ -454,6 +461,12 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
     # ADR-064 §7: the quiz pool of the TURN (turn-scoped — the orchestrator already resolved it for
     # this leg, whether it was produced in this call or recovered from the turn's steps).
     quiz = QuizSchema.model_validate(out.quiz) if out.quiz is not None else None
+    # ADR-070: catalog-backed media picker (not the study_learn quiz).
+    media_choices = (
+        MediaChoicesSchema.model_validate(out.media_choices)
+        if out.media_choices is not None
+        else None
+    )
     # ADR-068: media jobs of the TURN (submit-only refs; client polls /v1/media/jobs/{id}).
     media_jobs = (
         [MediaJobRefSchema.model_validate(item) for item in out.media_jobs]
@@ -482,6 +495,7 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
         blockReason=out.block_reason,
         usage=out.usage,
         quiz=quiz,
+        mediaChoices=media_choices,
         mediaJobs=media_jobs,
         serverTools=server_tools,
     )
@@ -617,6 +631,11 @@ async def chat_v2_run(
     ):
         raise RateLimitedError("rate limit exceeded")
 
+    media_selection = (
+        body.mediaSelection.model_dump(by_alias=True, mode="json")
+        if body.mediaSelection is not None
+        else None
+    )
     out = await orchestrator.run(
         user_id=current.user_id,
         project_id=body.projectId,
@@ -632,8 +651,165 @@ async def chat_v2_run(
         generation_mode=body.generationMode,
         generation_backend="v2",
         temporary=body.temporary,
+        media_selection=media_selection,
     )
     return _to_response(out)
+
+
+def _sse_frame(event: str, data: dict[str, Any]) -> bytes:
+    """Format one SSE event frame (ADR-069)."""
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {payload}\n\n".encode()
+
+
+def _stream_event_frame(ev: ChatStreamEvent) -> bytes:
+    if ev.kind == "delta":
+        return _sse_frame("delta", {"text": ev.text})
+    if ev.kind == "done" and ev.out is not None:
+        resp = _to_response(ev.out)
+        return _sse_frame(
+            "done",
+            resp.model_dump(by_alias=True, mode="json", exclude_none=False),
+        )
+    if ev.kind == "error":
+        return _sse_frame(
+            "error",
+            {"code": ev.error_code or "error", "message": ev.error_message or ""},
+        )
+    raise RuntimeError(f"unknown ChatStreamEvent kind: {ev.kind}")
+
+
+@router.post(
+    "/v2/run/stream",
+    summary="Запустить шаг диалога (SSE text stream)",
+    description=(
+        "Тот же body/auth/rate-limit, что у `/v1/chat/v2/run`, но ответ — "
+        "`text/event-stream` ([ADR-069](../../docs/adr/ADR-069-sse-text-streaming.md)). "
+        "События: `delta` (`{text}`), затем `done` (полный `ChatResponse`); при сбое после "
+        "старта стрима — `error` (`{code,message}`). В `study_learn` дельт нет (анти-спойлер). "
+        "JSON `/v2/run` без изменений."
+    ),
+    responses={
+        200: {
+            "content": {
+                "text/event-stream": {
+                    "schema": {"type": "string"},
+                    "example": (
+                        'event: delta\ndata: {"text":"Hel"}\n\n'
+                        'event: delta\ndata: {"text":"lo"}\n\n'
+                        'event: done\ndata: {"status":"assistant_message",...}\n\n'
+                    ),
+                }
+            }
+        },
+        **_CHAT_RESPONSES,
+    },
+)
+async def chat_v2_run_stream(
+    request: Request,
+    current: CurrentUser,
+    body: Annotated[ChatV2RunRequest, Body(openapi_examples=_V2_RUN_REQUEST_EXAMPLES)],
+    x_device_id: Annotated[str | None, Header()] = None,
+) -> StreamingResponse:
+    """SSE stream (ADR-069).
+
+    The DB session lives only in a producer task (via ``get_db``), while this coroutine
+    formats SSE frames. That keeps ``AsyncSession`` single-task and still lets text
+    ``delta`` frames flush as the provider streams. Pre-stream errors are raised before
+    ``StreamingResponse`` so FastAPI can return the usual 4xx.
+    """
+    require_owner(body.userId, current)
+    device_id = x_device_id or current.device_id
+    if not await enforce_chat_limits(
+        user_id=current.user_id, device_id=device_id, ip=client_ip(request)
+    ):
+        raise RateLimitedError("rate limit exceeded")
+
+    user_id = current.user_id
+    db_dep = request.app.dependency_overrides.get(get_db, get_db)
+    queue: asyncio.Queue[ChatStreamEvent | BaseException | None] = asyncio.Queue()
+
+    async def _produce() -> None:
+        try:
+            async for session in db_dep():
+                orchestrator = get_v2_orchestrator(session)
+
+                async def _on_delta(text: str) -> None:
+                    await queue.put(ChatStreamEvent.delta(text))
+
+                media_selection = (
+                    body.mediaSelection.model_dump(by_alias=True, mode="json")
+                    if body.mediaSelection is not None
+                    else None
+                )
+                out = await orchestrator.run(
+                    user_id=user_id,
+                    project_id=body.projectId,
+                    session_id=body.sessionId,
+                    message=body.message,
+                    mode=body.mode,
+                    assistant_mode=body.assistantMode,
+                    attachments=body.attachments,
+                    model=body.model,
+                    workspace_project_id=body.workspaceProjectId,
+                    context=body.context,
+                    edit_message_step_id=body.editMessageStepId,
+                    generation_mode=body.generationMode,
+                    generation_backend="v2",
+                    temporary=body.temporary,
+                    on_text_delta=_on_delta,
+                    media_selection=media_selection,
+                )
+                await queue.put(ChatStreamEvent.done(out))
+                break
+        except BaseException as exc:
+            await queue.put(exc)
+        finally:
+            await queue.put(None)
+
+    produce_task = asyncio.create_task(_produce())
+    first = await queue.get()
+    if isinstance(first, BaseException):
+        await produce_task
+        raise first
+    if first is None:
+        await produce_task
+        raise RuntimeError("chat stream ended without events")
+
+    async def _events() -> AsyncIterator[bytes]:
+        assert isinstance(first, ChatStreamEvent)
+        yield _stream_event_frame(first)
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    # Mid-stream failure: emit error frame (HTTP already 200).
+                    yield _sse_frame(
+                        "error",
+                        {
+                            "code": getattr(item, "code", None) or type(item).__name__,
+                            "message": str(item) or type(item).__name__,
+                        },
+                    )
+                    break
+                yield _stream_event_frame(item)
+        finally:
+            if not produce_task.done():
+                produce_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await produce_task
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(

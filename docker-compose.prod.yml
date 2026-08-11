@@ -209,6 +209,9 @@ services:
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME:-claude-ios}.tls.certresolver=${TRAEFIK_CERTRESOLVER:?set TRAEFIK_CERTRESOLVER in .env (ACME resolver name from /opt/edge, resolved: le)}"
       # Traefik proxies inbound traffic to the container's internal port 8000 over `web`.
       - "traefik.http.services.${COMPOSE_PROJECT_NAME:-claude-ios}.loadbalancer.server.port=8000"
+      # ADR-069: flush SSE frames promptly (chat /v2/run/stream); avoid proxy buffering of
+      # text/event-stream. App also sends X-Accel-Buffering: no on that route.
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME:-claude-ios}.loadbalancer.responseforwarding.flushinterval=1ms"
 
 networks:
   # External network shared with the Traefik edge-proxy. Created once on the server:

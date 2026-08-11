@@ -17,6 +17,7 @@ stored response id could point at another OpenAI account.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import openai
@@ -29,6 +30,7 @@ from app.chat.llm_client import (
     LLMResult,
     LLMUsage,
     NeutralMessage,
+    StreamEvent,
 )
 from app.chat.openai_client import (
     _PROVIDER,
@@ -558,3 +560,122 @@ class OpenAIResponsesClient(OpenAIClient):
             raise UpstreamError("openai upstream error") from exc
 
         return self._parse_responses_result(response, model)
+
+    async def stream_message(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[NeutralMessage] | list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        attachments: PreparedAttachments | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        generation_mode: str = "general",
+        provider_state: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream Responses API output text (ADR-069), then emit completed LLMResult."""
+        model = model if model is not None else self._default_model
+        generation_mode = (
+            generation_mode
+            if generation_mode in {"general", "research", "reasoning", "study_learn"}
+            else "general"
+        )
+        client = self._client
+        if api_key is not None:
+            client = client.with_options(api_key=api_key)
+
+        responses_api = getattr(client, "responses", None)
+        if responses_api is None:
+            raise UpstreamError("openai responses api is unavailable in this SDK")
+
+        previous_response_id = self._usable_previous_response_id(provider_state, model=model)
+        input_items, previous_response_id = self._responses_input_from_messages(
+            messages, previous_response_id=previous_response_id
+        )
+        if attachments is not None:
+            self._inject_responses_attachments(input_items, attachments)
+
+        response_tools = self._serialize_responses_tools(tools, generation_mode)
+        settings = get_settings()
+        reasoning = (
+            {"effort": settings.resolved_reasoning_level()}
+            if generation_mode == "reasoning"
+            else openai.NOT_GIVEN
+        )
+        create_kwargs: dict[str, Any] = {
+            "model": model,
+            "instructions": system_prompt,
+            "input": input_items if input_items else "",
+            "max_output_tokens": self._max_tokens,
+            "tools": response_tools or openai.NOT_GIVEN,
+            "reasoning": reasoning,
+            "previous_response_id": previous_response_id or openai.NOT_GIVEN,
+            "store": True,
+        }
+
+        # Prefer SDK stream context manager; fall back to create(stream=True) or non-stream.
+        stream_cm = getattr(responses_api, "stream", None)
+        try:
+            if callable(stream_cm):
+                async with stream_cm(**create_kwargs) as stream:
+                    async for event in stream:
+                        etype = getattr(event, "type", None) or ""
+                        if etype in {
+                            "response.output_text.delta",
+                            "response.text.delta",
+                        }:
+                            delta = getattr(event, "delta", None)
+                            if isinstance(delta, str) and delta:
+                                yield StreamEvent.text_delta(delta)
+                    response = await stream.get_final_response()
+            else:
+                stream = await responses_api.create(**create_kwargs, stream=True)
+                final_response: Any = None
+                async for event in stream:
+                    etype = getattr(event, "type", None) or ""
+                    if etype in {"response.output_text.delta", "response.text.delta"}:
+                        delta = getattr(event, "delta", None)
+                        if isinstance(delta, str) and delta:
+                            yield StreamEvent.text_delta(delta)
+                    if etype == "response.completed":
+                        final_response = getattr(event, "response", None) or final_response
+                    if hasattr(event, "response") and etype.endswith("completed"):
+                        final_response = event.response
+                if final_response is None and hasattr(stream, "get_final_response"):
+                    final_response = await stream.get_final_response()
+                if final_response is None:
+                    # Last-resort: non-stream create (single synthetic delta).
+                    response = await responses_api.create(**create_kwargs)
+                    result = self._parse_responses_result(response, model)
+                    if result.text:
+                        yield StreamEvent.text_delta(result.text)
+                    yield StreamEvent.completed(result)
+                    return
+                response = final_response
+        except openai.AuthenticationError as exc:
+            _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", 401))
+            raise OpenAIAuthError(str(exc)) from exc
+        except (openai.APITimeoutError, openai.APIConnectionError) as exc:
+            _log_upstream_error(exc, model=model, status_code=None)
+            raise UpstreamError("openai upstream error") from exc
+        except TypeError:
+            # Older SDK without stream kwargs — fall back to create_message shape.
+            result = await self.create_message(
+                system_prompt=system_prompt,
+                messages=messages,
+                tools=tools,
+                attachments=attachments,
+                api_key=api_key,
+                model=model,
+                generation_mode=generation_mode,
+                provider_state=provider_state,
+            )
+            if result.text:
+                yield StreamEvent.text_delta(result.text)
+            yield StreamEvent.completed(result)
+            return
+        except openai.APIStatusError as exc:
+            _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", None))
+            raise UpstreamError("openai upstream error") from exc
+
+        yield StreamEvent.completed(self._parse_responses_result(response, model))

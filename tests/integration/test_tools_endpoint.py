@@ -39,6 +39,7 @@ _EXPECTED_NAMES = {
     "quiz.generate",
     "media.generate_image",
     "media.generate_video",
+    "media.ask_params",
 }
 _MUTATING = {
     "files.write",
@@ -96,7 +97,14 @@ async def test_tools_descriptor_contract(
         expected_exec = (
             "server"
             if name.startswith("site.")
-            or name in {"time.now", "quiz.generate", "media.generate_image", "media.generate_video"}
+            or name
+            in {
+                "time.now",
+                "quiz.generate",
+                "media.generate_image",
+                "media.generate_video",
+                "media.ask_params",
+            }
             else "client"
         )
         assert tool["execution"] == expected_exec, (name, tool["execution"])

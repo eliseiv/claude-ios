@@ -15,7 +15,7 @@
 - [07-implementation-phases.md](07-implementation-phases.md)
 - [09-testing.md](09-testing.md)
 
-> Байты результата и лента `/v1/media/*` живут в модуле media (не в `chat_steps`). Сабмит из чата — через global tools `media.generate_image` / `media.generate_video` ([ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)): tool только ставит задачу и отдаёт `jobId` в `ChatResponse.mediaJobs`; ожидание fal в tool-loop запрещено. Контракт `/v1/media/*` без изменений. От `LLM_PROVIDER` ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) media не зависит. Кошелёк/ledger — [ADR-005](../../adr/ADR-005-idempotency-ledger.md).
+> Байты результата и лента `/v1/media/*` живут в модуле media (не в `chat_steps`). Сабмит из чата — через global tools `media.generate_image` / `media.generate_video` ([ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)): tool только ставит задачу и отдаёт `jobId` в `ChatResponse.mediaJobs`; ожидание fal в tool-loop запрещено. Пикер параметров в чате — `media.ask_params` → `ChatResponse.mediaChoices` / `mediaSelection` ([ADR-070](../../adr/ADR-070-media-choices-wizard.md)); options только из `catalog.py`. Контракт `/v1/media/*` без изменений. От `LLM_PROVIDER` ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) media не зависит. Кошелёк/ledger — [ADR-005](../../adr/ADR-005-idempotency-ledger.md).
 
 ## DoD (выполнено)
 - ✅ `GET /v1/media/models` — каталог моделей: id, тип, базовая цена в кредитах, поддержка референсных изображений и звука, **режимы** (`textToImage`/`imageToImage`/`textToVideo`/`imageToVideo`) с их параметрами и допустимыми значениями `aspectRatio`/`resolution`/`duration`.
@@ -35,6 +35,7 @@
 - ✅ Каталог шаблонов галереи: `GET /v1/media/templates/images|videos`, публичный cover GET, admin POST/DELETE с base64-обложкой ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)); seed 5+5; не зависит от `FAL_API_KEY`.
 
 ## Changelog
+- 2026-08-11: quiz-like пикер параметров в чате — `media.ask_params` + `mediaChoices`/`mediaSelection` — [ADR-070](../../adr/ADR-070-media-choices-wizard.md); `/v1/media/*` без изменений.
 - 2026-08-11: chat tools `media.generate_image`/`media.generate_video` + `ChatResponse.mediaJobs` — [ADR-068](../../adr/ADR-068-media-generate-chat-tools.md); `/v1/media/*` без изменений.
 - 2026-08-10: каталог шаблонов галереи — `GET /v1/media/templates/images|videos`, cover GET, admin POST/DELETE — [ADR-066](../../adr/ADR-066-media-templates-catalog.md); миграция `0021_media_templates`, seed 5+5.
 - 2026-08-04: модуль создан и реализован — [ADR-060](../../adr/ADR-060-media-generation-fal.md). Backend: `src/app/media_generation/{catalog,fal_client,repository,service}.py`, `src/app/schemas/media.py`, `src/app/api_gateway/routers/media.py`, миграция `0018_media_jobs`, config `FAL_*`/`MEDIA_*`, ошибка `media_generation_not_configured`.

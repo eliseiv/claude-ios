@@ -1,16 +1,17 @@
-"""Global (project-independent) server-side tool handlers (ADR-026 / ADR-064 / ADR-068).
+"""Global (project-independent) server-side tool handlers (ADR-026 / ADR-064 / ADR-068 / ADR-070).
 
 Unlike SiteToolHandlers (project-scoped site.*, ADR-011), these handlers are NOT tied to a
 WebsiteService/project — they execute in the chat tool-loop without an external_project_id and
 are offered to Claude without requiring a project (including «чистый чат» with no project,
 ADR-022). Mode-gating (axis C) is orthogonal: ``quiz.generate`` is offered only in
-``study_learn``; ``time.now`` and ``media.generate_*`` are offered in every mode.
+``study_learn``; ``time.now`` and ``media.*`` are offered in every mode.
 
 ``time.now`` (ADR-026 §6) returns the current date/time via an injectable ``Clock``.
 ``quiz.generate`` (ADR-064) validates and echoes a quiz pool.
 ``media.generate_image`` / ``media.generate_video`` (ADR-068) call ``MediaGenerationService.submit``
 — submit-only, never wait for fal completion. Failures become ``ToolExecution.error`` so the
 chat turn survives (same soft contract as ``invalid_timezone`` / ``invalid_quiz``).
+``media.ask_params`` (ADR-070) starts a catalog-backed choices wizard.
 
 The same ``ToolExecution`` contract as SiteToolHandlers is reused (single tool-result contract for
 the orchestrator). Only the frozen dataclass is imported from website.tools — no website
@@ -26,10 +27,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 
+from app.chat.media_choices import build_wizard_state
 from app.chat.tools import (
     QUIZ_CONSTRAINTS_HINT,
     QUIZ_INVALID_ERROR_CODE,
     TIME_NOW_TZ_MAX_LENGTH,
+    TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
     TOOL_MEDIA_GENERATE_VIDEO,
     TOOL_QUIZ_GENERATE,
@@ -110,12 +113,49 @@ class GlobalToolHandlers:
             return self._time_now(args)
         if tool_name == TOOL_QUIZ_GENERATE:
             return self._quiz_generate(args)
+        if tool_name == TOOL_MEDIA_ASK_PARAMS:
+            return self._media_ask_params(args)
         if tool_name == TOOL_MEDIA_GENERATE_IMAGE:
             return await self._media_generate(kind="image", args=args, user_id=user_id)
         if tool_name == TOOL_MEDIA_GENERATE_VIDEO:
             return await self._media_generate(kind="video", args=args, user_id=user_id)
         # Unknown global tool name — should never happen (validated upstream against the registry).
         return ToolExecution.error("unknown_tool", f"unknown global server-side tool: {tool_name}")
+
+    def _media_ask_params(self, args: dict[str, Any]) -> ToolExecution:
+        """Start a mediaChoices wizard; options come only from the server catalog (ADR-070)."""
+        kind = str(args.get("kind") or "")
+        prompt = str(args.get("prompt") or "")
+        source_raw = args.get("sourceJobId")
+        source_job_id: str | None = None
+        if source_raw is not None:
+            try:
+                source_job_id = str(uuid.UUID(str(source_raw)))
+            except ValueError:
+                return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, "sourceJobId must be a UUID")
+
+        def _credits(model: Any) -> int:
+            if self._media is not None:
+                return self._media.credits_for(model)
+            return int(model.default_credits)
+
+        selection_id = str(uuid.uuid4())
+        try:
+            state = build_wizard_state(
+                selection_id=selection_id,
+                kind=kind,
+                prompt=prompt,
+                source_job_id=source_job_id,
+                answers={},
+                credits_for=_credits,
+            )
+        except ValueError as exc:
+            return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, str(exc)[:400])
+        if state is None:
+            return ToolExecution.error(
+                MEDIA_INVALID_ERROR_CODE, "media catalog has no steps for this request"
+            )
+        return ToolExecution.ok(state)
 
     @staticmethod
     def _quiz_generate(args: dict[str, Any]) -> ToolExecution:

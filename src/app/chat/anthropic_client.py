@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import anthropic
@@ -32,6 +33,7 @@ from app.chat.llm_client import (
     LLMResult,
     LLMUsage,
     NeutralMessage,
+    StreamEvent,
 )
 from app.chat.tools import (
     UnknownToolNameError,
@@ -434,6 +436,120 @@ class AnthropicClient:
             usage=self._parse_usage(message, model),
             text="".join(text_parts),
             tool_uses=tool_uses,
+        )
+
+    async def stream_message(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[NeutralMessage] | list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        attachments: PreparedAttachments | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        generation_mode: str = "general",
+        provider_state: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream Anthropic Messages (ADR-069): text deltas then a completed LLMResult."""
+        _ = provider_state
+        model = model if model is not None else self._default_model
+        generation_mode = (
+            generation_mode
+            if generation_mode in {"general", "research", "reasoning", "study_learn"}
+            else "general"
+        )
+        client = self._client
+        if api_key is not None:
+            client = client.with_options(api_key=api_key)
+
+        wire_messages = self._build_provider_messages(messages)
+        if attachments is not None and attachments.content_blocks:
+            for wm in reversed(wire_messages):
+                if wm.get("role") == "user":
+                    existing = wm.get("content")
+                    base = existing if isinstance(existing, list) else []
+                    wm["content"] = [*base, *attachments.content_blocks]
+                    break
+
+        anthropic_tools = self._serialize_tools(tools)
+        cached_tools = [dict(t) for t in anthropic_tools]
+        if cached_tools:
+            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+        if generation_mode == "research":
+            settings = get_settings()
+            cached_tools.append(
+                {
+                    "type": settings.anthropic_web_search_tool_type,
+                    "name": "web_search",
+                    "response_inclusion": "excluded",
+                }
+            )
+
+        extra_body: dict[str, Any] | None = None
+        if generation_mode == "reasoning":
+            settings = get_settings()
+            budget = min(
+                settings.anthropic_thinking_budget_tokens,
+                max(1, self._max_tokens - 1),
+            )
+            extra_body = {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                    "display": settings.resolved_anthropic_thinking_display(),
+                }
+            }
+
+        create_kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": self._max_tokens,
+            "system": cast(Any, self._build_system(system_prompt)),
+            "tools": cast(Any, cached_tools),
+            "messages": cast(Any, wire_messages),
+        }
+        if generation_mode in {"research", "reasoning"}:
+            create_kwargs["extra_body"] = extra_body
+
+        try:
+            async with client.messages.stream(**create_kwargs) as stream:
+                async for text in stream.text_stream:
+                    if text:
+                        yield StreamEvent.text_delta(text)
+                message = await stream.get_final_message()
+        except anthropic.AuthenticationError as exc:
+            _log_upstream_error(exc, model=model)
+            raise AnthropicAuthError(str(exc)) from exc
+        except (
+            anthropic.APITimeoutError,
+            anthropic.APIConnectionError,
+            anthropic.APIStatusError,
+        ) as exc:
+            _log_upstream_error(exc, model=model)
+            raise UpstreamError("anthropic upstream error") from exc
+
+        content_blocks: list[dict[str, Any]] = []
+        text_parts: list[str] = []
+        tool_uses: list[dict[str, Any]] = []
+        for block in message.content:
+            block_dict = _normalize_block(block.model_dump())
+            content_blocks.append(block_dict)
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                try:
+                    domain_name = to_domain_tool_name(block.name)
+                except UnknownToolNameError as exc:
+                    raise ValidationFailedError(str(exc)) from exc
+                tool_uses.append({"id": block.id, "name": domain_name, "input": block.input})
+
+        yield StreamEvent.completed(
+            LLMResult(
+                stop_reason=_to_neutral_stop_reason(message.stop_reason),
+                content_blocks=content_blocks,
+                usage=self._parse_usage(message, model),
+                text="".join(text_parts),
+                tool_uses=tool_uses,
+            )
         )
 
     async def validate_key(self, api_key: str) -> KeyValidation:
