@@ -93,8 +93,23 @@ async def test_media_choices_wizard_to_job(
     choices2 = body2["mediaChoices"]
     assert choices2["step"] == "resolution"
     assert body2.get("mediaJobs") is None
-    res_values = {o["value"] for o in choices2["questions"][0]["options"]}
-    assert "1K" in res_values and "2K" in res_values
+    res_opts = {o["value"]: o["label"] for o in choices2["questions"][0]["options"]}
+    assert "1K" in res_opts and "2K" in res_opts
+    assert "cr." in res_opts["2K"]
+
+    # Intermediate taps must NOT add chat bubbles (progress is patched into ask_params result).
+    hist_mid = await client.get(f"/v1/chats/{session_id}", headers=auth_headers(uid))
+    assert hist_mid.status_code == 200, hist_mid.text
+    mid_steps = hist_mid.json()["steps"]
+    mid_user_texts = [
+        b.get("text", "")
+        for s in mid_steps
+        if s["role"] == "user"
+        for b in (s.get("payload") or {}).get("content") or []
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    assert not any(t.startswith("Media:") for t in mid_user_texts)
+    assert not any("media selection" in t for t in mid_user_texts)
 
     # Complete priced params + aspectRatio in one cumulative answers payload by walking steps.
     answers = {"model": "nano-banana-2", "resolution": "2K"}
@@ -134,3 +149,34 @@ async def test_media_choices_wizard_to_job(
     assert jobs[0]["kind"] == "image"
     assert jobs[0]["model"] == "nano-banana-2"
     assert jobs[0]["status"] == "queued"
+    job_id = jobs[0]["jobId"]
+
+    hist = await client.get(f"/v1/chats/{session_id}", headers=auth_headers(uid))
+    assert hist.status_code == 200, hist.text
+    steps = hist.json()["steps"]
+    summary_users = [
+        s
+        for s in steps
+        if s["role"] == "user"
+        and any(
+            isinstance(b, dict)
+            and b.get("type") == "text"
+            and str(b.get("text", "")).startswith("Media:")
+            for b in (s.get("payload") or {}).get("content") or []
+        )
+    ]
+    assert len(summary_users) == 1
+    summary_text = next(
+        b["text"]
+        for b in summary_users[0]["payload"]["content"]
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
+    assert "nano-banana" in summary_text.lower() or "Nano Banana" in summary_text
+    assert "2K" in summary_text and "cr." in summary_text
+    assert summary_users[0]["payload"].get("mediaWizard", {}).get("jobId") == job_id
+
+    assistant_with_jobs = [
+        s for s in steps if s["role"] == "assistant" and (s.get("payload") or {}).get("mediaJobs")
+    ]
+    assert len(assistant_with_jobs) == 1
+    assert assistant_with_jobs[0]["payload"]["mediaJobs"][0]["jobId"] == job_id

@@ -8,9 +8,11 @@ from app.chat.media_choices import (
     STEP_MODEL,
     STEP_RESOLUTION,
     build_wizard_state,
+    format_selection_summary,
     next_step_id,
     validate_and_merge_answers,
 )
+from app.media_generation.catalog import find_model
 
 
 def test_first_step_is_model() -> None:
@@ -40,6 +42,28 @@ def test_after_model_asks_resolution() -> None:
     )
 
 
+def test_resolution_labels_include_tier_prices() -> None:
+    state = build_wizard_state(
+        selection_id="sel-1",
+        kind="image",
+        prompt="a cat",
+        source_job_id=None,
+        answers={"model": "nano-banana-2"},
+        credits_for=lambda m: m.default_credits,
+    )
+    assert state is not None
+    assert state["step"] == STEP_RESOLUTION
+    by_value = {o["value"]: o["label"] for o in state["questions"][0]["options"]}
+    model = find_model("nano-banana-2")
+    assert model is not None
+    assert "1K" in by_value and "cr." in by_value["1K"]
+    assert "4K" in by_value and "cr." in by_value["4K"]
+    # Higher tier must not look cheaper than a lower tier in the label digits.
+    cr_1k = int(by_value["1K"].split("·")[-1].strip().split()[0])
+    cr_4k = int(by_value["4K"].split("·")[-1].strip().split()[0])
+    assert cr_4k > cr_1k
+
+
 def test_validate_rejects_hallucinated_model() -> None:
     with pytest.raises(ValueError, match="invalid value"):
         validate_and_merge_answers(
@@ -59,3 +83,27 @@ def test_validate_accepts_catalog_resolution() -> None:
     )
     assert merged == {"model": "nano-banana-2", "resolution": "2K"}
     assert next_step_id(merged, kind="image", source_job_id=None) == "aspectRatio"
+
+
+def test_format_selection_summary_is_one_line() -> None:
+    text = format_selection_summary(
+        prompt="a fluffy cat",
+        kind="image",
+        answers={"model": "nano-banana-2", "resolution": "2K", "aspectRatio": "1:1"},
+        credits_charged=6,
+        source_job_id=None,
+    )
+    assert text.startswith("Media: a fluffy cat")
+    assert "2K" in text and "6 cr." in text
+    assert "edit" not in text
+
+
+def test_format_selection_summary_marks_edit() -> None:
+    text = format_selection_summary(
+        prompt="add a hat",
+        kind="image",
+        answers={"model": "nano-banana-2", "resolution": "1K"},
+        credits_charged=4,
+        source_job_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert text.endswith("edit") or " · edit" in text

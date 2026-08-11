@@ -13,6 +13,10 @@ ADR-022). Mode-gating (axis C) is orthogonal: ``quiz.generate`` is offered only 
 chat turn survives (same soft contract as ``invalid_timezone`` / ``invalid_quiz``).
 ``media.ask_params`` (ADR-070) starts a catalog-backed choices wizard.
 
+When the user attached images on the SAME turn, media tools upload them to fal (ADR-062) and
+use them as image-to-image / image-to-video references unless the model already passed
+``sourceJobId`` / ``imageUrls``.
+
 The same ``ToolExecution`` contract as SiteToolHandlers is reused (single tool-result contract for
 the orchestrator). Only the frozen dataclass is imported from website.tools — no website
 infrastructure is instantiated here (ADR-026 §5).
@@ -27,6 +31,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 
+from app.chat.attachments import ImageAttachmentRef
 from app.chat.media_choices import build_wizard_state
 from app.chat.tools import (
     QUIZ_CONSTRAINTS_HINT,
@@ -44,6 +49,7 @@ from app.errors import (
     InsufficientCreditsError,
     MediaGenerationNotConfiguredError,
     NotFoundError,
+    PayloadTooLargeError,
     UpstreamError,
     ValidationFailedError,
 )
@@ -65,6 +71,9 @@ MEDIA_INVALID_ERROR_CODE = "invalid_media_request"
 MEDIA_NOT_CONFIGURED_ERROR_CODE = "media_not_configured"
 MEDIA_INSUFFICIENT_CREDITS_ERROR_CODE = "insufficient_credits"
 MEDIA_UPSTREAM_ERROR_CODE = "media_upstream_error"
+
+# Cap auto-uploads from chat attachments (matches media.generate_image imageUrls max).
+_TURN_IMAGE_UPLOAD_MAX = 14
 
 
 @runtime_checkable
@@ -107,6 +116,7 @@ class GlobalToolHandlers:
         tool_name: str,
         args: dict[str, Any],
         user_id: uuid.UUID | None = None,
+        turn_images: list[ImageAttachmentRef] | None = None,
     ) -> ToolExecution:
         """Execute a global server-side tool. Returns a ToolExecution (result or error envelope)."""
         if tool_name == TOOL_TIME_NOW:
@@ -114,15 +124,59 @@ class GlobalToolHandlers:
         if tool_name == TOOL_QUIZ_GENERATE:
             return self._quiz_generate(args)
         if tool_name == TOOL_MEDIA_ASK_PARAMS:
-            return self._media_ask_params(args)
+            return await self._media_ask_params(args, turn_images=turn_images)
         if tool_name == TOOL_MEDIA_GENERATE_IMAGE:
-            return await self._media_generate(kind="image", args=args, user_id=user_id)
+            return await self._media_generate(
+                kind="image", args=args, user_id=user_id, turn_images=turn_images
+            )
         if tool_name == TOOL_MEDIA_GENERATE_VIDEO:
-            return await self._media_generate(kind="video", args=args, user_id=user_id)
+            return await self._media_generate(
+                kind="video", args=args, user_id=user_id, turn_images=turn_images
+            )
         # Unknown global tool name — should never happen (validated upstream against the registry).
         return ToolExecution.error("unknown_tool", f"unknown global server-side tool: {tool_name}")
 
-    def _media_ask_params(self, args: dict[str, Any]) -> ToolExecution:
+    async def _upload_turn_images(
+        self, turn_images: list[ImageAttachmentRef] | None
+    ) -> list[str] | ToolExecution:
+        """Upload same-turn chat image attachments to fal; return https URLs or a soft error."""
+        if not turn_images:
+            return []
+        if self._media is None:
+            return ToolExecution.error(
+                MEDIA_NOT_CONFIGURED_ERROR_CODE,
+                "media generation is not configured on this instance",
+            )
+        urls: list[str] = []
+        try:
+            for img in turn_images[:_TURN_IMAGE_UPLOAD_MAX]:
+                uploaded = await self._media.upload_reference_image(
+                    media_type=img.media_type,
+                    file_name=img.filename,
+                    data=img.data,
+                )
+                urls.append(uploaded.url)
+        except PayloadTooLargeError as exc:
+            return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, str(exc)[:400])
+        except ValidationFailedError as exc:
+            return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, str(exc)[:400])
+        except MediaGenerationNotConfiguredError:
+            return ToolExecution.error(
+                MEDIA_NOT_CONFIGURED_ERROR_CODE,
+                "media generation is not configured on this instance",
+            )
+        except UpstreamError:
+            return ToolExecution.error(
+                MEDIA_UPSTREAM_ERROR_CODE, "media provider unavailable; try again later"
+            )
+        return urls
+
+    async def _media_ask_params(
+        self,
+        args: dict[str, Any],
+        *,
+        turn_images: list[ImageAttachmentRef] | None = None,
+    ) -> ToolExecution:
         """Start a mediaChoices wizard; options come only from the server catalog (ADR-070)."""
         kind = str(args.get("kind") or "")
         prompt = str(args.get("prompt") or "")
@@ -133,6 +187,14 @@ class GlobalToolHandlers:
                 source_job_id = str(uuid.UUID(str(source_raw)))
             except ValueError:
                 return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, "sourceJobId must be a UUID")
+
+        image_urls: list[str] = []
+        # Prefer an explicit prior job; otherwise bridge chat attachments → fal https URLs.
+        if source_job_id is None and turn_images:
+            uploaded = await self._upload_turn_images(turn_images)
+            if isinstance(uploaded, ToolExecution):
+                return uploaded
+            image_urls = uploaded
 
         def _credits(model: Any) -> int:
             if self._media is not None:
@@ -146,6 +208,7 @@ class GlobalToolHandlers:
                 kind=kind,
                 prompt=prompt,
                 source_job_id=source_job_id,
+                image_urls=image_urls or None,
                 answers={},
                 credits_for=_credits,
             )
@@ -195,6 +258,7 @@ class GlobalToolHandlers:
         kind: str,
         args: dict[str, Any],
         user_id: uuid.UUID | None,
+        turn_images: list[ImageAttachmentRef] | None = None,
     ) -> ToolExecution:
         """Submit a media job (ADR-068). Never waits for fal completion.
 
@@ -243,6 +307,13 @@ class GlobalToolHandlers:
                 "cfgScale": args.get("cfgScale"),
                 "seed": args.get("seed"),
             }
+
+        # Same-turn chat photo → fal https when the model omitted an explicit reference.
+        if source_job_id is None and not image_urls and turn_images:
+            uploaded = await self._upload_turn_images(turn_images)
+            if isinstance(uploaded, ToolExecution):
+                return uploaded
+            image_urls = uploaded
 
         try:
             view = await self._media.submit(

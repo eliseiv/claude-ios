@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import get_settings
 from app.models import ChatSession, ChatStep, ToolCall
@@ -251,8 +252,9 @@ class ChatRepository:
     ) -> dict[str, Any] | None:
         """Latest persisted mediaChoices wizard state for ``selectionId`` (ADR-070).
 
-        Looks at user-step ``mediaWizard`` payloads (wizard continuations without LLM) and
-        ``media.ask_params`` tool results, newest ``seq`` first.
+        Prefers the ``media.ask_params`` tool result (answers are patched in place during the
+        wizard so intermediate taps do not create chat bubbles). Falls back to a completed
+        user-step ``mediaWizard`` summary.
         """
         from app.chat.tools import TOOL_MEDIA_ASK_PARAMS
 
@@ -260,13 +262,69 @@ class ChatRepository:
         steps = await self.list_steps(session_id)
         for step in reversed(steps):
             payload = step.payload if isinstance(step.payload, dict) else {}
+            if step.role == "tool" and payload.get("toolName") == TOOL_MEDIA_ASK_PARAMS:
+                result = payload.get("result")
+                if isinstance(result, dict) and result.get("selectionId") == sid:
+                    return result
             if step.role == "user":
                 wizard = payload.get("mediaWizard")
                 if isinstance(wizard, dict) and wizard.get("selectionId") == sid:
                     return wizard
-            if step.role == "tool" and payload.get("toolName") == TOOL_MEDIA_ASK_PARAMS:
+        return None
+
+    async def patch_media_ask_params_result(
+        self,
+        session_id: uuid.UUID,
+        selection_id: uuid.UUID,
+        *,
+        answers: dict[str, str],
+        step: str,
+        questions: list[dict[str, Any]],
+    ) -> ChatStep | None:
+        """Update the ask_params tool-result in place (wizard progress without new history rows)."""
+        from app.chat.tools import TOOL_MEDIA_ASK_PARAMS
+
+        sid = str(selection_id)
+        steps = await self.list_steps(session_id)
+        for step_row in reversed(steps):
+            payload = step_row.payload if isinstance(step_row.payload, dict) else {}
+            if step_row.role != "tool" or payload.get("toolName") != TOOL_MEDIA_ASK_PARAMS:
+                continue
+            result = payload.get("result")
+            if not isinstance(result, dict) or result.get("selectionId") != sid:
+                continue
+            new_result = {
+                **result,
+                "answers": answers,
+                "step": step,
+                "questions": questions,
+            }
+            step_row.payload = {**payload, "result": new_result}
+            flag_modified(step_row, "payload")
+            await self._session.flush()
+            return step_row
+        return None
+
+    async def last_media_job_ref(self, session_id: uuid.UUID) -> dict[str, Any] | None:
+        """Most recent media jobId recorded in this chat (assistant mediaJobs or generate_* result).
+
+        Used to steer edit follow-ups toward image-to-image via ``sourceJobId``.
+        """
+        from app.chat.tools import TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO
+
+        generate_tools = {TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO}
+        steps = await self.list_steps(session_id)
+        for step in reversed(steps):
+            payload = step.payload if isinstance(step.payload, dict) else {}
+            if step.role == "assistant":
+                jobs = payload.get("mediaJobs")
+                if isinstance(jobs, list):
+                    for job in reversed(jobs):
+                        if isinstance(job, dict) and job.get("jobId"):
+                            return job
+            if step.role == "tool" and payload.get("toolName") in generate_tools:
                 result = payload.get("result")
-                if isinstance(result, dict) and result.get("selectionId") == sid:
+                if isinstance(result, dict) and result.get("jobId"):
                     return result
         return None
 

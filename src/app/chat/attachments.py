@@ -39,7 +39,7 @@ import base64
 import binascii
 import io
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config import Settings
 from app.errors import ValidationFailedError
@@ -71,6 +71,21 @@ PROVIDER_OPENAI = "openai"
 
 
 @dataclass(frozen=True)
+class ImageAttachmentRef:
+    """In-memory image attachment for media image-to-image bridging (not persisted).
+
+    Chat attachments are vision input (ADR-020); fal generation needs https URLs (ADR-062). The
+    orchestrator keeps these refs for the CURRENT turn's tool-loop, uploads them to fal when a
+    media tool runs without an explicit reference, then drops them — raw base64 never hits
+    ``chat_steps``.
+    """
+
+    media_type: str
+    filename: str
+    data: str  # base64
+
+
+@dataclass(frozen=True)
 class PreparedAttachments:
     """Result of validating a request's attachments (ADR-020 / ADR-033 §5).
 
@@ -78,10 +93,12 @@ class PreparedAttachments:
       messages.create call only — full base64 in memory, never persisted.
     - placeholders: light text blocks persisted in chat_steps.payload INSTEAD of base64
       (storage invariant: raw base64 is never stored; provider-agnostic).
+    - images: request image attachments for media tools (same-turn only; never persisted).
     """
 
     content_blocks: list[dict[str, object]]
     placeholders: list[dict[str, str]]
+    images: list[ImageAttachmentRef] = field(default_factory=list)
 
 
 def _max_bytes_for(attachment_type: str, settings: Settings) -> int:
@@ -269,6 +286,7 @@ def prepare_attachments(
 
     content_blocks: list[dict[str, object]] = []
     placeholders: list[dict[str, str]] = []
+    images: list[ImageAttachmentRef] = []
     total_decoded = 0
 
     for att in attachments:
@@ -299,5 +317,15 @@ def prepare_attachments(
         # (anthropic document-block / openai native file-part, ADR-041), never a 500.
         content_blocks.append(_content_block(att, decoded, text, provider))
         placeholders.append(_placeholder(att, len(decoded)))
+        if att.type == "image":
+            images.append(
+                ImageAttachmentRef(
+                    media_type=att.mediaType,
+                    filename=att.filename or "image.jpg",
+                    data=att.data,
+                )
+            )
 
-    return PreparedAttachments(content_blocks=content_blocks, placeholders=placeholders)
+    return PreparedAttachments(
+        content_blocks=content_blocks, placeholders=placeholders, images=images
+    )

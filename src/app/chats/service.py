@@ -14,7 +14,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from app.chat.tools import TOOL_QUIZ_GENERATE, UnknownToolNameError, to_domain_tool_name
+from app.chat.tools import (
+    TOOL_MEDIA_GENERATE_IMAGE,
+    TOOL_MEDIA_GENERATE_VIDEO,
+    TOOL_QUIZ_GENERATE,
+    UnknownToolNameError,
+    to_domain_tool_name,
+)
 from app.chats.cursor import ChatCursor, InvalidCursorError
 from app.chats.provider_blocks import to_domain_blocks
 from app.chats.repository import ChatsRepository, strip_context_block
@@ -158,22 +164,34 @@ class ChatsService:
         provider_to_domain = await self._repo.provider_id_to_domain_id(session_id)
         # ADR-065 §2: turns whose assistant text must not be served (see _quiz_turn_ids).
         quiz_turns = self._quiz_turn_ids(steps)
+        # ADR-068/070: surface mediaJobs on the last assistant step of each turn (cold start).
+        media_jobs_by_turn = self._media_jobs_by_turn(steps)
+        last_assistant_by_turn = self._last_assistant_step_ids(steps)
+        history_steps: list[ChatStepView] = []
+        for step in steps:
+            payload = self._normalize_payload(step, provider_to_domain, quiz_turns)
+            if (
+                step.role == "assistant"
+                and last_assistant_by_turn.get(step.message_step_id) == step.id
+                and step.message_step_id in media_jobs_by_turn
+            ):
+                payload["mediaJobs"] = media_jobs_by_turn[step.message_step_id]
+            history_steps.append(
+                ChatStepView(
+                    id=step.id,
+                    message_step_id=step.message_step_id,
+                    role=step.role,
+                    payload=payload,
+                    usage=step.usage,
+                    created_at=step.created_at,
+                )
+            )
         return ChatHistoryView(
             id=session.id,
             title=session.title,
             assistant_mode=session.assistant_mode,
             mode=session.mode,
-            steps=[
-                ChatStepView(
-                    id=step.id,
-                    message_step_id=step.message_step_id,
-                    role=step.role,
-                    payload=self._normalize_payload(step, provider_to_domain, quiz_turns),
-                    usage=step.usage,
-                    created_at=step.created_at,
-                )
-                for step in steps
-            ],
+            steps=history_steps,
         )
 
     @staticmethod
@@ -194,6 +212,75 @@ class ChatsService:
             and step.payload.get("toolName") == TOOL_QUIZ_GENERATE
             and step.payload.get("result")
         }
+
+    @staticmethod
+    def _last_assistant_step_ids(steps: list[ChatStep]) -> dict[uuid.UUID, uuid.UUID]:
+        """messageStepId → id of the last assistant step in that turn (seq order)."""
+        last: dict[uuid.UUID, uuid.UUID] = {}
+        for step in steps:
+            if step.role == "assistant":
+                last[step.message_step_id] = step.id
+        return last
+
+    @staticmethod
+    def _media_job_ref(raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        job_id = raw.get("jobId")
+        if not job_id:
+            return None
+        ref: dict[str, Any] = {"jobId": str(job_id)}
+        for key in ("kind", "status", "model", "creditsCharged"):
+            if key in raw and raw[key] is not None:
+                ref[key] = raw[key]
+        return ref
+
+    @classmethod
+    def _media_jobs_by_turn(cls, steps: list[ChatStep]) -> dict[uuid.UUID, list[dict[str, Any]]]:
+        """Collect media job anchors per turn for history (ADR-068 / ADR-070).
+
+        Sources (same turn): ``media.generate_*`` tool results, assistant ``mediaJobs``,
+        user ``mediaWizard.jobId``. Deduped by jobId; order = first appearance in step order.
+        """
+        generate_tools = {TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO}
+        by_turn: dict[uuid.UUID, list[dict[str, Any]]] = {}
+        seen: dict[uuid.UUID, set[str]] = {}
+
+        def _add(turn_id: uuid.UUID, raw: Any) -> None:
+            ref = cls._media_job_ref(raw)
+            if ref is None:
+                return
+            bucket = seen.setdefault(turn_id, set())
+            if ref["jobId"] in bucket:
+                return
+            bucket.add(ref["jobId"])
+            by_turn.setdefault(turn_id, []).append(ref)
+
+        for step in steps:
+            payload = step.payload if isinstance(step.payload, dict) else {}
+            turn_id = step.message_step_id
+            if step.role == "tool" and payload.get("toolName") in generate_tools:
+                _add(turn_id, payload.get("result"))
+            if step.role == "assistant":
+                jobs = payload.get("mediaJobs")
+                if isinstance(jobs, list):
+                    for job in jobs:
+                        _add(turn_id, job)
+            if step.role == "user":
+                wizard = payload.get("mediaWizard")
+                if isinstance(wizard, dict) and wizard.get("jobId"):
+                    raw_answers = wizard.get("answers")
+                    answers = raw_answers if isinstance(raw_answers, dict) else {}
+                    _add(
+                        turn_id,
+                        {
+                            "jobId": wizard["jobId"],
+                            "kind": wizard.get("kind"),
+                            "model": answers.get("model"),
+                            "status": "queued",
+                        },
+                    )
+        return by_turn
 
     @staticmethod
     def _normalize_payload(

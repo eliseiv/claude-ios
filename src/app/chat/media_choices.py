@@ -2,6 +2,9 @@
 
 Options are ALWAYS taken from ``catalog.models_of_kind`` / variant allowlists — never from the
 LLM. One question per response so cascading enums (resolution depends on model) stay correct.
+
+Priced options (resolution / duration / audio) show the estimated credit cost in the label so the
+user sees that 1K/2K/4K are not the same price.
 """
 
 from __future__ import annotations
@@ -9,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from app.media_generation.catalog import FalModel, FalVariant, find_model, models_of_kind
+from app.media_generation.catalog import FalModel, FalVariant, find_model, models_of_kind, run_price
 
 # Wizard step ids (= question.id and answers keys).
 STEP_MODEL = "model"
@@ -39,22 +42,55 @@ def _question(step: str, options: list[dict[str, str]]) -> dict[str, Any]:
     }
 
 
-def _with_image(source_job_id: str | None) -> bool:
-    return bool(source_job_id)
+def _with_image(source_job_id: str | None, image_urls: list[str] | None = None) -> bool:
+    """True when the run is image-to-* (prior job and/or uploaded reference URLs)."""
+    return bool(source_job_id) or bool(image_urls)
 
 
-def _variant_for(model: FalModel, *, source_job_id: str | None) -> FalVariant | None:
-    return model.variant_for(with_image=_with_image(source_job_id))
+def _variant_for(
+    model: FalModel,
+    *,
+    source_job_id: str | None,
+    image_urls: list[str] | None = None,
+) -> FalVariant | None:
+    return model.variant_for(with_image=_with_image(source_job_id, image_urls))
 
 
-def next_step_id(answers: Mapping[str, str], *, kind: str, source_job_id: str | None) -> str | None:
+def estimate_run_credits(
+    model: FalModel,
+    answers: Mapping[str, str],
+    *,
+    base_credits: int,
+    overrides: Mapping[str, str] | None = None,
+) -> int:
+    """Credits for a hypothetical submit with answers (+ overrides for option labels)."""
+    merged = {**dict(answers), **dict(overrides or {})}
+    audio: bool | None = None
+    if STEP_GENERATE_AUDIO in merged:
+        audio = merged[STEP_GENERATE_AUDIO] == "true"
+    return run_price(
+        model=model,
+        base_credits=base_credits,
+        resolution=merged.get(STEP_RESOLUTION),
+        duration=merged.get(STEP_DURATION),
+        generate_audio=audio,
+    )
+
+
+def next_step_id(
+    answers: Mapping[str, str],
+    *,
+    kind: str,
+    source_job_id: str | None,
+    image_urls: list[str] | None = None,
+) -> str | None:
     """Return the next unanswered step id, or None when the wizard is complete."""
     if STEP_MODEL not in answers:
         return STEP_MODEL
     model = find_model(answers[STEP_MODEL])
     if model is None or model.kind != kind:
         return STEP_MODEL
-    variant = _variant_for(model, source_job_id=source_job_id)
+    variant = _variant_for(model, source_job_id=source_job_id, image_urls=image_urls)
     if variant is None:
         return STEP_MODEL
     if variant.resolutions and STEP_RESOLUTION not in answers:
@@ -78,9 +114,12 @@ def build_step_questions(
     answers: Mapping[str, str],
     source_job_id: str | None,
     credits_for: Callable[[FalModel], int],
+    image_urls: list[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]] | None:
     """Build (step, questions[]) for the next wizard step, or None if ready to submit."""
-    step = next_step_id(answers, kind=kind, source_job_id=source_job_id)
+    step = next_step_id(
+        answers, kind=kind, source_job_id=source_job_id, image_urls=image_urls
+    )
     if step is None:
         return None
 
@@ -95,18 +134,38 @@ def build_step_questions(
     model = find_model(answers[STEP_MODEL])
     if model is None or model.kind != kind:
         raise ValueError("selected model is not available")
-    variant = _variant_for(model, source_job_id=source_job_id)
+    variant = _variant_for(model, source_job_id=source_job_id, image_urls=image_urls)
     if variant is None:
         raise ValueError("selected model does not support this reference mode")
+    base = credits_for(model)
 
     if step == STEP_RESOLUTION:
-        options = [_option(v, v) for v in variant.resolutions]
+        options = []
+        for v in variant.resolutions:
+            cr = estimate_run_credits(
+                model, answers, base_credits=base, overrides={STEP_RESOLUTION: v}
+            )
+            options.append(_option(v, f"{v} · {cr} cr."))
         return step, [_question(STEP_RESOLUTION, options)]
     if step == STEP_DURATION:
-        options = [_option(v, v) for v in variant.durations]
+        options = []
+        for v in variant.durations:
+            cr = estimate_run_credits(
+                model, answers, base_credits=base, overrides={STEP_DURATION: v}
+            )
+            options.append(_option(v, f"{v} · {cr} cr."))
         return step, [_question(STEP_DURATION, options)]
     if step == STEP_GENERATE_AUDIO:
-        options = [_option("true", "Yes"), _option("false", "No")]
+        yes_cr = estimate_run_credits(
+            model, answers, base_credits=base, overrides={STEP_GENERATE_AUDIO: "true"}
+        )
+        no_cr = estimate_run_credits(
+            model, answers, base_credits=base, overrides={STEP_GENERATE_AUDIO: "false"}
+        )
+        options = [
+            _option("true", f"Yes · {yes_cr} cr."),
+            _option("false", f"No · {no_cr} cr."),
+        ]
         return step, [_question(STEP_GENERATE_AUDIO, options)]
     if step == STEP_ASPECT_RATIO:
         options = [_option(v, v) for v in variant.aspect_ratios]
@@ -120,14 +179,21 @@ def allowed_values_for_step(
     kind: str,
     answers_before: Mapping[str, str],
     source_job_id: str | None,
+    image_urls: list[str] | None = None,
 ) -> set[str]:
     """Catalog allowlist for ``step`` given answers already accepted before it."""
-    if next_step_id(answers_before, kind=kind, source_job_id=source_job_id) != step:
+    if (
+        next_step_id(
+            answers_before, kind=kind, source_job_id=source_job_id, image_urls=image_urls
+        )
+        != step
+    ):
         return set()
     built = build_step_questions(
         kind=kind,
         answers=answers_before,
         source_job_id=source_job_id,
+        image_urls=image_urls,
         credits_for=lambda m: m.default_credits,
     )
     if built is None or built[0] != step:
@@ -149,6 +215,7 @@ def validate_and_merge_answers(
     source_job_id: str | None,
     existing: Mapping[str, str],
     incoming: Mapping[str, Any],
+    image_urls: list[str] | None = None,
 ) -> dict[str, str]:
     """Merge ``incoming`` into ``existing`` along the wizard order; catalog-check every value."""
     candidate: dict[str, str] = dict(existing)
@@ -161,11 +228,17 @@ def validate_and_merge_answers(
 
     built: dict[str, str] = {}
     while True:
-        step = next_step_id(built, kind=kind, source_job_id=source_job_id)
+        step = next_step_id(
+            built, kind=kind, source_job_id=source_job_id, image_urls=image_urls
+        )
         if step is None or step not in candidate:
             break
         allowed = allowed_values_for_step(
-            step, kind=kind, answers_before=built, source_job_id=source_job_id
+            step,
+            kind=kind,
+            answers_before=built,
+            source_job_id=source_job_id,
+            image_urls=image_urls,
         )
         value = candidate[step]
         if value not in allowed:
@@ -185,12 +258,15 @@ def build_wizard_state(
     source_job_id: str | None,
     answers: Mapping[str, str],
     credits_for: Callable[[FalModel], int],
+    image_urls: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Persisted wizard state for the next question, or None when ready to submit."""
+    urls = [u for u in (image_urls or []) if isinstance(u, str) and u]
     built = build_step_questions(
         kind=kind,
         answers=answers,
         source_job_id=source_job_id,
+        image_urls=urls or None,
         credits_for=credits_for,
     )
     if built is None:
@@ -201,6 +277,7 @@ def build_wizard_state(
         "kind": kind,
         "prompt": prompt,
         "sourceJobId": source_job_id,
+        "imageUrls": urls,
         "answers": dict(answers),
         "step": step,
         "questions": questions,
@@ -230,3 +307,29 @@ def submit_params_from_answers(answers: Mapping[str, str]) -> dict[str, Any]:
     if STEP_GENERATE_AUDIO in answers:
         params["generateAudio"] = answers[STEP_GENERATE_AUDIO] == "true"
     return params
+
+
+def format_selection_summary(
+    *,
+    prompt: str,
+    kind: str,
+    answers: Mapping[str, str],
+    credits_charged: int,
+    source_job_id: str | None,
+) -> str:
+    """Single history bubble for the completed wizard (replaces N intermediate taps)."""
+    parts: list[str] = [prompt.strip() or kind]
+    model = find_model(answers.get(STEP_MODEL, ""))
+    if model is not None:
+        parts.append(model.title)
+    elif STEP_MODEL in answers:
+        parts.append(answers[STEP_MODEL])
+    for key in (STEP_RESOLUTION, STEP_DURATION, STEP_ASPECT_RATIO):
+        if key in answers:
+            parts.append(answers[key])
+    if STEP_GENERATE_AUDIO in answers:
+        parts.append("audio" if answers[STEP_GENERATE_AUDIO] == "true" else "silent")
+    parts.append(f"{credits_charged} cr.")
+    if source_job_id:
+        parts.append("edit")
+    return "Media: " + " · ".join(parts)

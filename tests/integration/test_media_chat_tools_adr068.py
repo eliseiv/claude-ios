@@ -106,6 +106,17 @@ async def test_media_generate_image_tool_loop_returns_media_jobs(
         )
     assert row == "queued"
 
+    # History: assistant payload carries mediaJobs so iOS can rehydrate the bubble (ADR-068/070).
+    hist = await client.get(f"/v1/chats/{body['sessionId']}", headers=auth_headers(uid))
+    assert hist.status_code == 200, hist.text
+    assistants = [
+        s
+        for s in hist.json()["steps"]
+        if s["role"] == "assistant" and (s.get("payload") or {}).get("mediaJobs")
+    ]
+    assert len(assistants) == 1
+    assert assistants[0]["payload"]["mediaJobs"][0]["jobId"] == job_id
+
 
 @pytest.mark.asyncio
 async def test_media_generate_not_configured_soft_error_keeps_turn(

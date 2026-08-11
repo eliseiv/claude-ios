@@ -53,7 +53,18 @@ Execution: создать `selectionId`, первый шаг (`model`), persist 
 - Чужой/неизвестный `selectionId` → `422`.
 - Chat-debit за чистый selection-шаг без LLM — **нет**; media debit только на финальном submit.
 
-### 4. Не меняется
+### 4. История чата (сводка, не N тапов)
+
+- Промежуточные `mediaSelection` **не** создают user/assistant bubbles — answers патчатся в tool-result `media.ask_params`.
+- На финале — **один** user-шаг `Media: <prompt> · <model> · <params> · <N> cr.` + assistant с текстом и `payload.mediaJobs` (cold start: `jobId` в истории).
+- Labels resolution/duration/audio включают оценку кредитов (`2K · 6 cr.`).
+
+### 5. Edit / image-to-image
+
+- Правки предыдущей генерации: `sourceJobId` (иначе text-to-* заново). System prompt + hint `Most recent media job… sourceJobId=…`.
+- Фото **из текущего сообщения** (chat attachment, ADR-020): при `media.ask_params` / `media.generate_*` без `sourceJobId` бэкенд сам заливает attachment на fal (`POST` upload) и кладёт https в `imageUrls` визарда / submit — image-to-image без участия модели в URL. Base64 в `chat_steps` не пишется. Workspace knowledge files не используются как reference.
+
+### 6. Не меняется
 
 - Контракт `/v1/media/*`, поле `quiz`, биллинг `media-gen:{jobId}`.
 

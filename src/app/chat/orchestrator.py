@@ -27,7 +27,7 @@ from app.audit.service import (
 )
 from app.byok.service import BYOKService
 from app.chat.anthropic_client import AnthropicAuthError
-from app.chat.attachments import PreparedAttachments, prepare_attachments
+from app.chat.attachments import ImageAttachmentRef, PreparedAttachments, prepare_attachments
 from app.chat.global_tools import MEDIA_INVALID_ERROR_CODE, GlobalToolHandlers
 from app.chat.llm_client import (
     STOP_REASON_MAX_TOKENS,
@@ -119,7 +119,16 @@ _MEDIA_GENERATE_INSTRUCTION = (
     "wait — the app shows tappable choices. Do not invent model ids or resolutions. Only call "
     "media.generate_image or media.generate_video when those parameters are already known. "
     "Generate tools only queue a job and return a jobId — tell the user generation has started; "
-    "do not claim the media is ready until the app reports it."
+    "do not claim the media is ready until the app reports it. "
+    "First generation with no photo attached: omit sourceJobId (text-to-image / text-to-video). "
+    "If the user attached a photo on this message and asks to generate/transform based on it "
+    "(e.g. put them on a beach), call media.ask_params — the server uploads the attachment and "
+    "runs image-to-image automatically; you do not pass imageUrls. "
+    "If the user asks to edit, change, redraw, add to, or refine a previously generated image or "
+    "video in this chat, you MUST pass sourceJobId set to that job's jobId from history "
+    "(tool results or assistant mediaJobs). Without sourceJobId (and with no attachment) the "
+    "provider starts a NEW unrelated generation. Prefer media.ask_params with sourceJobId for "
+    "edits when quality is unclear."
 )
 
 # ADR-059: state, in the system prompt, that the assistant has the full conversation so far and
@@ -350,10 +359,13 @@ def _merge_attachments(
         return None
     chat_blocks = chat.content_blocks if chat is not None else []
     chat_placeholders = chat.placeholders if chat is not None else []
+    # Media image-to-image bridging uses ONLY request images — not workspace knowledge files.
+    chat_images = list(chat.images) if chat is not None else []
     ws_blocks = workspace.content_blocks if workspace is not None else []
     return PreparedAttachments(
         content_blocks=[*ws_blocks, *chat_blocks],
         placeholders=list(chat_placeholders),
+        images=chat_images,
     )
 
 
@@ -805,6 +817,8 @@ class ChatOrchestrator:
                     sess.assistant_mode, instructions, effective_generation_mode
                 )
 
+        system_prompt = await self._system_prompt_with_last_media_job(sess.id, system_prompt)
+
         # ADR-020 / ADR-033 §3,§5: validate inline attachments (provider-aware) and split into
         # (a) the PreparedAttachments handed to the client ONCE on turn 0 — the client builds the
         # provider content blocks and injects them — and (b) light text placeholders persisted in
@@ -897,6 +911,21 @@ class ChatOrchestrator:
             on_text_delta=on_text_delta,
         )
 
+    async def _system_prompt_with_last_media_job(
+        self, session_id: uuid.UUID, system_prompt: str
+    ) -> str:
+        """Append the latest chat media jobId so edits use image-to-image (ADR-070)."""
+        last_media = await self._deps.repo.last_media_job_ref(session_id)
+        if last_media is None or not last_media.get("jobId"):
+            return system_prompt
+        job_id = last_media["jobId"]
+        kind = last_media.get("kind", "image")
+        return (
+            f"{system_prompt}\n\nMost recent media job in this chat: "
+            f"jobId={job_id} kind={kind}. "
+            f"For edits/refinements of that media, pass sourceJobId={job_id}."
+        )
+
     async def _handle_media_selection(
         self,
         *,
@@ -907,14 +936,21 @@ class ChatOrchestrator:
         message: str,
         generation_mode: str,
     ) -> ChatRunOut:
-        """Continue or complete a mediaChoices wizard without calling the LLM (ADR-070)."""
+        """Continue or complete a mediaChoices wizard without calling the LLM (ADR-070).
+
+        Intermediate taps patch the ``media.ask_params`` tool result in place — no extra
+        user/assistant bubbles. Only the final submit writes one summary user step + assistant
+        step with ``mediaJobs`` (cold-start recoverable).
+        """
         from app.chat.media_choices import (
             build_wizard_state,
+            format_selection_summary,
             media_choices_response,
             submit_params_from_answers,
             validate_and_merge_answers,
         )
 
+        _ = message  # optional client text; history uses a server-built summary on complete
         raw_sid = media_selection.get("selectionId")
         try:
             selection_id = raw_sid if isinstance(raw_sid, uuid.UUID) else uuid.UUID(str(raw_sid))
@@ -932,6 +968,12 @@ class ChatOrchestrator:
         prompt = str(prior.get("prompt") or "")
         source_job_id = prior.get("sourceJobId")
         source_job_id_str = str(source_job_id) if source_job_id else None
+        raw_urls = prior.get("imageUrls")
+        image_urls = (
+            [str(u) for u in raw_urls if isinstance(u, str) and u]
+            if isinstance(raw_urls, list)
+            else []
+        )
         raw_answers = prior.get("answers")
         existing_answers: dict[str, Any] = raw_answers if isinstance(raw_answers, dict) else {}
 
@@ -939,6 +981,7 @@ class ChatOrchestrator:
             merged = validate_and_merge_answers(
                 kind=kind,
                 source_job_id=source_job_id_str,
+                image_urls=image_urls or None,
                 existing={str(k): str(v) for k, v in existing_answers.items()},
                 incoming=incoming,
             )
@@ -957,67 +1000,44 @@ class ChatOrchestrator:
             kind=kind,
             prompt=prompt,
             source_job_id=source_job_id_str,
+            image_urls=image_urls or None,
             answers=merged,
             credits_for=_credits,
         )
 
-        label = message.strip() or f"[media selection {selection_id}]"
-        user_payload: dict[str, Any] = {
-            "content": [{"type": "text", "text": label}],
-            "generationMode": generation_mode,
-        }
         if next_state is not None:
-            user_payload["mediaWizard"] = next_state
-            await self._deps.repo.add_step(
-                session_id=session_id,
-                message_step_id=message_step_id,
-                role="user",
-                payload=user_payload,
+            patched = await self._deps.repo.patch_media_ask_params_result(
+                session_id,
+                selection_id,
+                answers=merged,
+                step=str(next_state["step"]),
+                questions=list(next_state["questions"]),
             )
-            assistant_step = await self._deps.repo.add_step(
-                session_id=session_id,
-                message_step_id=message_step_id,
-                role="assistant",
-                payload={"content": [{"type": "text", "text": "Please choose the next option."}]},
-            )
+            if patched is None:
+                raise ValidationFailedError("unknown mediaSelection.selectionId")
             await self._session.commit()
             return ChatRunOut(
                 status="assistant_message",
                 session_id=session_id,
                 assistant_message="Please choose the next option.",
-                message_step_id=message_step_id,
-                step_id=assistant_step.id,
+                message_step_id=patched.message_step_id,
+                step_id=patched.id,
                 media_choices=media_choices_response(next_state),
             )
 
-        # Wizard complete → submit media job (media debit only; no chat debit).
+        # Wizard complete → one summary bubble + submit (media debit only; no chat debit).
         model_id = merged.get("model")
         if not model_id:
             raise ValidationFailedError("mediaSelection is missing model")
         params = submit_params_from_answers(merged)
         source_uuid = uuid.UUID(source_job_id_str) if source_job_id_str else None
-        user_payload["mediaWizard"] = {
-            "selectionId": str(selection_id),
-            "kind": kind,
-            "prompt": prompt,
-            "sourceJobId": source_job_id_str,
-            "answers": merged,
-            "step": "done",
-            "questions": [],
-        }
-        await self._deps.repo.add_step(
-            session_id=session_id,
-            message_step_id=message_step_id,
-            role="user",
-            payload=user_payload,
-        )
         try:
             view = await media_svc.submit(
                 user_id=user_id,
                 kind=kind,
                 model_id=model_id,
                 prompt=prompt,
-                image_urls=[],
+                image_urls=image_urls,
                 params=params,
                 source_job_id=source_uuid,
             )
@@ -1040,24 +1060,58 @@ class ChatOrchestrator:
             "model": job.model_id,
             "creditsCharged": job.credits_charged,
         }
+        summary = format_selection_summary(
+            prompt=prompt,
+            kind=kind,
+            answers=merged,
+            credits_charged=job.credits_charged,
+            source_job_id=source_job_id_str,
+        )
+        await self._deps.repo.patch_media_ask_params_result(
+            session_id,
+            selection_id,
+            answers=merged,
+            step="done",
+            questions=[],
+        )
+        await self._deps.repo.add_step(
+            session_id=session_id,
+            message_step_id=message_step_id,
+            role="user",
+            payload={
+                "content": [{"type": "text", "text": summary}],
+                "generationMode": generation_mode,
+                "mediaWizard": {
+                    "selectionId": str(selection_id),
+                    "kind": kind,
+                    "prompt": prompt,
+                    "sourceJobId": source_job_id_str,
+                    "imageUrls": image_urls,
+                    "answers": merged,
+                    "step": "done",
+                    "questions": [],
+                    "jobId": str(job.id),
+                },
+            },
+        )
+        assistant_text = (
+            f"Generation started ({job.credits_charged} cr.). "
+            "I will let you know when it is ready."
+        )
         assistant_step = await self._deps.repo.add_step(
             session_id=session_id,
             message_step_id=message_step_id,
             role="assistant",
             payload={
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Generation started. I will let you know when it is ready.",
-                    }
-                ]
+                "content": [{"type": "text", "text": assistant_text}],
+                "mediaJobs": [job_ref],
             },
         )
         await self._session.commit()
         return ChatRunOut(
             status="assistant_message",
             session_id=session_id,
-            assistant_message="Generation started. I will let you know when it is ready.",
+            assistant_message=assistant_text,
             message_step_id=message_step_id,
             step_id=assistant_step.id,
             media_jobs=[job_ref],
@@ -1290,6 +1344,7 @@ class ChatOrchestrator:
             system_prompt = _system_prompt_with_workspace(
                 sess.assistant_mode, instructions, generation_mode
             )
+        system_prompt = await self._system_prompt_with_last_media_job(sess.id, system_prompt)
         return await self._generate_loop(
             user_id=user_id,
             session_id=session_id,
@@ -1759,6 +1814,8 @@ class ChatOrchestrator:
         # last user turn. Subsequent (tool-loop) iterations replay placeholders from chat_steps —
         # heavy base64 is never re-sent. The reference is consumed after the first call.
         turn0_attachments = first_turn_attachments
+        # Same-turn image attachments stay available for media tools (upload → image-to-image).
+        turn_images = list(first_turn_attachments.images) if first_turn_attachments else []
         for _ in range(max_rounds + 1):
             messages = await self._build_messages(session_id)
             sess = await self._session.get(ChatSession, session_id)
@@ -1884,6 +1941,7 @@ class ChatOrchestrator:
                     quiz_accumulator=quiz_accumulator,
                     media_accumulator=media_accumulator,
                     media_choices_accumulator=media_choices_accumulator,
+                    turn_images=turn_images,
                 )
                 # Persist the tool_use step + tool_calls + tool_results + audit (no billing here).
                 await self._session.commit()
@@ -1917,6 +1975,7 @@ class ChatOrchestrator:
                     result=result,
                     usage=usage,
                     server_tools=server_tools,
+                    media_jobs=media_accumulator.jobs or None,
                 ),
                 message_step_id=message_step_id,
                 quiz_accumulated=quiz_accumulator.pool,
@@ -2001,19 +2060,25 @@ class ChatOrchestrator:
         result: LLMResult,
         usage: dict[str, Any],
         server_tools: list[ServerToolExecutionOut],
+        media_jobs: list[dict[str, Any]] | None = None,
     ) -> ChatRunOut:
         # Final assistant_message. The assistant-step + billing (debit or trial flip) + audit are
         # committed together as one short transaction (atomicity per MAJOR-4 / CRITICAL-1).
         # ADR-023: capture the persisted assistant step's id → ChatResponse.stepId. It is the same
         # ChatStep.id that GET /v1/chats/{id} renders as ChatStepSchema.id for this step (sync
         # invariant).
+        # ADR-068/070: persist mediaJobs on the assistant payload so GET /v1/chats/{id} can show
+        # generation anchors without scanning tool steps (iOS cold start).
         if billing.debit_credits and billing.expose_credit_amount:
             usage = {**usage, "creditsCharged": billing.credit_amount}
+        assistant_payload: dict[str, Any] = {"content": result.content_blocks}
+        if media_jobs:
+            assistant_payload["mediaJobs"] = list(media_jobs)
         assistant_step = await self._deps.repo.add_step(
             session_id=session_id,
             message_step_id=message_step_id,
             role="assistant",
-            payload={"content": result.content_blocks},
+            payload=assistant_payload,
             usage=usage,
         )
         sess = await self._session.get(ChatSession, session_id)
@@ -2067,6 +2132,7 @@ class ChatOrchestrator:
             step_id=assistant_step.id,
             # ADR-028: server-side tools executed in this /chat/run before the final assistant turn.
             server_tools=list(server_tools),
+            media_jobs=list(media_jobs) if media_jobs else None,
         )
 
     async def _handle_max_tokens(
@@ -2145,6 +2211,7 @@ class ChatOrchestrator:
         quiz_accumulator: _QuizAccumulator | None = None,
         media_accumulator: _MediaJobsAccumulator | None = None,
         media_choices_accumulator: _MediaChoicesAccumulator | None = None,
+        turn_images: list[ImageAttachmentRef] | None = None,
     ) -> _TurnOutcome:
         """Process a tool_use turn (ADR-008/011): persist tool_calls, branch server/client-side.
 
@@ -2292,6 +2359,7 @@ class ChatOrchestrator:
                     args=validated_args,
                     provider_tool_use_id=provider_tool_use_id,
                     server_tools=server_tools,
+                    turn_images=turn_images,
                 )
                 if (
                     tool_name == TOOL_QUIZ_GENERATE
@@ -2445,6 +2513,7 @@ class ChatOrchestrator:
         args: dict[str, Any],
         provider_tool_use_id: str,
         server_tools: list[ServerToolExecutionOut],
+        turn_images: list[ImageAttachmentRef] | None = None,
     ) -> ToolExecution:
         """Execute a global server-side tool (time.now, quiz.generate) on the backend (ADR-026 §4).
 
@@ -2461,7 +2530,10 @@ class ChatOrchestrator:
         accumulator (ADR-064 §7) without re-reading the persisted step.
         """
         execution = await self._deps.global_tools.execute(
-            tool_name=tool_name, args=args, user_id=user_id
+            tool_name=tool_name,
+            args=args,
+            user_id=user_id,
+            turn_images=turn_images,
         )
         await self._persist_tool_execution(
             user_id=user_id,

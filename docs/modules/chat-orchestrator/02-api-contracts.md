@@ -286,7 +286,7 @@
 
 **Бриф для iOS (код не в этом репо):** новый URL `/v1/chat/v2/run/stream`; парсить SSE (`event` + JSON `data`); UI растёт по `delta.text` вместо индикатора «думает»; на `done` применить полный `ChatResponse` (`toolCalls` / `mediaJobs` / `mediaChoices` / `quiz` как у JSON `/v2/run`); keep-alive / reconnect в v1 не обязателен (один запрос = один ход).
 
-**Бриф mediaChoices (ADR-070):** при непустом `mediaChoices` — карточки как квиз (`question` + tap по `options[].label`); накопить `answers[id]=value` и слать `mediaSelection` на `/v2/run` (пустой `message` ок); повторять до `mediaJobs`; каталог `GET /v1/media/models` для отдельного media-UI по-прежнему валиден.
+**Бриф mediaChoices (ADR-070):** при непустом `mediaChoices` — карточки как квиз (`question` + tap по `options[].label`; в label resolution/duration часто есть цена `· N cr.`); накопить `answers[id]=value` и слать `mediaSelection` на `/v2/run` (пустой `message` ок); повторять до `mediaJobs`. Промежуточные тапы **не** плодят шаги в истории — на финале один user `Media: … · N cr.` + assistant с `payload.mediaJobs`. **Cold start / история:** в `GET /v1/chats/{id}` искать `steps[].payload.mediaJobs` на последнем assistant хода (`jobId` → poll/push media); то же для пути `media.generate_*`. Правки («дорисуй…») — модель шлёт `sourceJobId`; ассеты из `GET /v1/media/jobs/{jobId}`. Каталог `GET /v1/media/models` для отдельного media-UI валиден.
 
 ### POST /v1/chat/v2/tool-result
 

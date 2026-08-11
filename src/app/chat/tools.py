@@ -572,6 +572,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Present tappable choices so the user picks image/video parameters (model, resolution, "
         "duration, …) before generation. Call this when the user wants a photo or video and has "
         "not already chosen those parameters. Pass kind ('image'|'video') and the prompt to use. "
+        "If the user attached a photo on this message, the server uses it as the image-to-image "
+        "reference automatically — do not invent URLs. "
+        "For edits/refinements of a prior generation, ALSO pass sourceJobId (that job's jobId) so "
+        "the provider runs image-to-image / image-to-video instead of a new text-to-* render. "
         "Do NOT invent model ids or resolutions — the app shows catalog options. After this tool, "
         "wait for the user to tap; do not call media.generate_* in the same turn."
     ),
@@ -579,16 +583,17 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Submit an image generation job when model and quality are ALREADY known (e.g. the user "
         "stated them). Prefer media.ask_params when parameters are unclear. Returns immediately "
         "with jobId and status 'queued' — do NOT wait for the image; the app polls "
-        "GET /v1/media/jobs/{jobId}. 'model' is a catalog id such as 'nano-banana-2'. Optional "
-        "imageUrls (https) or sourceJobId starts an edit. Costs media credits in addition to the "
-        "chat turn."
+        "GET /v1/media/jobs/{jobId}. 'model' is a catalog id such as 'nano-banana-2'. "
+        "For edits of a previous image, pass sourceJobId (required for image-to-image); optional "
+        "imageUrls (https) is an alternative. Costs media credits in addition to the chat turn."
     ),
     TOOL_MEDIA_GENERATE_VIDEO: (
         "Submit a video generation job when model, duration, and quality are ALREADY known. "
         "Prefer media.ask_params when parameters are unclear. Returns immediately with jobId and "
         "status 'queued' — do NOT wait for the video; the app polls GET /v1/media/jobs/{jobId}. "
-        "'model' is a catalog id such as 'veo-3.1'. Optional imageUrl or sourceJobId starts "
-        "image-to-video. Costs media credits in addition to the chat turn."
+        "'model' is a catalog id such as 'veo-3.1'. For image-to-video from a prior job, pass "
+        "sourceJobId; optional imageUrl is an alternative. Costs media credits in addition to "
+        "the chat turn."
     ),
 }
 
