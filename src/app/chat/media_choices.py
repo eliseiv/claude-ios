@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from app.media_generation.catalog import FalModel, find_model, models_of_kind
+from app.media_generation.catalog import FalModel, FalVariant, find_model, models_of_kind
 
 # Wizard step ids (= question.id and answers keys).
 STEP_MODEL = "model"
@@ -43,7 +43,7 @@ def _with_image(source_job_id: str | None) -> bool:
     return bool(source_job_id)
 
 
-def _variant_for(model: FalModel, *, source_job_id: str | None):
+def _variant_for(model: FalModel, *, source_job_id: str | None) -> FalVariant | None:
     return model.variant_for(with_image=_with_image(source_job_id))
 
 

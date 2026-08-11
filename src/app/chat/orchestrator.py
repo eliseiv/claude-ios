@@ -932,7 +932,8 @@ class ChatOrchestrator:
         prompt = str(prior.get("prompt") or "")
         source_job_id = prior.get("sourceJobId")
         source_job_id_str = str(source_job_id) if source_job_id else None
-        existing_answers = prior.get("answers") if isinstance(prior.get("answers"), dict) else {}
+        raw_answers = prior.get("answers")
+        existing_answers: dict[str, Any] = raw_answers if isinstance(raw_answers, dict) else {}
 
         try:
             merged = validate_and_merge_answers(

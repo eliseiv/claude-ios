@@ -190,8 +190,8 @@ class LLMClient(Protocol):
     ) -> AsyncIterator[StreamEvent]:
         """Stream one provider round: zero+ ``text_delta`` then exactly one ``completed`` (ADR-069).
 
-        Implementations SHOULD emit progressive text; a fallback that yields a single delta of the
-        full text before ``completed`` is acceptable only when the provider stream API is unavailable.
+        Implementations SHOULD emit progressive text; a fallback that yields a single delta of
+        the full text before ``completed`` is OK only when the provider stream API is unavailable.
         """
         ...
 

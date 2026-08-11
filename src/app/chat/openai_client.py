@@ -380,11 +380,11 @@ class OpenAIClient:
         openai_tools = self._serialize_tools(tools)
 
         try:
-            stream = await client.chat.completions.create(
+            stream = await client.chat.completions.create(  # type: ignore[call-overload]
                 model=model,
                 max_tokens=self._max_tokens,
-                messages=wire_messages,  # type: ignore[arg-type]
-                tools=openai_tools or openai.NOT_GIVEN,  # type: ignore[arg-type]
+                messages=wire_messages,
+                tools=openai_tools or openai.NOT_GIVEN,
                 stream=True,
                 stream_options={"include_usage": True},
             )
