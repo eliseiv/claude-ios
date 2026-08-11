@@ -309,6 +309,33 @@ class Settings(BaseSettings):
     media_upload_request_body_limit: int = Field(
         default=16 * 1024 * 1024, alias="MEDIA_UPLOAD_REQUEST_BODY_LIMIT"
     )
+    # Decoded-byte ceiling for gallery template covers (ADR-066 admin create).
+    media_template_cover_max_bytes: int = Field(
+        default=2 * 1024 * 1024, alias="MEDIA_TEMPLATE_COVER_MAX_BYTES"
+    )
+    # Raised transport body limit for POST /v1/admin/media/templates only (cover base64).
+    media_template_cover_request_body_limit: int = Field(
+        default=4 * 1024 * 1024, alias="MEDIA_TEMPLATE_COVER_REQUEST_BODY_LIMIT"
+    )
+    # Background reconciler for non-terminal media jobs (ADR-067 / Q-060-2). Interval <= 0
+    # disables the loop (tests). Batch caps how many fal polls run per tick.
+    media_reconcile_interval_seconds: float = Field(
+        default=15.0, alias="MEDIA_RECONCILE_INTERVAL_SECONDS"
+    )
+    media_reconcile_batch_size: int = Field(default=50, alias="MEDIA_RECONCILE_BATCH_SIZE")
+
+    # --- APNs push (ADR-067 / TD-011) ---
+    # Empty credentials => device-token CRUD still works; send is a no-op (warning logged).
+    # SECRET: AuthKey_*.p8 contents (\\n-escaped) or path via APNS_AUTH_KEY_PATH.
+    apns_key_id: str = Field(default="", alias="APNS_KEY_ID")
+    apns_team_id: str = Field(default="", alias="APNS_TEAM_ID")
+    apns_auth_key: str = Field(default="", alias="APNS_AUTH_KEY")
+    apns_auth_key_path: str = Field(default="", alias="APNS_AUTH_KEY_PATH")
+    # Bundle id / APNs topic (per-instance).
+    apns_topic: str = Field(default="", alias="APNS_TOPIC")
+    # sandbox (default) | production — host selection only; not a secret.
+    apns_environment: str = Field(default="sandbox", alias="APNS_ENVIRONMENT")
+    apns_timeout_seconds: float = Field(default=10.0, alias="APNS_TIMEOUT_SECONDS")
 
     # --- Admin auth (ADR-009, ADM-1) ---
     # Isolated admin secret (X-Admin-Token). High-entropy (>= 32 bytes), only via secret
@@ -880,6 +907,10 @@ class Settings(BaseSettings):
     def resolve_public_key(self) -> str:
         """Public RS256 verification key PEM (used by JwtVerifier and the JWKS endpoint)."""
         return self._resolve_pem(self.jwt_public_key_path, self.jwt_public_key)
+
+    def resolve_apns_auth_key(self) -> str:
+        """APNs AuthKey .p8 PEM, or '' when push send is not configured (ADR-067)."""
+        return self._resolve_pem(self.apns_auth_key_path, self.apns_auth_key)
 
     def apple_audience_resolved(self) -> str:
         """Effective Apple `aud` for verification (ADR-043 §3).

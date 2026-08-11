@@ -8,8 +8,10 @@ from app.models.tables import (
     ChatSession,
     ChatStep,
     CloudPaymentsWebhookEvent,
+    DevicePushToken,
     LedgerTransaction,
     MediaJob,
+    MediaTemplate,
     Project,
     SiteFile,
     Subscription,
@@ -40,4 +42,6 @@ __all__ = [
     "WorkspaceProject",
     "WorkspaceFile",
     "MediaJob",
+    "MediaTemplate",
+    "DevicePushToken",
 ]

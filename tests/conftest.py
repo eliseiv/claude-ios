@@ -42,6 +42,13 @@ os.environ["DOCS_ENABLED"] = "true"
 # profile sets METRICS_SCRAPE_TOKEN (=> /metrics 403 without header); force it empty.
 os.environ["METRICS_SCRAPE_TOKEN"] = ""
 os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
+# ADR-067: disable the background media reconciler in the hermetic suite (poll path is
+# exercised explicitly; a live loop would race fal fakes across tests).
+os.environ["MEDIA_RECONCILE_INTERVAL_SECONDS"] = "0"
+os.environ["APNS_KEY_ID"] = ""
+os.environ["APNS_TEAM_ID"] = ""
+os.environ["APNS_AUTH_KEY"] = ""
+os.environ["APNS_TOPIC"] = ""
 
 # JWT: tokens are signed below with an ephemeral RSA key (_PRIVATE_PEM); the service must
 # verify with the matching JWT_PUBLIC_KEY and the iss/aud baked into make_jwt(). Force a
@@ -154,6 +161,8 @@ _TABLES = (
     # Media generation (ADR-060, migration 0018): FK→users, listed explicitly so generation jobs
     # do not leak between tests.
     "media_jobs",
+    # Push tokens (ADR-067, migration 0022).
+    "device_push_tokens",
     "byok_keys",
     # user_preferences must be truncated between tests so preferences-integration state does
     # not leak across tests (Figma-gap migration 0004 table; FK→users, but TRUNCATE CASCADE on

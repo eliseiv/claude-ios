@@ -38,6 +38,12 @@ from app.errors import ForbiddenError, MediaGenerationNotConfiguredError, Unauth
 from app.media_generation.fal_client import FalClient
 from app.media_generation.repository import MediaJobsRepository
 from app.media_generation.service import MediaGenerationService
+from app.media_generation.templates_repository import MediaTemplatesRepository
+from app.media_generation.templates_service import MediaTemplatesService
+from app.notifications.apns_client import ApnsClient
+from app.notifications.push_service import MediaPushService
+from app.notifications.repository import DevicePushTokensRepository
+from app.notifications.service import NotificationsService
 from app.observability.context import set_user_id
 from app.preferences.service import PreferencesService
 from app.profile.service import ProfileService
@@ -209,25 +215,45 @@ def get_fal_client() -> FalClient:
 
 
 def require_media_generation_configured() -> None:
-    """Gate the whole /v1/media/* surface on the instance having a fal key (ADR-060 §5).
+    """Gate generation routes on the instance having a fal key (ADR-060 §5).
 
-    Generation is opt-in per instance, and an instance without ``FAL_API_KEY`` cannot serve any part
-    of the feature usefully: offering the model catalog there would have the client render a picker
-    for models it cannot run. So the catalog and the job routes answer the same
-    ``503 media_generation_not_configured`` as a submit does, letting the client hide the section on
-    one call instead of discovering the outage after the user picked a model.
+    Generation is opt-in per instance. Without ``FAL_API_KEY``, models/jobs/uploads/submit answer
+    ``503 media_generation_not_configured``. Gallery templates (``/v1/media/templates/*``, ADR-066)
+    intentionally sit on a separate router without this gate — the tile catalog does not call fal.
     """
     if not get_fal_client().configured:
         raise MediaGenerationNotConfiguredError("media generation is not configured")
 
 
+def get_apns_client() -> ApnsClient:
+    return ApnsClient(get_settings())
+
+
+def get_notifications_service(session: DbSession) -> NotificationsService:
+    return NotificationsService(DevicePushTokensRepository(session))
+
+
+def get_media_push_service(session: DbSession) -> MediaPushService:
+    return MediaPushService(session, apns=get_apns_client())
+
+
 def get_media_generation_service(session: DbSession) -> MediaGenerationService:
     # ADR-060: the wallet debit and the media_jobs insert must land in ONE transaction, so the
     # wallet service is built on the same request-scoped session as the repository.
+    # ADR-067: push notifier shares that session so push_sent_at lands with mark_completed.
     return MediaGenerationService(
         repo=MediaJobsRepository(session),
         fal=get_fal_client(),
         wallet=WalletService(session, AuditService(session)),
+        settings=get_settings(),
+        push=get_media_push_service(session),
+    )
+
+
+def get_media_templates_service(session: DbSession) -> MediaTemplatesService:
+    # ADR-066: gallery templates catalog — independent of fal; same request-scoped session.
+    return MediaTemplatesService(
+        repo=MediaTemplatesRepository(session),
         settings=get_settings(),
     )
 

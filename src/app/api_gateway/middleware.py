@@ -40,12 +40,14 @@ class SizeLimitMiddleware(BaseHTTPMiddleware):
         raised limit is harmless for it.
       - POST /v1/media/uploads — base64 reference image for image-to-image / image-to-video
         (ADR-062). Exact path, so nothing else under /v1/media/* is widened.
+      - POST /v1/admin/media/templates — base64 gallery cover (ADR-066). Exact path.
     """
 
     _CHAT_RUN_PATHS = frozenset({"/v1/chat/run", "/v1/chat/v2/run"})
     _WORKSPACES_PREFIX = "/v1/workspaces/"
     _FILES_SUFFIX = "/files"
     _MEDIA_UPLOAD_PATH = "/v1/media/uploads"
+    _MEDIA_TEMPLATE_CREATE_PATH = "/v1/admin/media/templates"
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
@@ -54,12 +56,15 @@ class SizeLimitMiddleware(BaseHTTPMiddleware):
         self._chat_run_limit = settings.attachment_request_body_limit
         self._workspace_files_limit = settings.workspace_request_body_limit
         self._media_upload_limit = settings.media_upload_request_body_limit
+        self._media_template_cover_limit = settings.media_template_cover_request_body_limit
 
     def _limit_for(self, path: str) -> int:
         if path in self._CHAT_RUN_PATHS:
             return self._chat_run_limit
         if path == self._MEDIA_UPLOAD_PATH:
             return self._media_upload_limit
+        if path == self._MEDIA_TEMPLATE_CREATE_PATH:
+            return self._media_template_cover_limit
         if path.startswith(self._WORKSPACES_PREFIX) and path.endswith(self._FILES_SUFFIX):
             return self._workspace_files_limit
         return self._limit

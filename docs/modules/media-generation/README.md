@@ -3,7 +3,7 @@
 - Статус: **Реализован**; цены откалиброваны под прайс fal от 2026-08-05 с двукратным покрытием закупки ([ADR-061](../../adr/ADR-061-fal-price-calibration-and-priced-defaults.md), закрывает [Q-060-3](../../99-open-questions.md)). Периодическая сверка прайса — [Q-061-1](../../99-open-questions.md).
 - Ответственность: генерация изображений и видео на провайдере [fal.ai](https://fal.ai) по асинхронному контракту «поставить задачу → опросить результат» ([ADR-060](../../adr/ADR-060-media-generation-fal.md)). Списание кредитов при постановке, возврат при провале у провайдера.
 - Модели MVP: **Nano Banana Pro**, **Nano Banana 2** (изображения), **Kling Video**, **Kling Video V3**, **Veo 3.1** (видео).
-- Активируется **по инстансу**: `FAL_API_KEY` не задан → вся поверхность `/v1/media/*` отвечает `503 media_generation_not_configured`.
+- Активируется **по инстансу**: `FAL_API_KEY` не задан → постановка/опрос/uploads/`GET /v1/media/models` отвечают `503 media_generation_not_configured`. Каталог шаблонов (`/v1/media/templates/*`) от fal не зависит ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)).
 
 ## Документы
 - [00-overview.md](00-overview.md)
@@ -32,8 +32,10 @@
 - ✅ Списание и создание задачи — в одной транзакции: сабмит упал → списание откатилось.
 - ✅ Миграция `0018` (`media_jobs`), single head. Маппинг ошибок провайдера в `502`/`503`/`422`/`429` без утечки upstream-тела.
 - ✅ Отдельный блок `Media` в Swagger с примерами запросов на оба режима.
+- ✅ Каталог шаблонов галереи: `GET /v1/media/templates/images|videos`, публичный cover GET, admin POST/DELETE с base64-обложкой ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)); seed 5+5; не зависит от `FAL_API_KEY`.
 
 ## Changelog
+- 2026-08-10: каталог шаблонов галереи — `GET /v1/media/templates/images|videos`, cover GET, admin POST/DELETE — [ADR-066](../../adr/ADR-066-media-templates-catalog.md); миграция `0021_media_templates`, seed 5+5.
 - 2026-08-04: модуль создан и реализован — [ADR-060](../../adr/ADR-060-media-generation-fal.md). Backend: `src/app/media_generation/{catalog,fal_client,repository,service}.py`, `src/app/schemas/media.py`, `src/app/api_gateway/routers/media.py`, миграция `0018_media_jobs`, config `FAL_*`/`MEDIA_*`, ошибка `media_generation_not_configured`.
 - 2026-08-04: реестр сверен с опубликованными схемами fal; наборы значений перенесены на уровень режима (у Veo `aspectRatio: "auto"` только с картинкой), исправлены `0.5K` у Nano Banana 2, `4k` у Veo и `3`…`15` у Kling V3; добавлены `cfgScale`, `seed`, `generateAudio` у Kling V3, `negativePrompt` у Veo; цена масштабируется по `numImages`/`duration`.
 - 2026-08-05: цены откалиброваны под прайс fal, влияющие на цену параметры получили серверные дефолты — [ADR-061](../../adr/ADR-061-fal-price-calibration-and-priced-defaults.md); env `FAL_ASSET_RETENTION_SECONDS`.

@@ -1,7 +1,7 @@
 # Module: Notifications
 
-- Статус: Спроектирован частично (Спринт 3) — на старте только хранение настройки + регистрация device-токена. Фактическая отправка push (APNs) — [TD-011](../../100-known-tech-debt.md).
-- Ответственность: toggle уведомлений (хранится в `user_preferences.notifications_enabled`) + регистрация APNs device-токена (`device_push_tokens`).
+- Статус: **Реализован** (CRUD токена + APNs media-ready, [ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)). Остаток TD-011 — не-media триггеры.
+- Ответственность: toggle (`user_preferences.notifications_enabled`) + регистрация APNs device-токена + отправка push при `media_jobs` → `completed`.
 
 ## Документы
 - [00-overview.md](00-overview.md)
@@ -12,12 +12,14 @@
 - [07-implementation-phases.md](07-implementation-phases.md)
 - [09-testing.md](09-testing.md)
 
-> Data model — `device_push_tokens` (таблица 17); настройка — `user_preferences.notifications_enabled` (таблица 12, модуль preferences).
+> Data model — `device_push_tokens` (таблица 17, миграция `0022`); настройка — `user_preferences.notifications_enabled`.
 
 ## DoD
-- `POST /v1/notifications/device-token` (регистрация/обновление APNs-токена), `DELETE /v1/notifications/device-token` (отписка устройства).
-- Toggle уведомлений — через `PATCH /v1/preferences` (`notificationsEnabled`).
-- **Отправка push — out of scope этого прохода** ([TD-011](../../100-known-tech-debt.md)): только хранение настройки и токена.
+- `POST /v1/notifications/device-token`, `DELETE /v1/notifications/device-token`.
+- Toggle — `PATCH /v1/preferences` (`notificationsEnabled`).
+- APNs media-ready push: `jobId` + `kind` + `mediaUrl` + `aps.mutable-content=1` ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)).
+- Фоновый media reconciler — чтобы push ушёл без клиентского poll.
 
 ## Changelog
-- 2026-06-02: bootstrap модуля (architect, Figma-gap). Таблица `device_push_tokens`. Отправка push отложена в [TD-011](../../100-known-tech-debt.md). См. [figma-gap-analysis.md](../../figma-gap-analysis.md).
+- 2026-08-11: реализация Phase 1–3 для media ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)).
+- 2026-06-02: bootstrap модуля (architect, Figma-gap).

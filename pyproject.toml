@@ -20,7 +20,9 @@ dependencies = [
     # ADR-033: OpenAI SDK for the OpenAI provider (AsyncOpenAI, Chat Completions). Used only when
     # LLM_PROVIDER=openai; the default anthropic path does not import it at runtime.
     "openai>=1.51,<2",
-    "httpx>=0.27,<0.28",
+    "httpx[http2]>=0.27,<0.28",
+    # Required by httpx HTTP/2 (APNs, ADR-067). Explicit so the slim runtime image pulls it.
+    "h2>=4.1,<5",
     "pyjwt[crypto]>=2.9,<2.10",
     "cryptography>=43,<44",
     "prometheus-client>=0.21,<0.22",

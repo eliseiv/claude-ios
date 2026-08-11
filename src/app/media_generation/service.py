@@ -59,6 +59,7 @@ from app.media_generation.repository import (
     MediaJobsRepository,
 )
 from app.models import MediaJob
+from app.notifications.push_service import MediaPushService
 from app.observability.logging import log_event
 from app.wallet.service import WalletService
 
@@ -110,11 +111,13 @@ class MediaGenerationService:
         fal: FalClient,
         wallet: WalletService,
         settings: Settings,
+        push: MediaPushService | None = None,
     ) -> None:
         self._repo = repo
         self._fal = fal
         self._wallet = wallet
         self._settings = settings
+        self._push = push
 
     # ---- pricing ----
 
@@ -313,6 +316,12 @@ class MediaGenerationService:
             return MediaJobView(job=job, assets=_assets_from_result(job.result))
         return await self._advance(job)
 
+    async def advance(self, job: MediaJob) -> MediaJobView:
+        """Advance one already-loaded job (used by the background reconciler, ADR-067)."""
+        if job.status in TERMINAL_STATUSES:
+            return MediaJobView(job=job, assets=_assets_from_result(job.result))
+        return await self._advance(job)
+
     async def list_jobs(
         self,
         *,
@@ -401,6 +410,13 @@ class MediaGenerationService:
                 model=job.model_id,
                 assets=len(assets),
             )
+            if self._push is not None and assets:
+                await self._push.notify_media_ready(
+                    job_id=job.id,
+                    user_id=job.user_id,
+                    kind=job.kind,
+                    media_url=assets[0].url,
+                )
             return MediaJobView(job=job, assets=assets)
 
         if status.status in (FAL_FAILED, FAL_CANCELED):

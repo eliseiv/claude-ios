@@ -25,6 +25,7 @@ STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 
 TERMINAL_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED})
+NON_TERMINAL_STATUSES = frozenset({STATUS_QUEUED, STATUS_RUNNING})
 
 
 @dataclass(frozen=True)
@@ -148,3 +149,17 @@ class MediaJobsRepository:
         job.credits_refunded = refunded
         job.updated_at = _now()
         await self._session.flush()
+
+    async def list_non_terminal(self, *, limit: int) -> list[MediaJob]:
+        """Oldest non-terminal jobs first — for the background reconciler (ADR-067).
+
+        Not owner-scoped: the reconciler is a trusted in-process worker that advances every
+        stuck job so refunds and media-ready pushes still happen when the client stops polling.
+        """
+        stmt = (
+            select(MediaJob)
+            .where(MediaJob.status.in_(tuple(NON_TERMINAL_STATUSES)))
+            .order_by(MediaJob.created_at.asc(), MediaJob.id.asc())
+            .limit(limit)
+        )
+        return list((await self._session.scalars(stmt)).all())

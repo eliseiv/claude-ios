@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -26,7 +27,9 @@ from app.api_gateway.routers import (
     chats,
     health,
     media,
+    media_templates,
     models,
+    notifications,
     policy,
     preferences,
     presets,
@@ -41,6 +44,7 @@ from app.api_gateway.routers import (
 from app.config import get_settings
 from app.db import dispose_engine
 from app.errors import AppError
+from app.media_generation.reconciler import reconciler_loop
 from app.observability.context import get_request_id
 from app.observability.logging import configure_logging
 
@@ -57,9 +61,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "STOREKIT_TEST_MODE is ENABLED — accepting HS256 test transactions. "
             "MUST be false in production."
         )
-    yield
-    await dispose_engine()
-    await close_redis()
+    stop = asyncio.Event()
+    reconciler_task: asyncio.Task[None] | None = None
+    if settings.media_reconcile_interval_seconds > 0:
+        reconciler_task = asyncio.create_task(
+            reconciler_loop(stop, settings), name="media-reconciler"
+        )
+    try:
+        yield
+    finally:
+        stop.set()
+        if reconciler_task is not None:
+            try:
+                await asyncio.wait_for(reconciler_task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                reconciler_task.cancel()
+        await dispose_engine()
+        await close_redis()
 
 
 def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
@@ -120,7 +138,16 @@ _OPENAPI_TAGS = [
             "Генерация фото и видео через fal.ai. Сценарий: `GET /v1/media/models` → "
             "`POST /v1/media/images`|`/videos` (ответ `202`, задача в статусе `queued`, кредиты "
             "списаны) → опрос `GET /v1/media/jobs/{jobId}` до `completed`/`failed`. Неудачная "
-            "генерация возвращает кредиты."
+            "генерация возвращает кредиты. При `completed` (и фоновом reconciler) — push APNs "
+            "с `jobId`/`kind`/`mediaUrl`, если включены уведомления и зарегистрирован device token."
+        ),
+    },
+    {
+        "name": "Notifications",
+        "description": (
+            "Регистрация APNs device-токена (`POST`/`DELETE /v1/notifications/device-token`). "
+            "Toggle доставки — `notificationsEnabled` в `/v1/preferences`. "
+            "Deep link media-ready push: `jobId` + `kind` (чата у media нет)."
         ),
     },
     {
@@ -231,6 +258,7 @@ def create_app() -> FastAPI:
         models,
         presets,
         media,
+        media_templates,
         policy,
         wallet,
         subscription,
@@ -242,6 +270,7 @@ def create_app() -> FastAPI:
         workspaces,
         profile,
         preferences,
+        notifications,
         billing_adapty,
         billing_cloudpayments,
     ):

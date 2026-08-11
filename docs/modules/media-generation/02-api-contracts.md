@@ -5,6 +5,8 @@
 **Сценарий целиком:**
 
 ```
+GET  /v1/media/templates/images|videos → плитки шаблонов (обложка + промпт + модель + params)
+GET  /v1/media/templates/{id}/cover    → байты обложки (без JWT)
 GET  /v1/media/models                  → модель, режимы и допустимые значения параметров
 POST /v1/media/uploads                 → 201 { url }   (только если генерируем по своей картинке)
 POST /v1/media/images | /videos        → 202 { jobId, status: "queued", creditsCharged }
@@ -15,6 +17,48 @@ POST /v1/media/images { sourceJobId }  → правка результата п�
 GET  /v1/media/jobs?cursor=…           → лента, новые сверху
 DELETE /v1/media/jobs/{jobId}          → убрать завершённую задачу из ленты
 ```
+
+---
+
+## `GET /v1/media/templates/images` / `GET /v1/media/templates/videos`
+
+Каталог шаблонов галереи ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)). JWT + per-user rate-limit. **Не зависит от `FAL_API_KEY`** — отвечает даже когда генерация на инстансе выключена. Кредитов не тратит.
+
+**Ответ `200`:**
+
+```json
+{
+  "templates": [
+    {
+      "id": "profile_picture",
+      "title": "Profile Picture",
+      "coverUrl": "https://velunixa.shop/v1/media/templates/profile_picture/cover",
+      "prompt": "Studio portrait of the person in the photo, soft light, clean background",
+      "model": "nano-banana-2",
+      "requiredInputImages": 1,
+      "parameters": { "aspectRatio": "1:1", "resolution": "1K", "numImages": 1 }
+    }
+  ]
+}
+```
+
+| Поле | Смысл |
+|---|---|
+| `id` | стабильный slug; также путь обложки |
+| `title` | подпись плитки |
+| `coverUrl` | абсолютный URL обложки (`SERVICE_DOMAIN`); при пустом домене — относительный `/v1/media/templates/{id}/cover` |
+| `prompt` / `model` / `parameters` | копируются в `POST /v1/media/images` или `/videos` |
+| `requiredInputImages` | сколько фото попросить у юзера (`0` = text-only; image ≤ 14; video ≤ 1) |
+
+Порядок — `sort_order` в БД (порядок seed / create).
+
+## `GET /v1/media/templates/{id}/cover`
+
+Байты обложки. **Без JWT.** `Content-Type` из записи, `Cache-Control: public, max-age=86400`. Чужой/несуществующий `id` → `404`.
+
+## Admin: `POST /v1/admin/media/templates` / `DELETE /v1/admin/media/templates/{id}`
+
+Авторизация `X-Admin-Key` / `X-Admin-Token` ([ADR-009](../../adr/ADR-009-admin-token-auth.md)). Create принимает base64-обложку (`cover.mediaType` ∈ jpeg/png/webp); конфликт `id` → `409`. Delete → `200 { "deleted": true }` или `404`.
 
 ---
 
@@ -200,7 +244,9 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 
 ## `GET /v1/media/jobs/{jobId}`
 
-Актуальное состояние задачи. **Единственный эндпоинт, который опрашивает провайдера**, и только пока задача не терминальна; после `completed`/`failed` ответ идёт из БД.
+Актуальное состояние задачи. Опрашивает провайдера, пока задача не терминальна; после `completed`/`failed` ответ идёт из БД. Параллельно фоновый reconciler ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)) продвигает non-terminal jobs без клиентского poll — нужен для media-ready push, когда iOS заморозил приложение.
+
+При переходе в `completed` (poll или reconciler) бэкенд один раз шлёт APNs (если `notificationsEnabled` + device token + `APNS_*`): custom keys `jobId`, `kind`, `mediaUrl` (= `assets[0].url`), `aps.mutable-content=1`. Deep link — по `jobId` (чата у media нет).
 
 **Ответ `200`:**
 
@@ -299,7 +345,7 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 | `payload_too_large` | 413 | **только на `POST /v1/media/uploads`:** файл или тело запроса больше лимита |
 | `rate_limited` | 429 | превышен per-user лимит или лимит провайдера |
 | `upstream_error` | 502 | провайдер недоступен (таймаут, connect, 5xx, битый ответ). **Кредиты не списаны** — списание откатывается вместе с задачей |
-| `media_generation_not_configured` | 503 | генерация не настроена на инстансе (`FAL_API_KEY` не задан) либо провайдер отклонил ключ. Проблема оператора, не клиента. На инстансе без ключа так отвечает **любой** маршрут префикса, включая `GET /v1/media/models` — раздел генерации скрывается по одному вызову |
+| `media_generation_not_configured` | 503 | генерация не настроена на инстансе (`FAL_API_KEY` не задан) либо провайдер отклонил ключ. Проблема оператора, не клиента. Так отвечают маршруты постановки/опроса/uploads/`GET /v1/media/models`. **Исключение:** `GET /v1/media/templates/*` и admin CRUD шаблонов не зависят от fal и при пустом ключе остаются доступны ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)) |
 
 **Инварианты биллинга, на которые можно опираться:**
 

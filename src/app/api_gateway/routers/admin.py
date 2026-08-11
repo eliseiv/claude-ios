@@ -15,6 +15,7 @@ from fastapi import APIRouter, Body, Depends, Path, Request
 
 from app.admin.service import AdminService
 from app.api_gateway.auth import require_admin
+from app.api_gateway.routers import admin_media_templates
 from app.api_gateway.rate_limit import enforce_admin_limits
 from app.api_gateway.routers import crm_admin
 from app.config import get_settings
@@ -40,6 +41,7 @@ router = APIRouter(
     dependencies=[Depends(require_admin)],
 )
 router.include_router(crm_admin.router)
+router.include_router(admin_media_templates.router)
 
 
 def _enforce_admin_body_size(request: Request) -> None:

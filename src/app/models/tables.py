@@ -445,6 +445,50 @@ class CloudPaymentsWebhookEvent(Base):
     __table_args__ = (Index("ix_cloudpayments_webhook_events_user_id", "user_id"),)
 
 
+class MediaTemplate(Base):
+    """Gallery generation template with BYTEA cover (ADR-066, migration 0021).
+
+    List endpoints project metadata + absolute ``coverUrl``; the cover bytes are served by
+    ``GET /v1/media/templates/{id}/cover``. Operators create/delete rows via admin API.
+    """
+
+    __tablename__ = "media_templates"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    required_input_images: Mapped[int] = mapped_column(
+        nullable=False, server_default=sa_text("0")
+    )
+    parameters: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=sa_text("'{}'::jsonb")
+    )
+    cover_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    cover_media_type: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(nullable=False, server_default=sa_text("0"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('image', 'video')", name="ck_media_templates_kind"),
+        CheckConstraint(
+            "required_input_images >= 0 AND required_input_images <= 14",
+            name="ck_media_templates_required_input_images",
+        ),
+        CheckConstraint(
+            "cover_media_type IN ('image/jpeg', 'image/png', 'image/webp')",
+            name="ck_media_templates_cover_media_type",
+        ),
+        Index("ix_media_templates_kind_sort", "kind", "sort_order"),
+    )
+
+
 class MediaJob(Base):
     """One image/video generation run submitted to the fal.ai queue (ADR-060 §4, migration 0018).
 
@@ -492,6 +536,10 @@ class MediaJob(Base):
     # The reference-image URLs actually sent upstream. Persisted rather than derived from the
     # parent: the parent may be deleted, and the feed still has to show what this was made from.
     input_image_urls: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # ADR-067: stamped once when a media-ready push is claimed (poll or reconciler).
+    push_sent_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )
@@ -506,6 +554,36 @@ class MediaJob(Base):
         ),
         # Owner-scoped listing, newest first (GET /v1/media/jobs).
         Index("ix_media_jobs_user_created", "user_id", "created_at"),
+        # Background reconciler (ADR-067 / Q-060-2): non-terminal jobs only.
+        Index(
+            "ix_media_jobs_non_terminal",
+            "created_at",
+            postgresql_where=sa_text("status IN ('queued', 'running')"),
+        ),
+    )
+
+
+class DevicePushToken(Base):
+    """APNs device token registered for a (user, device) pair (ADR-067, notifications)."""
+
+    __tablename__ = "device_push_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    push_token: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'ios'"))
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_id", name="ux_push_tokens_user_device"),
+        Index("ix_push_tokens_user", "user_id"),
     )
 
 

@@ -1,18 +1,24 @@
 # Notifications — Architecture
 
 ## Размещение
-Пакет `src/app/notifications/`: репозиторий над `device_push_tokens` + use-cases (register/delete token) + роутер `/v1/notifications/*`. Настройка `notifications_enabled` — в preferences.
+Пакет `src/app/notifications/`: repository (`device_push_tokens`) + token CRUD + `ApnsClient` + `MediaPushService`. Роутер `/v1/notifications/*`. Toggle — preferences.
 
 ## Регистрация токена
 - `deviceId` резолвится: тело → JWT-claim → `X-Device-Id`; отсутствие → `422`.
 - Upsert: `INSERT ... ON CONFLICT (user_id, device_id) DO UPDATE SET push_token, updated_at`.
 
-## Будущая отправка (TD-011, не в этом проходе)
-- APNs-клиент (token-based JWT, `APNS_KEY_ID`/`APNS_TEAM_ID`/`APNS_AUTH_KEY`/`APNS_TOPIC`).
-- Перед отправкой — проверка `user_preferences.notifications_enabled`; выключено → skip.
-- Триггеры (например завершение длинной генерации) — определяются при реализации TD-011.
+## Отправка (ADR-067)
+- APNs token-based JWT (`APNS_KEY_ID` / `APNS_TEAM_ID` / `APNS_AUTH_KEY`|`_PATH` / `APNS_TOPIC` / `APNS_ENVIRONMENT`).
+- Перед отправкой — `notifications_enabled`; выключено → skip.
+- Триггер: `MediaGenerationService._advance` после `mark_completed` (poll **и** reconciler).
+- Идемпотентность: `UPDATE media_jobs SET push_sent_at WHERE push_sent_at IS NULL`.
+- `410 Unregistered` → delete token row(s) with that `push_token`.
+- Ошибка APNs не откатывает completed.
+
+## Media reconciler
+- `src/app/media_generation/reconciler.py`, старт из lifespan при `MEDIA_RECONCILE_INTERVAL_SECONDS > 0`.
+- Выборка non-terminal jobs → тот же `_advance`.
 
 ## Инварианты
 - Токен принадлежит `sub`; один на `(user, device)`.
-- На старте нет фоновых задач/исходящих push — только синхронные CRUD токена.
-- `push_token` обрабатывается как чувствительный идентификатор (минимизация в логах).
+- `push_token` минимизируется в логах.

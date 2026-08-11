@@ -352,7 +352,7 @@ CREATE INDEX ix_attachments_session ON attachments (session_id) WHERE session_id
 ```
 > Хранилище байтов вложений мультимодального ввода **и** файлов-контекста workspace (общее, [ADR-014](adr/ADR-014-multimodal-attachments.md)) — **только в двухшаговой модели, отложенной на MVP** ([TD-015](100-known-tech-debt.md); MVP — inline base64 [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). Лимиты MVP (мультимодальный ввод inline base64): image ≤ 5 MB, document ≤ 8 MB, total ≤ 10 MB, ≤ 10/сообщение — заданы env `ATTACHMENT_*` ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md), точные ключи — [07-deployment.md](07-deployment.md)). Лимиты в [modules/attachments/05-security.md](modules/attachments/05-security.md) (напр. document ≤ 10 MB) относятся к **отложенной двухшаговой upload-модели** ([TD-015](100-known-tech-debt.md)), а не к MVP. media_type allowlist — [Q-020-1](99-open-questions.md), [modules/attachments/05-security.md](modules/attachments/05-security.md), [Q-014-1](99-open-questions.md)/[Q-014-2](99-open-questions.md). Контент в БД (двухшаговая модель) → [TD-009](100-known-tech-debt.md); orphan-retention → [TD-010](100-known-tech-debt.md).
 
-### 17. device_push_tokens (модуль `notifications`)
+### 17. device_push_tokens (модуль `notifications`, миграция `0022`, [ADR-067](adr/ADR-067-media-ready-push-and-reconciler.md))
 ```sql
 CREATE TABLE device_push_tokens (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -360,12 +360,12 @@ CREATE TABLE device_push_tokens (
     device_id    TEXT NOT NULL,            -- из JWT claim / X-Device-Id
     push_token   TEXT NOT NULL,            -- APNs device token
     platform     TEXT NOT NULL DEFAULT 'ios',
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (user_id, device_id)            -- ux_push_tokens_user_device
 );
-CREATE UNIQUE INDEX ux_push_tokens_user_device ON device_push_tokens (user_id, device_id);
 CREATE INDEX ix_push_tokens_user ON device_push_tokens (user_id);
 ```
-> Регистрация APNs-токена устройства. Один токен на `(user_id, device_id)` (upsert при перерегистрации). **Само отправление push** (APNs-клиент, триггеры) — вне scope этого прохода, вынесено в [TD-011](100-known-tech-debt.md): на старте только хранение настройки (`user_preferences.notifications_enabled`) и регистрация токена. См. [modules/notifications/00-overview.md](modules/notifications/00-overview.md).
+> Регистрация APNs-токена устройства. Один токен на `(user_id, device_id)` (upsert). Отправка media-ready push — [ADR-067](adr/ADR-067-media-ready-push-and-reconciler.md); идемпотентность на `media_jobs.push_sent_at`. Toggle — `user_preferences.notifications_enabled`.
 
 ---
 
