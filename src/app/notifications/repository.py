@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import datetime
 import uuid
+from typing import Any, cast
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import CursorResult, delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DevicePushToken
@@ -49,13 +50,16 @@ class DevicePushTokensRepository:
         )
 
     async def delete(self, *, user_id: uuid.UUID, device_id: str) -> bool:
-        result = await self._session.execute(
-            delete(DevicePushToken).where(
-                DevicePushToken.user_id == user_id,
-                DevicePushToken.device_id == device_id,
-            )
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                delete(DevicePushToken).where(
+                    DevicePushToken.user_id == user_id,
+                    DevicePushToken.device_id == device_id,
+                )
+            ),
         )
-        return bool(result.rowcount)
+        return (result.rowcount or 0) > 0
 
     async def delete_by_push_token(self, *, push_token: str) -> None:
         """Drop every row with this APNs token (410 Unregistered cleanup)."""
