@@ -303,9 +303,11 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         # ADR-033: inject the active provider's LLMClient (anthropic default | openai).
         anthropic_client=get_llm_client(),
         site_tools=SiteToolHandlers(session, website, audit),
-        # ADR-026: global server-side tools (time.now) with the default SystemClock. Project-
-        # independent — no WebsiteService/session-context, wired alongside site_tools.
-        global_tools=GlobalToolHandlers(clock=SystemClock()),
+        # ADR-026 / ADR-068: global server-side tools (time.now, media.generate_*) with SystemClock
+        # and the request-scoped MediaGenerationService (same wallet/session as /v1/media/*).
+        global_tools=GlobalToolHandlers(
+            clock=SystemClock(), media=get_media_generation_service(session)
+        ),
         preferences=PreferencesService(session),
         # ADR-036: workspace context provider (instructions + knowledge files) for workspace chats.
         workspaces=WorkspacesService(WorkspacesRepository(session)),
@@ -329,7 +331,9 @@ def get_v2_orchestrator(session: DbSession) -> ChatOrchestrator:
         audit=audit,
         anthropic_client=get_generation_llm_client(),
         site_tools=SiteToolHandlers(session, website, audit),
-        global_tools=GlobalToolHandlers(clock=SystemClock()),
+        global_tools=GlobalToolHandlers(
+            clock=SystemClock(), media=get_media_generation_service(session)
+        ),
         preferences=PreferencesService(session),
         workspaces=WorkspacesService(WorkspacesRepository(session)),
     )

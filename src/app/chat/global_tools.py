@@ -1,19 +1,16 @@
-"""Global (project-independent) server-side tool handlers (ADR-026).
+"""Global (project-independent) server-side tool handlers (ADR-026 / ADR-064 / ADR-068).
 
 Unlike SiteToolHandlers (project-scoped site.*, ADR-011), these handlers are NOT tied to a
 WebsiteService/project — they execute in the chat tool-loop without an external_project_id and
-are offered to Claude in every turn (including «чистый чат» with no project, ADR-022).
+are offered to Claude without requiring a project (including «чистый чат» with no project,
+ADR-022). Mode-gating (axis C) is orthogonal: ``quiz.generate`` is offered only in
+``study_learn``; ``time.now`` and ``media.generate_*`` are offered in every mode.
 
-Two tools today. ``quiz.generate`` (ADR-064) validates and echoes a quiz pool; it is global in the
-same sense (no project) but, unlike ``time.now``, it is offered to the model ONLY in the
-``study_learn`` generation mode (axis C) — «global» means «needs no project», not «offered always».
-
-``time.now`` (ADR-026 §6) returns the current date/time via an
-injectable ``Clock`` provider (determinism for qa, ADR-026 §8 / 06-testing-strategy) — never a
-direct ``datetime.now()``. The result always carries a UTC set (``utc``/``unix``/``weekday``);
-a valid IANA ``tz`` additionally yields ``local``/``timezone``. An invalid/unknown/over-long tz
-degrades to a ``ToolExecution.error("invalid_timezone", ...)`` (the turn survives, ADR-026 §6) —
-never a raised exception.
+``time.now`` (ADR-026 §6) returns the current date/time via an injectable ``Clock``.
+``quiz.generate`` (ADR-064) validates and echoes a quiz pool.
+``media.generate_image`` / ``media.generate_video`` (ADR-068) call ``MediaGenerationService.submit``
+— submit-only, never wait for fal completion. Failures become ``ToolExecution.error`` so the
+chat turn survives (same soft contract as ``invalid_timezone`` / ``invalid_quiz``).
 
 The same ``ToolExecution`` contract as SiteToolHandlers is reused (single tool-result contract for
 the orchestrator). Only the frozen dataclass is imported from website.tools — no website
@@ -23,6 +20,7 @@ infrastructure is instantiated here (ADR-026 §5).
 from __future__ import annotations
 
 import datetime
+import uuid
 from typing import Any, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -32,11 +30,21 @@ from app.chat.tools import (
     QUIZ_CONSTRAINTS_HINT,
     QUIZ_INVALID_ERROR_CODE,
     TIME_NOW_TZ_MAX_LENGTH,
+    TOOL_MEDIA_GENERATE_IMAGE,
+    TOOL_MEDIA_GENERATE_VIDEO,
     TOOL_QUIZ_GENERATE,
     TOOL_TIME_NOW,
     Quiz,
     content_free_args_error,
 )
+from app.errors import (
+    InsufficientCreditsError,
+    MediaGenerationNotConfiguredError,
+    NotFoundError,
+    UpstreamError,
+    ValidationFailedError,
+)
+from app.media_generation.service import MediaGenerationService
 from app.website.tools import ToolExecution
 
 # English weekday names by UTC date (Monday..Sunday), ADR-026 §6.
@@ -49,6 +57,11 @@ _WEEKDAYS = (
     "Saturday",
     "Sunday",
 )
+
+MEDIA_INVALID_ERROR_CODE = "invalid_media_request"
+MEDIA_NOT_CONFIGURED_ERROR_CODE = "media_not_configured"
+MEDIA_INSUFFICIENT_CREDITS_ERROR_CODE = "insufficient_credits"
+MEDIA_UPSTREAM_ERROR_CODE = "media_upstream_error"
 
 
 @runtime_checkable
@@ -70,21 +83,37 @@ class SystemClock:
 
 
 class GlobalToolHandlers:
-    """Dispatch + handlers for global server-side tools (ADR-026).
+    """Dispatch + handlers for global server-side tools (ADR-026 / ADR-068).
 
     Project-independent: no WebsiteService, no external_project_id, no session-context args. Time is
-    taken from the injected ``Clock`` (default ``SystemClock``).
+    taken from the injected ``Clock`` (default ``SystemClock``). Media tools use the optional
+    ``MediaGenerationService`` (None → ``media_not_configured`` tool-result error).
     """
 
-    def __init__(self, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock | None = None,
+        media: MediaGenerationService | None = None,
+    ) -> None:
         self._clock = clock if clock is not None else SystemClock()
+        self._media = media
 
-    async def execute(self, *, tool_name: str, args: dict[str, Any]) -> ToolExecution:
+    async def execute(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        user_id: uuid.UUID | None = None,
+    ) -> ToolExecution:
         """Execute a global server-side tool. Returns a ToolExecution (result or error envelope)."""
         if tool_name == TOOL_TIME_NOW:
             return self._time_now(args)
         if tool_name == TOOL_QUIZ_GENERATE:
             return self._quiz_generate(args)
+        if tool_name == TOOL_MEDIA_GENERATE_IMAGE:
+            return await self._media_generate(kind="image", args=args, user_id=user_id)
+        if tool_name == TOOL_MEDIA_GENERATE_VIDEO:
+            return await self._media_generate(kind="video", args=args, user_id=user_id)
         # Unknown global tool name — should never happen (validated upstream against the registry).
         return ToolExecution.error("unknown_tool", f"unknown global server-side tool: {tool_name}")
 
@@ -119,6 +148,108 @@ class GlobalToolHandlers:
                 f"{content_free_args_error(exc)}; {QUIZ_CONSTRAINTS_HINT}",
             )
         return ToolExecution.ok(validated.model_dump())
+
+    async def _media_generate(
+        self,
+        *,
+        kind: str,
+        args: dict[str, Any],
+        user_id: uuid.UUID | None,
+    ) -> ToolExecution:
+        """Submit a media job (ADR-068). Never waits for fal completion.
+
+        Maps service/domain errors to soft tool-result errors so the chat turn continues. Chat-turn
+        billing is separate: media debit uses ``media-gen:{jobId}`` inside MediaGenerationService.
+        """
+        if self._media is None:
+            return ToolExecution.error(
+                MEDIA_NOT_CONFIGURED_ERROR_CODE,
+                "media generation is not configured on this instance",
+            )
+        if user_id is None:
+            return ToolExecution.error(
+                MEDIA_NOT_CONFIGURED_ERROR_CODE,
+                "media generation requires an authenticated user",
+            )
+
+        model_id = str(args.get("model") or "")
+        prompt = str(args.get("prompt") or "")
+        source_raw = args.get("sourceJobId")
+        source_job_id: uuid.UUID | None = None
+        if source_raw is not None:
+            try:
+                source_job_id = uuid.UUID(str(source_raw))
+            except ValueError:
+                return ToolExecution.error(
+                    MEDIA_INVALID_ERROR_CODE, "sourceJobId must be a UUID"
+                )
+
+        if kind == "image":
+            image_urls = list(args.get("imageUrls") or [])
+            params = {
+                "aspectRatio": args.get("aspectRatio"),
+                "resolution": args.get("resolution"),
+                "numImages": args.get("numImages"),
+                "outputFormat": args.get("outputFormat"),
+                "seed": args.get("seed"),
+            }
+        else:
+            image_url = args.get("imageUrl")
+            image_urls = [str(image_url)] if image_url else []
+            params = {
+                "negativePrompt": args.get("negativePrompt"),
+                "aspectRatio": args.get("aspectRatio"),
+                "resolution": args.get("resolution"),
+                "duration": args.get("duration"),
+                "generateAudio": args.get("generateAudio"),
+                "cfgScale": args.get("cfgScale"),
+                "seed": args.get("seed"),
+            }
+
+        try:
+            view = await self._media.submit(
+                user_id=user_id,
+                kind=kind,
+                model_id=model_id,
+                prompt=prompt,
+                image_urls=image_urls,
+                params=params,
+                source_job_id=source_job_id,
+            )
+        except MediaGenerationNotConfiguredError:
+            return ToolExecution.error(
+                MEDIA_NOT_CONFIGURED_ERROR_CODE,
+                "media generation is not configured on this instance",
+            )
+        except InsufficientCreditsError:
+            return ToolExecution.error(
+                MEDIA_INSUFFICIENT_CREDITS_ERROR_CODE,
+                "insufficient credits for media generation",
+            )
+        except NotFoundError:
+            return ToolExecution.error(
+                MEDIA_INVALID_ERROR_CODE, "sourceJobId not found"
+            )
+        except ValidationFailedError as exc:
+            # Catalog / enum / mutual-exclusion failures — content from our ValidationFailedError
+            # messages (no user prompt echo beyond what the model already sent as args).
+            detail = str(exc)[:400] or "invalid media request"
+            return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, detail)
+        except UpstreamError:
+            return ToolExecution.error(
+                MEDIA_UPSTREAM_ERROR_CODE, "media provider unavailable; try again later"
+            )
+
+        job = view.job
+        return ToolExecution.ok(
+            {
+                "jobId": str(job.id),
+                "kind": job.kind,
+                "status": job.status,
+                "model": job.model_id,
+                "creditsCharged": job.credits_charged,
+            }
+        )
 
     def _time_now(self, args: dict[str, Any]) -> ToolExecution:
         now_utc = self._clock.now()

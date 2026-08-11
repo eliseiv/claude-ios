@@ -179,6 +179,8 @@ def test_other_tools_unchanged_by_adr027() -> None:
         "site.delete",
         "time.now",
         "quiz.generate",
+        "media.generate_image",
+        "media.generate_video",
     }
 
 

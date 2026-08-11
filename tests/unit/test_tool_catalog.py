@@ -44,6 +44,8 @@ _EXPECTED_NAMES = {
     "site.delete",
     "time.now",
     "quiz.generate",
+    "media.generate_image",
+    "media.generate_video",
 }
 
 

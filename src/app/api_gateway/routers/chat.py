@@ -27,6 +27,7 @@ from app.schemas.chat import (
     ChatV2RunRequest,
     GenerationMode,
     GenerationModeCapability,
+    MediaJobRefSchema,
     QuizSchema,
     ServerToolExecutionSchema,
     ToolCallSchema,
@@ -453,6 +454,12 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
     # ADR-064 §7: the quiz pool of the TURN (turn-scoped — the orchestrator already resolved it for
     # this leg, whether it was produced in this call or recovered from the turn's steps).
     quiz = QuizSchema.model_validate(out.quiz) if out.quiz is not None else None
+    # ADR-068: media jobs of the TURN (submit-only refs; client polls /v1/media/jobs/{id}).
+    media_jobs = (
+        [MediaJobRefSchema.model_validate(item) for item in out.media_jobs]
+        if out.media_jobs is not None
+        else None
+    )
     # ADR-064 §7, HARD half of the anti-spoiler guarantee — the single point where it is applied.
     # Keyed on the PRESENCE OF A QUIZ, not on the endpoint, the status or the generation mode:
     # - not on the mode, because a study_learn turn where the model produced NO quiz must still
@@ -475,6 +482,7 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
         blockReason=out.block_reason,
         usage=out.usage,
         quiz=quiz,
+        mediaJobs=media_jobs,
         serverTools=server_tools,
     )
 

@@ -364,6 +364,20 @@ class ChatCapabilitiesResponse(StrictModel):
     )
 
 
+class MediaJobRefSchema(StrictModel):
+    """Ссылка на media-задачу, созданную chat-tool `media.generate_*` (ADR-068)."""
+
+    jobId: uuid.UUID = Field(
+        description="Идентификатор задачи для `GET /v1/media/jobs/{jobId}`."
+    )
+    kind: Literal["image", "video"] = Field(description="Тип генерации.")
+    status: Literal["queued", "running", "completed", "failed"] = Field(
+        description="Статус на момент сабмита (обычно `queued`)."
+    )
+    model: str = Field(description="Идентификатор модели из каталога media.")
+    creditsCharged: int = Field(description="Сколько кредитов списано за эту media-задачу.")
+
+
 class ServerToolExecutionSchema(StrictModel):
     """Одно server-side выполнение, выполненное backend за этот вызов /chat/run."""
 
@@ -528,10 +542,21 @@ class ChatResponse(StrictModel):
         description="Потребление токенов модели (при `assistant_message`/`tool_call`).",
     )
     quiz: QuizSchema | None = Field(default=None, description=_QUIZ_DOC)
+    mediaJobs: list[MediaJobRefSchema] | None = Field(
+        default=None,
+        description=(
+            "Задачи генерации media, поставленные server-side tools `media.generate_image` / "
+            "`media.generate_video` в этом **ходе** (`messageStepId`). `null` — задач не было. "
+            "Непустой список — клиент опрашивает `GET /v1/media/jobs/{jobId}` (и/или ждёт push). "
+            "Биллинг media отдельный (`media-gen:{jobId}`); ход чата списывается как обычно. "
+            "Старые `/v1/media/*` без изменений."
+        ),
+    )
     serverTools: list[ServerToolExecutionSchema] = Field(
         default_factory=list,
         description=(
-            "Server-side инструменты (`site.*`, `time.now`, `quiz.generate`), выполненные backend "
+            "Server-side инструменты (`site.*`, `time.now`, `quiz.generate`, "
+            "`media.generate_image`/`media.generate_video`), выполненные backend "
             "за ЭТОТ вызов "
             "`/chat/run` (или один `/chat/tool-result`-continuation), в порядке выполнения. "
             "Присутствует всегда: пустой `[]` — server-side не выполнялись (в т.ч. "

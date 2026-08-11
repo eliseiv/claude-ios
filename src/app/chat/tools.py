@@ -47,6 +47,13 @@ TOOL_TIME_NOW = "time.now"
 # must not be carried over to its neighbour.
 TOOL_QUIZ_GENERATE = "quiz.generate"
 
+# Global server-side media tools (ADR-068): submit an image/video job via MediaGenerationService
+# (same path as POST /v1/media/images|videos). Project-independent and NOT mode-gated — offered in
+# every generation mode, including «чистый чат». Tool = submit only (returns jobId/queued); the
+# model MUST NOT wait for fal completion inside the tool-loop (minutes; ADR-060).
+TOOL_MEDIA_GENERATE_IMAGE = "media.generate_image"
+TOOL_MEDIA_GENERATE_VIDEO = "media.generate_video"
+
 # Project-scoped server-side tools (site.*, ADR-011/022): executed by the backend in the
 # tool-loop; offered to Claude ONLY when the session has a project (project_id IS NOT NULL).
 SERVER_SIDE_TOOLS = frozenset(
@@ -63,7 +70,14 @@ SERVER_SIDE_TOOLS = frozenset(
 # the two registries are mutually exclusive (invariant GLOBAL_SERVER_SIDE_TOOLS ∩ SERVER_SIDE_TOOLS
 # = ∅). Combined server-side = SERVER_SIDE_TOOLS ∪ GLOBAL_SERVER_SIDE_TOOLS; everything else in
 # ALL_TOOL_NAMES is client-side.
-GLOBAL_SERVER_SIDE_TOOLS = frozenset({TOOL_TIME_NOW, TOOL_QUIZ_GENERATE})
+GLOBAL_SERVER_SIDE_TOOLS = frozenset(
+    {
+        TOOL_TIME_NOW,
+        TOOL_QUIZ_GENERATE,
+        TOOL_MEDIA_GENERATE_IMAGE,
+        TOOL_MEDIA_GENERATE_VIDEO,
+    }
+)
 
 # Axis C — generation-mode gate (ADR-064 §3). A tool listed here is offered to the model IF AND
 # ONLY IF the EFFECTIVE generation mode of the turn is in its set. A tool ABSENT from this registry
@@ -85,7 +99,11 @@ TOOL_GENERATION_MODES: dict[str, frozenset[str]] = {
 # integration — strict tool-args mode is off for both — so a violation is an EXPECTED scenario, not
 # an anomaly. Other tools' args come from fixed schemas, where a malformed args IS an anomaly.
 # Do not transfer the behaviour of either branch to the other.
-ARGS_DEGRADE_TOOLS = frozenset({TOOL_QUIZ_GENERATE})
+# Media args can be wrong enums / mutually exclusive refs from the model; degrade like quiz so the
+# turn survives and the model can ask clarifying questions instead of 422-ing the whole chat turn.
+ARGS_DEGRADE_TOOLS = frozenset(
+    {TOOL_QUIZ_GENERATE, TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO}
+)
 
 ALL_TOOL_NAMES = frozenset(
     {
@@ -129,6 +147,9 @@ _DOMAIN_TO_ANTHROPIC: dict[str, str] = {
     TOOL_TIME_NOW: "time_now",
     # Global server-side, mode-gated quiz.generate (ADR-064 §2): same dot→underscore mapping.
     TOOL_QUIZ_GENERATE: "quiz_generate",
+    # Global server-side media tools (ADR-068): same dot→underscore mapping.
+    TOOL_MEDIA_GENERATE_IMAGE: "media_generate_image",
+    TOOL_MEDIA_GENERATE_VIDEO: "media_generate_video",
 }
 _ANTHROPIC_TO_DOMAIN: dict[str, str] = {a: d for d, a in _DOMAIN_TO_ANTHROPIC.items()}
 
@@ -379,6 +400,78 @@ class Quiz(_StrictModel):
     )
 
 
+# --- global server-side media.generate_* (ADR-068) ---
+# Bounds mirror POST /v1/media/images|videos (schemas/media.py). Authoritative catalog checks
+# (allowed aspectRatio/resolution/duration per model) happen in MediaGenerationService.submit;
+# these schemas only enforce structural shape so the model gets a useful JSON Schema hint.
+_MEDIA_PROMPT_MAX = 5000
+_MEDIA_NEGATIVE_PROMPT_MAX = 2000
+_MEDIA_URL_MAX = 2048
+_MEDIA_MAX_IMAGE_URLS = 14
+_MEDIA_SEED_MAX = 2**31 - 1
+
+
+def _validate_media_https_urls(values: list[str]) -> list[str]:
+    for value in values:
+        if not value.startswith("https://"):
+            raise ValueError("image URLs must start with https://")
+        if len(value) > _MEDIA_URL_MAX:
+            raise ValueError(f"image URL must be at most {_MEDIA_URL_MAX} characters")
+    return values
+
+
+class MediaGenerateImageArgs(_StrictModel):
+    """Args for media.generate_image — same intent as POST /v1/media/images."""
+
+    model: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, max_length=_MEDIA_PROMPT_MAX)
+    imageUrls: list[str] | None = Field(default=None, max_length=_MEDIA_MAX_IMAGE_URLS)
+    sourceJobId: str | None = None
+    aspectRatio: str | None = None
+    resolution: str | None = None
+    numImages: int | None = Field(default=None, ge=1, le=4)
+    outputFormat: Literal["jpeg", "png", "webp"] | None = None
+    seed: int | None = Field(default=None, ge=0, le=_MEDIA_SEED_MAX)
+
+    @field_validator("imageUrls")
+    @classmethod
+    def _check_urls(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else _validate_media_https_urls(value)
+
+    @model_validator(mode="after")
+    def _exclusive_refs(self) -> MediaGenerateImageArgs:
+        if self.sourceJobId is not None and self.imageUrls:
+            raise ValueError("sourceJobId and imageUrls are mutually exclusive")
+        return self
+
+
+class MediaGenerateVideoArgs(_StrictModel):
+    """Args for media.generate_video — same intent as POST /v1/media/videos."""
+
+    model: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, max_length=_MEDIA_PROMPT_MAX)
+    imageUrl: str | None = Field(default=None, max_length=_MEDIA_URL_MAX)
+    sourceJobId: str | None = None
+    negativePrompt: str | None = Field(default=None, max_length=_MEDIA_NEGATIVE_PROMPT_MAX)
+    aspectRatio: str | None = None
+    resolution: str | None = None
+    duration: str | None = None
+    generateAudio: bool | None = None
+    cfgScale: float | None = Field(default=None, ge=0, le=1)
+    seed: int | None = Field(default=None, ge=0, le=_MEDIA_SEED_MAX)
+
+    @field_validator("imageUrl")
+    @classmethod
+    def _check_url(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_media_https_urls([value])[0]
+
+    @model_validator(mode="after")
+    def _exclusive_refs(self) -> MediaGenerateVideoArgs:
+        if self.sourceJobId is not None and self.imageUrl is not None:
+            raise ValueError("sourceJobId and imageUrl are mutually exclusive")
+        return self
+
+
 _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_FILES_READ: FilesReadArgs,
     TOOL_FILES_WRITE: FilesWriteArgs,
@@ -395,6 +488,8 @@ _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_SITE_DELETE: SiteDeleteArgs,
     TOOL_TIME_NOW: TimeNowArgs,
     TOOL_QUIZ_GENERATE: Quiz,
+    TOOL_MEDIA_GENERATE_IMAGE: MediaGenerateImageArgs,
+    TOOL_MEDIA_GENERATE_VIDEO: MediaGenerateVideoArgs,
 }
 
 
@@ -454,6 +549,21 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "'explanation' shown to the learner after they answer. Ask the questions ONLY through this "
         "tool: never repeat the question wording in your reply text and never reveal the correct "
         "options or explanations there. Keep any accompanying text short."
+    ),
+    TOOL_MEDIA_GENERATE_IMAGE: (
+        "Submit an image generation job. Returns immediately with jobId and status 'queued' — "
+        "do NOT wait for the image; the app polls GET /v1/media/jobs/{jobId}. Ask the user for "
+        "model and quality (resolution/aspectRatio) when unclear. 'model' is a catalog id such as "
+        "'nano-banana-2' or 'nano-banana-pro'. Optional imageUrls (https) or sourceJobId starts "
+        "an edit of a prior image. This costs media credits in addition to the chat turn."
+    ),
+    TOOL_MEDIA_GENERATE_VIDEO: (
+        "Submit a video generation job. Returns immediately with jobId and status 'queued' — "
+        "do NOT wait for the video (it can take minutes); the app polls "
+        "GET /v1/media/jobs/{jobId}. "
+        "Ask the user for model, duration, and quality when unclear. 'model' is a catalog id such "
+        "as 'veo-3.1' or 'kling-video-v3'. Optional imageUrl (https) or sourceJobId starts "
+        "image-to-video from a prior image. This costs media credits in addition to the chat turn."
     ),
 }
 

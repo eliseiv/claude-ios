@@ -277,6 +277,37 @@ class ChatRepository:
         )
         return value if isinstance(value, dict) else None
 
+    async def tool_results_for_message_step(
+        self,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        tool_names: frozenset[str],
+    ) -> list[dict[str, Any]]:
+        """Successful tool ``result`` payloads for ``tool_names`` within ONE turn, seq ASC.
+
+        Turn-scoped fallback for ``ChatResponse.mediaJobs`` (ADR-068): when the current-call
+        accumulator is empty, recover every successful media submit of this ``message_step_id`` so
+        continuations / replay / ``blocked+max_tokens`` still carry the jobs. Errored rounds
+        (``result`` null) are excluded — same SQL null semantics as
+        ``last_tool_result_for_message_step``.
+        """
+        if not tool_names:
+            return []
+        rows = (
+            await self._session.execute(
+                select(ChatStep.payload["result"])
+                .where(
+                    ChatStep.session_id == session_id,
+                    ChatStep.message_step_id == message_step_id,
+                    ChatStep.role == "tool",
+                    ChatStep.payload["toolName"].astext.in_(tuple(tool_names)),
+                    ChatStep.payload["result"].astext.isnot(None),
+                )
+                .order_by(ChatStep.seq.asc())
+            )
+        ).scalars()
+        return [value for value in rows if isinstance(value, dict)]
+
     async def create_tool_call(
         self,
         *,

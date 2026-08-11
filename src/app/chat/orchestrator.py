@@ -27,7 +27,7 @@ from app.audit.service import (
 from app.byok.service import BYOKService
 from app.chat.anthropic_client import AnthropicAuthError
 from app.chat.attachments import PreparedAttachments, prepare_attachments
-from app.chat.global_tools import GlobalToolHandlers
+from app.chat.global_tools import MEDIA_INVALID_ERROR_CODE, GlobalToolHandlers
 from app.chat.llm_client import (
     STOP_REASON_MAX_TOKENS,
     STOP_REASON_TOOL_USE,
@@ -47,6 +47,8 @@ from app.chat.tools import (
     QUIZ_INVALID_ERROR_CODE,
     SERVER_SIDE_TOOLS,
     TOOL_GENERATION_MODES,
+    TOOL_MEDIA_GENERATE_IMAGE,
+    TOOL_MEDIA_GENERATE_VIDEO,
     TOOL_QUIZ_GENERATE,
     content_free_args_error,
     neutral_tool_definitions,
@@ -88,6 +90,8 @@ from app.workspaces.service import WorkspacesService
 
 logger = logging.getLogger("app.chat.orchestrator")
 
+_MEDIA_TOOL_NAMES = frozenset({TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO})
+
 # ADR-028 Решение 2: hard cap for serverTools[].summary (same value as steps-view summary).
 # The summary is a COMPACT indicator only — it MUST NOT carry the raw tool result, paths, URLs,
 # preview signed-tokens or any secret. Anything longer is truncated to this length.
@@ -102,6 +106,15 @@ _TIME_NOW_INSTRUCTION = (
     "You do not have built-in knowledge of the current date or time. If the user's request "
     "depends on the current date, time, or day of the week, call the time.now tool to get it; "
     "do not guess."
+)
+
+# ADR-068: steer the model to media.generate_* for photo/video requests. STATIC — no catalog dump
+# (prices/models change per instance); ask clarifying questions, submit once, never wait for fal.
+_MEDIA_GENERATE_INSTRUCTION = (
+    "When the user asks you to generate a photo or video, use media.generate_image or "
+    "media.generate_video. Ask briefly for model and quality (and duration for video) if unclear, "
+    "then call the tool once. The tool only queues the job and returns a jobId — tell the user "
+    "generation has started; do not claim the media is ready until the app reports it."
 )
 
 # ADR-059: state, in the system prompt, that the assistant has the full conversation so far and
@@ -124,7 +137,12 @@ _CONVERSATION_MEMORY_INSTRUCTION = (
 _SYSTEM_PROMPT_CHAT = (
     "You are a helpful assistant integrated into an iOS app. You can call tools that the "
     "user's device executes locally (files, calendar, reminders). Use tools when needed and "
-    "respond concisely. " + _CONVERSATION_MEMORY_INSTRUCTION + " " + _TIME_NOW_INSTRUCTION
+    "respond concisely. "
+    + _CONVERSATION_MEMORY_INSTRUCTION
+    + " "
+    + _TIME_NOW_INSTRUCTION
+    + " "
+    + _MEDIA_GENERATE_INSTRUCTION
 )
 # Website-builder guidance: gpt-4o tends to "create" images by writing image files with a
 # placeholder string as base64 ("base64 placeholder for dish1.jpg"), which site.write_file rejects
@@ -149,6 +167,8 @@ _SYSTEM_PROMPT_CODE = (
     + _CONVERSATION_MEMORY_INSTRUCTION
     + " "
     + _TIME_NOW_INSTRUCTION
+    + " "
+    + _MEDIA_GENERATE_INSTRUCTION
 )
 
 GenerationBackend = Literal["legacy", "v2"]
@@ -437,6 +457,9 @@ class ChatRunOut:
     # replay: server_tools answers «what ran in this call», quiz answers «what this turn contains».
     # Do not carry the rule of either field over to the other.
     quiz: dict[str, Any] | None = None
+    # ADR-068: media jobs submitted in THIS TURN via media.generate_* — turn-scoped like quiz.
+    # None = «no media jobs in this turn»; a list (possibly recovered from tool steps) otherwise.
+    media_jobs: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -449,6 +472,17 @@ class _QuizAccumulator:
     """
 
     pool: dict[str, Any] | None = None
+
+
+@dataclass
+class _MediaJobsAccumulator:
+    """Media jobs submitted in the CURRENT call (ADR-068).
+
+    APPEND (not last-wins): the model may queue several images/videos in one turn; the client needs
+    every jobId. Threaded through the tool-loop like ``_QuizAccumulator``.
+    """
+
+    jobs: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -904,7 +938,7 @@ class ChatOrchestrator:
             assistant_step_id = await self._deps.repo.assistant_tool_step_id(
                 session_id, message_step_id
             )
-            return await self._with_turn_quiz(
+            return await self._decorate_turn_out(
                 ChatRunOut(
                     status="tool_call",
                     session_id=session_id,
@@ -914,7 +948,8 @@ class ChatOrchestrator:
                     step_id=assistant_step_id,
                 ),
                 message_step_id=message_step_id,
-                accumulated=None,
+                quiz_accumulated=None,
+                media_accumulated=None,
                 generation_mode=generation_mode,
             )
 
@@ -926,10 +961,11 @@ class ChatOrchestrator:
             # ADR-064 §7: the replay is NOT a special rule — it is the ordinary turn-scoped fallback
             # (no accumulator in this call → read the turn's quiz step). server_tools stays empty
             # here by contrast (ADR-028): it is a per-call indicator, quiz is turn content.
-            return await self._with_turn_quiz(
+            return await self._decorate_turn_out(
                 self._render_saved_step(session_id, message_step_id, saved),
                 message_step_id=message_step_id,
-                accumulated=None,
+                quiz_accumulated=None,
+                media_accumulated=None,
                 generation_mode=generation_mode,
             )
 
@@ -1231,6 +1267,60 @@ class ChatOrchestrator:
         )
         return replace(out, quiz=quiz)
 
+    async def _resolve_turn_media_jobs(
+        self,
+        *,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        accumulated: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Media jobs of the TURN (ADR-068): call accumulator, else persisted media tool results."""
+        if accumulated:
+            return list(accumulated)
+        recovered = await self._deps.repo.tool_results_for_message_step(
+            session_id, message_step_id, _MEDIA_TOOL_NAMES
+        )
+        return recovered or None
+
+    async def _with_turn_media_jobs(
+        self,
+        out: ChatRunOut,
+        *,
+        message_step_id: uuid.UUID,
+        accumulated: list[dict[str, Any]] | None,
+    ) -> ChatRunOut:
+        """Attach turn-scoped mediaJobs to a terminal ChatRunOut (ADR-068)."""
+        if out.message_step_id is None:
+            return out
+        media_jobs = await self._resolve_turn_media_jobs(
+            session_id=out.session_id,
+            message_step_id=message_step_id,
+            accumulated=accumulated,
+        )
+        return replace(out, media_jobs=media_jobs)
+
+    async def _decorate_turn_out(
+        self,
+        out: ChatRunOut,
+        *,
+        message_step_id: uuid.UUID,
+        quiz_accumulated: dict[str, Any] | None,
+        media_accumulated: list[dict[str, Any]] | None,
+        generation_mode: str,
+    ) -> ChatRunOut:
+        """Attach turn-scoped quiz + mediaJobs at every terminal leg (ADR-064 / ADR-068)."""
+        decorated = await self._with_turn_quiz(
+            out,
+            message_step_id=message_step_id,
+            accumulated=quiz_accumulated,
+            generation_mode=generation_mode,
+        )
+        return await self._with_turn_media_jobs(
+            decorated,
+            message_step_id=message_step_id,
+            accumulated=media_accumulated,
+        )
+
     async def _build_messages(self, session_id: uuid.UUID) -> list[NeutralMessage]:
         """Reconstruct the provider-NEUTRAL history from chat_steps (TD-002, ADR-033 §3).
 
@@ -1285,6 +1375,8 @@ class ChatOrchestrator:
         effective_generation_mode = generation_mode if use_generation_v2 else "general"
         # ADR-064 §7 producer 1: pool of THIS call, last-wins, threaded through every round.
         quiz_accumulator = _QuizAccumulator()
+        # ADR-068: media jobs of THIS call (append), threaded through every round.
+        media_accumulator = _MediaJobsAccumulator()
         # ADR-044 §5: select the generation client + the effective model by mode.
         # - credits → the injected active-provider client (self._deps.llm); stale-model guard
         #   against the ACTIVE provider allowlist (a session model fixed for another provider after
@@ -1410,7 +1502,7 @@ class ChatOrchestrator:
                 # ADR-064 §7: it also carries the turn's quiz — including a pool produced on an
                 # EARLIER leg of the turn — and the partial truncated text is then suppressed in
                 # _to_response like any other status.
-                return await self._with_turn_quiz(
+                return await self._decorate_turn_out(
                     await self._handle_max_tokens(
                         user_id=user_id,
                         session_id=session_id,
@@ -1420,7 +1512,8 @@ class ChatOrchestrator:
                         server_tools=server_tools,
                     ),
                     message_step_id=message_step_id,
-                    accumulated=quiz_accumulator.pool,
+                    quiz_accumulated=quiz_accumulator.pool,
+                    media_accumulated=media_accumulator.jobs or None,
                     generation_mode=effective_generation_mode,
                 )
 
@@ -1435,6 +1528,7 @@ class ChatOrchestrator:
                     server_tools=server_tools,
                     generation_mode=effective_generation_mode,
                     quiz_accumulator=quiz_accumulator,
+                    media_accumulator=media_accumulator,
                 )
                 # Persist the tool_use step + tool_calls + tool_results + audit (no billing here).
                 await self._session.commit()
@@ -1446,10 +1540,11 @@ class ChatOrchestrator:
                     # ADR-064 §7: this is the leg of the MAIN quiz scenario — the model called
                     # quiz.generate AND a client-side tool in one assistant step. The pool must ride
                     # along here, and (turn-scope) again on the tool-result leg that finishes it.
-                    return await self._with_turn_quiz(
+                    return await self._decorate_turn_out(
                         outcome.client_out,
                         message_step_id=message_step_id,
-                        accumulated=quiz_accumulator.pool,
+                        quiz_accumulated=quiz_accumulator.pool,
+                        media_accumulated=media_accumulator.jobs or None,
                         generation_mode=effective_generation_mode,
                     )
                 # Pure server-side turn: results are persisted; continue the loop to Anthropic.
@@ -1457,7 +1552,7 @@ class ChatOrchestrator:
 
             # Final assistant_message — break out of the server-side loop and bill once.
             api_key = None
-            return await self._with_turn_quiz(
+            return await self._decorate_turn_out(
                 await self._finalize_assistant(
                     user_id=user_id,
                     session_id=session_id,
@@ -1468,7 +1563,8 @@ class ChatOrchestrator:
                     server_tools=server_tools,
                 ),
                 message_step_id=message_step_id,
-                accumulated=quiz_accumulator.pool,
+                quiz_accumulated=quiz_accumulator.pool,
+                media_accumulated=media_accumulator.jobs or None,
                 generation_mode=effective_generation_mode,
             )
 
@@ -1690,6 +1786,7 @@ class ChatOrchestrator:
         server_tools: list[ServerToolExecutionOut],
         generation_mode: str = "general",
         quiz_accumulator: _QuizAccumulator | None = None,
+        media_accumulator: _MediaJobsAccumulator | None = None,
     ) -> _TurnOutcome:
         """Process a tool_use turn (ADR-008/011): persist tool_calls, branch server/client-side.
 
@@ -1787,6 +1884,12 @@ class ChatOrchestrator:
                 # the loop continue: the model sees it in the SAME turn and regenerates the pool.
                 # The message is content-free (field path + error kind) — never str(exc), which
                 # pydantic renders with the offending quiz text.
+                if tool_name == TOOL_QUIZ_GENERATE:
+                    degrade_code = QUIZ_INVALID_ERROR_CODE
+                    degrade_msg = f"{content_free_args_error(exc)}; {QUIZ_CONSTRAINTS_HINT}"
+                else:
+                    degrade_code = MEDIA_INVALID_ERROR_CODE
+                    degrade_msg = content_free_args_error(exc)
                 await self._record_refused_tool_call(
                     user_id=user_id,
                     session_id=session_id,
@@ -1794,10 +1897,7 @@ class ChatOrchestrator:
                     tool_name=tool_name,
                     raw_args=raw_args,
                     provider_tool_use_id=provider_tool_use_id,
-                    execution=ToolExecution.error(
-                        QUIZ_INVALID_ERROR_CODE,
-                        f"{content_free_args_error(exc)}; {QUIZ_CONSTRAINTS_HINT}",
-                    ),
+                    execution=ToolExecution.error(degrade_code, degrade_msg),
                     server_tools=server_tools,
                 )
                 continue
@@ -1844,6 +1944,14 @@ class ChatOrchestrator:
                     # ADR-064 §7 producer 1: last-wins. A later valid pool in the same call
                     # REPLACES an earlier one — pools are never merged.
                     quiz_accumulator.pool = execution.result
+                if (
+                    tool_name in _MEDIA_TOOL_NAMES
+                    and media_accumulator is not None
+                    and not execution.is_error
+                    and isinstance(execution.result, dict)
+                ):
+                    # ADR-068: append — several media jobs in one turn are all surfaced.
+                    media_accumulator.jobs.append(execution.result)
             elif tool_name in SERVER_SIDE_TOOLS:
                 # Invariant (ADR-022): reaching here implies has_project is True (the project-less
                 # site.* anomaly raised above), so external_project_id is a resolved string. The
@@ -1986,7 +2094,9 @@ class ChatOrchestrator:
         Returns the ToolExecution so the caller can lift a successful quiz pool into the turn's
         accumulator (ADR-064 §7) without re-reading the persisted step.
         """
-        execution = await self._deps.global_tools.execute(tool_name=tool_name, args=args)
+        execution = await self._deps.global_tools.execute(
+            tool_name=tool_name, args=args, user_id=user_id
+        )
         await self._persist_tool_execution(
             user_id=user_id,
             session_id=session_id,

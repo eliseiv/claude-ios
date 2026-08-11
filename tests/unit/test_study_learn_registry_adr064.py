@@ -32,6 +32,8 @@ from app.chat.tools import (
     QUIZ_INVALID_ERROR_CODE,
     SERVER_SIDE_TOOLS,
     TOOL_GENERATION_MODES,
+    TOOL_MEDIA_GENERATE_IMAGE,
+    TOOL_MEDIA_GENERATE_VIDEO,
     TOOL_QUIZ_GENERATE,
     Quiz,
     QuizQuestion,
@@ -196,8 +198,12 @@ def test_registries_are_disjoint_and_within_the_tool_namespace() -> None:
     assert TOOL_QUIZ_GENERATE in GLOBAL_SERVER_SIDE_TOOLS
     assert set(TOOL_GENERATION_MODES) <= set(ALL_TOOL_NAMES)
     assert set(ARGS_DEGRADE_TOOLS) <= set(ALL_TOOL_NAMES)
-    # The degrade exception is scoped to the quiz — it must not spread to other tools silently.
-    assert set(ARGS_DEGRADE_TOOLS) == {TOOL_QUIZ_GENERATE}
+    # Degrade is an allowlist: quiz (ADR-064) + media.generate_* (ADR-068). Do not widen casually.
+    assert set(ARGS_DEGRADE_TOOLS) == {
+        TOOL_QUIZ_GENERATE,
+        TOOL_MEDIA_GENERATE_IMAGE,
+        TOOL_MEDIA_GENERATE_VIDEO,
+    }
 
 
 # ============================== pool validation boundaries ==================================
