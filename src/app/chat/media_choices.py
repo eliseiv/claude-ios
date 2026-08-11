@@ -30,16 +30,33 @@ _STEP_QUESTIONS: dict[str, str] = {
 }
 
 
-def _option(value: str, label: str) -> dict[str, str]:
-    return {"value": value, "label": label}
+def _option(value: str, label: str, credits: int | None = None) -> dict[str, Any]:
+    out: dict[str, Any] = {"value": value, "label": label}
+    if credits is not None:
+        out["credits"] = credits
+    return out
 
 
-def _question(step: str, options: list[dict[str, str]]) -> dict[str, Any]:
+def _question(
+    step: str, options: list[dict[str, Any]], *, question: str | None = None
+) -> dict[str, Any]:
     return {
         "id": step,
-        "question": _STEP_QUESTIONS[step],
+        "question": question or _STEP_QUESTIONS[step],
         "options": options,
     }
+
+
+def _priced_question_title(step: str, options: list[dict[str, Any]]) -> str:
+    """Question text that always surfaces tier prices (even if the client renders only values)."""
+    bits: list[str] = []
+    for opt in options:
+        cr = opt.get("credits")
+        if isinstance(cr, int):
+            bits.append(f"{opt['value']}: {cr} cr.")
+    if not bits:
+        return _STEP_QUESTIONS[step]
+    return f"{_STEP_QUESTIONS[step]} ({', '.join(bits)})"
 
 
 def _with_image(source_job_id: str | None, image_urls: list[str] | None = None) -> bool:
@@ -122,9 +139,10 @@ def build_step_questions(
         return None
 
     if step == STEP_MODEL:
-        options = [
-            _option(m.id, f"{m.title} · from {credits_for(m)} cr.") for m in models_of_kind(kind)
-        ]
+        options = []
+        for m in models_of_kind(kind):
+            cr = credits_for(m)
+            options.append(_option(m.id, f"{m.title} · from {cr} cr.", credits=cr))
         if not options:
             raise ValueError(f"no media models configured for kind={kind}")
         return step, [_question(STEP_MODEL, options)]
@@ -143,16 +161,24 @@ def build_step_questions(
             cr = estimate_run_credits(
                 model, answers, base_credits=base, overrides={STEP_RESOLUTION: v}
             )
-            options.append(_option(v, f"{v} · {cr} cr."))
-        return step, [_question(STEP_RESOLUTION, options)]
+            options.append(_option(v, f"{v} · {cr} cr.", credits=cr))
+        return step, [
+            _question(
+                STEP_RESOLUTION, options, question=_priced_question_title(STEP_RESOLUTION, options)
+            )
+        ]
     if step == STEP_DURATION:
         options = []
         for v in variant.durations:
             cr = estimate_run_credits(
                 model, answers, base_credits=base, overrides={STEP_DURATION: v}
             )
-            options.append(_option(v, f"{v} · {cr} cr."))
-        return step, [_question(STEP_DURATION, options)]
+            options.append(_option(v, f"{v} · {cr} cr.", credits=cr))
+        return step, [
+            _question(
+                STEP_DURATION, options, question=_priced_question_title(STEP_DURATION, options)
+            )
+        ]
     if step == STEP_GENERATE_AUDIO:
         yes_cr = estimate_run_credits(
             model, answers, base_credits=base, overrides={STEP_GENERATE_AUDIO: "true"}
@@ -161,10 +187,16 @@ def build_step_questions(
             model, answers, base_credits=base, overrides={STEP_GENERATE_AUDIO: "false"}
         )
         options = [
-            _option("true", f"Yes · {yes_cr} cr."),
-            _option("false", f"No · {no_cr} cr."),
+            _option("true", f"Yes · {yes_cr} cr.", credits=yes_cr),
+            _option("false", f"No · {no_cr} cr.", credits=no_cr),
         ]
-        return step, [_question(STEP_GENERATE_AUDIO, options)]
+        return step, [
+            _question(
+                STEP_GENERATE_AUDIO,
+                options,
+                question=_priced_question_title(STEP_GENERATE_AUDIO, options),
+            )
+        ]
     if step == STEP_ASPECT_RATIO:
         options = [_option(v, v) for v in variant.aspect_ratios]
         return step, [_question(STEP_ASPECT_RATIO, options)]
@@ -279,11 +311,10 @@ def build_wizard_state(
 
 
 def media_choices_response(state: Mapping[str, Any]) -> dict[str, Any]:
-    """Wire shape for ``ChatResponse.mediaChoices`` (no internal answers)."""
+    """Wire shape for ``ChatResponse.mediaChoices`` (no internal answers / fal prompt)."""
     return {
         "selectionId": state["selectionId"],
         "kind": state["kind"],
-        "prompt": state["prompt"],
         "step": state["step"],
         "questions": state["questions"],
     }
@@ -311,8 +342,12 @@ def format_selection_summary(
     credits_charged: int,
     source_job_id: str | None,
 ) -> str:
-    """Single history bubble for the completed wizard (replaces N intermediate taps)."""
-    parts: list[str] = [prompt.strip() or kind]
+    """Single history bubble for the completed wizard (replaces N intermediate taps).
+
+    The fal ``prompt`` is intentionally omitted — it is an internal generation input, not UI copy.
+    """
+    _ = prompt  # kept in signature for call-site stability; not shown to the user
+    parts: list[str] = [kind]
     model = find_model(answers.get(STEP_MODEL, ""))
     if model is not None:
         parts.append(model.title)

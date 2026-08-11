@@ -67,7 +67,7 @@ async def test_media_choices_wizard_to_job(
     assert choices is not None
     assert choices["kind"] == "image"
     assert choices["step"] == "model"
-    assert choices["prompt"] == "a fluffy cat"
+    assert "prompt" not in choices
     assert body1.get("mediaJobs") is None
     selection_id = choices["selectionId"]
     session_id = body1["sessionId"]
@@ -93,9 +93,12 @@ async def test_media_choices_wizard_to_job(
     choices2 = body2["mediaChoices"]
     assert choices2["step"] == "resolution"
     assert body2.get("mediaJobs") is None
-    res_opts = {o["value"]: o["label"] for o in choices2["questions"][0]["options"]}
+    res_q = choices2["questions"][0]
+    res_opts = {o["value"]: o for o in res_q["options"]}
     assert "1K" in res_opts and "2K" in res_opts
-    assert "cr." in res_opts["2K"]
+    assert "cr." in res_opts["2K"]["label"]
+    assert isinstance(res_opts["2K"].get("credits"), int)
+    assert "2K:" in res_q["question"] and "cr." in res_q["question"]
 
     # Intermediate taps must NOT add chat bubbles (progress is patched into ask_params result).
     hist_mid = await client.get(f"/v1/chats/{session_id}", headers=auth_headers(uid))
@@ -173,6 +176,7 @@ async def test_media_choices_wizard_to_job(
     )
     assert "nano-banana" in summary_text.lower() or "Nano Banana" in summary_text
     assert "2K" in summary_text and "cr." in summary_text
+    assert "fluffy cat" not in summary_text
     assert summary_users[0]["payload"].get("mediaWizard", {}).get("jobId") == job_id
 
     assistant_with_jobs = [

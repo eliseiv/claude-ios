@@ -53,15 +53,34 @@ def test_resolution_labels_include_tier_prices() -> None:
     )
     assert state is not None
     assert state["step"] == STEP_RESOLUTION
-    by_value = {o["value"]: o["label"] for o in state["questions"][0]["options"]}
+    q = state["questions"][0]
+    by_value = {o["value"]: o for o in q["options"]}
     model = find_model("nano-banana-2")
     assert model is not None
-    assert "1K" in by_value and "cr." in by_value["1K"]
-    assert "4K" in by_value and "cr." in by_value["4K"]
-    # Higher tier must not look cheaper than a lower tier in the label digits.
-    cr_1k = int(by_value["1K"].split("·")[-1].strip().split()[0])
-    cr_4k = int(by_value["4K"].split("·")[-1].strip().split()[0])
-    assert cr_4k > cr_1k
+    assert "1K" in by_value and "cr." in by_value["1K"]["label"]
+    assert "4K" in by_value and "cr." in by_value["4K"]["label"]
+    assert isinstance(by_value["1K"]["credits"], int)
+    assert isinstance(by_value["4K"]["credits"], int)
+    assert by_value["4K"]["credits"] > by_value["1K"]["credits"]
+    # Question title carries prices so UI that ignores labels still shows cost.
+    assert "1K:" in q["question"] and "cr." in q["question"]
+
+
+def test_media_choices_wire_omits_fal_prompt() -> None:
+    from app.chat.media_choices import media_choices_response
+
+    state = build_wizard_state(
+        selection_id="sel-1",
+        kind="image",
+        prompt="secret fal prompt text",
+        source_job_id=None,
+        answers={},
+        credits_for=lambda m: m.default_credits,
+    )
+    assert state is not None
+    wire = media_choices_response(state)
+    assert "prompt" not in wire
+    assert wire["step"] == STEP_MODEL
 
 
 def test_validate_rejects_hallucinated_model() -> None:
@@ -93,7 +112,8 @@ def test_format_selection_summary_is_one_line() -> None:
         credits_charged=6,
         source_job_id=None,
     )
-    assert text.startswith("Media: a fluffy cat")
+    assert text.startswith("Media: image")
+    assert "fluffy cat" not in text  # fal prompt must not appear in history
     assert "2K" in text and "6 cr." in text
     assert "edit" not in text
 
@@ -106,4 +126,5 @@ def test_format_selection_summary_marks_edit() -> None:
         credits_charged=4,
         source_job_id="11111111-1111-1111-1111-111111111111",
     )
+    assert "add a hat" not in text
     assert text.endswith("edit") or " · edit" in text

@@ -454,14 +454,27 @@ class MediaChoiceOptionSchema(StrictModel):
     """One tappable option in a mediaChoices question (ADR-070)."""
 
     value: str = Field(description="Машиночитаемое значение (id модели, `1K`, `8s`, …).")
-    label: str = Field(description="Подпись для UI.")
+    label: str = Field(description="Подпись для UI (для priced-шагов обычно включает `· N cr.`).")
+    credits: int | None = Field(
+        default=None,
+        description=(
+            "Оценка кредитов за этот выбор (модель — базовый tier; resolution/duration/audio — "
+            "итог рана). `null` у aspectRatio и прочих шагов без цены."
+        ),
+    )
 
 
 class MediaChoiceQuestionSchema(StrictModel):
     """One wizard question — same interaction pattern as quiz cards, without correctIndex."""
 
     id: str = Field(description="Ключ ответа: `model` | `resolution` | `duration` | …")
-    question: str = Field(description="Текст вопроса для карточки.")
+    question: str = Field(
+        description=(
+            "Текст вопроса для карточки. На priced-шагах (resolution/duration/audio) сервер "
+            "добавляет перечень цен в скобках, чтобы стоимость была видна даже если клиент "
+            "рисует только `options[].value`."
+        )
+    )
     options: list[MediaChoiceOptionSchema] = Field(min_length=1)
 
 
@@ -470,7 +483,6 @@ class MediaChoicesSchema(StrictModel):
 
     selectionId: uuid.UUID = Field(description="Коррелятор wizard-а для `mediaSelection`.")
     kind: Literal["image", "video"]
-    prompt: str = Field(description="Промпт, с которым будет сабмит после выбора.")
     step: str = Field(description="Текущий шаг wizard-а (`model`, `resolution`, …).")
     questions: list[MediaChoiceQuestionSchema] = Field(
         min_length=1,

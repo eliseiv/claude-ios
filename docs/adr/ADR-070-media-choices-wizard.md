@@ -18,22 +18,26 @@
 {
   "selectionId": "<uuid>",
   "kind": "image",
-  "prompt": "…",
   "step": "model",
   "questions": [
     {
       "id": "model",
       "question": "Choose a model",
-      "options": [{ "value": "nano-banana-2", "label": "Nano Banana 2 · from 4 cr." }]
+      "options": [{
+        "value": "nano-banana-2",
+        "label": "Nano Banana 2 · from 4 cr.",
+        "credits": 4
+      }]
     }
   ]
 }
 ```
 
-- Без `correctIndex` / `explanation`.
+- Без `correctIndex` / `explanation`. Промпт для fal **не** отдаётся в `mediaChoices` (только во внутреннем wizard state).
 - `assistantMessage` **не** глушится.
 - Wizard = **один вопрос за ответ** (каскад: model → priced params → aspectRatio).
 - Options **только** из серверного каталога (`catalog.py` / тот же источник, что `GET /v1/media/models`). LLM enum’ы не передаёт.
+- Priced-шаги (`resolution` / `duration` / `audio`): цена в `options[].credits`, в `label` (`· N cr.`) и дублем в тексте `question` (`1K: 4 cr., 2K: 6 cr., …`).
 
 ### 2. Tool `media.ask_params`
 
@@ -56,8 +60,8 @@ Execution: создать `selectionId`, первый шаг (`model`), persist 
 ### 4. История чата (сводка, не N тапов)
 
 - Промежуточные `mediaSelection` **не** создают user/assistant bubbles — answers патчатся в tool-result `media.ask_params`.
-- На финале — **один** user-шаг `Media: <prompt> · <model> · <params> · <N> cr.` + assistant с текстом и `payload.mediaJobs` (cold start: `jobId` в истории).
-- Labels resolution/duration/audio включают оценку кредитов (`2K · 6 cr.`).
+- На финале — **один** user-шаг `Media: <kind> · <model> · <params> · <N> cr.` + assistant с текстом и `payload.mediaJobs` (cold start: `jobId` в истории). Текст fal-промпта в историю **не** пишется.
+- Labels / `credits` / question title на resolution/duration/audio несут оценку кредитов.
 
 ### 5. Edit / image-to-image
 
