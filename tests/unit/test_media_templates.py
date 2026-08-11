@@ -14,7 +14,10 @@ from app.media_generation.templates_service import MediaTemplatesService
 from app.schemas.media_templates import MediaTemplateCreateRequest
 
 # 1×1 PNG
-_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA"
+    "DUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 def test_create_request_rejects_bad_id() -> None:

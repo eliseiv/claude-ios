@@ -16,7 +16,10 @@ from tests.conftest import FakeAnthropicClient, FakeStoreKitVerifier, auth_heade
 
 _ADMIN_SECRET = "admin-secret-templates-0123456789abcdef0123456789"
 _ADMIN_HEADERS = {"X-Admin-Token": _ADMIN_SECRET}
-_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA"
+    "DUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 @pytest.fixture
