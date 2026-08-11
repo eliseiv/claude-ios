@@ -16,9 +16,7 @@ from tests.conftest import FakeAnthropicClient, FakeStoreKitVerifier, auth_heade
 
 _ADMIN_SECRET = "admin-secret-templates-0123456789abcdef0123456789"
 _ADMIN_HEADERS = {"X-Admin-Token": _ADMIN_SECRET}
-_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-)
+_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
 
 @pytest.fixture
@@ -79,9 +77,7 @@ async def test_seed_lists_and_cover_without_fal(
     async with db_sessionmaker() as s:
         uid = await seed_user(s, subscription="active", balance=5)
 
-    images = await templates_client.get(
-        "/v1/media/templates/images", headers=auth_headers(uid)
-    )
+    images = await templates_client.get("/v1/media/templates/images", headers=auth_headers(uid))
     assert images.status_code == 200, images.text
     image_items = images.json()["templates"]
     assert len(image_items) == 5
@@ -98,9 +94,7 @@ async def test_seed_lists_and_cover_without_fal(
     assert profile["coverUrl"].endswith("/v1/media/templates/profile_picture/cover")
     assert profile["coverUrl"].startswith("https://templates.test/")
 
-    videos = await templates_client.get(
-        "/v1/media/templates/videos", headers=auth_headers(uid)
-    )
+    videos = await templates_client.get("/v1/media/templates/videos", headers=auth_headers(uid))
     assert videos.status_code == 200, videos.text
     assert len(videos.json()["templates"]) == 5
 
@@ -141,9 +135,7 @@ async def test_admin_create_and_delete(
     assert body["id"] == "custom_tile"
     assert body["kind"] == "image"
 
-    listing = await templates_client.get(
-        "/v1/media/templates/images", headers=auth_headers(uid)
-    )
+    listing = await templates_client.get("/v1/media/templates/images", headers=auth_headers(uid))
     ids = {t["id"] for t in listing.json()["templates"]}
     assert "custom_tile" in ids
 
@@ -172,9 +164,7 @@ async def test_admin_create_and_delete(
     )
     assert again.status_code == 404
 
-    listing2 = await templates_client.get(
-        "/v1/media/templates/images", headers=auth_headers(uid)
-    )
+    listing2 = await templates_client.get("/v1/media/templates/images", headers=auth_headers(uid))
     assert "custom_tile" not in {t["id"] for t in listing2.json()["templates"]}
 
 

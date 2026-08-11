@@ -12,9 +12,7 @@ from app.schemas.common import StrictModel
 _ID_RE = re.compile(r"^[a-z0-9_]+$")
 _PROMPT_MAX = 5000
 _TITLE_MAX = 120
-_IMAGE_PARAM_KEYS = frozenset(
-    {"aspectRatio", "resolution", "numImages", "outputFormat", "seed"}
-)
+_IMAGE_PARAM_KEYS = frozenset({"aspectRatio", "resolution", "numImages", "outputFormat", "seed"})
 _VIDEO_PARAM_KEYS = frozenset(
     {
         "aspectRatio",

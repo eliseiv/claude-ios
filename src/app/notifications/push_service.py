@@ -45,9 +45,7 @@ class MediaPushService:
         media_url: str,
     ) -> None:
         try:
-            await self._notify(
-                job_id=job_id, user_id=user_id, kind=kind, media_url=media_url
-            )
+            await self._notify(job_id=job_id, user_id=user_id, kind=kind, media_url=media_url)
         except Exception:  # noqa: BLE001 - push must never break media completion
             log_event(
                 logger,

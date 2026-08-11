@@ -261,12 +261,15 @@ async def test_reconciler_advances_and_pushes(
     db_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app.db import dispose_engine
     from app.media_generation import fal_client as fal_client_mod
     from app.media_generation.reconciler import reconcile_once
 
     monkeypatch.setenv("FAL_API_KEY", _FAL_KEY)
     monkeypatch.setenv("FAL_QUEUE_BASE", _QUEUE_BASE)
     get_settings.cache_clear()
+    # Reconciler uses the global app.db sessionmaker; bind a fresh engine to this loop.
+    await dispose_engine()
 
     fal = _Fal()
     monkeypatch.setattr(fal_client_mod, "httpx", _make_fake_httpx(fal))
@@ -292,8 +295,7 @@ async def test_reconciler_advances_and_pushes(
         uid = await seed_user(s, balance=100)
         await s.execute(
             text(
-                "INSERT INTO user_preferences (user_id, notifications_enabled) "
-                "VALUES (:u, true)"
+                "INSERT INTO user_preferences (user_id, notifications_enabled) " "VALUES (:u, true)"
             ),
             {"u": uid},
         )

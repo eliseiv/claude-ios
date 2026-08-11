@@ -175,12 +175,8 @@ class MediaTemplatesService:
             if key in ("aspectRatio", "resolution", "duration"):
                 allowed = variant.allowed(key)
                 if allowed and value not in allowed:
-                    raise ValidationFailedError(
-                        f"invalid {key} for {model.id}: {value!r}"
-                    )
-            if key == "numImages" and (
-                not isinstance(value, int) or value < 1 or value > 4
-            ):
+                    raise ValidationFailedError(f"invalid {key} for {model.id}: {value!r}")
+            if key == "numImages" and (not isinstance(value, int) or value < 1 or value > 4):
                 raise ValidationFailedError("numImages must be an integer 1..4")
             if key == "generateAudio" and not isinstance(value, bool):
                 raise ValidationFailedError("generateAudio must be a boolean")

@@ -459,9 +459,7 @@ class MediaTemplate(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
-    required_input_images: Mapped[int] = mapped_column(
-        nullable=False, server_default=sa_text("0")
-    )
+    required_input_images: Mapped[int] = mapped_column(nullable=False, server_default=sa_text("0"))
     parameters: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=sa_text("'{}'::jsonb")
     )

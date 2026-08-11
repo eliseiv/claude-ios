@@ -71,5 +71,6 @@ def downgrade() -> None:
     op.drop_index("ix_media_jobs_non_terminal", table_name="media_jobs")
     op.drop_column("media_jobs", "push_sent_at")
     op.drop_index("ix_push_tokens_user", table_name="device_push_tokens")
-    op.drop_index("ux_push_tokens_user_device", table_name="device_push_tokens")
+    # UniqueConstraint creates a constraint (not a standalone index); drop the constraint.
+    op.drop_constraint("ux_push_tokens_user_device", "device_push_tokens", type_="unique")
     op.drop_table("device_push_tokens")
