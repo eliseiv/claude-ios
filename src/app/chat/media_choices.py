@@ -117,9 +117,7 @@ def build_step_questions(
     image_urls: list[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]] | None:
     """Build (step, questions[]) for the next wizard step, or None if ready to submit."""
-    step = next_step_id(
-        answers, kind=kind, source_job_id=source_job_id, image_urls=image_urls
-    )
+    step = next_step_id(answers, kind=kind, source_job_id=source_job_id, image_urls=image_urls)
     if step is None:
         return None
 
@@ -183,9 +181,7 @@ def allowed_values_for_step(
 ) -> set[str]:
     """Catalog allowlist for ``step`` given answers already accepted before it."""
     if (
-        next_step_id(
-            answers_before, kind=kind, source_job_id=source_job_id, image_urls=image_urls
-        )
+        next_step_id(answers_before, kind=kind, source_job_id=source_job_id, image_urls=image_urls)
         != step
     ):
         return set()
@@ -228,9 +224,7 @@ def validate_and_merge_answers(
 
     built: dict[str, str] = {}
     while True:
-        step = next_step_id(
-            built, kind=kind, source_job_id=source_job_id, image_urls=image_urls
-        )
+        step = next_step_id(built, kind=kind, source_job_id=source_job_id, image_urls=image_urls)
         if step is None or step not in candidate:
             break
         allowed = allowed_values_for_step(
