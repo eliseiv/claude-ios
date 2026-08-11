@@ -92,7 +92,9 @@ async def test_media_generate_image_tool_loop_returns_media_jobs(
                     text("SELECT idempotency_key FROM ledger_transactions WHERE user_id = :u"),
                     {"u": str(uid)},
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
     assert body["messageStepId"] in keys
     assert f"media-gen:{job_id}" in keys

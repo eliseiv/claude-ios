@@ -367,9 +367,7 @@ class ChatCapabilitiesResponse(StrictModel):
 class MediaJobRefSchema(StrictModel):
     """Ссылка на media-задачу, созданную chat-tool `media.generate_*` (ADR-068)."""
 
-    jobId: uuid.UUID = Field(
-        description="Идентификатор задачи для `GET /v1/media/jobs/{jobId}`."
-    )
+    jobId: uuid.UUID = Field(description="Идентификатор задачи для `GET /v1/media/jobs/{jobId}`.")
     kind: Literal["image", "video"] = Field(description="Тип генерации.")
     status: Literal["queued", "running", "completed", "failed"] = Field(
         description="Статус на момент сабмита (обычно `queued`)."

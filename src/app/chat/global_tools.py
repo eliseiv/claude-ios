@@ -180,9 +180,7 @@ class GlobalToolHandlers:
             try:
                 source_job_id = uuid.UUID(str(source_raw))
             except ValueError:
-                return ToolExecution.error(
-                    MEDIA_INVALID_ERROR_CODE, "sourceJobId must be a UUID"
-                )
+                return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, "sourceJobId must be a UUID")
 
         if kind == "image":
             image_urls = list(args.get("imageUrls") or [])
@@ -227,9 +225,7 @@ class GlobalToolHandlers:
                 "insufficient credits for media generation",
             )
         except NotFoundError:
-            return ToolExecution.error(
-                MEDIA_INVALID_ERROR_CODE, "sourceJobId not found"
-            )
+            return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, "sourceJobId not found")
         except ValidationFailedError as exc:
             # Catalog / enum / mutual-exclusion failures — content from our ValidationFailedError
             # messages (no user prompt echo beyond what the model already sent as args).
