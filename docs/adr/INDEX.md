@@ -74,6 +74,8 @@
 | [ADR-068](ADR-068-media-generate-chat-tools.md) | Chat tools `media.generate_image` / `media.generate_video` + turn-scoped `ChatResponse.mediaJobs` | Accepted | 2026-08-11 |
 | [ADR-069](ADR-069-sse-text-streaming.md) | SSE text streaming для `/v1/chat/v2/run/stream` (`delta` / `done` / `error`) | Accepted | 2026-08-11 |
 | [ADR-070](ADR-070-media-choices-wizard.md) | Media choices wizard: `mediaChoices` / `mediaSelection` / `media.ask_params` (quiz-like UX, options из каталога) | Accepted | 2026-08-11 |
+| [ADR-071](ADR-071-chat-attachment-refs-and-history-pagination.md) | Chat attachmentRefs TTL + ask-before-reuse + history pagination | Accepted | 2026-08-12 |
+| [ADR-072](ADR-072-chat-media-tools-instance-gate.md) | Per-instance `CHAT_MEDIA_TOOLS_ENABLED`: REST `/v1/media/*` без chat media tools | Accepted | 2026-08-12 |
 
 ## Ревизии
 

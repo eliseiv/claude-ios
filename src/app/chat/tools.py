@@ -82,6 +82,16 @@ GLOBAL_SERVER_SIDE_TOOLS = frozenset(
     }
 )
 
+# Chat media tools (ADR-068 / ADR-070). Gated per-instance by CHAT_MEDIA_TOOLS_ENABLED (ADR-072);
+# orthogonal to FAL_API_KEY (which gates /v1/media/*).
+MEDIA_CHAT_TOOLS = frozenset(
+    {
+        TOOL_MEDIA_GENERATE_IMAGE,
+        TOOL_MEDIA_GENERATE_VIDEO,
+        TOOL_MEDIA_ASK_PARAMS,
+    }
+)
+
 # Axis C — generation-mode gate (ADR-064 §3). A tool listed here is offered to the model IF AND
 # ONLY IF the EFFECTIVE generation mode of the turn is in its set. A tool ABSENT from this registry
 # is not mode-gated at all (all 14 others behave exactly as before). The gate is evaluated against
@@ -673,6 +683,13 @@ def content_free_args_error(exc: Exception) -> str:
     return ("; ".join(parts) or "invalid arguments")[:_ARGS_ERROR_MAX_CHARS]
 
 
+def offered_media_chat_tool(tool_name: str, *, include_media_chat_tools: bool) -> bool:
+    """ADR-072: media chat tools are offered only when the instance enables them."""
+    if tool_name not in MEDIA_CHAT_TOOLS:
+        return True
+    return include_media_chat_tools
+
+
 def offered_in_generation_mode(tool_name: str, generation_mode: str) -> bool:
     """Axis C predicate (ADR-064 §3): may ``tool_name`` be offered in ``generation_mode``?
 
@@ -793,7 +810,10 @@ def tool_catalog() -> list[dict[str, Any]]:
 
 
 def anthropic_tool_definitions(
-    *, include_server_side: bool = True, generation_mode: str = "general"
+    *,
+    include_server_side: bool = True,
+    generation_mode: str = "general",
+    include_media_chat_tools: bool = True,
 ) -> list[dict[str, Any]]:
     """Tool definitions for the Anthropic messages API (input_schema per tool).
 
@@ -827,6 +847,9 @@ def anthropic_tool_definitions(
         if not offered_in_generation_mode(name, generation_mode):
             # Axis C gate: a mode-gated tool (quiz.generate) outside its modes (ADR-064 §3).
             continue
+        if not offered_media_chat_tool(name, include_media_chat_tools=include_media_chat_tools):
+            # ADR-072: drop media.* chat tools when CHAT_MEDIA_TOOLS_ENABLED=false.
+            continue
         definitions.append(
             {
                 # BUG-3 forward map: Anthropic requires underscore names; iOS-facing names stay
@@ -840,7 +863,10 @@ def anthropic_tool_definitions(
 
 
 def neutral_tool_definitions(
-    *, include_server_side: bool = True, generation_mode: str = "general"
+    *,
+    include_server_side: bool = True,
+    generation_mode: str = "general",
+    include_media_chat_tools: bool = True,
 ) -> list[dict[str, Any]]:
     """Provider-neutral tool definitions (ADR-033 §4): ``{name(domain dotted), description,
     input_schema}``.
@@ -851,12 +877,15 @@ def neutral_tool_definitions(
     drop project-scoped ``site.*`` when there is no project; ``GLOBAL_SERVER_SIDE_TOOLS`` like
     ``time.now`` are never gated — ADR-026 §3), and so is the ``generation_mode`` gate (ADR-064 §3
     axis C: ``quiz.generate`` only in ``study_learn``; the ``general`` default excludes it).
+    ADR-072: ``include_media_chat_tools=False`` drops ``MEDIA_CHAT_TOOLS``.
     """
     definitions: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
         if not include_server_side and name in SERVER_SIDE_TOOLS:
             continue
         if not offered_in_generation_mode(name, generation_mode):
+            continue
+        if not offered_media_chat_tool(name, include_media_chat_tools=include_media_chat_tools):
             continue
         definitions.append(
             {
@@ -900,7 +929,10 @@ def openai_tool_function(neutral_def: dict[str, Any]) -> dict[str, Any]:
 
 
 def openai_tool_definitions(
-    *, include_server_side: bool = True, generation_mode: str = "general"
+    *,
+    include_server_side: bool = True,
+    generation_mode: str = "general",
+    include_media_chat_tools: bool = True,
 ) -> list[dict[str, Any]]:
     """Tool definitions for the OpenAI Chat Completions API (ADR-033 §4).
 
@@ -908,11 +940,13 @@ def openai_tool_definitions(
     serializes each via ``openai_tool_function`` (the one OpenAI-wire wrapper). The
     ``include_server_side`` gate is identical to ``anthropic_tool_definitions`` (ADR-022 §A;
     ``GLOBAL_SERVER_SIDE_TOOLS`` never gated — ADR-026 §3), and so is the ``generation_mode``
-    axis-C gate (ADR-064 §3).
+    axis-C gate (ADR-064 §3). ADR-072: ``include_media_chat_tools`` mirrors neutral defs.
     """
     return [
         openai_tool_function(d)
         for d in neutral_tool_definitions(
-            include_server_side=include_server_side, generation_mode=generation_mode
+            include_server_side=include_server_side,
+            generation_mode=generation_mode,
+            include_media_chat_tools=include_media_chat_tools,
         )
     ]

@@ -267,6 +267,10 @@ class Settings(BaseSettings):
     # => the whole /v1/media/* surface answers 503 media_generation_not_configured, so the feature
     # is opt-in per instance. Never logged (redaction covers *key* fields).
     fal_api_key: str = Field(default="", alias="FAL_API_KEY")
+    # ADR-072: when False, chat does NOT offer media.ask_params / media.generate_* (and refuses
+    # mediaSelection), while /v1/media/* still works if FAL_API_KEY is set. Default True keeps
+    # prior behaviour on every instance. Per-instance (e.g. ravelumi: REST gallery only).
+    chat_media_tools_enabled: bool = Field(default=True, alias="CHAT_MEDIA_TOOLS_ENABLED")
     # PUBLIC upstream host of the fal QUEUE API (async submit/poll; the sync fal.run host cannot
     # serve minute-long video runs). Fixed server-side — never taken from a request body — and
     # also the allowlist for the polling URLs fal returns (SSRF guard in FalClient).

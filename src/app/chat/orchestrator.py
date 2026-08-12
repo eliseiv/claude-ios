@@ -49,6 +49,7 @@ from app.chat.repository import ChatRepository, derive_title
 from app.chat.tools import (
     ARGS_DEGRADE_TOOLS,
     GLOBAL_SERVER_SIDE_TOOLS,
+    MEDIA_CHAT_TOOLS,
     MUTATING_TOOLS,
     QUIZ_CONSTRAINTS_HINT,
     QUIZ_INVALID_ERROR_CODE,
@@ -61,6 +62,7 @@ from app.chat.tools import (
     content_free_args_error,
     neutral_tool_definitions,
     offered_in_generation_mode,
+    offered_media_chat_tool,
     validate_tool_args,
 )
 from app.config import get_settings
@@ -169,12 +171,7 @@ _CONVERSATION_MEMORY_INSTRUCTION = (
 _SYSTEM_PROMPT_CHAT = (
     "You are a helpful assistant integrated into an iOS app. You can call tools that the "
     "user's device executes locally (files, calendar, reminders). Use tools when needed and "
-    "respond concisely. "
-    + _CONVERSATION_MEMORY_INSTRUCTION
-    + " "
-    + _TIME_NOW_INSTRUCTION
-    + " "
-    + _MEDIA_GENERATE_INSTRUCTION
+    "respond concisely. " + _CONVERSATION_MEMORY_INSTRUCTION + " " + _TIME_NOW_INSTRUCTION
 )
 # Website-builder guidance: gpt-4o tends to "create" images by writing image files with a
 # placeholder string as base64 ("base64 placeholder for dish1.jpg"), which site.write_file rejects
@@ -199,8 +196,6 @@ _SYSTEM_PROMPT_CODE = (
     + _CONVERSATION_MEMORY_INSTRUCTION
     + " "
     + _TIME_NOW_INSTRUCTION
-    + " "
-    + _MEDIA_GENERATE_INSTRUCTION
 )
 
 GenerationBackend = Literal["legacy", "v2"]
@@ -228,8 +223,11 @@ def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") ->
     ``generation_mode`` MUST be the EFFECTIVE mode of the turn, so the legacy path (forced
     ``general``) never carries a mode suffix. Workspace instructions are layered on top of this by
     ``_system_prompt_with_workspace`` and therefore stay LAST (ADR-036 §3).
+    ADR-072: media-generate instruction is appended only when ``CHAT_MEDIA_TOOLS_ENABLED``.
     """
     base = _SYSTEM_PROMPT_CODE if assistant_mode == "code" else _SYSTEM_PROMPT_CHAT
+    if get_settings().chat_media_tools_enabled:
+        base = f"{base} {_MEDIA_GENERATE_INSTRUCTION}"
     if generation_mode == "study_learn":
         return f"{base}\n\n{_STUDY_LEARN_INSTRUCTION}"
     return base
@@ -773,6 +771,11 @@ class ChatOrchestrator:
         if media_selection is not None:
             if not use_generation_v2:
                 raise ValidationFailedError("mediaSelection is only supported on /v1/chat/v2/*")
+            if not get_settings().chat_media_tools_enabled:
+                raise ValidationFailedError(
+                    "media chat tools are disabled on this instance "
+                    "(use /v1/media/* for generation)"
+                )
             return await self._handle_media_selection(
                 user_id=user_id,
                 session_id=sess.id,
@@ -945,6 +948,8 @@ class ChatOrchestrator:
         self, session_id: uuid.UUID, system_prompt: str
     ) -> str:
         """Append the latest chat media jobId so edits use image-to-image (ADR-070)."""
+        if not get_settings().chat_media_tools_enabled:
+            return system_prompt
         last_media = await self._deps.repo.last_media_job_ref(session_id)
         last_image = await self._deps.repo.last_image_job_ref(session_id)
         if last_media is None or not last_media.get("jobId"):
@@ -969,6 +974,8 @@ class ChatOrchestrator:
         self, session_id: uuid.UUID, system_prompt: str
     ) -> str:
         """Hint the model to ask before reusing a photo from recent user messages."""
+        if not get_settings().chat_media_tools_enabled:
+            return system_prompt
         payloads = await self._deps.repo.recent_user_payloads(
             session_id, limit=RECENT_USER_STEPS_SCAN
         )
@@ -1934,6 +1941,7 @@ class ChatOrchestrator:
                 "tools": neutral_tool_definitions(
                     include_server_side=has_project,
                     generation_mode=effective_generation_mode,
+                    include_media_chat_tools=get_settings().chat_media_tools_enabled,
                 ),
                 "attachments": turn0_attachments,
                 "api_key": api_key,
@@ -2381,6 +2389,26 @@ class ChatOrchestrator:
                     execution=ToolExecution.error(
                         "tool_not_available",
                         f"tool {tool_name} is not available in this generation mode",
+                    ),
+                    server_tools=server_tools,
+                )
+                continue
+
+            # ADR-072: media chat tools disabled on this instance (REST /v1/media/* may still work).
+            if tool_name in MEDIA_CHAT_TOOLS and not offered_media_chat_tool(
+                tool_name,
+                include_media_chat_tools=get_settings().chat_media_tools_enabled,
+            ):
+                await self._record_refused_tool_call(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message_step_id=message_step_id,
+                    tool_name=tool_name,
+                    raw_args=raw_args,
+                    provider_tool_use_id=provider_tool_use_id,
+                    execution=ToolExecution.error(
+                        "tool_not_available",
+                        f"tool {tool_name} is not available on this instance",
                     ),
                     server_tools=server_tools,
                 )

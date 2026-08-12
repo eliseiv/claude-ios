@@ -88,9 +88,48 @@ def test_media_tools_offered_in_every_mode_with_and_without_project() -> None:
     assert with_project == set(TOOLS_OFFERED_IN_EVERY_MODE)
 
 
-def test_system_prompts_include_media_instruction() -> None:
-    assert _MEDIA_GENERATE_INSTRUCTION in _SYSTEM_PROMPT_CHAT
-    assert _MEDIA_GENERATE_INSTRUCTION in _SYSTEM_PROMPT_CODE
+def test_system_prompts_include_media_instruction_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.chat.orchestrator import _system_prompt_for
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("CHAT_MEDIA_TOOLS_ENABLED", "true")
+    get_settings.cache_clear()
+    assert _MEDIA_GENERATE_INSTRUCTION in _system_prompt_for("chat")
+    assert _MEDIA_GENERATE_INSTRUCTION in _system_prompt_for("code")
+    # Base constants stay free of media copy so ADR-072 can omit it per instance.
+    assert _MEDIA_GENERATE_INSTRUCTION not in _SYSTEM_PROMPT_CHAT
+    assert _MEDIA_GENERATE_INSTRUCTION not in _SYSTEM_PROMPT_CODE
+    get_settings.cache_clear()
+
+
+def test_system_prompts_omit_media_instruction_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.chat.orchestrator import _system_prompt_for
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("CHAT_MEDIA_TOOLS_ENABLED", "false")
+    get_settings.cache_clear()
+    assert _MEDIA_GENERATE_INSTRUCTION not in _system_prompt_for("chat")
+    assert _MEDIA_GENERATE_INSTRUCTION not in _system_prompt_for("code")
+    get_settings.cache_clear()
+
+
+def test_media_chat_tools_hidden_when_include_false() -> None:
+    from app.chat.tools import TOOL_MEDIA_ASK_PARAMS, TOOL_TIME_NOW
+
+    names = {
+        to_domain_tool_name(d["name"])
+        for d in anthropic_tool_definitions(include_media_chat_tools=False)
+    }
+    assert TOOL_MEDIA_GENERATE_IMAGE not in names
+    assert TOOL_MEDIA_GENERATE_VIDEO not in names
+    assert TOOL_MEDIA_ASK_PARAMS not in names
+    assert TOOL_TIME_NOW in names
 
 
 def test_validate_image_args_rejects_exclusive_refs() -> None:
