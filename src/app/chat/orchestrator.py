@@ -144,7 +144,8 @@ _MEDIA_GENERATE_INSTRUCTION = (
     "edits when quality is unclear. "
     "Exception — video after a previously GENERATED photo in this chat (not a user attachment): "
     "call media.ask_params for kind=video WITHOUT sourceJobId and WITHOUT useRecentImage. The "
-    "app shows a Yes/No card «Использовать последнее фото?» (same mediaChoices UI as duration/resolution). "
+    "app shows a Yes/No card «Использовать последнее фото?» "
+    "(same mediaChoices UI as duration/resolution). "
     "Do not ask that Yes/No in plain text for a generated photo — only the choices card."
 )
 

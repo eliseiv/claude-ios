@@ -225,7 +225,11 @@ class GlobalToolHandlers:
             image_urls = urls
 
         # Offer «Использовать последнее фото?» only when starting video without a chosen reference.
-        offer_last = last_image_job_id if (kind == "video" and not source_job_id and not image_urls) else None
+        offer_last = (
+            last_image_job_id
+            if (kind == "video" and not source_job_id and not image_urls)
+            else None
+        )
 
         def _credits(model: Any) -> int:
             if self._media is not None:

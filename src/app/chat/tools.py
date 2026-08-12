@@ -598,7 +598,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "the provider runs image-to-image / image-to-video instead of a new text-to-* render. "
         "Exception: when starting a video after a previously GENERATED photo in this chat, omit "
         "sourceJobId and useRecentImage — the app shows a Yes/No mediaChoices card "
-        "«Использовать последнее фото?» before model/duration. Do not ask that Yes/No in plain text. "
+        "«Использовать последнее фото?» before model/duration. Do not ask that "
+        "Yes/No in plain text. "
         "Do NOT invent model ids or resolutions — the app shows catalog options. After this tool, "
         "wait for the user to tap; do not call media.generate_* in the same turn."
     ),

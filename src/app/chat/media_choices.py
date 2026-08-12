@@ -137,12 +137,15 @@ def next_step_id(
     last_image_job_id: str | None = None,
 ) -> str | None:
     """Return the next unanswered step id, or None when the wizard is complete."""
-    if offers_use_last_image(
-        kind=kind,
-        source_job_id=source_job_id,
-        image_urls=image_urls,
-        last_image_job_id=last_image_job_id,
-    ) and STEP_USE_LAST_IMAGE not in answers:
+    if (
+        offers_use_last_image(
+            kind=kind,
+            source_job_id=source_job_id,
+            image_urls=image_urls,
+            last_image_job_id=last_image_job_id,
+        )
+        and STEP_USE_LAST_IMAGE not in answers
+    ):
         return STEP_USE_LAST_IMAGE
 
     eff_source = effective_source_job_id(
@@ -374,7 +377,9 @@ def build_wizard_state(
 ) -> dict[str, Any] | None:
     """Persisted wizard state for the next question, or None when ready to submit."""
     urls = [u for u in (image_urls or []) if isinstance(u, str) and u]
-    last_id = last_image_job_id if isinstance(last_image_job_id, str) and last_image_job_id else None
+    last_id = (
+        last_image_job_id if isinstance(last_image_job_id, str) and last_image_job_id else None
+    )
     built = build_step_questions(
         kind=kind,
         answers=answers,
