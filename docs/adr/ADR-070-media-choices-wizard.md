@@ -68,6 +68,7 @@ Execution: создать `selectionId`, первый шаг (`model`), persist 
 - Правки предыдущей генерации: `sourceJobId` (иначе text-to-* заново). System prompt + hint `Most recent media job… sourceJobId=…`.
 - Фото **из текущего сообщения** (chat attachment, ADR-020): при `media.ask_params` / `media.generate_*` без `sourceJobId` бэкенд сам заливает attachment на fal (`POST` upload) и кладёт https в `imageUrls` визарда / submit — image-to-image без участия модели в URL. Base64 в `chat_steps` не пишется. Workspace knowledge files не используются как reference.
 - Фото из **недавних** user-сообщений: при upload пишется `attachmentRefs` (TTL 1 день, [ADR-071](ADR-071-chat-attachment-refs-and-history-pagination.md)); перед генерацией без нового attach модель **спрашивает**; после «да» — `useRecentImage: true`.
+- **Видео после сгенерированного фото в чате:** `media.ask_params` с `kind=video` **без** `sourceJobId` / `useRecentImage`. Первый шаг визарда — `useLastImage` («Использовать последнее фото?» Да/Нет), тот же UI что у resolution/duration. Да → submit с `sourceJobId` = последний image job; Нет → text-to-video. Если LLM уже передал `sourceJobId` или есть attachment URLs — карточка пропускается.
 
 ### 6. Не меняется
 

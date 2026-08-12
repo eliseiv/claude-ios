@@ -119,6 +119,7 @@ class GlobalToolHandlers:
         user_id: uuid.UUID | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
+        last_image_job_id: str | None = None,
     ) -> ToolExecution:
         """Execute a global server-side tool. Returns a ToolExecution (result or error envelope)."""
         if tool_name == TOOL_TIME_NOW:
@@ -127,7 +128,10 @@ class GlobalToolHandlers:
             return self._quiz_generate(args)
         if tool_name == TOOL_MEDIA_ASK_PARAMS:
             return await self._media_ask_params(
-                args, turn_images=turn_images, recent_image_urls=recent_image_urls
+                args,
+                turn_images=turn_images,
+                recent_image_urls=recent_image_urls,
+                last_image_job_id=last_image_job_id,
             )
         if tool_name == TOOL_MEDIA_GENERATE_IMAGE:
             return await self._media_generate(
@@ -189,6 +193,7 @@ class GlobalToolHandlers:
         *,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
+        last_image_job_id: str | None = None,
     ) -> ToolExecution:
         """Start a mediaChoices wizard; options come only from the server catalog (ADR-070)."""
         kind = str(args.get("kind") or "")
@@ -219,6 +224,9 @@ class GlobalToolHandlers:
                 )
             image_urls = urls
 
+        # Offer «Использовать последнее фото?» only when starting video without a chosen reference.
+        offer_last = last_image_job_id if (kind == "video" and not source_job_id and not image_urls) else None
+
         def _credits(model: Any) -> int:
             if self._media is not None:
                 return self._media.credits_for(model)
@@ -232,6 +240,7 @@ class GlobalToolHandlers:
                 prompt=prompt,
                 source_job_id=source_job_id,
                 image_urls=image_urls or None,
+                last_image_job_id=offer_last,
                 answers={},
                 credits_for=_credits,
             )

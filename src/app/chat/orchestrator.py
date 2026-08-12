@@ -141,7 +141,11 @@ _MEDIA_GENERATE_INSTRUCTION = (
     "video in this chat, you MUST pass sourceJobId set to that job's jobId from history "
     "(tool results or assistant mediaJobs). Without sourceJobId (and with no attachment) the "
     "provider starts a NEW unrelated generation. Prefer media.ask_params with sourceJobId for "
-    "edits when quality is unclear."
+    "edits when quality is unclear. "
+    "Exception — video after a previously GENERATED photo in this chat (not a user attachment): "
+    "call media.ask_params for kind=video WITHOUT sourceJobId and WITHOUT useRecentImage. The "
+    "app shows a Yes/No card «Использовать последнее фото?» (same mediaChoices UI as duration/resolution). "
+    "Do not ask that Yes/No in plain text for a generated photo — only the choices card."
 )
 
 # ADR-059: state, in the system prompt, that the assistant has the full conversation so far and
@@ -941,15 +945,24 @@ class ChatOrchestrator:
     ) -> str:
         """Append the latest chat media jobId so edits use image-to-image (ADR-070)."""
         last_media = await self._deps.repo.last_media_job_ref(session_id)
+        last_image = await self._deps.repo.last_image_job_ref(session_id)
         if last_media is None or not last_media.get("jobId"):
             return system_prompt
         job_id = last_media["jobId"]
         kind = last_media.get("kind", "image")
-        return (
+        hint = (
             f"{system_prompt}\n\nMost recent media job in this chat: "
             f"jobId={job_id} kind={kind}. "
             f"For edits/refinements of that media, pass sourceJobId={job_id}."
         )
+        if last_image is not None and last_image.get("jobId"):
+            img_id = last_image["jobId"]
+            hint += (
+                f" Most recent generated photo jobId={img_id}. When the user asks for a video "
+                "based on that photo, call media.ask_params kind=video WITHOUT sourceJobId "
+                "(the app asks «Использовать последнее фото?» via mediaChoices)."
+            )
+        return hint
 
     async def _system_prompt_with_recent_photo(
         self, session_id: uuid.UUID, system_prompt: str
@@ -1000,6 +1013,7 @@ class ChatOrchestrator:
         """
         from app.chat.media_choices import (
             build_wizard_state,
+            effective_source_job_id,
             format_selection_summary,
             media_choices_response,
             submit_params_from_answers,
@@ -1024,6 +1038,8 @@ class ChatOrchestrator:
         prompt = str(prior.get("prompt") or "")
         source_job_id = prior.get("sourceJobId")
         source_job_id_str = str(source_job_id) if source_job_id else None
+        raw_last = prior.get("lastImageJobId")
+        last_image_job_id = str(raw_last) if raw_last else None
         raw_urls = prior.get("imageUrls")
         image_urls = (
             [str(u) for u in raw_urls if isinstance(u, str) and u]
@@ -1038,6 +1054,7 @@ class ChatOrchestrator:
                 kind=kind,
                 source_job_id=source_job_id_str,
                 image_urls=image_urls or None,
+                last_image_job_id=last_image_job_id,
                 existing={str(k): str(v) for k, v in existing_answers.items()},
                 incoming=incoming,
             )
@@ -1057,6 +1074,7 @@ class ChatOrchestrator:
             prompt=prompt,
             source_job_id=source_job_id_str,
             image_urls=image_urls or None,
+            last_image_job_id=last_image_job_id,
             answers=merged,
             credits_for=_credits,
         )
@@ -1086,7 +1104,12 @@ class ChatOrchestrator:
         if not model_id:
             raise ValidationFailedError("mediaSelection is missing model")
         params = submit_params_from_answers(merged)
-        source_uuid = uuid.UUID(source_job_id_str) if source_job_id_str else None
+        eff_source = effective_source_job_id(
+            source_job_id=source_job_id_str,
+            last_image_job_id=last_image_job_id,
+            answers=merged,
+        )
+        source_uuid = uuid.UUID(eff_source) if eff_source else None
         try:
             view = await media_svc.submit(
                 user_id=user_id,
@@ -1121,7 +1144,7 @@ class ChatOrchestrator:
             kind=kind,
             answers=merged,
             credits_charged=job.credits_charged,
-            source_job_id=source_job_id_str,
+            source_job_id=eff_source,
         )
         await self._deps.repo.patch_media_ask_params_result(
             session_id,
@@ -1142,6 +1165,7 @@ class ChatOrchestrator:
                     "kind": kind,
                     "prompt": prompt,
                     "sourceJobId": source_job_id_str,
+                    "lastImageJobId": last_image_job_id,
                     "imageUrls": image_urls,
                     "answers": merged,
                     "step": "done",
@@ -1874,6 +1898,12 @@ class ChatOrchestrator:
         # Same-turn image attachments stay available for media tools (upload → image-to-image).
         turn_images = list(first_turn_attachments.images) if first_turn_attachments else []
         recent_image_urls = await self._recent_image_urls_for_session(session_id)
+        last_image_ref = await self._deps.repo.last_image_job_ref(session_id)
+        last_image_job_id = (
+            str(last_image_ref["jobId"])
+            if last_image_ref is not None and last_image_ref.get("jobId")
+            else None
+        )
         for _ in range(max_rounds + 1):
             messages = await self._build_messages(session_id)
             sess = await self._session.get(ChatSession, session_id)
@@ -2001,6 +2031,7 @@ class ChatOrchestrator:
                     media_choices_accumulator=media_choices_accumulator,
                     turn_images=turn_images,
                     recent_image_urls=recent_image_urls,
+                    last_image_job_id=last_image_job_id,
                 )
                 # Persist the tool_use step + tool_calls + tool_results + audit (no billing here).
                 await self._session.commit()
@@ -2272,6 +2303,7 @@ class ChatOrchestrator:
         media_choices_accumulator: _MediaChoicesAccumulator | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
+        last_image_job_id: str | None = None,
     ) -> _TurnOutcome:
         """Process a tool_use turn (ADR-008/011): persist tool_calls, branch server/client-side.
 
@@ -2421,6 +2453,7 @@ class ChatOrchestrator:
                     server_tools=server_tools,
                     turn_images=turn_images,
                     recent_image_urls=recent_image_urls,
+                    last_image_job_id=last_image_job_id,
                 )
                 if (
                     tool_name == TOOL_QUIZ_GENERATE
@@ -2576,6 +2609,7 @@ class ChatOrchestrator:
         server_tools: list[ServerToolExecutionOut],
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
+        last_image_job_id: str | None = None,
     ) -> ToolExecution:
         """Execute a global server-side tool (time.now, quiz.generate) on the backend (ADR-026 §4).
 
@@ -2597,6 +2631,7 @@ class ChatOrchestrator:
             user_id=user_id,
             turn_images=turn_images,
             recent_image_urls=recent_image_urls,
+            last_image_job_id=last_image_job_id,
         )
         await self._persist_tool_execution(
             user_id=user_id,

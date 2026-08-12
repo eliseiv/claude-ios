@@ -5,6 +5,9 @@ LLM. One question per response so cascading enums (resolution depends on model) 
 
 Priced options (resolution / duration / audio) show the estimated credit cost in the label so the
 user sees that 1K/2K/4K are not the same price.
+
+When starting a **video** wizard and the chat has a prior generated image, the first card asks
+``useLastImage`` (Да/Нет) — same UI as duration/resolution — before model/params.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from typing import Any
 from app.media_generation.catalog import FalModel, FalVariant, find_model, models_of_kind, run_price
 
 # Wizard step ids (= question.id and answers keys).
+STEP_USE_LAST_IMAGE = "useLastImage"
 STEP_MODEL = "model"
 STEP_RESOLUTION = "resolution"
 STEP_DURATION = "duration"
@@ -22,6 +26,7 @@ STEP_GENERATE_AUDIO = "generateAudio"
 STEP_ASPECT_RATIO = "aspectRatio"
 
 _STEP_QUESTIONS: dict[str, str] = {
+    STEP_USE_LAST_IMAGE: "Использовать последнее фото?",
     STEP_MODEL: "Choose a model",
     STEP_RESOLUTION: "Choose a resolution",
     STEP_DURATION: "Choose a duration",
@@ -57,6 +62,35 @@ def _priced_question_title(step: str, options: list[dict[str, Any]]) -> str:
     if not bits:
         return _STEP_QUESTIONS[step]
     return f"{_STEP_QUESTIONS[step]} ({', '.join(bits)})"
+
+
+def offers_use_last_image(
+    *,
+    kind: str,
+    source_job_id: str | None,
+    image_urls: list[str] | None,
+    last_image_job_id: str | None,
+) -> bool:
+    """True when the wizard should open with the «Использовать последнее фото?» Да/Нет card."""
+    if kind != "video":
+        return False
+    if source_job_id or image_urls:
+        return False
+    return bool(last_image_job_id)
+
+
+def effective_source_job_id(
+    *,
+    source_job_id: str | None,
+    last_image_job_id: str | None,
+    answers: Mapping[str, str],
+) -> str | None:
+    """Resolve sourceJobId for variant selection / submit after useLastImage answers."""
+    if source_job_id:
+        return source_job_id
+    if answers.get(STEP_USE_LAST_IMAGE) == "true" and last_image_job_id:
+        return last_image_job_id
+    return None
 
 
 def _with_image(source_job_id: str | None, image_urls: list[str] | None = None) -> bool:
@@ -100,14 +134,29 @@ def next_step_id(
     kind: str,
     source_job_id: str | None,
     image_urls: list[str] | None = None,
+    last_image_job_id: str | None = None,
 ) -> str | None:
     """Return the next unanswered step id, or None when the wizard is complete."""
+    if offers_use_last_image(
+        kind=kind,
+        source_job_id=source_job_id,
+        image_urls=image_urls,
+        last_image_job_id=last_image_job_id,
+    ) and STEP_USE_LAST_IMAGE not in answers:
+        return STEP_USE_LAST_IMAGE
+
+    eff_source = effective_source_job_id(
+        source_job_id=source_job_id,
+        last_image_job_id=last_image_job_id,
+        answers=answers,
+    )
+
     if STEP_MODEL not in answers:
         return STEP_MODEL
     model = find_model(answers[STEP_MODEL])
     if model is None or model.kind != kind:
         return STEP_MODEL
-    variant = _variant_for(model, source_job_id=source_job_id, image_urls=image_urls)
+    variant = _variant_for(model, source_job_id=eff_source, image_urls=image_urls)
     if variant is None:
         return STEP_MODEL
     if variant.resolutions and STEP_RESOLUTION not in answers:
@@ -132,11 +181,31 @@ def build_step_questions(
     source_job_id: str | None,
     credits_for: Callable[[FalModel], int],
     image_urls: list[str] | None = None,
+    last_image_job_id: str | None = None,
 ) -> tuple[str, list[dict[str, Any]]] | None:
     """Build (step, questions[]) for the next wizard step, or None if ready to submit."""
-    step = next_step_id(answers, kind=kind, source_job_id=source_job_id, image_urls=image_urls)
+    step = next_step_id(
+        answers,
+        kind=kind,
+        source_job_id=source_job_id,
+        image_urls=image_urls,
+        last_image_job_id=last_image_job_id,
+    )
     if step is None:
         return None
+
+    if step == STEP_USE_LAST_IMAGE:
+        options = [
+            _option("true", "Да"),
+            _option("false", "Нет"),
+        ]
+        return step, [_question(STEP_USE_LAST_IMAGE, options)]
+
+    eff_source = effective_source_job_id(
+        source_job_id=source_job_id,
+        last_image_job_id=last_image_job_id,
+        answers=answers,
+    )
 
     if step == STEP_MODEL:
         options = []
@@ -150,7 +219,7 @@ def build_step_questions(
     model = find_model(answers[STEP_MODEL])
     if model is None or model.kind != kind:
         raise ValueError("selected model is not available")
-    variant = _variant_for(model, source_job_id=source_job_id, image_urls=image_urls)
+    variant = _variant_for(model, source_job_id=eff_source, image_urls=image_urls)
     if variant is None:
         raise ValueError("selected model does not support this reference mode")
     base = credits_for(model)
@@ -210,10 +279,17 @@ def allowed_values_for_step(
     answers_before: Mapping[str, str],
     source_job_id: str | None,
     image_urls: list[str] | None = None,
+    last_image_job_id: str | None = None,
 ) -> set[str]:
     """Catalog allowlist for ``step`` given answers already accepted before it."""
     if (
-        next_step_id(answers_before, kind=kind, source_job_id=source_job_id, image_urls=image_urls)
+        next_step_id(
+            answers_before,
+            kind=kind,
+            source_job_id=source_job_id,
+            image_urls=image_urls,
+            last_image_job_id=last_image_job_id,
+        )
         != step
     ):
         return set()
@@ -222,6 +298,7 @@ def allowed_values_for_step(
         answers=answers_before,
         source_job_id=source_job_id,
         image_urls=image_urls,
+        last_image_job_id=last_image_job_id,
         credits_for=lambda m: m.default_credits,
     )
     if built is None or built[0] != step:
@@ -244,6 +321,7 @@ def validate_and_merge_answers(
     existing: Mapping[str, str],
     incoming: Mapping[str, Any],
     image_urls: list[str] | None = None,
+    last_image_job_id: str | None = None,
 ) -> dict[str, str]:
     """Merge ``incoming`` into ``existing`` along the wizard order; catalog-check every value."""
     candidate: dict[str, str] = dict(existing)
@@ -256,7 +334,13 @@ def validate_and_merge_answers(
 
     built: dict[str, str] = {}
     while True:
-        step = next_step_id(built, kind=kind, source_job_id=source_job_id, image_urls=image_urls)
+        step = next_step_id(
+            built,
+            kind=kind,
+            source_job_id=source_job_id,
+            image_urls=image_urls,
+            last_image_job_id=last_image_job_id,
+        )
         if step is None or step not in candidate:
             break
         allowed = allowed_values_for_step(
@@ -265,6 +349,7 @@ def validate_and_merge_answers(
             answers_before=built,
             source_job_id=source_job_id,
             image_urls=image_urls,
+            last_image_job_id=last_image_job_id,
         )
         value = candidate[step]
         if value not in allowed:
@@ -285,14 +370,17 @@ def build_wizard_state(
     answers: Mapping[str, str],
     credits_for: Callable[[FalModel], int],
     image_urls: list[str] | None = None,
+    last_image_job_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Persisted wizard state for the next question, or None when ready to submit."""
     urls = [u for u in (image_urls or []) if isinstance(u, str) and u]
+    last_id = last_image_job_id if isinstance(last_image_job_id, str) and last_image_job_id else None
     built = build_step_questions(
         kind=kind,
         answers=answers,
         source_job_id=source_job_id,
         image_urls=urls or None,
+        last_image_job_id=last_id,
         credits_for=credits_for,
     )
     if built is None:
@@ -303,6 +391,7 @@ def build_wizard_state(
         "kind": kind,
         "prompt": prompt,
         "sourceJobId": source_job_id,
+        "lastImageJobId": last_id,
         "imageUrls": urls,
         "answers": dict(answers),
         "step": step,
@@ -358,7 +447,7 @@ def format_selection_summary(
             parts.append(answers[key])
     if STEP_GENERATE_AUDIO in answers:
         parts.append("audio" if answers[STEP_GENERATE_AUDIO] == "true" else "silent")
+    if answers.get(STEP_USE_LAST_IMAGE) == "true" or source_job_id:
+        parts.append("from photo")
     parts.append(f"{credits_charged} cr.")
-    if source_job_id:
-        parts.append("edit")
     return "Media: " + " · ".join(parts)

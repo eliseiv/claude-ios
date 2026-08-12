@@ -184,3 +184,138 @@ async def test_media_choices_wizard_to_job(
     ]
     assert len(assistant_with_jobs) == 1
     assert assistant_with_jobs[0]["payload"]["mediaJobs"][0]["jobId"] == job_id
+
+
+@pytest.mark.asyncio
+async def test_video_wizard_asks_use_last_photo_after_image_job(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
+    fal_ready: None,
+) -> None:
+    """After a generated photo, video ask_params opens with Use-the-last-photo Yes/No card."""
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s, subscription="active", balance=80)
+
+    fake_anthropic.responses = [
+        fake_anthropic.tool_result(
+            "media.generate_image",
+            {"model": "nano-banana-2", "prompt": "an owl", "resolution": "1K"},
+            tool_id="toolu_img_owl01",
+        ),
+        fake_anthropic.text_result("Started your owl photo."),
+        fake_anthropic.tool_result(
+            "media.ask_params",
+            {"kind": "video", "prompt": "owl blinks"},
+            tool_id="toolu_ask_vid01",
+        ),
+        fake_anthropic.text_result("Choose options for the video."),
+    ]
+
+    r_img = await client.post(
+        "/v1/chat/v2/run",
+        json={"userId": str(uid), "message": "photo of an owl", "mode": "credits"},
+        headers=auth_headers(uid),
+    )
+    assert r_img.status_code == 200, r_img.text
+    body_img = r_img.json()
+    session_id = body_img["sessionId"]
+    image_job_id = body_img["mediaJobs"][0]["jobId"]
+
+    r_vid = await client.post(
+        "/v1/chat/v2/run",
+        json={
+            "userId": str(uid),
+            "sessionId": session_id,
+            "message": "make a video from that photo",
+            "mode": "credits",
+        },
+        headers=auth_headers(uid),
+    )
+    assert r_vid.status_code == 200, r_vid.text
+    body_vid = r_vid.json()
+    choices = body_vid.get("mediaChoices")
+    assert choices is not None
+    assert choices["kind"] == "video"
+    assert choices["step"] == "useLastImage"
+    q = choices["questions"][0]
+    assert q["question"] == "Использовать последнее фото?"
+    assert {o["value"]: o["label"] for o in q["options"]} == {"true": "Да", "false": "Нет"}
+    selection_id = choices["selectionId"]
+
+    r_yes = await client.post(
+        "/v1/chat/v2/run",
+        json={
+            "userId": str(uid),
+            "sessionId": session_id,
+            "message": "",
+            "mode": "credits",
+            "mediaSelection": {
+                "selectionId": selection_id,
+                "answers": {"useLastImage": "true"},
+            },
+        },
+        headers=auth_headers(uid),
+    )
+    assert r_yes.status_code == 200, r_yes.text
+    body_yes = r_yes.json()
+    assert body_yes["mediaChoices"]["step"] == "model"
+    assert body_yes.get("mediaJobs") is None
+
+    # sourceJobId submit requires a completed parent image with output URLs.
+    async with db_sessionmaker() as s:
+        from sqlalchemy import text
+
+        await s.execute(
+            text(
+                "UPDATE media_jobs SET status = 'completed', "
+                "result = CAST(:r AS jsonb) WHERE id = :id"
+            ),
+            {
+                "id": image_job_id,
+                "r": (
+                    '{"assets":[{"url":"https://fal.media/files/test/owl.png",'
+                    '"contentType":"image/png"}]}'
+                ),
+            },
+        )
+        await s.commit()
+
+    # Finish with a known video model path (model → … → job); sourceJobId must be the image job.
+    answers: dict[str, str] = {"useLastImage": "true", "model": "kling-video"}
+    # Walk remaining steps until submit.
+    for _ in range(8):
+        r_step = await client.post(
+            "/v1/chat/v2/run",
+            json={
+                "userId": str(uid),
+                "sessionId": session_id,
+                "message": "",
+                "mode": "credits",
+                "mediaSelection": {"selectionId": selection_id, "answers": answers},
+            },
+            headers=auth_headers(uid),
+        )
+        assert r_step.status_code == 200, r_step.text
+        step_body = r_step.json()
+        if step_body.get("mediaJobs"):
+            break
+        next_choices = step_body["mediaChoices"]
+        step_id = next_choices["step"]
+        first_opt = next_choices["questions"][0]["options"][0]["value"]
+        answers[step_id] = first_opt
+    else:
+        raise AssertionError("wizard did not complete")
+
+    jobs = step_body["mediaJobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["kind"] == "video"
+    # Submitted image-to-video must reference the prior photo job (server-side).
+    async with db_sessionmaker() as s:
+        from sqlalchemy import text
+
+        src = await s.scalar(
+            text("SELECT parent_job_id::text FROM media_jobs WHERE id = :id"),
+            {"id": jobs[0]["jobId"]},
+        )
+    assert src == image_job_id

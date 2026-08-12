@@ -325,6 +325,15 @@ class ChatRepository:
 
         Used to steer edit follow-ups toward image-to-image via ``sourceJobId``.
         """
+        return await self._last_media_job_ref(session_id, kind=None)
+
+    async def last_image_job_ref(self, session_id: uuid.UUID) -> dict[str, Any] | None:
+        """Most recent **image** media job in this chat (for Use-last-photo video wizard step)."""
+        return await self._last_media_job_ref(session_id, kind="image")
+
+    async def _last_media_job_ref(
+        self, session_id: uuid.UUID, *, kind: str | None
+    ) -> dict[str, Any] | None:
         from app.chat.tools import TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO
 
         generate_tools = {TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO}
@@ -335,12 +344,18 @@ class ChatRepository:
                 jobs = payload.get("mediaJobs")
                 if isinstance(jobs, list):
                     for job in reversed(jobs):
-                        if isinstance(job, dict) and job.get("jobId"):
-                            return job
+                        if not isinstance(job, dict) or not job.get("jobId"):
+                            continue
+                        if kind is not None and job.get("kind") != kind:
+                            continue
+                        return job
             if step.role == "tool" and payload.get("toolName") in generate_tools:
                 result = payload.get("result")
-                if isinstance(result, dict) and result.get("jobId"):
-                    return result
+                if not isinstance(result, dict) or not result.get("jobId"):
+                    continue
+                if kind is not None and result.get("kind") != kind:
+                    continue
+                return result
         return None
 
     async def last_tool_result_for_message_step(
