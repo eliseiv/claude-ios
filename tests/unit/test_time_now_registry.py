@@ -87,10 +87,17 @@ def test_both_system_prompts_contain_time_now_instruction() -> None:
 
 
 def test_system_prompt_is_static_no_date_interpolated() -> None:
-    # prompt-cache invariant: the instruction is the SAME object every call (no date injected),
+    # prompt-cache invariant: the instruction is the SAME every call (no date injected),
     # so the cached system prefix never changes between requests.
-    assert _system_prompt_for("chat") == _SYSTEM_PROMPT_CHAT
-    assert _system_prompt_for("chat") == _system_prompt_for("chat")
+    # ADR-072: media instruction is layered by settings, not baked into _SYSTEM_PROMPT_CHAT.
+    from app.chat.orchestrator import _MEDIA_GENERATE_INSTRUCTION
+    from app.config import get_settings
+
+    chat = _system_prompt_for("chat")
+    assert chat.startswith(_SYSTEM_PROMPT_CHAT)
+    if get_settings().chat_media_tools_enabled:
+        assert _MEDIA_GENERATE_INSTRUCTION in chat
+    assert chat == _system_prompt_for("chat")
     # No 4-digit year is hardcoded into the static instruction (the date arrives via tool_result).
     import re
 
