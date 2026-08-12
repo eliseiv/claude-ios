@@ -87,16 +87,32 @@ async def list_chats(
     "/{chat_id}",
     response_model=ChatHistoryResponse,
     summary="История чата",
-    description="История шагов чата (упорядочены по времени). Чужой/несуществующий чат → 404.",
+    description=(
+        "История шагов чата (порядок по `seq ASC`). Без query — вся история. "
+        "`limit` (1–100) — страница: первая отдача = последние N шагов; `nextCursor` → более "
+        "старые. Невалидный `cursor` → 422. Чужой/несуществующий чат → 404."
+    ),
 )
 async def get_chat(
     request: Request,
     current: CurrentUser,
     chats: Annotated[ChatsService, Depends(get_chats_service)],
     chat_id: Annotated[uuid.UUID, Path(description="Идентификатор чата.")],
+    limit: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            le=100,
+            description="Размер страницы. Без параметра — вся история (обратная совместимость).",
+        ),
+    ] = None,
+    cursor: Annotated[
+        str | None,
+        Query(description="Курсор более старой страницы — `nextCursor` из предыдущего ответа."),
+    ] = None,
 ) -> ChatHistoryResponse:
     await _rate_limit(current.user_id)
-    view = await chats.get_history(chat_id, current.user_id)
+    view = await chats.get_history(chat_id, current.user_id, limit=limit, cursor=cursor)
     return ChatHistoryResponse(
         id=view.id,
         title=view.title,
@@ -113,6 +129,7 @@ async def get_chat(
             )
             for step in view.steps
         ],
+        nextCursor=view.next_cursor,
     )
 
 

@@ -18,7 +18,7 @@ from sqlalchemy import CursorResult, Integer, and_, delete, func, or_, select
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.chats.cursor import ChatCursor
+from app.chats.cursor import ChatCursor, ChatHistoryCursor
 from app.chats.provider_blocks import to_domain_blocks
 from app.models import ChatSession, ChatStep, ToolCall
 
@@ -207,7 +207,61 @@ class ChatsRepository:
             await self._session.scalars(
                 select(ChatStep)
                 .where(ChatStep.session_id == session_id)
-                .order_by(ChatStep.created_at, ChatStep.id)
+                .order_by(ChatStep.seq.asc(), ChatStep.id.asc())
+            )
+        )
+
+    async def list_steps_page(
+        self,
+        session_id: uuid.UUID,
+        *,
+        limit: int,
+        cursor: ChatHistoryCursor | None,
+    ) -> tuple[list[ChatStep], str | None]:
+        """Newest-page-first history window, returned in ``seq ASC`` order.
+
+        Without ``cursor``: the latest ``limit`` steps. With ``cursor``: the next older page
+        before that keyset. ``next_cursor`` is set when still-older steps exist.
+        """
+        filters = [ChatStep.session_id == session_id]
+        if cursor is not None:
+            filters.append(
+                or_(
+                    ChatStep.seq < cursor.seq,
+                    and_(ChatStep.seq == cursor.seq, ChatStep.id < cursor.id),
+                )
+            )
+        rows = list(
+            await self._session.scalars(
+                select(ChatStep)
+                .where(*filters)
+                .order_by(ChatStep.seq.desc(), ChatStep.id.desc())
+                .limit(limit + 1)
+            )
+        )
+        has_more = len(rows) > limit
+        page_desc = rows[:limit]
+        page = list(reversed(page_desc))
+        next_cursor: str | None = None
+        if has_more and page:
+            oldest = page[0]
+            next_cursor = ChatHistoryCursor(seq=oldest.seq, id=oldest.id).encode()
+        return page, next_cursor
+
+    async def list_steps_for_message_steps(
+        self, session_id: uuid.UUID, message_step_ids: set[uuid.UUID]
+    ) -> list[ChatStep]:
+        """All steps belonging to the given turns (for mediaJobs enrichment on a page)."""
+        if not message_step_ids:
+            return []
+        return list(
+            await self._session.scalars(
+                select(ChatStep)
+                .where(
+                    ChatStep.session_id == session_id,
+                    ChatStep.message_step_id.in_(message_step_ids),
+                )
+                .order_by(ChatStep.seq.asc(), ChatStep.id.asc())
             )
         )
 
@@ -215,7 +269,7 @@ class ChatsRepository:
         row: uuid.UUID | None = await self._session.scalar(
             select(ChatStep.message_step_id)
             .where(ChatStep.session_id == session_id)
-            .order_by(ChatStep.created_at.desc(), ChatStep.id.desc())
+            .order_by(ChatStep.seq.desc(), ChatStep.id.desc())
             .limit(1)
         )
         return row
@@ -230,7 +284,7 @@ class ChatsRepository:
                     ChatStep.session_id == session_id,
                     ChatStep.message_step_id == message_step_id,
                 )
-                .order_by(ChatStep.created_at, ChatStep.id)
+                .order_by(ChatStep.seq.asc(), ChatStep.id.asc())
             )
         )
 

@@ -305,6 +305,21 @@ class ChatRepository:
             return step_row
         return None
 
+    async def recent_user_payloads(
+        self, session_id: uuid.UUID, *, limit: int = 30
+    ) -> list[dict[str, Any]]:
+        """Newest-first user-step payloads (for recent chat-photo reuse / ask-first hint)."""
+        steps = await self.list_steps(session_id)
+        payloads: list[dict[str, Any]] = []
+        for step in reversed(steps):
+            if step.role != "user":
+                continue
+            if isinstance(step.payload, dict):
+                payloads.append(step.payload)
+            if len(payloads) >= limit:
+                break
+        return payloads
+
     async def last_media_job_ref(self, session_id: uuid.UUID) -> dict[str, Any] | None:
         """Most recent media jobId recorded in this chat (assistant mediaJobs or generate_* result).
 

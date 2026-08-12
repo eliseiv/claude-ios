@@ -16,6 +16,8 @@
 - [09-testing.md](09-testing.md)
 
 > Байты результата и лента `/v1/media/*` живут в модуле media (не в `chat_steps`). Сабмит из чата — через global tools `media.generate_image` / `media.generate_video` ([ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)): tool только ставит задачу и отдаёт `jobId` в `ChatResponse.mediaJobs`; ожидание fal в tool-loop запрещено. Пикер параметров в чате — `media.ask_params` → `ChatResponse.mediaChoices` / `mediaSelection` ([ADR-070](../../adr/ADR-070-media-choices-wizard.md)); options только из `catalog.py`. Контракт `/v1/media/*` без изменений. От `LLM_PROVIDER` ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) media не зависит. Кошелёк/ledger — [ADR-005](../../adr/ADR-005-idempotency-ledger.md).
+>
+> **Где iOS искать «историю генераций»:** (1) лента пользователя — `GET /v1/media/jobs` (+ cursor); (2) в конкретном чате — `GET /v1/chats/{id}` → `steps[].payload.mediaJobs` на assistant → `GET /v1/media/jobs/{jobId}`. Если `GET /v1/media/models` даёт `503 media_generation_not_configured` — на инстансе нет `FAL_API_KEY`. На `ravelumi.shop` ключ задан (media отвечает 401 без токена, не 503).
 
 ## DoD (выполнено)
 - ✅ `GET /v1/media/models` — каталог моделей: id, тип, базовая цена в кредитах, поддержка референсных изображений и звука, **режимы** (`textToImage`/`imageToImage`/`textToVideo`/`imageToVideo`) с их параметрами и допустимыми значениями `aspectRatio`/`resolution`/`duration`.

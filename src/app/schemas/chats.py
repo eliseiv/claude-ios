@@ -58,7 +58,19 @@ class ChatHistoryResponse(StrictModel):
     title: str | None = Field(default=None, description="Заголовок чата.")
     assistantMode: Literal["chat", "code"] = Field(description="Тип ассистента (chat|code).")
     mode: Literal["credits", "byok"] = Field(description="Режим оплаты сессии.")
-    steps: list[ChatStepSchema] = Field(description="Упорядоченные шаги чата.")
+    steps: list[ChatStepSchema] = Field(
+        description=(
+            "Шаги чата в порядке `seq ASC`. Без `limit` — вся история. С `limit` — страница "
+            "(первая = последние N шагов); `nextCursor` грузит более старые."
+        )
+    )
+    nextCursor: str | None = Field(
+        default=None,
+        description=(
+            "Курсор более старой страницы при запросе с `limit`. `null` — старее шагов нет "
+            "(или пагинация не использовалась)."
+        ),
+    )
 
 
 class StepsViewStepSchema(StrictModel):

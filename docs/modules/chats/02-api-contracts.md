@@ -41,6 +41,10 @@
 ## GET /v1/chats/{id}
 История шагов чата.
 
+### Query
+- `limit` (опц., 1–100) — размер страницы. **Без параметра** — вся история (обратная совместимость).
+- `cursor` (опц.) — opaque-курсор более старой страницы (`nextCursor` предыдущего ответа). Требует `limit`; невалидный → `422`.
+
 ### Response (200)
 ```json
 {
@@ -57,12 +61,17 @@
       "usage": { "inputTokens": 0, "outputTokens": 0, "model": "string" },
       "createdAt": "ISO8601"
     }
-  ]
+  ],
+  "nextCursor": "string | null"
 }
 ```
 - `steps` — упорядочены по `chat_steps.seq` (монотонный порядок вставки, [ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)), **НЕ** по `created_at` (равен для шагов одной транзакции). `createdAt` отдаётся как информационный timestamp каждого шага.
+- **Пагинация (newest page first):** при `limit` первая страница = **последние N** шагов (в ответе всё равно `seq ASC`); `nextCursor` → более старые. `nextCursor: null` — старее нет (или `limit` не передавали).
+- **Бриф iOS:** `GET /v1/chats/{id}?limit=50` → низ чата; scroll-up → `cursor=nextCursor`. Без `limit` — как раньше полный dump.
+- **Fal/generation prompt** при отдаче **не** светится: `mediaWizard.prompt`, `media.ask_params` `result.prompt` и `tool_use.input.prompt` для media-tools редактируются на read-time (в БД для submit остаются).
 - `payload` — payload шага. **Отдаётся в ДОМЕННОМ виде (нормализация при отдаче, [ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)), а НЕ в сыром виде хранилища.** Нормализация применяется на границе сериализации ответа (хранение `chat_steps.payload` и реплей в Claude не меняются). Форма зависит от `role`:
-  - **`mediaJobs` на assistant ([ADR-068](../../adr/ADR-068-media-generate-chat-tools.md) / [ADR-070](../../adr/ADR-070-media-choices-wizard.md)) — якорь генерации в истории:** у **последнего** `role="assistant"` шага хода, в котором ставили media-задачу, в `payload` отдаётся `mediaJobs: [{ jobId, kind?, status?, model?, creditsCharged? }]` (тот же shape, что `ChatResponse.mediaJobs`). Источники при отдаче: записанный `payload.mediaJobs`, tool-result `media.generate_*`, `user.payload.mediaWizard.jobId`. Байты картинки/видео в историю **не** кладутся — клиент грузит `GET /v1/media/jobs/{jobId}` (и/или push). **iOS:** искать генерации в чате по `steps[].payload.mediaJobs` на assistant.
+  - **`mediaJobs` на assistant ([ADR-068](../../adr/ADR-068-media-generate-chat-tools.md) / [ADR-070](../../adr/ADR-070-media-choices-wizard.md)) — якорь генерации в истории:** у **последнего** `role="assistant"` шага хода, в котором ставили media-задачу, в `payload` отдаётся `mediaJobs: [{ jobId, kind?, status?, model?, creditsCharged? }]` (тот же shape, что `ChatResponse.mediaJobs`). Источники при отдаче: записанный `payload.mediaJobs`, tool-result `media.generate_*`, `user.payload.mediaWizard.jobId`. Байты картинки/видео в историю **не** кладутся — клиент грузит `GET /v1/media/jobs/{jobId}` (и/или push). **iOS:** искать генерации в чате по `steps[].payload.mediaJobs` на assistant. **Лента всех генераций пользователя** (не привязанная к чату) — отдельный `GET /v1/media/jobs`. Без `FAL_API_KEY` на инстансе media отвечает `503 media_generation_not_configured`.
+  - **`attachmentRefs` на user (TTL 1 день):** при image-attachment в чат (если media настроен) сервер заливает фото на fal и пишет `payload.attachmentRefs: [{ mediaType, filename, url, expiresAt }]`. UI может игнорировать; нужно для `useRecentImage` после согласия пользователя.
   - **`role="tool"` (результат tool-шага):** хранится в кастомной доменной форме `{toolCallId (domain UUID), providerToolUseId, toolName (dot), result|error}` — **НЕ** wire `tool_result`-блок в `content[]` (см. [chat-orchestrator/04-data-model.md](../chat-orchestrator/04-data-model.md)). При отдаче `providerToolUseId` **стрипается** (внутренний raw `toolu_...`, ADR-008 — наружу не утекает); `toolCallId` уже доменный (= `tool_calls.id`, совпадает с `/chat/run` `toolCall.id`).
   - **`role="assistant"` content-блоки (`type=text` / `type=tool_use`):**
     - **`tool_use.name`:** underscore → dot (`calendar_create_events` → `calendar.create_events`) через `to_domain_tool_name` — совпадает с `/v1/tools` `name`, `/chat/run` `toolCall.name`, `/v1/chats/{id}/steps` `toolName`.

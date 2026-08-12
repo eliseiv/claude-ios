@@ -281,6 +281,118 @@ async def test_get_history_omits_provider_tool_use_id(
     assert "toolu_SECRET123" not in blob
 
 
+@pytest.mark.asyncio
+async def test_get_history_strips_media_prompt(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    secret = "SECRET_FAL_PROMPT_DO_NOT_SHOW"
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+        sid = await _seed_session(s, user_id=uid, title="media")
+        msid = uuid.uuid4()
+        await _seed_step(
+            s,
+            session_id=sid,
+            message_step_id=msid,
+            role="user",
+            payload={
+                "content": [{"type": "text", "text": "Media: image · 4 cr."}],
+                "mediaWizard": {"prompt": secret, "jobId": str(uuid.uuid4())},
+            },
+        )
+        await _seed_step(
+            s,
+            session_id=sid,
+            message_step_id=msid,
+            role="tool",
+            payload={
+                "toolCallId": str(uuid.uuid4()),
+                "toolName": "media.ask_params",
+                "result": {"selectionId": str(uuid.uuid4()), "prompt": secret, "step": "model"},
+            },
+        )
+        await _seed_step(
+            s,
+            session_id=sid,
+            message_step_id=msid,
+            role="assistant",
+            payload={
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_media1",
+                        "name": "media_ask_params",
+                        "input": {"kind": "image", "prompt": secret},
+                    }
+                ]
+            },
+        )
+        await _seed_tool_call(
+            s,
+            session_id=sid,
+            message_step_id=msid,
+            tool_name="media.ask_params",
+            provider_tool_use_id="toolu_media1",
+        )
+        await s.commit()
+
+    r = await client.get(f"/v1/chats/{sid}", headers=auth_headers(uid))
+    assert r.status_code == 200
+    assert secret not in r.text
+
+
+@pytest.mark.asyncio
+async def test_get_history_limit_returns_newest_page(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+        sid = await _seed_session(s, user_id=uid, title="paged")
+        texts: list[str] = []
+        for i in range(5):
+            msid = uuid.uuid4()
+            text = f"msg-{i}"
+            texts.append(text)
+            await _seed_step(
+                s,
+                session_id=sid,
+                message_step_id=msid,
+                role="user",
+                payload=_user_payload(text),
+            )
+        await s.commit()
+
+    r1 = await client.get(f"/v1/chats/{sid}?limit=2", headers=auth_headers(uid))
+    assert r1.status_code == 200
+    body1 = r1.json()
+    assert len(body1["steps"]) == 2
+    assert body1["nextCursor"] is not None
+    page1_texts = [
+        b["text"]
+        for st in body1["steps"]
+        for b in st["payload"]["content"]
+        if b.get("type") == "text"
+    ]
+    assert page1_texts == ["msg-3", "msg-4"]
+
+    r2 = await client.get(
+        f"/v1/chats/{sid}?limit=2&cursor={body1['nextCursor']}",
+        headers=auth_headers(uid),
+    )
+    assert r2.status_code == 200
+    body2 = r2.json()
+    page2_texts = [
+        b["text"]
+        for st in body2["steps"]
+        for b in st["payload"]["content"]
+        if b.get("type") == "text"
+    ]
+    assert page2_texts == ["msg-1", "msg-2"]
+    assert body2["nextCursor"] is not None
+
+
 # --- GET /v1/chats/{id}/steps: domain names, no raw id ---
 @pytest.mark.asyncio
 async def test_steps_view_uses_domain_tool_names_no_raw_id(

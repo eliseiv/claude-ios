@@ -135,3 +135,28 @@ async def test_generate_image_uploads_turn_images_when_no_urls() -> None:
     submit_kwargs = media.submit.await_args.kwargs
     assert submit_kwargs["image_urls"] == ["https://fal.media/files/uploaded.png"]
     assert submit_kwargs["source_job_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_ask_params_use_recent_image() -> None:
+    from app.chat.attachment_refs import MEDIA_NO_RECENT_IMAGE_ERROR_CODE
+
+    media = AsyncMock()
+    media.credits_for = lambda m: m.default_credits
+    handlers = GlobalToolHandlers(media=media)
+    out = await handlers.execute(
+        tool_name=TOOL_MEDIA_ASK_PARAMS,
+        args={"kind": "image", "prompt": "on a beach", "useRecentImage": True},
+        recent_image_urls=["https://fal.media/files/recent.png"],
+    )
+    assert out.is_error is False
+    assert out.result is not None
+    assert out.result["imageUrls"] == ["https://fal.media/files/recent.png"]
+
+    missing = await handlers.execute(
+        tool_name=TOOL_MEDIA_ASK_PARAMS,
+        args={"kind": "image", "prompt": "on a beach", "useRecentImage": True},
+        recent_image_urls=[],
+    )
+    assert missing.is_error is True
+    assert missing.error_code == MEDIA_NO_RECENT_IMAGE_ERROR_CODE

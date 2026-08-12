@@ -436,6 +436,7 @@ class MediaGenerateImageArgs(_StrictModel):
     prompt: str = Field(min_length=1, max_length=_MEDIA_PROMPT_MAX)
     imageUrls: list[str] | None = Field(default=None, max_length=_MEDIA_MAX_IMAGE_URLS)
     sourceJobId: str | None = None
+    useRecentImage: bool | None = None
     aspectRatio: str | None = None
     resolution: str | None = None
     numImages: int | None = Field(default=None, ge=1, le=4)
@@ -451,6 +452,10 @@ class MediaGenerateImageArgs(_StrictModel):
     def _exclusive_refs(self) -> MediaGenerateImageArgs:
         if self.sourceJobId is not None and self.imageUrls:
             raise ValueError("sourceJobId and imageUrls are mutually exclusive")
+        if self.sourceJobId is not None and self.useRecentImage:
+            raise ValueError("sourceJobId and useRecentImage are mutually exclusive")
+        if self.imageUrls and self.useRecentImage:
+            raise ValueError("imageUrls and useRecentImage are mutually exclusive")
         return self
 
 
@@ -461,6 +466,7 @@ class MediaGenerateVideoArgs(_StrictModel):
     prompt: str = Field(min_length=1, max_length=_MEDIA_PROMPT_MAX)
     imageUrl: str | None = Field(default=None, max_length=_MEDIA_URL_MAX)
     sourceJobId: str | None = None
+    useRecentImage: bool | None = None
     negativePrompt: str | None = Field(default=None, max_length=_MEDIA_NEGATIVE_PROMPT_MAX)
     aspectRatio: str | None = None
     resolution: str | None = None
@@ -478,6 +484,10 @@ class MediaGenerateVideoArgs(_StrictModel):
     def _exclusive_refs(self) -> MediaGenerateVideoArgs:
         if self.sourceJobId is not None and self.imageUrl is not None:
             raise ValueError("sourceJobId and imageUrl are mutually exclusive")
+        if self.sourceJobId is not None and self.useRecentImage:
+            raise ValueError("sourceJobId and useRecentImage are mutually exclusive")
+        if self.imageUrl is not None and self.useRecentImage:
+            raise ValueError("imageUrl and useRecentImage are mutually exclusive")
         return self
 
 
@@ -487,6 +497,13 @@ class MediaAskParamsArgs(_StrictModel):
     kind: Literal["image", "video"]
     prompt: str = Field(min_length=1, max_length=_MEDIA_PROMPT_MAX)
     sourceJobId: str | None = None
+    useRecentImage: bool | None = None
+
+    @model_validator(mode="after")
+    def _exclusive_refs(self) -> MediaAskParamsArgs:
+        if self.sourceJobId is not None and self.useRecentImage:
+            raise ValueError("sourceJobId and useRecentImage are mutually exclusive")
+        return self
 
 
 _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
@@ -571,10 +588,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     TOOL_MEDIA_ASK_PARAMS: (
         "Present tappable choices so the user picks image/video parameters (model, resolution, "
         "duration, …) before generation. Call this when the user wants a photo or video and has "
-        "not already chosen those parameters. Pass kind ('image'|'video') and the prompt to use. "
-        "If the user attached a photo on this message, the server uses it as the image-to-image "
+        "not already chosen those parameters. Pass kind ('image'|'video') and the prompt to use "
+        "(never repeat that prompt in your visible reply). "
+        "If the user attached a photo on THIS message, the server uses it as the image-to-image "
         "reference automatically — do not invent URLs. "
-        "For edits/refinements of a prior generation, ALSO pass sourceJobId (that job's jobId) so "
+        "If the user agreed to reuse a photo from a recent earlier message, pass useRecentImage "
+        "true (server resolves a stored URL with a 1-day TTL). "
+        "For edits/refinements of a prior generation, pass sourceJobId (that job's jobId) so "
         "the provider runs image-to-image / image-to-video instead of a new text-to-* render. "
         "Do NOT invent model ids or resolutions — the app shows catalog options. After this tool, "
         "wait for the user to tap; do not call media.generate_* in the same turn."
@@ -584,16 +604,19 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "stated them). Prefer media.ask_params when parameters are unclear. Returns immediately "
         "with jobId and status 'queued' — do NOT wait for the image; the app polls "
         "GET /v1/media/jobs/{jobId}. 'model' is a catalog id such as 'nano-banana-2'. "
-        "For edits of a previous image, pass sourceJobId (required for image-to-image); optional "
-        "imageUrls (https) is an alternative. Costs media credits in addition to the chat turn."
+        "For edits of a previous image, pass sourceJobId; optional imageUrls (https) or "
+        "useRecentImage true (agreed reuse of a recent chat photo) are alternatives. "
+        "Never repeat the generation prompt in your visible reply. Costs media credits in "
+        "addition to the chat turn."
     ),
     TOOL_MEDIA_GENERATE_VIDEO: (
         "Submit a video generation job when model, duration, and quality are ALREADY known. "
         "Prefer media.ask_params when parameters are unclear. Returns immediately with jobId and "
         "status 'queued' — do NOT wait for the video; the app polls GET /v1/media/jobs/{jobId}. "
         "'model' is a catalog id such as 'veo-3.1'. For image-to-video from a prior job, pass "
-        "sourceJobId; optional imageUrl is an alternative. Costs media credits in addition to "
-        "the chat turn."
+        "sourceJobId; optional imageUrl or useRecentImage true are alternatives. Never repeat "
+        "the generation prompt in your visible reply. Costs media credits in addition to the "
+        "chat turn."
     ),
 }
 

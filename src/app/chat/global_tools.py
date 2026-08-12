@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 
+from app.chat.attachment_refs import MEDIA_NO_RECENT_IMAGE_ERROR_CODE
 from app.chat.attachments import ImageAttachmentRef
 from app.chat.media_choices import build_wizard_state
 from app.chat.tools import (
@@ -117,6 +118,7 @@ class GlobalToolHandlers:
         args: dict[str, Any],
         user_id: uuid.UUID | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
+        recent_image_urls: list[str] | None = None,
     ) -> ToolExecution:
         """Execute a global server-side tool. Returns a ToolExecution (result or error envelope)."""
         if tool_name == TOOL_TIME_NOW:
@@ -124,14 +126,24 @@ class GlobalToolHandlers:
         if tool_name == TOOL_QUIZ_GENERATE:
             return self._quiz_generate(args)
         if tool_name == TOOL_MEDIA_ASK_PARAMS:
-            return await self._media_ask_params(args, turn_images=turn_images)
+            return await self._media_ask_params(
+                args, turn_images=turn_images, recent_image_urls=recent_image_urls
+            )
         if tool_name == TOOL_MEDIA_GENERATE_IMAGE:
             return await self._media_generate(
-                kind="image", args=args, user_id=user_id, turn_images=turn_images
+                kind="image",
+                args=args,
+                user_id=user_id,
+                turn_images=turn_images,
+                recent_image_urls=recent_image_urls,
             )
         if tool_name == TOOL_MEDIA_GENERATE_VIDEO:
             return await self._media_generate(
-                kind="video", args=args, user_id=user_id, turn_images=turn_images
+                kind="video",
+                args=args,
+                user_id=user_id,
+                turn_images=turn_images,
+                recent_image_urls=recent_image_urls,
             )
         # Unknown global tool name — should never happen (validated upstream against the registry).
         return ToolExecution.error("unknown_tool", f"unknown global server-side tool: {tool_name}")
@@ -176,6 +188,7 @@ class GlobalToolHandlers:
         args: dict[str, Any],
         *,
         turn_images: list[ImageAttachmentRef] | None = None,
+        recent_image_urls: list[str] | None = None,
     ) -> ToolExecution:
         """Start a mediaChoices wizard; options come only from the server catalog (ADR-070)."""
         kind = str(args.get("kind") or "")
@@ -189,12 +202,22 @@ class GlobalToolHandlers:
                 return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, "sourceJobId must be a UUID")
 
         image_urls: list[str] = []
+        use_recent = bool(args.get("useRecentImage"))
         # Prefer an explicit prior job; otherwise bridge chat attachments → fal https URLs.
         if source_job_id is None and turn_images:
             uploaded = await self._upload_turn_images(turn_images)
             if isinstance(uploaded, ToolExecution):
                 return uploaded
             image_urls = uploaded
+        elif source_job_id is None and use_recent:
+            urls = [u for u in (recent_image_urls or []) if isinstance(u, str) and u]
+            if not urls:
+                return ToolExecution.error(
+                    MEDIA_NO_RECENT_IMAGE_ERROR_CODE,
+                    "no recent chat photo available (expired or missing); "
+                    "ask the user to re-attach",
+                )
+            image_urls = urls
 
         def _credits(model: Any) -> int:
             if self._media is not None:
@@ -259,6 +282,7 @@ class GlobalToolHandlers:
         args: dict[str, Any],
         user_id: uuid.UUID | None,
         turn_images: list[ImageAttachmentRef] | None = None,
+        recent_image_urls: list[str] | None = None,
     ) -> ToolExecution:
         """Submit a media job (ADR-068). Never waits for fal completion.
 
@@ -308,12 +332,22 @@ class GlobalToolHandlers:
                 "seed": args.get("seed"),
             }
 
+        use_recent = bool(args.get("useRecentImage"))
         # Same-turn chat photo → fal https when the model omitted an explicit reference.
         if source_job_id is None and not image_urls and turn_images:
             uploaded = await self._upload_turn_images(turn_images)
             if isinstance(uploaded, ToolExecution):
                 return uploaded
             image_urls = uploaded
+        elif source_job_id is None and not image_urls and use_recent:
+            urls = [u for u in (recent_image_urls or []) if isinstance(u, str) and u]
+            if not urls:
+                return ToolExecution.error(
+                    MEDIA_NO_RECENT_IMAGE_ERROR_CODE,
+                    "no recent chat photo available (expired or missing); "
+                    "ask the user to re-attach",
+                )
+            image_urls = urls
 
         try:
             view = await self._media.submit(

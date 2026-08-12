@@ -15,18 +15,24 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.chat.tools import (
+    TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
     TOOL_MEDIA_GENERATE_VIDEO,
     TOOL_QUIZ_GENERATE,
     UnknownToolNameError,
     to_domain_tool_name,
 )
-from app.chats.cursor import ChatCursor, InvalidCursorError
+from app.chats.cursor import ChatCursor, ChatHistoryCursor, InvalidCursorError
 from app.chats.provider_blocks import to_domain_blocks
 from app.chats.repository import ChatsRepository, strip_context_block
 from app.errors import NotFoundError, ValidationFailedError, WorkspaceNotFoundError
 from app.models import ChatSession, ChatStep, ToolCall
 from app.workspaces.service import WorkspacesService
+
+_MEDIA_PROMPT_TOOLS = frozenset(
+    {TOOL_MEDIA_ASK_PARAMS, TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO}
+)
+_HISTORY_LIMIT_MAX = 100
 
 logger = logging.getLogger("app.chats.service")
 
@@ -70,6 +76,7 @@ class ChatHistoryView:
     assistant_mode: str
     mode: str
     steps: list[ChatStepView]
+    next_cursor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,18 +162,45 @@ class ChatsService:
             raise NotFoundError("chat not found")
         return session
 
-    async def get_history(self, session_id: uuid.UUID, user_id: uuid.UUID) -> ChatHistoryView:
+    async def get_history(
+        self,
+        session_id: uuid.UUID,
+        user_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> ChatHistoryView:
         session = await self._require_session(session_id, user_id)
-        steps = await self._repo.list_steps(session_id)
+        next_cursor: str | None = None
+        history_cursor: ChatHistoryCursor | None = None
+        if cursor is not None:
+            try:
+                history_cursor = ChatHistoryCursor.decode(cursor)
+            except InvalidCursorError as exc:
+                raise ValidationFailedError("invalid cursor") from exc
+        if limit is None:
+            if history_cursor is not None:
+                raise ValidationFailedError("cursor requires limit")
+            steps = await self._repo.list_steps(session_id)
+            enrich_steps = steps
+        else:
+            if limit < 1 or limit > _HISTORY_LIMIT_MAX:
+                raise ValidationFailedError(f"limit must be between 1 and {_HISTORY_LIMIT_MAX}")
+            steps, next_cursor = await self._repo.list_steps_page(
+                session_id, limit=limit, cursor=history_cursor
+            )
+            # mediaJobs / quiz may live on tool steps outside the page — pull full turns.
+            turn_ids = {s.message_step_id for s in steps}
+            enrich_steps = await self._repo.list_steps_for_message_steps(session_id, turn_ids)
         # ADR-024: build the provider_tool_use_id → domain tool_calls.id map ONCE per session (one
         # query, no N+1). Every tool_use/tool_result block of every step resolves its public id
         # through this map; provider ids (toolu_...) never surface in the history response.
         provider_to_domain = await self._repo.provider_id_to_domain_id(session_id)
         # ADR-065 §2: turns whose assistant text must not be served (see _quiz_turn_ids).
-        quiz_turns = self._quiz_turn_ids(steps)
+        quiz_turns = self._quiz_turn_ids(enrich_steps)
         # ADR-068/070: surface mediaJobs on the last assistant step of each turn (cold start).
-        media_jobs_by_turn = self._media_jobs_by_turn(steps)
-        last_assistant_by_turn = self._last_assistant_step_ids(steps)
+        media_jobs_by_turn = self._media_jobs_by_turn(enrich_steps)
+        last_assistant_by_turn = self._last_assistant_step_ids(enrich_steps)
         history_steps: list[ChatStepView] = []
         for step in steps:
             payload = self._normalize_payload(step, provider_to_domain, quiz_turns)
@@ -192,6 +226,7 @@ class ChatsService:
             assistant_mode=session.assistant_mode,
             mode=session.mode,
             steps=history_steps,
+            next_cursor=next_cursor,
         )
 
     @staticmethod
@@ -310,6 +345,12 @@ class ChatsService:
         payload = copy.deepcopy(step.payload)
         # ADR-008: never expose the raw provider id stored on tool steps.
         payload.pop("providerToolUseId", None)
+        # ADR-071: fal generation prompt must not appear on the history wire. Tool steps often
+        # have no ``content[]`` (toolName/result) — strip BEFORE the content early-return.
+        if step.role == "user":
+            ChatsService._strip_media_wizard_prompt(payload)
+        if step.role == "tool":
+            ChatsService._strip_media_tool_result_prompt(payload)
         content = payload.get("content")
         if not isinstance(content, list):
             return payload
@@ -345,10 +386,34 @@ class ChatsService:
             block_type = block.get("type")
             if block_type == "tool_use":
                 ChatsService._normalize_tool_use_block(block, provider_to_domain, step)
+                ChatsService._redact_media_tool_use_prompt(block)
             elif block_type == "tool_result":
                 ChatsService._normalize_tool_result_block(block, provider_to_domain, step)
-            # text blocks and tool_use.input are intentionally left unchanged.
+            # text blocks are intentionally left unchanged (except quiz / context strips above).
         return payload
+
+    @staticmethod
+    def _strip_media_wizard_prompt(payload: dict[str, Any]) -> None:
+        wizard = payload.get("mediaWizard")
+        if isinstance(wizard, dict):
+            wizard.pop("prompt", None)
+
+    @staticmethod
+    def _strip_media_tool_result_prompt(payload: dict[str, Any]) -> None:
+        if payload.get("toolName") != TOOL_MEDIA_ASK_PARAMS:
+            return
+        result = payload.get("result")
+        if isinstance(result, dict):
+            result.pop("prompt", None)
+
+    @staticmethod
+    def _redact_media_tool_use_prompt(block: dict[str, Any]) -> None:
+        name = block.get("name")
+        if name not in _MEDIA_PROMPT_TOOLS:
+            return
+        raw_input = block.get("input")
+        if isinstance(raw_input, dict) and "prompt" in raw_input:
+            raw_input["prompt"] = "[redacted]"
 
     @staticmethod
     def _strip_leading_context_block(content: list[Any]) -> None:

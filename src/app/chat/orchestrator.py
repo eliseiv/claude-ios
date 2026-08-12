@@ -27,6 +27,12 @@ from app.audit.service import (
 )
 from app.byok.service import BYOKService
 from app.chat.anthropic_client import AnthropicAuthError
+from app.chat.attachment_refs import (
+    RECENT_USER_STEPS_SCAN,
+    latest_alive_image_urls,
+    recent_image_available,
+    upload_turn_attachment_refs,
+)
 from app.chat.attachments import ImageAttachmentRef, PreparedAttachments, prepare_attachments
 from app.chat.global_tools import MEDIA_INVALID_ERROR_CODE, GlobalToolHandlers
 from app.chat.llm_client import (
@@ -120,10 +126,17 @@ _MEDIA_GENERATE_INSTRUCTION = (
     "media.generate_image or media.generate_video when those parameters are already known. "
     "Generate tools only queue a job and return a jobId — tell the user generation has started; "
     "do not claim the media is ready until the app reports it. "
+    "Never repeat the generation prompt (the text you pass to media tools) in your visible reply "
+    "or summarize it back to the user — keep that prompt internal to the tool call. "
     "First generation with no photo attached: omit sourceJobId (text-to-image / text-to-video). "
-    "If the user attached a photo on this message and asks to generate/transform based on it "
+    "If the user attached a photo on THIS message and asks to generate/transform based on it "
     "(e.g. put them on a beach), call media.ask_params — the server uploads the attachment and "
     "runs image-to-image automatically; you do not pass imageUrls. "
+    "If there is a recent photo from an earlier user message in this chat (see system hint) and "
+    "the user did NOT attach a new photo on this message, FIRST ask in plain text whether they "
+    "want to use that earlier photo — do NOT call media.ask_params or media.generate_* until they "
+    "answer. If they say yes, call media.ask_params with useRecentImage true. If they say no, "
+    "proceed without it (text-to-*). "
     "If the user asks to edit, change, redraw, add to, or refine a previously generated image or "
     "video in this chat, you MUST pass sourceJobId set to that job's jobId from history "
     "(tool results or assistant mediaJobs). Without sourceJobId (and with no attachment) the "
@@ -851,21 +864,33 @@ class ChatOrchestrator:
         placeholders = prepared.placeholders if prepared is not None else []
         user_payload_content: list[dict[str, Any]] = [*text_blocks, *placeholders]
 
+        # Persist fal https refs (TTL 1 day) for later useRecentImage — soft-fail if media off.
+        attachment_refs: list[dict[str, Any]] = []
+        if prepared is not None and prepared.images:
+            media_svc = self._deps.global_tools._media  # noqa: SLF001
+            attachment_refs = await upload_turn_attachment_refs(media_svc, prepared.images)
+
+        # Ask-first: recent earlier photo, but NOT when this message already has a new image.
+        has_turn_images = bool(prepared is not None and prepared.images)
+        if not has_turn_images:
+            system_prompt = await self._system_prompt_with_recent_photo(sess.id, system_prompt)
+
         # ADR-036 §6: merge the workspace knowledge-file blocks with the request's inline
         # attachment blocks (project context first). Only the request attachments leave a persisted
         # placeholder; workspace files are re-assembled from workspace_files, never persisted here.
         first_turn = _merge_attachments(prepared, workspace_attachments)
 
         # Persist the user message under this step (placeholders only — no base64, ADR-020 §3).
+        user_payload: dict[str, Any] = {"content": user_payload_content}
+        if use_generation_v2:
+            user_payload["generationMode"] = generation_mode
+        if attachment_refs:
+            user_payload["attachmentRefs"] = attachment_refs
         await self._deps.repo.add_step(
             session_id=sess.id,
             message_step_id=message_step_id,
             role="user",
-            payload=(
-                {"content": user_payload_content, "generationMode": generation_mode}
-                if use_generation_v2
-                else {"content": user_payload_content}
-            ),
+            payload=user_payload,
         )
 
         generation_credit_cost = (
@@ -925,6 +950,37 @@ class ChatOrchestrator:
             f"jobId={job_id} kind={kind}. "
             f"For edits/refinements of that media, pass sourceJobId={job_id}."
         )
+
+    async def _system_prompt_with_recent_photo(
+        self, session_id: uuid.UUID, system_prompt: str
+    ) -> str:
+        """Hint the model to ask before reusing a photo from recent user messages."""
+        payloads = await self._deps.repo.recent_user_payloads(
+            session_id, limit=RECENT_USER_STEPS_SCAN
+        )
+        if not recent_image_available(payloads):
+            return system_prompt
+        alive = latest_alive_image_urls(payloads, max_urls=1)
+        if alive:
+            return (
+                f"{system_prompt}\n\nA recent user message in this chat included a photo that is "
+                "still available for generation (stored ~1 day). If the user asks to generate a "
+                "photo or video and did not attach a new photo on this message, ask first whether "
+                "they want to use that earlier photo. If they agree, call media.ask_params with "
+                "useRecentImage true."
+            )
+        return (
+            f"{system_prompt}\n\nA recent user message in this chat included a photo attachment. "
+            "If the user asks to generate a photo or video and did not attach a new photo on this "
+            "message, ask first whether they want to use that earlier photo. If they agree but "
+            "useRecentImage fails, ask them to re-attach the photo."
+        )
+
+    async def _recent_image_urls_for_session(self, session_id: uuid.UUID) -> list[str]:
+        payloads = await self._deps.repo.recent_user_payloads(
+            session_id, limit=RECENT_USER_STEPS_SCAN
+        )
+        return latest_alive_image_urls(payloads, max_urls=1)
 
     async def _handle_media_selection(
         self,
@@ -1345,6 +1401,7 @@ class ChatOrchestrator:
                 sess.assistant_mode, instructions, generation_mode
             )
         system_prompt = await self._system_prompt_with_last_media_job(sess.id, system_prompt)
+        system_prompt = await self._system_prompt_with_recent_photo(sess.id, system_prompt)
         return await self._generate_loop(
             user_id=user_id,
             session_id=session_id,
@@ -1816,6 +1873,7 @@ class ChatOrchestrator:
         turn0_attachments = first_turn_attachments
         # Same-turn image attachments stay available for media tools (upload → image-to-image).
         turn_images = list(first_turn_attachments.images) if first_turn_attachments else []
+        recent_image_urls = await self._recent_image_urls_for_session(session_id)
         for _ in range(max_rounds + 1):
             messages = await self._build_messages(session_id)
             sess = await self._session.get(ChatSession, session_id)
@@ -1942,6 +2000,7 @@ class ChatOrchestrator:
                     media_accumulator=media_accumulator,
                     media_choices_accumulator=media_choices_accumulator,
                     turn_images=turn_images,
+                    recent_image_urls=recent_image_urls,
                 )
                 # Persist the tool_use step + tool_calls + tool_results + audit (no billing here).
                 await self._session.commit()
@@ -2212,6 +2271,7 @@ class ChatOrchestrator:
         media_accumulator: _MediaJobsAccumulator | None = None,
         media_choices_accumulator: _MediaChoicesAccumulator | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
+        recent_image_urls: list[str] | None = None,
     ) -> _TurnOutcome:
         """Process a tool_use turn (ADR-008/011): persist tool_calls, branch server/client-side.
 
@@ -2360,6 +2420,7 @@ class ChatOrchestrator:
                     provider_tool_use_id=provider_tool_use_id,
                     server_tools=server_tools,
                     turn_images=turn_images,
+                    recent_image_urls=recent_image_urls,
                 )
                 if (
                     tool_name == TOOL_QUIZ_GENERATE
@@ -2514,6 +2575,7 @@ class ChatOrchestrator:
         provider_tool_use_id: str,
         server_tools: list[ServerToolExecutionOut],
         turn_images: list[ImageAttachmentRef] | None = None,
+        recent_image_urls: list[str] | None = None,
     ) -> ToolExecution:
         """Execute a global server-side tool (time.now, quiz.generate) on the backend (ADR-026 §4).
 
@@ -2534,6 +2596,7 @@ class ChatOrchestrator:
             args=args,
             user_id=user_id,
             turn_images=turn_images,
+            recent_image_urls=recent_image_urls,
         )
         await self._persist_tool_execution(
             user_id=user_id,

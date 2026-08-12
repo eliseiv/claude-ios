@@ -1,8 +1,7 @@
-"""Opaque keyset-pagination cursor for the chats list (chats/02-api-contracts.md).
+"""Opaque keyset-pagination cursors for chats list + chat history (chats/02-api-contracts.md).
 
-Encodes the ordering tuple (is_pinned, updated_at, id) of the last returned row. The list is
-ordered ``is_pinned DESC, updated_at DESC, id DESC`` (BR-CH-3 + a stable id tie-break), so a
-cursor lets the next page resume deterministically even when ``updated_at`` ties.
+List cursor encodes ``(is_pinned, updated_at, id)``. History cursor encodes ``(seq, id)`` so
+scroll-up pages resume on the ADR-021 step order (not ``created_at``).
 """
 
 from __future__ import annotations
@@ -41,5 +40,26 @@ class ChatCursor:
                 updated_at=updated,
                 id=uuid.UUID(id_str),
             )
+        except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
+            raise InvalidCursorError("invalid cursor") from exc
+
+
+@dataclass(frozen=True)
+class ChatHistoryCursor:
+    """Keyset cursor for ``GET /v1/chats/{id}`` pages that walk toward older steps."""
+
+    seq: int
+    id: uuid.UUID
+
+    def encode(self) -> str:
+        raw = f"{self.seq}|{self.id}"
+        return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+    @staticmethod
+    def decode(value: str) -> ChatHistoryCursor:
+        try:
+            raw = base64.urlsafe_b64decode(value.encode("ascii")).decode("utf-8")
+            seq_str, id_str = raw.split("|", 1)
+            return ChatHistoryCursor(seq=int(seq_str), id=uuid.UUID(id_str))
         except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
             raise InvalidCursorError("invalid cursor") from exc
