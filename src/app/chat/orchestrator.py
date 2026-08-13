@@ -1934,7 +1934,7 @@ class ChatOrchestrator:
             except (AnthropicAuthError, OpenAIAuthError, UpstreamError) as exc:
                 following = next_attempt_index(attempts, index, exc)
                 if following is None:
-                    if isinstance(exc, (AnthropicAuthError, OpenAIAuthError)):
+                    if isinstance(exc, AnthropicAuthError | OpenAIAuthError):
                         raise UpstreamError("llm provider unavailable") from exc
                     raise
                 nxt = attempts[following]
