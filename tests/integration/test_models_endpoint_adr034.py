@@ -29,9 +29,27 @@ from tests.conftest import auth_headers, seed_user
 def restore_model_settings() -> Iterator[None]:
     """Snapshot/restore the model-allowlist Settings fields (the cached singleton is mutated)."""
     s = get_settings()
-    orig = (s.llm_provider, s.anthropic_models_raw, s.openai_models_raw, s.anthropic_model)
+    orig = (
+        s.llm_provider,
+        s.anthropic_models_raw,
+        s.openai_models_raw,
+        s.anthropic_model,
+        s.llm_providers_raw,
+        s.openai_api_key,
+        s.anthropic_api_key,
+        s.openai_model,
+    )
     yield
-    (s.llm_provider, s.anthropic_models_raw, s.openai_models_raw, s.anthropic_model) = orig
+    (
+        s.llm_provider,
+        s.anthropic_models_raw,
+        s.openai_models_raw,
+        s.anthropic_model,
+        s.llm_providers_raw,
+        s.openai_api_key,
+        s.anthropic_api_key,
+        s.openai_model,
+    ) = orig
 
 
 def _set_allowlist(*, provider: str, anthropic_raw: str, anthropic_model: str) -> None:
@@ -68,7 +86,12 @@ async def test_models_empty_allowlist_single_default(
     assert r.status_code == 200, r.text
     models = r.json()["models"]
     assert models == [
-        {"id": "claude-sonnet-4-5", "displayName": "claude-sonnet-4-5", "default": True}
+        {
+            "id": "claude-sonnet-4-5",
+            "displayName": "claude-sonnet-4-5",
+            "default": True,
+            "provider": "anthropic",
+        }
     ]
 
 
@@ -134,6 +157,8 @@ async def test_models_response_invariants(
     assert len(defaults) == 1
     assert models[0]["default"] is True
     assert models[0]["id"] == "claude-def"
+    # additive provider column: single-provider instance → LLM_PROVIDER on every row (ADR-073).
+    assert all(m["provider"] == "anthropic" for m in models)
     # no duplicate ids.
     ids = [m["id"] for m in models]
     assert len(ids) == len(set(ids))

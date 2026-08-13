@@ -1008,18 +1008,18 @@ JWKS с публичным ключом (для самопроверки/отл�
 ## 24. Models (список моделей инстанса)
 
 ### GET /v1/models
-Список моделей, доступных для выбора на **этом** инстансе (модели активного LLM-провайдера). Источник для селектора модели в композере iOS. [ADR-034](adr/ADR-034-user-model-selection.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1models--список-доступных-моделей-инстанса-adr-034).
+Список моделей, доступных для выбора на **этом** инстансе. Источник для селектора модели в композере iOS. [ADR-034](adr/ADR-034-user-model-selection.md), [ADR-073](adr/ADR-073-dual-credits-llm-providers.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1models--список-доступных-моделей-инстанса-adr-034).
 **Заголовки:** `Authorization: Bearer <JWT>` (обязателен — как все `/v1/*`).
 **Response 200:**
 ```json
 { "models": [
-  { "id": "gpt-4o", "displayName": "GPT-4o", "default": true },
-  { "id": "gpt-4o-mini", "displayName": "GPT-4o mini", "default": false }
+  { "id": "gpt-4o", "displayName": "GPT-4o", "default": true, "provider": "openai" },
+  { "id": "gpt-4o-mini", "displayName": "GPT-4o mini", "default": false, "provider": "openai" }
 ] }
 ```
 - `id` — provider-id модели; отправляется обратно в `POST /v1/chat/run` `model`. `displayName` — для UI. `default` (bool) — ровно одна модель `true` (дефолтная модель инстанса `ANTHROPIC_MODEL`/`OPENAI_MODEL`), идёт первой.
-- Набор — allowlist активного провайдера (`ANTHROPIC_MODELS`/`OPENAI_MODELS`, выбор по `LLM_PROVIDER`). **Пустой allowlist** ⇒ ровно один элемент = дефолтная модель инстанса (обратная совместимость).
-- Контракт провайдер-агностичен; на anthropic-инстансе — Claude-модели, на openai — OpenAI-модели. Выбрать модель чужого провайдера нельзя ([ADR-034 §7](adr/ADR-034-user-model-selection.md)).
+- `provider` (`openai`\|`anthropic`) — **аддитивное** поле ([ADR-073](adr/ADR-073-dual-credits-llm-providers.md)); старые клиенты игнорируют. Без `LLM_PROVIDERS` совпадает с `LLM_PROVIDER`.
+- Набор без `LLM_PROVIDERS` — allowlist активного провайдера (`ANTHROPIC_MODELS`/`OPENAI_MODELS`). **Пустой allowlist** ⇒ ровно один элемент = дефолтная модель инстанса (обратная совместимость). С `LLM_PROVIDERS` — union обоих каталогов (нужны оба ключа). Смена провайдера внутри чата не поддерживается.
 **Коды:** `200`; `401`; `429`.
 
 ---

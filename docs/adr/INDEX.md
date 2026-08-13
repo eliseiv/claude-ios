@@ -76,6 +76,8 @@
 | [ADR-070](ADR-070-media-choices-wizard.md) | Media choices wizard: `mediaChoices` / `mediaSelection` / `media.ask_params` (quiz-like UX, options из каталога) | Accepted | 2026-08-11 |
 | [ADR-071](ADR-071-chat-attachment-refs-and-history-pagination.md) | Chat attachmentRefs TTL + ask-before-reuse + history pagination | Accepted | 2026-08-12 |
 | [ADR-072](ADR-072-chat-media-tools-instance-gate.md) | Per-instance `CHAT_MEDIA_TOOLS_ENABLED`: REST `/v1/media/*` без chat media tools | Accepted | 2026-08-12 |
+| [ADR-073](ADR-073-dual-credits-llm-providers.md) | **Dual-credits OpenAI+Anthropic** (opt-in `LLM_PROVIDERS`): union `GET /v1/models` + аддитивное `provider`; credits-роутинг по session-fixed модели; **без** mid-chat switch; без `LLM_PROVIDERS` живые инстансы неизменны | Accepted | 2026-08-13 |
+| [ADR-074](ADR-074-provider-key-failover.md) | **Запасные API-ключи + кросс-провайдерный failover** (паритет 232 ADR-047): `OPENAI_API_KEY_BACKUP` / `ANTHROPIC_API_KEY_BACKUP`; ротация только при отказе учётной записи; OpenAI→Anthropic только credential; Anthropic→OpenAI любой сбой апстрима; пустые env → живые инстансы неизменны; `LLM_PROVIDER` не ломается | Accepted | 2026-08-13 |
 
 ## Ревизии
 

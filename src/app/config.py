@@ -10,7 +10,7 @@ import ipaddress
 from functools import lru_cache
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _IpNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -20,11 +20,26 @@ _IpNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 _CLOUDPAYMENTS_DEFAULT_FRESHNESS_HOURS = 72
 
 
+def _dedup_nonempty(*values: str) -> tuple[str, ...]:
+    """Non-empty values in listing order, without duplicates (ADR-074 key chain).
+
+    Order is the failover order, so a set is not applicable. Secrets are compared only
+    to each other and are never logged.
+    """
+    seen: list[str] = []
+    for value in values:
+        stripped = value.strip()
+        if stripped and stripped not in seen:
+            seen.append(stripped)
+    return tuple(seen)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # --- Storage ---
@@ -34,22 +49,33 @@ class Settings(BaseSettings):
     )
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
-    # --- LLM provider selection (ADR-033) ---
-    # One provider per instance. Default "anthropic" → existing instances (claude-ios/avelyra)
-    # are unchanged; "openai" activates the OpenAI Chat Completions path. The OpenAI clone is a
-    # separate instance with LLM_PROVIDER=openai + OPENAI_* (07-deployment.md §Мульти-инстанс).
+    # --- LLM provider selection (ADR-033, dual-credits ADR-073) ---
+    # Default provider for credits when the client does not pick a model. Default "anthropic" →
+    # existing instances are unchanged; "openai" activates OpenAI as that default. Dual-provider
+    # credits (both keys, both catalogs) is OPT-IN via LLM_PROVIDERS (empty = single provider).
     llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
+    # CSV of extra credits providers besides LLM_PROVIDER, e.g. "openai,anthropic". Unset/empty →
+    # only LLM_PROVIDER (ADR-033 compat). A named extra provider is served only when its API key
+    # is non-empty. Public, not a secret. Per-instance.
+    llm_providers_raw: str = Field(default="", alias="LLM_PROVIDERS")
 
     # --- Model allowlist per provider (ADR-034) ---
     # JSON object {model-id: displayName} of the models a user may pick on this instance. Parsed
     # by allowed_models() with the SAME shape rules as token_products() (str→non-empty-str only).
     # Default "{}" → empty allowlist → backward-compatible fallback to the single instance default
-    # model (allowed_models()). Per-provider: only the active provider's raw is read. Not secrets.
+    # model (allowed_models()). Per-provider: allowed_models() reads only the active provider's raw;
+    # dual-credits catalog_models() (ADR-073) unions allowlists of credits_providers(). Not secrets.
     anthropic_models_raw: str = Field(default="{}", alias="ANTHROPIC_MODELS")
     openai_models_raw: str = Field(default="{}", alias="OPENAI_MODELS")
 
-    # --- OpenAI (ADR-033; used only when LLM_PROVIDER=openai) ---
+    # --- OpenAI (ADR-033; used when LLM_PROVIDER=openai, or as extra credits via LLM_PROVIDERS) ---
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    # ADR-074: spare OpenAI key. Canonical name matches 232; OPEN_AI_BACK_UP_API_KEY is accepted.
+    openai_api_key_backup: str = Field(
+        default="",
+        alias="OPENAI_API_KEY_BACKUP",
+        validation_alias=AliasChoices("OPENAI_API_KEY_BACKUP", "OPEN_AI_BACK_UP_API_KEY"),
+    )
     openai_model: str = Field(default="gpt-4o", alias="OPENAI_MODEL")
     # Output budget per call (parity with ANTHROPIC_MAX_TOKENS=16000).
     openai_max_tokens: int = Field(default=16000, alias="OPENAI_MAX_TOKENS")
@@ -60,6 +86,20 @@ class Settings(BaseSettings):
 
     # --- Anthropic ---
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    # ADR-074: spare Anthropic key. Canonical name matches 232; ANTHROPIC_FALLBACK_API_KEY accepted.
+    anthropic_api_key_backup: str = Field(
+        default="",
+        alias="ANTHROPIC_API_KEY_BACKUP",
+        validation_alias=AliasChoices("ANTHROPIC_API_KEY_BACKUP", "ANTHROPIC_FALLBACK_API_KEY"),
+    )
+    # OpenAI model used when a Claude request fails over to OpenAI (empty → no Anthropic→OpenAI).
+    anthropic_chat_fallback_openai_model: str = Field(
+        default="", alias="ANTHROPIC_CHAT_FALLBACK_OPENAI_MODEL"
+    )
+    # Anthropic model used when both OpenAI keys are dead (empty → no OpenAI→Anthropic).
+    openai_chat_fallback_anthropic_model: str = Field(
+        default="", alias="OPENAI_CHAT_FALLBACK_ANTHROPIC_MODEL"
+    )
     anthropic_model: str = Field(default="claude-sonnet-4-5", alias="ANTHROPIC_MODEL")
     # ADR-025: output budget per call. Raised 4096→16000 so code/file generation (several
     # files.write with full content) is not truncated by max_tokens. Stays non-streaming; 16000
@@ -813,10 +853,106 @@ class Settings(BaseSettings):
         construction, ALWAYS present in
         ``allowed_models()`` (the empty-allowlist fallback returns exactly this model; a non-empty
         allowlist without it has it prepended at the API layer — GET /v1/models).
+        Dual-credits (ADR-073) does not change this: ``default:true`` stays the
+        LLM_PROVIDER default.
         """
-        if self.llm_provider.strip().lower() == "openai":
+        if self._normalized_llm_provider() == "openai":
             return self.openai_model
         return self.anthropic_model
+
+    def _normalized_llm_provider(self) -> str:
+        """Canonical credits default: ``openai`` or ``anthropic`` (anything else → anthropic)."""
+        provider = self.llm_provider.strip().lower()
+        return "openai" if provider == "openai" else "anthropic"
+
+    def _credits_api_key_configured(self, provider: str) -> bool:
+        if provider == "openai":
+            return bool(self.openai_api_key.strip())
+        return bool(self.anthropic_api_key.strip())
+
+    def openai_api_key_chain(self) -> tuple[str, ...]:
+        """OpenAI keys in failover order: primary, then backup (ADR-074).
+
+        Empty values are dropped (an empty key would 401 and waste an attempt). A duplicate
+        backup equal to the primary is also dropped so the same key is not tried twice.
+        """
+        return _dedup_nonempty(self.openai_api_key, self.openai_api_key_backup)
+
+    def anthropic_api_key_chain(self) -> tuple[str, ...]:
+        """Anthropic keys in failover order — mirror of ``openai_api_key_chain()``."""
+        return _dedup_nonempty(self.anthropic_api_key, self.anthropic_api_key_backup)
+
+    def credits_providers(self) -> tuple[str, ...]:
+        """Providers that may serve credits chats on this instance (ADR-073).
+
+        Always includes ``LLM_PROVIDER`` first (the instance default). Extra names from
+        ``LLM_PROVIDERS`` (CSV) are appended when they are ``openai``/``anthropic``, distinct from
+        the default, and have a non-empty API key. Unset/empty ``LLM_PROVIDERS`` → a 1-tuple of
+        the default provider — identical to ADR-033 single-provider instances.
+        """
+        active = self._normalized_llm_provider()
+        extras: list[str] = []
+        for part in self.llm_providers_raw.split(","):
+            provider = part.strip().lower()
+            if provider not in ("openai", "anthropic") or provider == active:
+                continue
+            if not self._credits_api_key_configured(provider):
+                continue
+            if provider not in extras:
+                extras.append(provider)
+        return (active, *extras)
+
+    def allowed_models_union(self) -> dict[str, str]:
+        """Selectable credits model ids across ``credits_providers()`` (ADR-073).
+
+        First provider wins on id collision. On a single-provider instance this equals
+        ``allowed_models()``.
+        """
+        merged: dict[str, str] = {}
+        for provider in self.credits_providers():
+            for model_id, display_name in self.allowed_models_for(provider).items():
+                if model_id not in merged:
+                    merged[model_id] = display_name
+        return merged
+
+    def credits_provider_for_model(self, model: str | None) -> str:
+        """Credits provider that should serve ``model`` (ADR-073).
+
+        ``None`` (session uses the instance default) → ``LLM_PROVIDER``. A known id is matched
+        against enabled providers in ``credits_providers()`` order. Unknown / stale ids (e.g. a
+        Claude session after dual-credits was turned off) fall back to ``LLM_PROVIDER`` so the
+        existing stale-model guard can send ``model=None`` instead of 502.
+        """
+        active = self._normalized_llm_provider()
+        if model is None:
+            return active
+        for provider in self.credits_providers():
+            if model in self.allowed_models_for(provider):
+                return provider
+        return active
+
+    def catalog_models(self) -> list[tuple[str, str, bool, str]]:
+        """GET /v1/models rows: ``(id, displayName, default, provider)`` (ADR-034 + ADR-073).
+
+        Default model (``default_model()``) is first and the only ``default=True``. Remaining ids
+        follow each enabled provider's allowlist insertion order, ``credits_providers()`` order,
+        without duplicates. Single-provider instances emit the same ids/order as today, plus the
+        additive ``provider`` column.
+        """
+        default_id = self.default_model()
+        providers = self.credits_providers()
+        active = providers[0]
+        active_map = self.allowed_models_for(active)
+        default_display = active_map.get(default_id, default_id)
+        rows: list[tuple[str, str, bool, str]] = [(default_id, default_display, True, active)]
+        seen = {default_id}
+        for provider in providers:
+            for model_id, display_name in self.allowed_models_for(provider).items():
+                if model_id in seen:
+                    continue
+                seen.add(model_id)
+                rows.append((model_id, display_name, False, provider))
+        return rows
 
     def byok_default_model_for(self, provider: str) -> str:
         """BYOK default model for a SPECIFIC provider (ADR-044 §5/§6, ADR-016).
@@ -836,7 +972,7 @@ class Settings(BaseSettings):
         Thin wrapper over :meth:`allowed_models_for` for the ACTIVE provider (``LLM_PROVIDER``,
         default anthropic). Signature and behavior are unchanged — existing callers keep working.
         """
-        return self.allowed_models_for(self.llm_provider.strip().lower())
+        return self.allowed_models_for(self._normalized_llm_provider())
 
     def allowed_models_for(self, provider: str) -> dict[str, str]:
         """Parse a SPECIFIC provider's model allowlist into a validated {id: displayName} mapping.

@@ -1,12 +1,14 @@
-"""Models-catalog schema for GET /v1/models (chat-orchestrator/02, ADR-034).
+"""Models-catalog schema for GET /v1/models (chat-orchestrator/02, ADR-034 / ADR-073).
 
-Provider-agnostic response contract: the active provider's allowlist as a list of
-``{id, displayName, default}`` items. Exactly one item has ``default=true`` (the instance default
-model), which is emitted first. An empty allowlist yields a single default item (displayName = id) —
-backward compatibility (ADR-034 §1–2).
+Provider-agnostic response contract: ``{id, displayName, default}`` plus additive ``provider``.
+Exactly one item has ``default=true`` (the instance default model), which is emitted first. An
+empty allowlist yields a single default item (displayName = id) — backward compatibility
+(ADR-034 §1–2). ``provider`` is additive JSON (old iOS decoders ignore unknown keys).
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import Field
 
@@ -27,9 +29,15 @@ class ModelInfo(StrictModel):
             "Дефолтная модель инстанса. Ровно у одного элемента `true`; этот элемент идёт первым."
         )
     )
+    provider: Literal["openai", "anthropic"] = Field(
+        description=(
+            "Сервисный провайдер этой модели. Аддитивное поле: старые клиенты его игнорируют. "
+            "На однопровайдерном инстансе совпадает с активным провайдером инстанса."
+        )
+    )
 
 
 class ModelsResponse(StrictModel):
     models: list[ModelInfo] = Field(
-        description="Доступные модели активного провайдера инстанса (дефолт первым)."
+        description="Доступные модели инстанса (дефолт первым; dual-credits — оба провайдера)."
     )

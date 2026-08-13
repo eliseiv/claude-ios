@@ -44,6 +44,9 @@ class FakeOpenAIClient:
         self.calls: list[dict[str, Any]] = []
         self.responses: list[Any] = []
         self.valid_keys: set[str] = set()
+        self.auth_error_keys: set[str] = set()
+        self.errors: list[BaseException] = []
+        self.raise_upstream = False
 
     def text_result(
         self, text_value: str = "openai answer", *, response_id: str | None = None
@@ -117,6 +120,17 @@ class FakeOpenAIClient:
                 "provider_state": kwargs.get("provider_state"),
             }
         )
+        if self.errors:
+            raise self.errors.pop(0)
+        if self.raise_upstream:
+            from app.errors import UpstreamError
+
+            raise UpstreamError("openai upstream error")
+        api_key = kwargs.get("api_key")
+        if api_key is not None and api_key in self.auth_error_keys:
+            from app.chat.openai_client import OpenAIAuthError
+
+            raise OpenAIAuthError("unauthorized")
         if not self.responses:
             return self.text_result()
         return self.responses.pop(0)

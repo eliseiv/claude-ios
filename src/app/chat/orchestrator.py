@@ -35,6 +35,12 @@ from app.chat.attachment_refs import (
 )
 from app.chat.attachments import ImageAttachmentRef, PreparedAttachments, prepare_attachments
 from app.chat.global_tools import MEDIA_INVALID_ERROR_CODE, GlobalToolHandlers
+from app.chat.key_failover import (
+    Attempt,
+    build_attempt_chain,
+    is_credential_failure,
+    next_attempt_index,
+)
 from app.chat.llm_client import (
     STOP_REASON_MAX_TOKENS,
     STOP_REASON_TOOL_USE,
@@ -386,18 +392,62 @@ def _merge_attachments(
 
 
 def _active_provider() -> str:
-    """Active LLM provider (ADR-033) for provider-aware attachment validation. Default anthropic."""
-    return get_settings().llm_provider.strip().lower()
+    """Default credits provider (ADR-033 / ADR-073): ``LLM_PROVIDER``, anthropic if unset."""
+    return get_settings().credits_provider_for_model(None)
+
+
+def _credits_llm(*, provider: str, use_generation_v2: bool) -> LLMClient:
+    """Credits-path client for ``provider`` (legacy Completions vs v2 Responses/Messages)."""
+    if use_generation_v2:
+        return generation_llm_client_for(provider)
+    return llm_client_for(provider)
+
+
+def _provider_state_for_attempt(
+    attempt: Attempt, stored: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Pass Responses ``previous_response_id`` only to an OpenAI candidate of the same account path.
+
+    A crossover to Anthropic must not send an OpenAI response id. A stored state from another
+    provider is dropped rather than forwarded.
+    """
+    if stored is None or attempt.provider != "openai":
+        return None
+    if stored.get("provider") not in (None, "openai"):
+        return None
+    return stored
+
+
+async def _invoke_llm(
+    llm: LLMClient,
+    llm_kwargs: dict[str, Any],
+    *,
+    on_text_delta: Callable[[str], Awaitable[None]] | None,
+    emit_text_deltas: bool,
+) -> LLMResult:
+    """One create_message / stream_message call. Failover wraps this, not the tool-loop."""
+    if on_text_delta is not None:
+        result: LLMResult | None = None
+        async for event in llm.stream_message(**llm_kwargs):
+            if event.kind == "text_delta" and event.text and emit_text_deltas:
+                await on_text_delta(event.text)
+            elif event.kind == "completed" and event.result is not None:
+                result = event.result
+        if result is None:
+            raise RuntimeError("stream_message ended without completed event")
+        return result
+    return await llm.create_message(**llm_kwargs)
 
 
 def _model_for_provider(model: str | None, provider: str) -> str | None:
     """Return ``model`` only if it is in ``provider``'s allowlist, else ``None`` (ADR-044).
 
     Shared stale-model guard for both billing modes:
-    - credits (ADR-044 §Связанное / orchestrator §Stale-model): ``provider`` = the ACTIVE instance
-      provider. A session model fixed for another provider (e.g. ``claude-*`` after the instance was
-      switched to ``LLM_PROVIDER=openai``) is NOT in the active allowlist → ``None`` → the client
-      uses its provider default instead of failing with ``create_message(model=foreign)``.
+    - credits (ADR-044 §Связанное / ADR-073): ``provider`` = the credits provider of this session
+      model (``credits_provider_for_model``). Dual-credits routes Claude→Anthropic and GPT→OpenAI.
+      A session model fixed for a provider that is no longer enabled (e.g. ``claude-*`` after
+      dual-credits was turned off on an OpenAI instance) is NOT in that provider's allowlist →
+      ``None`` → the client uses its provider default instead of failing with a foreign model id.
     - byok (ADR-044 §5.3): ``provider`` = the KEY's provider. A session model of another provider is
       never forwarded to the key's client.
 
@@ -717,7 +767,7 @@ class ChatOrchestrator:
         if (
             will_create
             and resolved_model is not None
-            and resolved_model not in get_settings().allowed_models()
+            and resolved_model not in get_settings().allowed_models_union()
         ):
             raise ValidationFailedError(
                 f"model '{resolved_model}' is not available on this instance"
@@ -820,10 +870,18 @@ class ChatOrchestrator:
         # the provider prompt cache stays intact.
         workspace_attachments: PreparedAttachments | None = None
         system_prompt = _system_prompt_for(sess.assistant_mode, effective_generation_mode)
+        # Credits dual-provider (ADR-073): attachments/workspace follow the SESSION model.
+        # BYOK keeps the instance default provider (same as before ADR-073; generation still
+        # routes by the key in _generate_loop).
+        session_provider = (
+            _active_provider()
+            if sess.mode == Mode.byok.value
+            else get_settings().credits_provider_for_model(sess.model)
+        )
         if sess.workspace_project_id is not None:
             if ctx.is_new:
                 ws_context = await self._deps.workspaces.context_for_session(
-                    sess.workspace_project_id, user_id, provider=_active_provider()
+                    sess.workspace_project_id, user_id, provider=session_provider
                 )
                 if ws_context is not None:
                     system_prompt = _system_prompt_with_workspace(
@@ -865,7 +923,7 @@ class ChatOrchestrator:
         message_text = _compose_turn0_text(context_block, message)
         prepared: PreparedAttachments | None = None
         if attachments:
-            prepared = prepare_attachments(attachments, get_settings(), _active_provider())
+            prepared = prepare_attachments(attachments, get_settings(), session_provider)
         text_blocks: list[dict[str, Any]] = (
             [{"type": "text", "text": message_text}] if message_text else []
         )
@@ -935,9 +993,9 @@ class ChatOrchestrator:
             # ADR-022 axis A: offer site.* only when the session has a project.
             has_project=sess.project_id is not None,
             first_turn_attachments=first_turn,
-            # ADR-034 §4 / ADR-044: session-fixed model (NULL → None). The effective model is
-            # resolved inside _generate_loop against the right provider's allowlist (stale-model
-            # fallback): credits → active provider, byok → key provider.
+            # ADR-034 §4 / ADR-044 / ADR-073: session-fixed model (NULL → None). The effective
+            # model is resolved inside _generate_loop against the right provider's allowlist
+            # (stale-model fallback): credits → session model's provider, byok → key provider.
             model=sess.model or None,
             generation_mode=effective_generation_mode,
             generation_backend=requested_backend,
@@ -1450,8 +1508,9 @@ class ChatOrchestrator:
             system_prompt=system_prompt,
             # ADR-022 axis A: project_id is session-fixed; gate site.* by the session's project.
             has_project=sess.project_id is not None,
-            # ADR-034 §4 / ADR-044: session-fixed model; effective model resolved in _generate_loop
-            # against the right provider's allowlist (credits → active, byok → key provider).
+            # ADR-034 §4 / ADR-044 / ADR-073: session-fixed model; effective model resolved in
+            # _generate_loop against the right provider's allowlist (credits → session provider,
+            # byok → key provider).
             model=sess.model or None,
             generation_mode=generation_mode,
             generation_backend=requested_backend,
@@ -1828,6 +1887,72 @@ class ChatOrchestrator:
                 )
         return messages
 
+    async def _credits_llm_with_failover(
+        self,
+        *,
+        session_model: str | None,
+        llm_kwargs: dict[str, Any],
+        stored_provider_state: dict[str, Any] | None,
+        use_generation_v2: bool,
+        on_text_delta: Callable[[str], Awaitable[None]] | None,
+        emit_text_deltas: bool,
+    ) -> tuple[LLMResult, str]:
+        """Try credits keys in ADR-074 order. Returns ``(result, provider_used)``.
+
+        BYOK never enters here. Each ``/chat/run`` starts from the primary key again (no
+        process-wide memory of a dead key). The session model stored in DB is not rewritten
+        when a crossover candidate answers.
+        """
+        attempts = build_attempt_chain(session_model)
+        active = get_settings().credits_provider_for_model(None)
+        index = 0
+        while True:
+            attempt = attempts[index]
+            llm = (
+                self._deps.llm
+                if attempt.provider == active
+                else _credits_llm(provider=attempt.provider, use_generation_v2=use_generation_v2)
+            )
+            attempt_kwargs = {
+                **llm_kwargs,
+                "api_key": attempt.api_key,
+                "model": (
+                    attempt.model
+                    if attempt.model is not None
+                    else _model_for_provider(session_model, attempt.provider)
+                ),
+                "provider_state": _provider_state_for_attempt(attempt, stored_provider_state),
+            }
+            try:
+                result = await _invoke_llm(
+                    llm,
+                    attempt_kwargs,
+                    on_text_delta=on_text_delta,
+                    emit_text_deltas=emit_text_deltas,
+                )
+                return result, attempt.provider
+            except (AnthropicAuthError, OpenAIAuthError, UpstreamError) as exc:
+                following = next_attempt_index(attempts, index, exc)
+                if following is None:
+                    if isinstance(exc, (AnthropicAuthError, OpenAIAuthError)):
+                        raise UpstreamError("llm provider unavailable") from exc
+                    raise
+                nxt = attempts[following]
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "chat_provider_failover",
+                    reason=("credentials" if is_credential_failure(exc) else "upstream_failure"),
+                    from_provider=attempt.provider,
+                    from_key_slot=attempt.key_index,
+                    to_provider=nxt.provider,
+                    to_key_slot=nxt.key_index,
+                    requested_model=session_model,
+                    next_model=nxt.model,
+                    exception_class=type(exc).__name__,
+                )
+                index = following
+
     async def _generate_loop(
         self,
         *,
@@ -1859,13 +1984,18 @@ class ChatOrchestrator:
         media_accumulator = _MediaJobsAccumulator()
         # ADR-070: mediaChoices wizard of THIS call, last-wins.
         media_choices_accumulator = _MediaChoicesAccumulator()
-        # ADR-044 §5: select the generation client + the effective model by mode.
-        # - credits → the injected active-provider client (self._deps.llm); stale-model guard
-        #   against the ACTIVE provider allowlist (a session model fixed for another provider after
-        #   an LLM_PROVIDER switch → None → client default, not a 502).
+        # ADR-044 §5 / ADR-073 / ADR-074: select the generation client + the effective model.
+        # - credits → first candidate is the session model's provider (ADR-073). Unset
+        #   LLM_PROVIDERS → LLM_PROVIDER only (ADR-033). Spare keys / crossover happen inside
+        #   the per-call loop (ADR-074); this assignment is the session provider, overwritten
+        #   if a crossover candidate answers. Stale-model: id not in that provider's allowlist
+        #   → None → client default (same guard as after an LLM_PROVIDER switch).
         # - byok → the client of the KEY's provider (llm_client_for), independent of LLM_PROVIDER;
         #   the session model is forwarded only if it is in the KEY provider's allowlist, else the
         #   BYOK default of that provider (a foreign model is never sent to the key's client).
+        #   BYOK does not rotate keys (the user's key is the only candidate).
+        llm: LLMClient | None = None
+        effective_model: str | None = None
         if mode is Mode.byok:
             if byok_provider is None:
                 # Defensive (ADR-044 §5.1): a valid/enabled key always has a detectable provider.
@@ -1883,10 +2013,9 @@ class ChatOrchestrator:
                 effective_model = get_settings().byok_default_model_for(byok_provider)
             provider = byok_provider
         else:
-            llm = self._deps.llm
-            # §Stale-model: guard the session model against the active provider's allowlist.
-            effective_model = _model_for_provider(model, _active_provider())
-            provider = _active_provider()
+            # ADR-073: route credits by the session model (session-fixed; no mid-chat switch).
+            # ADR-074 may still answer from the other provider on this call only.
+            provider = get_settings().credits_provider_for_model(model)
         # ADR-011: server-side site.* tools are executed by the backend synchronously inside this
         # loop, WITHOUT a round-trip to iOS. We keep calling the LLM as long as the turn contains
         # ONLY server-side tools (their tool_results are produced here and fed straight back).
@@ -1944,30 +2073,32 @@ class ChatOrchestrator:
                     include_media_chat_tools=get_settings().chat_media_tools_enabled,
                 ),
                 "attachments": turn0_attachments,
-                "api_key": api_key,
-                # ADR-034 §4 / ADR-044 §5: the effective model resolved above (stale-model
-                # guard for credits; key-provider allowlist + BYOK default for byok). None → the
-                # client uses its provider default; the orchestrator never blindly forwards a
-                # foreign model.
-                "model": effective_model,
                 "generation_mode": effective_generation_mode,
-                "provider_state": provider_state,
             }
             try:
                 result: LLMResult
-                if on_text_delta is not None:
-                    # ADR-069: progressive text deltas as the provider emits them; never for
-                    # study_learn (quiz anti-spoiler). toolCalls/quiz/mediaJobs arrive only in done.
-                    result = None  # type: ignore[assignment]
-                    async for event in llm.stream_message(**llm_kwargs):
-                        if event.kind == "text_delta" and event.text and emit_text_deltas:
-                            await on_text_delta(event.text)
-                        elif event.kind == "completed" and event.result is not None:
-                            result = event.result
-                    if result is None:
-                        raise RuntimeError("stream_message ended without completed event")
+                if mode is Mode.byok:
+                    assert llm is not None
+                    result = await _invoke_llm(
+                        llm,
+                        {
+                            **llm_kwargs,
+                            "api_key": api_key,
+                            "model": effective_model,
+                            "provider_state": None,
+                        },
+                        on_text_delta=on_text_delta,
+                        emit_text_deltas=emit_text_deltas,
+                    )
                 else:
-                    result = await llm.create_message(**llm_kwargs)
+                    result, provider = await self._credits_llm_with_failover(
+                        session_model=model,
+                        llm_kwargs=llm_kwargs,
+                        stored_provider_state=provider_state,
+                        use_generation_v2=use_generation_v2,
+                        on_text_delta=on_text_delta,
+                        emit_text_deltas=emit_text_deltas,
+                    )
             except (AnthropicAuthError, OpenAIAuthError):
                 if mode is Mode.byok:
                     # ADR-016: a previously-valid BYOK key rejected with 401 on use → expired

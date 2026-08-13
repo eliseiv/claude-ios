@@ -29,6 +29,17 @@ _MASTER_KEY_B64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="  # 32 bytes bas
 os.environ["KMS_LOCAL_MASTER_KEY"] = _MASTER_KEY_B64
 os.environ["KMS_KEY_ID"] = ""
 os.environ["ANTHROPIC_API_KEY"] = "sk-ant-service-test"
+# Dual-credits (ADR-073) is opt-in. Force empty so a local .env LLM_PROVIDERS cannot change
+# the hermetic single-provider catalog / routing that the rest of the suite asserts.
+os.environ["LLM_PROVIDERS"] = ""
+# ADR-074 key failover is opt-in (empty backup / empty crossover model). Force empty so a
+# local .env cannot rotate a credits call onto a spare key or the other provider.
+os.environ["OPENAI_API_KEY_BACKUP"] = ""
+os.environ["OPEN_AI_BACK_UP_API_KEY"] = ""
+os.environ["ANTHROPIC_API_KEY_BACKUP"] = ""
+os.environ["ANTHROPIC_FALLBACK_API_KEY"] = ""
+os.environ["OPENAI_CHAT_FALLBACK_ANTHROPIC_MODEL"] = ""
+os.environ["ANTHROPIC_CHAT_FALLBACK_OPENAI_MODEL"] = ""
 os.environ["APPSTORE_BUNDLE_ID"] = "com.example.app"
 os.environ["APPSTORE_ENVIRONMENT"] = "sandbox"
 os.environ["APPSTORE_ROOT_CERT_DIR"] = ""
@@ -555,6 +566,7 @@ async def client(
     # The routers imported the names at module load — patch there too.
     from app.api_gateway.routers import byok as byok_router
     from app.api_gateway.routers import chat as chat_router
+    from app.api_gateway.routers import models as models_router
     from app.api_gateway.routers import subscription as sub_router
     from app.api_gateway.routers import wallet as wallet_router
 
@@ -562,6 +574,7 @@ async def client(
     wallet_router.enforce_other_limits = _allow_other  # type: ignore[assignment]
     byok_router.enforce_other_limits = _allow_other  # type: ignore[assignment]
     sub_router.enforce_other_limits = _allow_other  # type: ignore[assignment]
+    models_router.enforce_other_limits = _allow_other  # type: ignore[assignment]
 
     app = create_app()
     app.dependency_overrides[deps.get_db] = _override_db
@@ -576,6 +589,7 @@ async def client(
     wallet_router.enforce_other_limits = orig_other  # type: ignore[assignment]
     byok_router.enforce_other_limits = orig_other  # type: ignore[assignment]
     sub_router.enforce_other_limits = orig_other  # type: ignore[assignment]
+    models_router.enforce_other_limits = orig_other  # type: ignore[assignment]
 
 
 # ----------------------------- DB seeding helpers -----------------------------
