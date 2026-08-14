@@ -241,12 +241,12 @@ async def test_crm_requests_are_retroactive_from_chat_and_media(
                 "VALUES "
                 "(:sid, :msid, 'user', '{}'::jsonb, NULL, now() - interval '3 seconds'), "
                 "(:sid, :msid, 'assistant', '{}'::jsonb, "
-                " '{\"model\": \"gpt-4o\", \"inputTokens\": 1000, \"outputTokens\": 100, "
-                "   \"cacheReadTokens\": 0, \"cacheWriteTokens\": 0}'::jsonb, "
+                ' \'{"model": "gpt-4o", "inputTokens": 1000, "outputTokens": 100, '
+                '   "cacheReadTokens": 0, "cacheWriteTokens": 0}\'::jsonb, '
                 " now() - interval '2 seconds'), "
                 "(:sid, :msid, 'assistant', '{}'::jsonb, "
-                " '{\"model\": \"gpt-4o\", \"inputTokens\": 2000, \"outputTokens\": 50, "
-                "   \"cacheReadTokens\": 0, \"cacheWriteTokens\": 0}'::jsonb, "
+                ' \'{"model": "gpt-4o", "inputTokens": 2000, "outputTokens": 50, '
+                '   "cacheReadTokens": 0, "cacheWriteTokens": 0}\'::jsonb, '
                 " now() - interval '1 seconds')"
             ),
             {"sid": str(sid), "msid": str(msid)},
