@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import pytest
+
 from app.media_generation.catalog import find_model
 from app.pricing.provider_prices import (
     chat_cost_usd,
@@ -130,7 +131,7 @@ def test_run_without_duration_has_no_cost_rather_than_a_guessed_one() -> None:
     assert media_cost_usd_of_run(model=_model("veo-3.1"), duration=None) is None
 
 
-# ================================ media: восстановление из кредитов ================================
+# ========================== media: восстановление из кредитов ==========================
 
 
 def test_image_tiers_with_one_price_per_credit_need_no_asset_count() -> None:

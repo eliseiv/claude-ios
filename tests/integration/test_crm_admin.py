@@ -237,7 +237,8 @@ async def test_crm_requests_are_retroactive_from_chat_and_media(
         )
         await session.execute(
             text(
-                "INSERT INTO chat_steps (session_id, message_step_id, role, payload, usage, created_at) "
+                "INSERT INTO chat_steps "
+                "(session_id, message_step_id, role, payload, usage, created_at) "
                 "VALUES "
                 "(:sid, :msid, 'user', '{}'::jsonb, NULL, now() - interval '3 seconds'), "
                 "(:sid, :msid, 'assistant', '{}'::jsonb, "
