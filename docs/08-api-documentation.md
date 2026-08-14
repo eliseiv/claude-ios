@@ -216,11 +216,20 @@ Tool-loop сценарий описать связно (в `description` тег�
 ## Открытые вопросы
 Нет. Все решения зафиксированы выше; дефолты явны.
 
-## CRM Admin API: история запросов (ADR-077)
+## CRM Admin API: история запросов (ADR-077, модель чтения — ADR-078)
 
-`GET /v1/admin/users/{id}/requests` читает только `request_logs`, а не
-`audit_logs`. Audit event types (`billing_debit`, `policy_decision`,
-`chat_step`) не являются endpoint и не попадают в историю запросов.
+`GET /v1/admin/users/{id}/requests` НЕ читает `audit_logs`: его event types
+(`billing_debit`, `policy_decision`, `chat_step`) не являются endpoint. История
+**выводится из доменных таблиц** и потому ретроактивна — она есть у
+пользователей, работавших до появления журнала:
+
+- чат: один **ход** (`message_step_id`) = одна строка, `endpoint` = `chat:<model>`,
+  `tokens_spent` — точное списание из `ledger_transactions`. Ход tool-loop’а не
+  размножается по шагам;
+- media: `media_jobs`, `endpoint` = `<kind>:<model_id>`, длительность —
+  `updated_at - created_at`, `refunded` — из `credits_refunded`;
+- `request_logs` добавляет то, чего в доменных таблицах нет физически:
+  **упавшие** и **ещё выполняющиеся** запросы, а также длительность новых ходов.
 
 Ответ, новые записи первыми:
 
@@ -228,7 +237,7 @@ Tool-loop сценарий описать связно (в `description` тег�
 {
   "total": 1,
   "items": [{
-    "endpoint": "/v1/chat/v2/run",
+    "endpoint": "chat:gpt-4o",
     "prompt_preview": "Краткий фрагмент запроса",
     "status_code": 200,
     "status": "ok",
@@ -241,10 +250,12 @@ Tool-loop сценарий описать связно (в `description` тег�
 }
 ```
 
-- `tokens_spent` — credits, реально списанные в этом API-вызове;
+- `tokens_spent` — credits, реально списанные за этот запрос; `null` = «не
+  измерено» (например, ход без строки ledger), а не ноль;
 - `provider_cost_usd=null` — стоимость провайдера не измерена;
 - `refunded=true` не обнуляет `tokens_spent`;
 - незавершённая media-задача отдаётся как `slow`/`202`;
-- completed дольше 30 секунд → `slow`; failed → `error`;
-- старые `audit_logs` не преобразуются: до первого нового запроса список
-  может быть пустым.
+- completed дольше 30 секунд → `slow`; failed → `error`. Порог общий с 232,
+  поэтому генерация видео (300–400 с) штатно помечается `slow`;
+- `duration_sec=null` у прошлых ходов чата: замера начала запроса до появления
+  `request_logs` не существует.

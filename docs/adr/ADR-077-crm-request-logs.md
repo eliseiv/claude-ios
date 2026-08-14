@@ -1,8 +1,14 @@
 # ADR-077 — История запросов CRM из `request_logs`, а не из `audit_logs`
 
-- **Статус:** accepted
+- **Статус:** accepted (модель ЧТЕНИЯ пересмотрена 2026-08-14 → [ADR-078](ADR-078-crm-request-history-derived-from-domain.md))
 - **Дата:** 2026-08-14
 - **Область:** CRM Admin API, chat, media generation, data model
+
+> **Пересмотрено:** решение читать историю CRM только из `request_logs` (и не
+> backfill-ить прошлое) дало пустую историю всем существующим пользователям.
+> [ADR-078](ADR-078-crm-request-history-derived-from-domain.md) выводит историю
+> из доменных таблиц, оставляя `request_logs` источником упавших/незавершённых
+> запросов. Схема, миграция `0023` и writer ниже — в силе без изменений.
 
 ## Контекст
 

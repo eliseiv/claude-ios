@@ -86,12 +86,18 @@ tests/
 ## CI gate (см. 07-deployment.md)
 PR не проходит, если: `ruff format --check` fail, `ruff check` fail, `mypy` fail, `pytest` fail, coverage < 80%.
 
-## CRM request history (ADR-077)
+## CRM request history (ADR-077, чтение — ADR-078)
 
 Обязательные integration-сценарии:
 
 - `audit_logs` с `billing_debit`/`policy_decision`/`chat_step` не появляются
   в `GET /v1/admin/users/{id}/requests`;
+- **история ретроактивна:** при ПУСТОМ `request_logs` ход чата (`chat_steps` +
+  списание в `ledger_transactions`) и `media_jobs` дают строки истории. Тест на
+  это — единственная защита от повторения регрессии «пустая история после
+  перевода чтения на новый журнал»;
+- **ход tool-loop’а не размножается:** два `assistant`-шага с одним
+  `message_step_id` и одним списанием дают РОВНО одну строку;
 - успешный chat route создаёт одну completed-строку с реальным endpoint,
   duration и credits из debit текущего вызова;
 - идемпотентный replay не приписывает существующее списание повторно;

@@ -11,14 +11,13 @@ import uuid
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func, select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.service import AdminService
 from app.audit.service import EVENT_CRM_SUBSCRIPTION_GRANT, AuditEvent, AuditService
 from app.config import Settings, get_settings
 from app.errors import InsufficientCreditsError, UserNotFoundError
-from app.models import RequestLog
 from app.schemas.crm_admin import (
     CrmPaymentItem,
     CrmPaymentListResponse,
@@ -44,6 +43,105 @@ _ADAPTY_PAYMENT_EVENTS = (
     "access_level_updated",
 )
 _ADAPTY_RENEWAL_EVENTS = ("subscription_renewed",)
+
+# Порог «медленного» запроса в секундах — тот же, что в 232 (`_SLOW_THRESHOLD_SEC`): CRM
+# раскрашивает строку по `status`, и разъезд порогов между бэками дал бы операторам две
+# несравнимые шкалы «медленно» на одной странице.
+_SLOW_THRESHOLD_SEC = 30.0
+_PROMPT_PREVIEW_MAX = 200
+
+# Единица истории для чата — ХОД (`message_step_id`), а не шаг: в server-side tool-loop один ход
+# пишет несколько строк `chat_steps` (`assistant` с `tool_use`, затем финальный `assistant`), а
+# списание по нему РОВНО ОДНО — `orchestrator._debit` идемпотентен по `message_step_id`. Строка
+# на шаг показала бы одно и то же списание два-три раза (проверено на проде: 18 assistant-шагов
+# против 15 оплаченных ходов).
+#
+# `request_logs` подключается к ходу ЛЕВЫМ соединением ради двух величин, которых в доменных
+# таблицах нет, — кода ответа и длительности; агрегат по `message_step_id` обязателен, потому что
+# продолжение через `/tool-result` — отдельный HTTP-запрос с тем же `message_step_id`, и без
+# группировки соединение размножило бы ход.
+_REQUEST_HISTORY_SQL = """
+    WITH turns AS (
+        SELECT s.message_step_id AS message_step_id,
+               min(s.created_at) AS sent_at,
+               (array_remove(array_agg(s.usage->>'model' ORDER BY s.seq DESC), NULL))[1] AS model
+          FROM chat_steps s
+          JOIN chat_sessions cs ON cs.id = s.session_id
+         WHERE cs.user_id = :uid AND s.role = 'assistant'
+         GROUP BY s.message_step_id
+    ), logged AS (
+        SELECT message_step_id,
+               max(status_code) AS status_code,
+               sum(EXTRACT(EPOCH FROM (completed_at - started_at))) AS duration_sec
+          FROM request_logs
+         WHERE user_id = :uid AND message_step_id IS NOT NULL
+         GROUP BY message_step_id
+    )
+    SELECT CASE WHEN t.model IS NULL THEN 'chat' ELSE 'chat:' || t.model END AS endpoint,
+           NULL::text AS prompt_preview,
+           COALESCE(l.status_code, 200) AS status_code,
+           CASE WHEN l.duration_sec > :slow THEN 'slow' ELSE 'ok' END AS status,
+           l.duration_sec::float AS duration_sec,
+           t.sent_at AS sent_at,
+           lt.amount::float AS tokens_spent,
+           NULL::float AS provider_cost_usd,
+           false AS refunded
+      FROM turns t
+      LEFT JOIN logged l ON l.message_step_id = t.message_step_id
+      LEFT JOIN ledger_transactions lt
+             ON lt.user_id = :uid
+            AND lt.idempotency_key = t.message_step_id::text
+            AND lt.type = 'debit'
+    UNION ALL
+    SELECT j.kind || ':' || j.model_id AS endpoint,
+           left(j.prompt, :preview) AS prompt_preview,
+           CASE j.status
+             WHEN 'completed' THEN 200
+             WHEN 'failed' THEN 500
+             ELSE 202
+           END AS status_code,
+           CASE
+             WHEN j.status = 'failed' THEN 'error'
+             WHEN j.status <> 'completed' THEN 'slow'
+             WHEN EXTRACT(EPOCH FROM (j.updated_at - j.created_at)) > :slow THEN 'slow'
+             ELSE 'ok'
+           END AS status,
+           CASE
+             WHEN j.status = 'completed'
+             THEN EXTRACT(EPOCH FROM (j.updated_at - j.created_at))
+           END::float AS duration_sec,
+           j.created_at AS sent_at,
+           j.credits_charged::float AS tokens_spent,
+           NULL::float AS provider_cost_usd,
+           j.credits_refunded AS refunded
+      FROM media_jobs j
+     WHERE j.user_id = :uid
+    UNION ALL
+    SELECT r.endpoint AS endpoint,
+           r.prompt_preview AS prompt_preview,
+           CASE
+             WHEN r.status IN ('started', 'queued') THEN 202
+             ELSE r.status_code
+           END AS status_code,
+           CASE
+             WHEN r.status = 'failed' THEN 'error'
+             WHEN r.status IN ('started', 'queued') THEN 'slow'
+             WHEN EXTRACT(EPOCH FROM (r.completed_at - r.started_at)) > :slow THEN 'slow'
+             ELSE 'ok'
+           END AS status,
+           CASE
+             WHEN r.status = 'completed'
+             THEN EXTRACT(EPOCH FROM (r.completed_at - r.started_at))
+           END::float AS duration_sec,
+           r.started_at AS sent_at,
+           r.tokens_spent::float AS tokens_spent,
+           r.provider_cost_usd AS provider_cost_usd,
+           r.refunded AS refunded
+      FROM request_logs r
+     WHERE r.user_id = :uid
+       AND r.message_step_id IS NULL
+       AND r.media_job_id IS NULL
+"""
 
 
 def _iso_z(dt: datetime.datetime | None) -> str | None:
@@ -406,52 +504,73 @@ class CrmAdminService:
     async def list_requests(
         self, user_id: uuid.UUID, *, limit: int, offset: int
     ) -> CrmRequestListResponse:
+        """История запросов, ВЫВЕДЕННАЯ из доменных таблиц (как в 232 — из `generations`).
+
+        Читать один журнал (`request_logs`) оказалось нельзя: журнал заполняется только с
+        момента своего появления, поэтому у всех существующих пользователей история
+        обнулилась бы — а именно она и нужна оператору. Доменные таблицы хранят те же факты
+        с самого начала работы сервиса, поэтому история здесь РЕТРОАКТИВНА:
+
+        * `chat_steps` (`role='assistant'`) — один ответ модели = один запрос; модель берётся
+          из `usage`, а списанные кредиты — из `ledger_transactions` по `idempotency_key`,
+          равному `message_step_id` (`chat/orchestrator._debit`), то есть это ТОЧНАЯ сумма,
+          а не оценка;
+        * `media_jobs` — сумма и возврат лежат в самой строке (`credits_charged`,
+          `credits_refunded`), длительность считается по `created_at`/`updated_at`;
+        * `request_logs` — ТОЛЬКО те запросы, которых в доменных таблицах нет физически:
+          упавшие и ещё выполняющиеся. Успешный запрос всегда проставляет
+          `message_step_id`/`media_job_id`, поэтому фильтр по двум `IS NULL` исключает
+          двойной показ БЕЗ дедупликации по ключам.
+
+        `provider_cost_usd` остаётся `NULL` = «не измерено» (правило `NULL ≠ 0`): себестоимость
+        провайдера в этом сервисе не сохраняется, и `0` был бы выдумкой под видом факта.
+        """
         await self._admin._require_user_exists(user_id)
         limit = min(max(limit, 1), 100)
         offset = max(offset, 0)
 
+        params = {
+            "uid": str(user_id),
+            "preview": _PROMPT_PREVIEW_MAX,
+            "slow": _SLOW_THRESHOLD_SEC,
+        }
         total = int(
             await self._session.scalar(
-                select(func.count()).select_from(RequestLog).where(RequestLog.user_id == user_id)
+                text(f"WITH history AS ({_REQUEST_HISTORY_SQL}) SELECT count(*) FROM history"),
+                params,
             )
             or 0
         )
-        rows = list(
+        rows = (
             (
-                await self._session.scalars(
-                    select(RequestLog)
-                    .where(RequestLog.user_id == user_id)
-                    .order_by(RequestLog.started_at.desc(), RequestLog.id.desc())
-                    .limit(limit)
-                    .offset(offset)
-                )
-            ).all()
-        )
-
-        items: list[CrmRequestItem] = []
-        for row in rows:
-            duration: float | None = None
-            if row.completed_at is not None:
-                duration = (row.completed_at - row.started_at).total_seconds()
-            if row.status == "failed":
-                req_status = "error"
-            elif row.status in {"started", "queued"} or duration is not None and duration > 30:
-                req_status = "slow"
-            else:
-                req_status = "ok"
-            items.append(
-                CrmRequestItem(
-                    endpoint=row.endpoint,
-                    prompt_preview=row.prompt_preview,
-                    status_code=202 if row.status in {"started", "queued"} else row.status_code,
-                    status=req_status,
-                    duration_sec=duration,
-                    sent_at=_iso_z(row.started_at) or "",
-                    tokens_spent=(None if row.tokens_spent is None else float(row.tokens_spent)),
-                    provider_cost_usd=row.provider_cost_usd,
-                    refunded=row.refunded,
+                await self._session.execute(
+                    text(
+                        f"WITH history AS ({_REQUEST_HISTORY_SQL}) "
+                        "SELECT * FROM history ORDER BY sent_at DESC LIMIT :lim OFFSET :off"
+                    ),
+                    {**params, "lim": limit, "off": offset},
                 )
             )
+            .mappings()
+            .all()
+        )
+
+        items = [
+            CrmRequestItem(
+                endpoint=str(r["endpoint"]),
+                prompt_preview=r["prompt_preview"],
+                status_code=int(r["status_code"]),
+                status=str(r["status"]),
+                duration_sec=None if r["duration_sec"] is None else float(r["duration_sec"]),
+                sent_at=_iso_z(r["sent_at"]) or "",
+                tokens_spent=None if r["tokens_spent"] is None else float(r["tokens_spent"]),
+                provider_cost_usd=(
+                    None if r["provider_cost_usd"] is None else float(r["provider_cost_usd"])
+                ),
+                refunded=bool(r["refunded"]),
+            )
+            for r in rows
+        ]
         return CrmRequestListResponse(total=total, items=items)
 
     async def stats(

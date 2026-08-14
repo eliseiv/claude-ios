@@ -209,6 +209,84 @@ async def test_crm_requests_use_request_logs_not_audit_events(
     }
 
 
+async def test_crm_requests_are_retroactive_from_chat_and_media(
+    crm_admin_client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """История берётся из доменных таблиц, поэтому существует БЕЗ единой строки `request_logs`.
+
+    Регрессия, которую этот тест закрывает: чтение одного лишь `request_logs` обнуляло историю
+    всем, кто пользовался сервисом до появления журнала. Здесь `request_logs` пуст намеренно.
+
+    Второй факт теста — ход tool-loop’а НЕ размножается: два `assistant`-шага с одним
+    `message_step_id` оплачены один раз и обязаны дать РОВНО одну строку.
+    """
+    async with db_sessionmaker() as session:
+        uid = await seed_user(session)
+        sid = uuid.uuid4()
+        msid = uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO chat_sessions (id, user_id, project_id, mode) "
+                "VALUES (:sid, :uid, 'p', 'credits')"
+            ),
+            {"sid": str(sid), "uid": uid},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO chat_steps (session_id, message_step_id, role, payload, usage) "
+                "VALUES (:sid, :msid, 'assistant', '{}'::jsonb, '{\"model\": \"gpt-4o\"}'::jsonb), "
+                "(:sid, :msid, 'assistant', '{}'::jsonb, '{\"model\": \"gpt-4o\"}'::jsonb)"
+            ),
+            {"sid": str(sid), "msid": str(msid)},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO ledger_transactions (user_id, type, amount, idempotency_key) "
+                "VALUES (:uid, 'debit', 7, :key)"
+            ),
+            {"uid": uid, "key": str(msid)},
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO media_jobs (
+                    user_id, model_id, kind, fal_endpoint, fal_request_id,
+                    status_url, response_url, status, prompt,
+                    credits_charged, credits_refunded, created_at, updated_at
+                ) VALUES (
+                    :uid, 'veo-3.1', 'video', 'fal-ai/veo', 'req-retro',
+                    'https://q/status', 'https://q', 'completed', 'a cat',
+                    64, true, now() - interval '10 seconds', now()
+                )
+                """
+            ),
+            {"uid": uid},
+        )
+        await session.commit()
+
+    response = await crm_admin_client.get(f"/v1/admin/users/{uid}/requests", headers=_ADMIN_HEADERS)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2, "tool-loop turn must not be counted per assistant step"
+
+    by_endpoint = {item["endpoint"]: item for item in body["items"]}
+    assert set(by_endpoint) == {"chat:gpt-4o", "video:veo-3.1"}
+
+    chat = by_endpoint["chat:gpt-4o"]
+    assert chat["tokens_spent"] == 7.0
+    assert chat["status"] == "ok"
+    assert chat["duration_sec"] is None  # не измерено — старых замеров у хода нет
+    assert chat["provider_cost_usd"] is None
+
+    media = by_endpoint["video:veo-3.1"]
+    assert media["tokens_spent"] == 64.0
+    assert media["refunded"] is True
+    assert media["prompt_preview"] == "a cat"
+    assert media["status"] == "ok"
+    assert media["duration_sec"] == pytest.approx(10, abs=1)
+
+
 async def test_request_log_writer_records_orchestrator_chat_debit(
     db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

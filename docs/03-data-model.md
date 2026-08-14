@@ -260,6 +260,13 @@ CREATE UNIQUE INDEX ux_request_logs_media_job
 > `duration_sec` не хранится и вычисляется как `completed_at-started_at`.
 > `tokens_spent` — credits списания, не input/output LLM tokens.
 > `provider_cost_usd=NULL` означает «не измерено», не ноль.
+>
+> **Не единственный источник истории CRM ([ADR-078](adr/ADR-078-crm-request-history-derived-from-domain.md)).**
+> `GET /v1/admin/users/{id}/requests` выводит историю из доменных таблиц
+> (`chat_steps` + `ledger_transactions`, `media_jobs`), а отсюда берёт только
+> строки с `message_step_id IS NULL AND media_job_id IS NULL` — упавшие и ещё
+> выполняющиеся запросы. Успешный запрос всегда проставляет одну из двух
+> корреляций, поэтому это же условие исключает двойной показ.
 > `audit_logs` остаётся независимым append-only журналом событий и не служит
 > источником request history.
 > `user_id` намеренно без FK: writer работает в независимой транзакции, а при
