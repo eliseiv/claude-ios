@@ -30,7 +30,7 @@
 <a id="model-опц-session-fixed-adr-034"></a>
 - **`model` (опц., session-fixed, [ADR-034](../../adr/ADR-034-user-model-selection.md) / [ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md)).** Выбор модели из разрешённого инстансом набора (`GET /v1/models`). Фиксируется на сессию при создании (как `mode`/`assistantMode`/`projectId`); **провайдер чата не меняется на resume**:
   - **без `model`** → сессия создаётся с `chat_sessions.model = NULL` = «дефолтная модель инстанса» (`ANTHROPIC_MODEL`/`OPENAI_MODEL` активного `LLM_PROVIDER`) — обратная совместимость;
-  - **с `model`** → должен быть непустой строкой после `strip` (пустая/whitespace → `422`) **и** входить в каталог инстанса (`GET /v1/models`: без `LLM_PROVIDERS` — allowlist активного провайдера; с dual — union обоих); иначе → **`422 unsupported_model`** (`"model '<x>' is not available on this instance"`). Тихого фолбэка на дефолт нет — явный контракт ([ADR-034 §3](../../adr/ADR-034-user-model-selection.md)).
+  - **с `model`** → должен быть непустой строкой после `strip` (пустая/whitespace → `422`) **и** входить в **chat**-каталог инстанса (`GET /v1/models` с `modality=chat`: без `LLM_PROVIDERS` — allowlist активного провайдера; с dual — union обоих). Fal-id (`modality=photo`/`video`) → **`422 unsupported_model`**. Иначе → **`422 unsupported_model`** (`"model '<x>' is not available on this instance"`). Тихого фолбэка на дефолт нет — явный контракт ([ADR-034 §3](../../adr/ADR-034-user-model-selection.md)).
   - **Resume-сессия:** `model` берётся из сессии (`chat_sessions.model`); поле запроса при resume **игнорируется** (не ошибка) — единообразно с `mode`/`assistantMode`/`projectId`. Смена провайдера внутри чата **не** поддерживается.
   - **Биллинг от выбора модели не зависит** (1 кредит = 1 сообщение, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Возвращаемый `usage.model` отражает фактически использованную модель.
   - Без `LLM_PROVIDERS` инстанс одно-провайдерный ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) → выбрать чужую (Claude на openai-инстансе) нельзя. Dual ([ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md)) — opt-in.
@@ -567,29 +567,32 @@ Backend только инициирует tool-call; исполняет клие
 
 **Коды:** `200`; `401` нет/невалидный JWT; `429` rate-limit.
 
-## GET /v1/models — список доступных моделей инстанса ([ADR-034](../../adr/ADR-034-user-model-selection.md) / [ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md))
+## GET /v1/models — список доступных моделей инстанса ([ADR-034](../../adr/ADR-034-user-model-selection.md) / [ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md) / [ADR-075](../../adr/ADR-075-unified-instance-models-catalog.md))
 
-Источник для селектора модели в композере iOS. Возвращает модели **credits-провайдеров этого инстанса**: без `LLM_PROVIDERS` — только активный `LLM_PROVIDER` (как [ADR-034](../../adr/ADR-034-user-model-selection.md)); с opt-in `LLM_PROVIDERS` — union allowlist'ов обоих провайдеров, у которых задан API key.
+Источник для селектора. Возвращает **всё, что инстанс умеет обслужить**: chat-модели credits-провайдеров + fal photo/video, если задан `FAL_API_KEY`. Chat без `LLM_PROVIDERS` — только активный `LLM_PROVIDER`; с opt-in `LLM_PROVIDERS` — union allowlist'ов обоих, у которых задан API key. Leftover-ключ соседнего LLM dual **не** включает. Пустой `FAL_API_KEY` — fal-строк нет.
 
 ### Auth
 - **JWT-protected** (как `GET /v1/tools`, [ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md)): `Authorization: Bearer <JWT>` обязателен. Список не секретен, контур авторизации единый. Per-user rate-limit как у прочих read-эндпоинтов (`enforce_other_limits`). Метод `GET` (read-only, кэшируемо).
 
 ### Response (200)
+Обёртка `{models:[…]}` сохранена (не raw-массив). Поля `name` / `modality` / `variant` / `family` / `provider=fal` — **аддитивные**.
 ```json
 {
   "models": [
-    { "id": "gpt-4o", "displayName": "GPT-4o", "default": true, "provider": "openai" },
-    { "id": "gpt-4o-mini", "displayName": "GPT-4o mini", "default": false, "provider": "openai" },
-    { "id": "claude-sonnet-4-5", "displayName": "Claude Sonnet 4.5", "default": false, "provider": "anthropic" }
+    { "id": "gpt-4o", "displayName": "GPT-4o", "name": "GPT-4o", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null },
+    { "id": "claude-sonnet-4-5", "displayName": "Claude Sonnet 4.5", "name": "Claude Sonnet 4.5", "default": false, "provider": "anthropic", "modality": "chat", "variant": null, "family": null },
+    { "id": "fal-ai/nano-banana-pro", "displayName": "Nano Banana Pro", "name": "Nano Banana Pro", "default": true, "provider": "fal", "modality": "photo", "variant": "Text to Image", "family": "Nano-Banana-Pro" }
   ]
 }
 ```
-- `id` — провайдерный id модели, передаётся обратно в `POST /v1/chat/run` `model`.
-- `displayName` — человекочитаемое имя для UI (из allowlist-объекта `id→displayName`).
-- `default` (bool) — ровно одна модель `true` (дефолтная модель инстанса = `ANTHROPIC_MODEL`/`OPENAI_MODEL` активного `LLM_PROVIDER`). Дефолт всегда присутствует в списке (добавляется, если allowlist его не содержит) и идёт **первым**; остальные — в порядке вставки allowlist, затем extra-провайдер ([ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md)).
-- `provider` (`openai`\|`anthropic`) — **аддитивное** поле ([ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md)). Старые клиенты его игнорируют. На однопровайдерном инстансе совпадает с `LLM_PROVIDER`.
-- **Пустой allowlist** (env не задан / невалиден) ⇒ ровно один элемент = дефолтная модель инстанса (`displayName = id`, `default:true`) — обратная совместимость ([ADR-034 §1–2](../../adr/ADR-034-user-model-selection.md)).
-- Контракт ответа провайдер-агностичен (один формат). Без `LLM_PROVIDERS` наполнение — модели активного провайдера (плюс поле `provider`). С `LLM_PROVIDERS` — оба каталога; `id` по-прежнему уходит в то же поле `model`. Смена провайдера внутри чата **не** поддерживается (resume игнорирует `model`).
+- `id` — для `modality=chat` уходит в `POST /v1/chat/run` `model`. Для photo/video — endpoint fal; в `chat.model` **не** принимается (`422`).
+- `displayName` / `name` — одно и то же человекочитаемое имя (`name` — дубль для клиентов, которые читают `name`).
+- `default` (bool) — у **chat** ровно один `true` (дефолт инстанса), он **первый** в массиве. При включённом fal у photo свой дефолт (`fal-ai/nano-banana-pro`). Video — все `false`.
+- `provider` (`openai`\|`anthropic`\|`fal`) — аддитивное поле. Старые клиенты игнорируют неизвестные ключи.
+- `modality` (`chat`\|`photo`\|`video`) — селектор чата берёт только `chat`.
+- `variant` / `family` — режим и семейство fal; у chat всегда `null`.
+- **Пустой chat-allowlist** ⇒ дефолт инстанса первым + встроенный продуктовый каталог провайдера ([ADR-076](../../adr/ADR-076-builtin-chat-product-catalog.md)). Env allowlist добавляет extras и может переименовать; встроенные id не прячет.
+- Смена провайдера внутри чата **не** поддерживается (resume игнорирует `model`). `GET /v1/media/models` (короткие id, `modes[]`, цены) не заменяется.
 
 **Коды:** `200`; `401` нет/невалидный JWT; `429` rate-limit.
 

@@ -58,11 +58,15 @@ def test_allowed_models_union_merges_both_allowlists() -> None:
         ANTHROPIC_MODELS=json.dumps({"claude-sonnet-4-5": "Sonnet", "claude-opus": "Opus"}),
     )
     union = s.allowed_models_union()
-    assert list(union)[:2] == ["gpt-4o", "gpt-4o-mini"]
+    assert list(union)[0] == "gpt-4o"
+    assert "gpt-4o-mini" in union
+    assert "gpt-5.1" in union
     assert "claude-sonnet-4-5" in union
     assert "claude-opus" in union
+    assert "claude-opus-5" in union
     # Single-provider allowed_models() is unchanged (openai only).
     assert "claude-opus" not in s.allowed_models()
+    assert "claude-opus-5" not in s.allowed_models()
 
 
 def test_credits_provider_for_model_routes_by_allowlist() -> None:
@@ -97,7 +101,9 @@ def test_catalog_models_default_first_and_additive_provider() -> None:
     rows = s.catalog_models()
     assert rows[0] == ("gpt-4o", "GPT-4o", True, "openai")
     assert ("gpt-4o-mini", "Mini", False, "openai") in rows
+    assert ("gpt-5.1", "GPT-5.1", False, "openai") in rows
     assert ("claude-sonnet-4-5", "Sonnet", False, "anthropic") in rows
+    assert ("claude-opus-5", "Claude Opus 5", False, "anthropic") in rows
     assert sum(1 for _id, _n, is_default, _p in rows if is_default) == 1
 
 
@@ -113,5 +119,8 @@ def test_catalog_models_single_provider_only_emits_active() -> None:
         ANTHROPIC_MODELS=json.dumps({"claude-sonnet-4-5": "Sonnet"}),
     )
     rows = s.catalog_models()
-    assert [r[0] for r in rows] == ["gpt-4o"]
+    assert rows[0][0] == "gpt-4o"
     assert rows[0][3] == "openai"
+    assert "gpt-5.1" in [r[0] for r in rows]
+    assert all(r[3] == "openai" for r in rows)
+    assert "claude-sonnet-4-5" not in [r[0] for r in rows]

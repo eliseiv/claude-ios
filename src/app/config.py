@@ -59,12 +59,13 @@ class Settings(BaseSettings):
     # is non-empty. Public, not a secret. Per-instance.
     llm_providers_raw: str = Field(default="", alias="LLM_PROVIDERS")
 
-    # --- Model allowlist per provider (ADR-034) ---
-    # JSON object {model-id: displayName} of the models a user may pick on this instance. Parsed
-    # by allowed_models() with the SAME shape rules as token_products() (str→non-empty-str only).
-    # Default "{}" → empty allowlist → backward-compatible fallback to the single instance default
-    # model (allowed_models()). Per-provider: allowed_models() reads only the active provider's raw;
-    # dual-credits catalog_models() (ADR-073) unions allowlists of credits_providers(). Not secrets.
+    # --- Model allowlist per provider (ADR-034 / ADR-076) ---
+    # JSON object {model-id: displayName}. Parsed by allowed_models() with the SAME shape rules as
+    # token_products() (str→non-empty-str only). Built-in product catalog (ADR-076) is always
+    # included for the provider; this env map ADDS extras and may override display names — it does
+    # not hide built-in rows. Instance default is always present. Per-provider: allowed_models()
+    # reads only the active provider's raw; dual-credits catalog_models() (ADR-073) unions
+    # credits_providers(). Not secrets.
     anthropic_models_raw: str = Field(default="{}", alias="ANTHROPIC_MODELS")
     openai_models_raw: str = Field(default="{}", alias="OPENAI_MODELS")
 
@@ -975,26 +976,20 @@ class Settings(BaseSettings):
         return self.allowed_models_for(self._normalized_llm_provider())
 
     def allowed_models_for(self, provider: str) -> dict[str, str]:
-        """Parse a SPECIFIC provider's model allowlist into a validated {id: displayName} mapping.
+        """Selectable models for a provider: built-in catalog ∪ env allowlist (ADR-076).
 
-        Provider-aware (ADR-034 §1, generalized for ADR-044 §5): reads ``openai_models_raw`` for
-        ``"openai"``, else ``anthropic_models_raw`` (any non-openai value, incl. ``"anthropic"``).
-        Used by the multi-provider BYOK path to check a session model against the allowlist of the
-        KEY's provider (not the active one). Same shape rules as ``token_products()``: only ``str``
-        keys with a non-empty ``str`` value survive (key stripped to a non-empty string; value a
-        non-empty string after the emptiness check). A malformed JSON document or a non-object
-        yields an empty mapping.
+        Provider-aware (ADR-034 §1, generalized for ADR-044 §5 / ADR-076): reads
+        ``openai_models_raw`` for ``"openai"``, else ``anthropic_models_raw``. Same shape rules as
+        ``token_products()``: only ``str`` keys with a non-empty ``str`` value survive. Malformed
+        JSON or a non-object yields an empty env map (built-in catalog still applies).
 
-        Backward-compatibility fallback: when the parsed result is empty, returns
-        ``{default: default}`` — a single entry equal to that provider's default model
-        (``<provider>_model``, displayName = id). So an unset allowlist reproduces the current
-        behavior exactly (one model, the provider default).
-
-        Invariant (ADR-034 §1): the provider's default model is ALWAYS present in the result. When a
-        non-empty allowlist does NOT contain it, the default is PREPENDED (displayName = id, first
-        key); the rest keep the allowlist insertion order. Pure (no I/O); cached via get_settings().
+        Order: instance default first, then built-in product ids, then extra env ids. Env values
+        override display names. The default is ALWAYS present (displayName from env, else built-in,
+        else the id). Pure (no I/O); cached via get_settings().
         """
         import json
+
+        from app.chat.product_catalog import product_models_for
 
         is_openai = provider.strip().lower() == "openai"
         raw = self.openai_models_raw if is_openai else self.anthropic_models_raw
@@ -1014,15 +1009,23 @@ class Settings(BaseSettings):
                 if not isinstance(value, str) or not value:
                     continue
                 parsed_models[stripped_key] = value
+        builtin = product_models_for("openai" if is_openai else "anthropic")
         default = self.openai_model if is_openai else self.anthropic_model
-        if not parsed_models:
-            # Empty allowlist → backward-compatible single default entry (displayName = id).
-            return {default: default}
         if default in parsed_models:
-            return parsed_models
-        # Non-empty allowlist missing the default → prepend the default first (invariant §1),
-        # keeping the allowlist's insertion order for the rest.
-        return {default: default, **parsed_models}
+            default_name = parsed_models[default]
+        elif default in builtin:
+            default_name = builtin[default]
+        else:
+            default_name = default
+        merged: dict[str, str] = {default: default_name}
+        for model_id, display_name in builtin.items():
+            if model_id in merged:
+                continue
+            merged[model_id] = parsed_models.get(model_id, display_name)
+        for model_id, display_name in parsed_models.items():
+            if model_id not in merged:
+                merged[model_id] = display_name
+        return merged
 
     @staticmethod
     def _resolve_pem(path_value: str, string_value: str) -> str:

@@ -34,6 +34,7 @@ def restore_dual_settings() -> Iterator[None]:
         s.openai_model,
         s.openai_api_key,
         s.anthropic_api_key,
+        s.fal_api_key,
     )
     yield
     (
@@ -45,6 +46,7 @@ def restore_dual_settings() -> Iterator[None]:
         s.openai_model,
         s.openai_api_key,
         s.anthropic_api_key,
+        s.fal_api_key,
     ) = orig
 
 
@@ -58,6 +60,7 @@ def _enable_openai_instance(*, dual: bool) -> None:
     s.openai_models_raw = json.dumps({"gpt-4o": "GPT-4o", "gpt-4o-mini": "GPT-4o mini"})
     s.anthropic_models_raw = json.dumps({"claude-sonnet-4-5": "Claude Sonnet 4.5"})
     s.llm_providers_raw = "openai,anthropic" if dual else ""
+    s.fal_api_key = ""
 
 
 @pytest.fixture
@@ -87,9 +90,13 @@ async def test_catalog_without_llm_providers_stays_single_provider(
     r = await client.get("/v1/models", headers=auth_headers(uid))
     assert r.status_code == 200, r.text
     models = r.json()["models"]
-    assert [m["id"] for m in models] == ["gpt-4o", "gpt-4o-mini"]
+    ids = [m["id"] for m in models]
+    assert ids[0] == "gpt-4o"
+    assert "gpt-4o-mini" in ids
+    assert "gpt-5.1" in ids
     assert models[0]["default"] is True
     assert all(m["provider"] == "openai" for m in models)
+    assert "claude-sonnet-4-5" not in ids
 
 
 @pytest.mark.asyncio
@@ -109,7 +116,9 @@ async def test_catalog_with_llm_providers_unions_both_allowlists(
     assert models[0]["default"] is True
     assert models[0]["provider"] == "openai"
     assert "gpt-4o-mini" in ids
+    assert "gpt-5.1" in ids
     assert "claude-sonnet-4-5" in ids
+    assert "claude-opus-5" in ids
     by_id = {m["id"]: m for m in models}
     assert by_id["claude-sonnet-4-5"]["provider"] == "anthropic"
     assert by_id["claude-sonnet-4-5"]["default"] is False

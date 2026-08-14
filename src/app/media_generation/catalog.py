@@ -338,6 +338,94 @@ _BY_ID: dict[str, FalModel] = {model.id: model for model in _MODELS}
 
 ALL_MODEL_IDS: frozenset[str] = frozenset(_BY_ID)
 
+# Unified GET /v1/models rows (ADR-075). One row per fal endpoint the registry can actually run.
+# Names/variant/family match the 232 catalogue shape the iOS picker already consumes.
+DEFAULT_PHOTO_ENDPOINT = "fal-ai/nano-banana-pro"
+
+_FAL_CATALOG_META: dict[str, tuple[str, str, str]] = {
+    "fal-ai/nano-banana-2/edit": ("Nano Banana 2", "Image Editing", "nano-banana-2"),
+    "fal-ai/nano-banana-pro/edit": ("Nano Banana Pro", "Image Editing", "Nano-Banana-Pro"),
+    "fal-ai/nano-banana-2": ("Nano Banana 2", "Text to Image", "nano-banana-2"),
+    "fal-ai/nano-banana-pro": ("Nano Banana Pro", "Text to Image", "Nano-Banana-Pro"),
+    "fal-ai/kling-video/v3/pro/image-to-video": (
+        "Kling Video v3 Image to Video [Pro]",
+        "Image to Video (pro)",
+        "kling-v3",
+    ),
+    "fal-ai/kling-video/v2.5-turbo/pro/image-to-video": (
+        "Kling Video",
+        "2.5 Turbo (Image to Video) Pro",
+        "kling-video-v25",
+    ),
+    "fal-ai/veo3.1/image-to-video": ("Veo 3.1", "Image to Video", "veo3.1"),
+    "fal-ai/kling-video/v3/pro/text-to-video": (
+        "Kling Video v3 Text to Video [Pro]",
+        "Text to Video (pro)",
+        "kling-v3",
+    ),
+    "fal-ai/veo3.1": ("Veo 3.1", "Text to Video", "veo3.1"),
+    "fal-ai/kling-video/v2.5-turbo/pro/text-to-video": (
+        "Kling v2.5 Text to Video",
+        "2.5 Turbo (Text to Video) Pro",
+        "kling-video-v25",
+    ),
+}
+
+# Display order for GET /v1/models: photo edits, photo t2i (default last among photos), then video.
+_FAL_CATALOG_ORDER: tuple[str, ...] = (
+    "fal-ai/nano-banana-2/edit",
+    "fal-ai/nano-banana-pro/edit",
+    "fal-ai/nano-banana-2",
+    "fal-ai/nano-banana-pro",
+    "fal-ai/kling-video/v3/pro/image-to-video",
+    "fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
+    "fal-ai/veo3.1/image-to-video",
+    "fal-ai/kling-video/v3/pro/text-to-video",
+    "fal-ai/veo3.1",
+    "fal-ai/kling-video/v2.5-turbo/pro/text-to-video",
+)
+
+
+@dataclass(frozen=True)
+class FalCatalogEntry:
+    """One fal endpoint as offered by the unified instance catalog (ADR-075)."""
+
+    id: str
+    name: str
+    modality: str
+    variant: str
+    family: str
+    default: bool
+
+
+def fal_catalog_entries() -> tuple[FalCatalogEntry, ...]:
+    """Fal rows for GET /v1/models: only endpoints this registry can submit."""
+    live_endpoints: set[str] = set()
+    kind_by_endpoint: dict[str, str] = {}
+    for model in _MODELS:
+        live_endpoints.add(model.text_variant.endpoint)
+        kind_by_endpoint[model.text_variant.endpoint] = model.kind
+        if model.image_variant is not None:
+            live_endpoints.add(model.image_variant.endpoint)
+            kind_by_endpoint[model.image_variant.endpoint] = model.kind
+    rows: list[FalCatalogEntry] = []
+    for endpoint in _FAL_CATALOG_ORDER:
+        if endpoint not in live_endpoints:
+            continue
+        name, variant, family = _FAL_CATALOG_META[endpoint]
+        kind = kind_by_endpoint[endpoint]
+        rows.append(
+            FalCatalogEntry(
+                id=endpoint,
+                name=name,
+                modality="photo" if kind == KIND_IMAGE else "video",
+                variant=variant,
+                family=family,
+                default=endpoint == DEFAULT_PHOTO_ENDPOINT,
+            )
+        )
+    return tuple(rows)
+
 
 def all_models() -> tuple[FalModel, ...]:
     """Every registered model, in catalog (display) order."""

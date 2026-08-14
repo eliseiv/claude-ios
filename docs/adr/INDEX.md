@@ -78,6 +78,8 @@
 | [ADR-072](ADR-072-chat-media-tools-instance-gate.md) | Per-instance `CHAT_MEDIA_TOOLS_ENABLED`: REST `/v1/media/*` без chat media tools | Accepted | 2026-08-12 |
 | [ADR-073](ADR-073-dual-credits-llm-providers.md) | **Dual-credits OpenAI+Anthropic** (opt-in `LLM_PROVIDERS`): union `GET /v1/models` + аддитивное `provider`; credits-роутинг по session-fixed модели; **без** mid-chat switch; без `LLM_PROVIDERS` живые инстансы неизменны | Accepted | 2026-08-13 |
 | [ADR-074](ADR-074-provider-key-failover.md) | **Запасные API-ключи + кросс-провайдерный failover** (паритет 232 ADR-047): `OPENAI_API_KEY_BACKUP` / `ANTHROPIC_API_KEY_BACKUP`; ротация только при отказе учётной записи; OpenAI→Anthropic только credential; Anthropic→OpenAI любой сбой апстрима; пустые env → живые инстансы неизменны; `LLM_PROVIDER` не ломается | Accepted | 2026-08-13 |
+| [ADR-075](ADR-075-unified-instance-models-catalog.md) | **Единый каталог инстанса на `GET /v1/models`**: chat (credits_providers + allowlist) + fal photo/video при `FAL_API_KEY`; аддитивные `name`/`modality`/`variant`/`family`/`provider=fal`; обёртка `{models}` и `displayName` сохранены; leftover LLM-ключ dual не включает; fal-id не принимается как `chat.model` | Accepted | 2026-08-14 |
+| [ADR-076](ADR-076-builtin-chat-product-catalog.md) | **Встроенный chat-каталог** OpenAI (`gpt-5.1`/`gpt-5`/`gpt-5-mini`/`gpt-4.1`/`gpt-4o`) и Anthropic (`claude-opus-5`/`claude-fable-5`/`claude-opus-4-7`/`claude-sonnet-4-6`/`claude-opus-4-6`/`claude-haiku-4-5-20251001`/`claude-sonnet-4-5`): всегда в `allowed_models_for`; env allowlist только добавляет/переименовывает; дефолт инстанса первый | Accepted | 2026-08-14 |
 
 ## Ревизии
 
