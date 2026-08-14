@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import decimal
 import uuid
 from typing import Any
 
@@ -11,10 +12,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Identity,
     Index,
+    Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -314,6 +318,53 @@ class AuditLog(Base):
     __table_args__ = (
         Index("ix_audit_user_created", "user_id", "created_at"),
         Index("ix_audit_event_type", "event_type", "created_at"),
+    )
+
+
+class RequestLog(Base):
+    """One CRM-visible backend request (ADR-077).
+
+    Unlike ``AuditLog``, this row models an API lifecycle and may be updated
+    exactly to a terminal state. Provider USD stays nullable until measured.
+    """
+
+    __tablename__ = "request_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    # Soft reference by verified JWT sub. A FK would make the independent
+    # writer deadlock against the uncommitted lazy-provision INSERT on a
+    # user's first request (ADR-077).
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'started'"))
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("202"))
+    tokens_spent: Mapped[decimal.Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    provider_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    refunded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa_text("false"))
+    message_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    media_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    started_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('started', 'queued', 'completed', 'failed')",
+            name="ck_request_logs_status",
+        ),
+        Index("ix_request_logs_user_started", "user_id", sa_text("started_at DESC")),
+        Index(
+            "ux_request_logs_media_job",
+            "media_job_id",
+            unique=True,
+            postgresql_where=sa_text("media_job_id IS NOT NULL"),
+        ),
     )
 
 

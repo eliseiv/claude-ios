@@ -102,6 +102,9 @@ class CrmRequestItem(StrictModel):
     status: Literal["ok", "slow", "error"]
     duration_sec: float | None = None
     sent_at: str
+    tokens_spent: float | None = None
+    provider_cost_usd: float | None = None
+    refunded: bool | None = None
 
 
 class CrmRequestListResponse(StrictModel):

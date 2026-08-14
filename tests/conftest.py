@@ -160,6 +160,7 @@ async def _engine(_migrated: str):
 
 
 _TABLES = (
+    "request_logs",
     "audit_logs",
     "tool_calls",
     "chat_steps",
@@ -578,6 +579,11 @@ async def client(
 
     app = create_app()
     app.dependency_overrides[deps.get_db] = _override_db
+    from app.request_logs.service import RequestLogWriter
+
+    app.dependency_overrides[deps.get_request_log_writer] = lambda: RequestLogWriter(
+        db_sessionmaker
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

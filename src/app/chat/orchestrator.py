@@ -569,6 +569,9 @@ class ChatRunOut:
     # ADR-070: catalog-backed mediaChoices wizard step for this turn (from media.ask_params /
     # mediaSelection continuation). None = no picker in this response.
     media_choices: dict[str, Any] | None = None
+    # Credits newly debited during THIS HTTP call. Idempotent replay is 0 even
+    # when the saved usage contains historical creditsCharged (ADR-077).
+    credits_spent: int = 0
 
 
 @dataclass
@@ -2330,9 +2333,10 @@ class ChatOrchestrator:
         # - active subscription + credits → consume the generation-mode cost;
         # - trial (subscription=none, trial_used=false) → free, flip users.trial_used;
         # - byok / already-trial-used → free, no write.
+        credits_spent = 0
         if billing.debit_credits:
             try:
-                await self._debit(
+                credits_spent = await self._debit(
                     user_id=user_id,
                     session_id=session_id,
                     message_step_id=message_step_id,
@@ -2363,6 +2367,7 @@ class ChatOrchestrator:
             # ADR-028: server-side tools executed in this /chat/run before the final assistant turn.
             server_tools=list(server_tools),
             media_jobs=list(media_jobs) if media_jobs else None,
+            credits_spent=credits_spent,
         )
 
     async def _handle_max_tokens(
@@ -2933,10 +2938,10 @@ class ChatOrchestrator:
         usage: dict[str, Any],
         generation_mode: str,
         amount: int,
-    ) -> None:
+    ) -> int:
         # amount is generation-mode dependent, still idempotent by messageStepId.
         # InsufficientCreditsError propagates to the caller, which maps it to a credits_empty block.
-        await self._deps.wallet.consume(
+        result = await self._deps.wallet.consume(
             user_id=user_id,
             amount=amount,
             idempotency_key=str(message_step_id),
@@ -2948,6 +2953,7 @@ class ChatOrchestrator:
             },
             session_id=session_id,
         )
+        return 0 if result.idempotent_replay else amount
 
     def _render_saved_step(
         self,

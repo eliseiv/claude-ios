@@ -221,8 +221,20 @@ async def test_tool_result_replay_idempotent_no_double_billing(
             text("SELECT count(*) FROM ledger_transactions WHERE user_id=:u AND type='debit'"),
             {"u": str(uid)},
         )
+        request_credits = list(
+            (
+                await s.scalars(
+                    text(
+                        "SELECT tokens_spent FROM request_logs "
+                        "WHERE user_id=:u ORDER BY started_at, id"
+                    ),
+                    {"u": str(uid)},
+                )
+            ).all()
+        )
     assert int(bal) == 4  # exactly one credit consumed for the message-step
     assert int(debits) == 1
+    assert [float(value) for value in request_credits] == [0.0, 1.0, 0.0]
 
 
 # --------- scenario 3 (persist boundary): server-side loop payload + replay wire-clean ---------

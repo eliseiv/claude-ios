@@ -85,3 +85,19 @@ tests/
 
 ## CI gate (см. 07-deployment.md)
 PR не проходит, если: `ruff format --check` fail, `ruff check` fail, `mypy` fail, `pytest` fail, coverage < 80%.
+
+## CRM request history (ADR-077)
+
+Обязательные integration-сценарии:
+
+- `audit_logs` с `billing_debit`/`policy_decision`/`chat_step` не появляются
+  в `GET /v1/admin/users/{id}/requests`;
+- успешный chat route создаёт одну completed-строку с реальным endpoint,
+  duration и credits из debit текущего вызова;
+- идемпотентный replay не приписывает существующее списание повторно;
+- техническая ошибка сохраняет failed-строку после rollback основного scope;
+- SSE mid-stream error завершает строку failed при transport HTTP 200;
+- media submit создаёт queued/202, poll и reconciler идемпотентно обновляют ту
+  же строку в completed/failed; refund не обнуляет tokens_spent;
+- `provider_cost_usd` остаётся `null`, пока нет проверенного тарификатора;
+- миграция `0023` upgrade/downgrade и индексы проверяются на PostgreSQL.

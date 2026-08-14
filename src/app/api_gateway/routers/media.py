@@ -18,8 +18,13 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Path, Query, Request
 
 from app.api_gateway.rate_limit import enforce_other_limits
-from app.deps import CurrentUser, get_media_generation_service, require_media_generation_configured
-from app.errors import RateLimitedError, ValidationFailedError
+from app.deps import (
+    CurrentUser,
+    get_media_generation_service,
+    get_request_log_writer,
+    require_media_generation_configured,
+)
+from app.errors import AppError, RateLimitedError, ValidationFailedError
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
@@ -28,6 +33,7 @@ from app.media_generation.catalog import (
 )
 from app.media_generation.cursor import InvalidCursorError, MediaJobCursor
 from app.media_generation.service import MediaGenerationService, MediaJobView
+from app.request_logs.service import RequestLogWriter
 from app.schemas.media import (
     ImageGenerationRequest,
     MediaAssetSchema,
@@ -167,22 +173,37 @@ async def generate_image(
     request: Request,
     current: CurrentUser,
     media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
 ) -> MediaJobResponse:
     await _rate_limit(current.user_id)
-    view = await media.submit(
-        user_id=current.user_id,
-        kind=KIND_IMAGE,
-        model_id=body.model,
-        prompt=body.prompt,
-        image_urls=list(body.imageUrls or []),
-        source_job_id=body.sourceJobId,
-        params={
-            "aspectRatio": body.aspectRatio,
-            "resolution": body.resolution,
-            "numImages": body.numImages,
-            "outputFormat": body.outputFormat,
-            "seed": body.seed,
-        },
+    log_id = await request_logs.start(
+        user_id=current.user_id, endpoint=request.url.path, prompt=body.prompt
+    )
+    try:
+        view = await media.submit(
+            user_id=current.user_id,
+            kind=KIND_IMAGE,
+            model_id=body.model,
+            prompt=body.prompt,
+            image_urls=list(body.imageUrls or []),
+            source_job_id=body.sourceJobId,
+            params={
+                "aspectRatio": body.aspectRatio,
+                "resolution": body.resolution,
+                "numImages": body.numImages,
+                "outputFormat": body.outputFormat,
+                "seed": body.seed,
+            },
+        )
+    except BaseException as exc:
+        await request_logs.fail(
+            log_id, status_code=exc.status_code if isinstance(exc, AppError) else 500
+        )
+        raise
+    await request_logs.queue_media(
+        log_id,
+        media_job_id=view.job.id,
+        tokens_spent=view.job.credits_charged,
     )
     return _job_response(view)
 
@@ -212,24 +233,39 @@ async def generate_video(
     request: Request,
     current: CurrentUser,
     media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
 ) -> MediaJobResponse:
     await _rate_limit(current.user_id)
-    view = await media.submit(
-        user_id=current.user_id,
-        kind=KIND_VIDEO,
-        model_id=body.model,
-        prompt=body.prompt,
-        image_urls=[body.imageUrl] if body.imageUrl else [],
-        source_job_id=body.sourceJobId,
-        params={
-            "negativePrompt": body.negativePrompt,
-            "aspectRatio": body.aspectRatio,
-            "resolution": body.resolution,
-            "duration": body.duration,
-            "generateAudio": body.generateAudio,
-            "cfgScale": body.cfgScale,
-            "seed": body.seed,
-        },
+    log_id = await request_logs.start(
+        user_id=current.user_id, endpoint=request.url.path, prompt=body.prompt
+    )
+    try:
+        view = await media.submit(
+            user_id=current.user_id,
+            kind=KIND_VIDEO,
+            model_id=body.model,
+            prompt=body.prompt,
+            image_urls=[body.imageUrl] if body.imageUrl else [],
+            source_job_id=body.sourceJobId,
+            params={
+                "negativePrompt": body.negativePrompt,
+                "aspectRatio": body.aspectRatio,
+                "resolution": body.resolution,
+                "duration": body.duration,
+                "generateAudio": body.generateAudio,
+                "cfgScale": body.cfgScale,
+                "seed": body.seed,
+            },
+        )
+    except BaseException as exc:
+        await request_logs.fail(
+            log_id, status_code=exc.status_code if isinstance(exc, AppError) else 500
+        )
+        raise
+    await request_logs.queue_media(
+        log_id,
+        media_job_id=view.job.id,
+        tokens_spent=view.job.credits_charged,
     )
     return _job_response(view)
 

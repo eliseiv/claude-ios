@@ -11,13 +11,14 @@ import uuid
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.service import AdminService
 from app.audit.service import EVENT_CRM_SUBSCRIPTION_GRANT, AuditEvent, AuditService
 from app.config import Settings, get_settings
 from app.errors import InsufficientCreditsError, UserNotFoundError
+from app.models import RequestLog
 from app.schemas.crm_admin import (
     CrmPaymentItem,
     CrmPaymentListResponse,
@@ -411,53 +412,44 @@ class CrmAdminService:
 
         total = int(
             await self._session.scalar(
-                text("SELECT COUNT(*)::int FROM audit_logs WHERE user_id = :uid"),
-                {"uid": str(user_id)},
+                select(func.count()).select_from(RequestLog).where(RequestLog.user_id == user_id)
             )
             or 0
         )
-        rows = (
+        rows = list(
             (
-                await self._session.execute(
-                    text(
-                        """
-                    SELECT event_type, payload, created_at
-                    FROM audit_logs
-                    WHERE user_id = :uid
-                    ORDER BY created_at DESC
-                    LIMIT :lim OFFSET :off
-                    """
-                    ),
-                    {"uid": str(user_id), "lim": limit, "off": offset},
+                await self._session.scalars(
+                    select(RequestLog)
+                    .where(RequestLog.user_id == user_id)
+                    .order_by(RequestLog.started_at.desc(), RequestLog.id.desc())
+                    .limit(limit)
+                    .offset(offset)
                 )
-            )
-            .mappings()
-            .all()
+            ).all()
         )
 
         items: list[CrmRequestItem] = []
         for row in rows:
-            payload = row["payload"] or {}
-            preview = payload.get("promptPreview") or payload.get("messagePreview")
-            if isinstance(preview, str) and len(preview) > 200:
-                preview = preview[:200] + "…"
-            status_code = int(payload.get("statusCode") or 200)
-            duration = payload.get("durationSec")
-            req_status: str
-            if status_code >= 500 or payload.get("error"):
+            duration: float | None = None
+            if row.completed_at is not None:
+                duration = (row.completed_at - row.started_at).total_seconds()
+            if row.status == "failed":
                 req_status = "error"
-            elif isinstance(duration, int | float) and duration > 30:
+            elif row.status in {"started", "queued"} or duration is not None and duration > 30:
                 req_status = "slow"
             else:
                 req_status = "ok"
             items.append(
                 CrmRequestItem(
-                    endpoint=str(row["event_type"]),
-                    prompt_preview=preview if isinstance(preview, str) else None,
-                    status_code=status_code,
+                    endpoint=row.endpoint,
+                    prompt_preview=row.prompt_preview,
+                    status_code=202 if row.status in {"started", "queued"} else row.status_code,
                     status=req_status,
-                    duration_sec=float(duration) if isinstance(duration, int | float) else None,
-                    sent_at=_iso_z(row["created_at"]) or "",
+                    duration_sec=duration,
+                    sent_at=_iso_z(row.started_at) or "",
+                    tokens_spent=(None if row.tokens_spent is None else float(row.tokens_spent)),
+                    provider_cost_usd=row.provider_cost_usd,
+                    refunded=row.refunded,
                 )
             )
         return CrmRequestListResponse(total=total, items=items)

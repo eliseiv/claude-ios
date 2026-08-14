@@ -19,11 +19,13 @@ from app.deps import (
     client_ip,
     get_db,
     get_orchestrator,
+    get_request_log_writer,
     get_v2_orchestrator,
     require_owner,
 )
-from app.errors import RateLimitedError
+from app.errors import AppError, RateLimitedError
 from app.observability.context import set_session_id
+from app.request_logs.service import RequestLogWriter
 from app.schemas.chat import (
     DEFAULT_GENERATION_MODE,
     ChatCapabilitiesResponse,
@@ -566,6 +568,7 @@ async def chat_run(
     request: Request,
     current: CurrentUser,
     orchestrator: Annotated[ChatOrchestrator, Depends(get_orchestrator)],
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
     body: Annotated[ChatRunRequest, Body(openapi_examples=_RUN_REQUEST_EXAMPLES)],
     x_device_id: Annotated[str | None, Header()] = None,
 ) -> ChatResponse:
@@ -576,22 +579,34 @@ async def chat_run(
     ):
         raise RateLimitedError("rate limit exceeded")
 
-    out = await orchestrator.run(
-        user_id=current.user_id,
-        project_id=body.projectId,
-        session_id=body.sessionId,
-        message=body.message,
-        mode=body.mode,
-        assistant_mode=body.assistantMode,
-        attachments=body.attachments,
-        model=body.model,
-        workspace_project_id=body.workspaceProjectId,
-        # ADR-037: per-message conversation settings (allowlist + render → injected into the turn-0
-        # user message inside orchestrator.run; not session-fixed, not stored).
-        context=body.context,
-        # ADR-040: edit+regenerate — truncate history from this turn and generate a new one.
-        edit_message_step_id=body.editMessageStepId,
-        generation_backend="legacy",
+    log_id = await request_logs.start(
+        user_id=current.user_id, endpoint=request.url.path, prompt=body.message
+    )
+    try:
+        out = await orchestrator.run(
+            user_id=current.user_id,
+            project_id=body.projectId,
+            session_id=body.sessionId,
+            message=body.message,
+            mode=body.mode,
+            assistant_mode=body.assistantMode,
+            attachments=body.attachments,
+            model=body.model,
+            workspace_project_id=body.workspaceProjectId,
+            context=body.context,
+            edit_message_step_id=body.editMessageStepId,
+            generation_backend="legacy",
+        )
+    except BaseException as exc:
+        await request_logs.fail(
+            log_id, status_code=exc.status_code if isinstance(exc, AppError) else 500
+        )
+        raise
+    await request_logs.finish_chat(
+        log_id,
+        status_code=200,
+        message_step_id=out.message_step_id,
+        tokens_spent=out.credits_spent,
     )
     return _to_response(out)
 
@@ -621,6 +636,7 @@ async def chat_v2_run(
     request: Request,
     current: CurrentUser,
     orchestrator: Annotated[ChatOrchestrator, Depends(get_v2_orchestrator)],
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
     body: Annotated[ChatV2RunRequest, Body(openapi_examples=_V2_RUN_REQUEST_EXAMPLES)],
     x_device_id: Annotated[str | None, Header()] = None,
 ) -> ChatResponse:
@@ -636,22 +652,37 @@ async def chat_v2_run(
         if body.mediaSelection is not None
         else None
     )
-    out = await orchestrator.run(
-        user_id=current.user_id,
-        project_id=body.projectId,
-        session_id=body.sessionId,
-        message=body.message,
-        mode=body.mode,
-        assistant_mode=body.assistantMode,
-        attachments=body.attachments,
-        model=body.model,
-        workspace_project_id=body.workspaceProjectId,
-        context=body.context,
-        edit_message_step_id=body.editMessageStepId,
-        generation_mode=body.generationMode,
-        generation_backend="v2",
-        temporary=body.temporary,
-        media_selection=media_selection,
+    log_id = await request_logs.start(
+        user_id=current.user_id, endpoint=request.url.path, prompt=body.message
+    )
+    try:
+        out = await orchestrator.run(
+            user_id=current.user_id,
+            project_id=body.projectId,
+            session_id=body.sessionId,
+            message=body.message,
+            mode=body.mode,
+            assistant_mode=body.assistantMode,
+            attachments=body.attachments,
+            model=body.model,
+            workspace_project_id=body.workspaceProjectId,
+            context=body.context,
+            edit_message_step_id=body.editMessageStepId,
+            generation_mode=body.generationMode,
+            generation_backend="v2",
+            temporary=body.temporary,
+            media_selection=media_selection,
+        )
+    except BaseException as exc:
+        await request_logs.fail(
+            log_id, status_code=exc.status_code if isinstance(exc, AppError) else 500
+        )
+        raise
+    await request_logs.finish_chat(
+        log_id,
+        status_code=200,
+        message_step_id=out.message_step_id,
+        tokens_spent=out.credits_spent,
     )
     return _to_response(out)
 
@@ -709,6 +740,7 @@ async def chat_v2_run_stream(
     request: Request,
     current: CurrentUser,
     body: Annotated[ChatV2RunRequest, Body(openapi_examples=_V2_RUN_REQUEST_EXAMPLES)],
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
     x_device_id: Annotated[str | None, Header()] = None,
 ) -> StreamingResponse:
     """SSE stream (ADR-069).
@@ -726,6 +758,9 @@ async def chat_v2_run_stream(
         raise RateLimitedError("rate limit exceeded")
 
     user_id = current.user_id
+    log_id = await request_logs.start(
+        user_id=user_id, endpoint=request.url.path, prompt=body.message
+    )
     db_dep = request.app.dependency_overrides.get(get_db, get_db)
     queue: asyncio.Queue[ChatStreamEvent | BaseException | None] = asyncio.Queue()
 
@@ -760,9 +795,18 @@ async def chat_v2_run_stream(
                     on_text_delta=_on_delta,
                     media_selection=media_selection,
                 )
+                await request_logs.finish_chat(
+                    log_id,
+                    status_code=200,
+                    message_step_id=out.message_step_id,
+                    tokens_spent=out.credits_spent,
+                )
                 await queue.put(ChatStreamEvent.done(out))
                 break
         except BaseException as exc:
+            await request_logs.fail(
+                log_id, status_code=exc.status_code if isinstance(exc, AppError) else 500
+            )
             await queue.put(exc)
         finally:
             await queue.put(None)
@@ -833,6 +877,7 @@ async def chat_tool_result(
     request: Request,
     current: CurrentUser,
     orchestrator: Annotated[ChatOrchestrator, Depends(get_orchestrator)],
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
     body: Annotated[ChatToolResultRequest, Body(openapi_examples=_TOOL_RESULT_REQUEST_EXAMPLES)],
     x_device_id: Annotated[str | None, Header()] = None,
 ) -> ChatResponse:
@@ -852,11 +897,24 @@ async def chat_tool_result(
         )
         for item in body.normalized_results()
     ]
-    out = await orchestrator.tool_result(
-        user_id=current.user_id,
-        session_id=body.sessionId,
-        results=normalized,
-        generation_backend="legacy",
+    log_id = await request_logs.start(user_id=current.user_id, endpoint=request.url.path)
+    try:
+        out = await orchestrator.tool_result(
+            user_id=current.user_id,
+            session_id=body.sessionId,
+            results=normalized,
+            generation_backend="legacy",
+        )
+    except BaseException as exc:
+        await request_logs.fail(
+            log_id, status_code=exc.status_code if isinstance(exc, AppError) else 500
+        )
+        raise
+    await request_logs.finish_chat(
+        log_id,
+        status_code=200,
+        message_step_id=out.message_step_id,
+        tokens_spent=out.credits_spent,
     )
     return _to_response(out)
 
@@ -881,6 +939,7 @@ async def chat_v2_tool_result(
     request: Request,
     current: CurrentUser,
     orchestrator: Annotated[ChatOrchestrator, Depends(get_v2_orchestrator)],
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
     body: Annotated[ChatToolResultRequest, Body(openapi_examples=_TOOL_RESULT_REQUEST_EXAMPLES)],
     x_device_id: Annotated[str | None, Header()] = None,
 ) -> ChatResponse:
@@ -899,10 +958,23 @@ async def chat_v2_tool_result(
         )
         for item in body.normalized_results()
     ]
-    out = await orchestrator.tool_result(
-        user_id=current.user_id,
-        session_id=body.sessionId,
-        results=normalized,
-        generation_backend="v2",
+    log_id = await request_logs.start(user_id=current.user_id, endpoint=request.url.path)
+    try:
+        out = await orchestrator.tool_result(
+            user_id=current.user_id,
+            session_id=body.sessionId,
+            results=normalized,
+            generation_backend="v2",
+        )
+    except BaseException as exc:
+        await request_logs.fail(
+            log_id, status_code=exc.status_code if isinstance(exc, AppError) else 500
+        )
+        raise
+    await request_logs.finish_chat(
+        log_id,
+        status_code=200,
+        message_step_id=out.message_step_id,
+        tokens_spent=out.credits_spent,
     )
     return _to_response(out)

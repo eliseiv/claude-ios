@@ -89,6 +89,53 @@ async def test_active_credits_single_debit(
         uid,
     )
     assert debits == 1
+    async with db_sessionmaker() as s:
+        request_row = (
+            await s.execute(
+                text(
+                    "SELECT endpoint, status, status_code, tokens_spent, provider_cost_usd "
+                    "FROM request_logs WHERE user_id=:u"
+                ),
+                {"u": str(uid)},
+            )
+        ).one()
+    assert request_row.endpoint == "/v1/chat/run"
+    assert request_row.status == "completed"
+    assert request_row.status_code == 200
+    assert float(request_row.tokens_spent) == 1.0
+    assert request_row.provider_cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_first_lazy_provisioned_request_is_logged(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    uid = uuid.uuid4()
+    fake_anthropic.responses = [fake_anthropic.text_result("first answer")]
+
+    response = await client.post(
+        "/v1/chat/run",
+        json={"userId": str(uid), "projectId": "p", "message": "hello", "mode": "credits"},
+        headers=auth_headers(uid),
+    )
+    assert response.status_code == 200
+
+    async with db_sessionmaker() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT endpoint, prompt_preview, status FROM request_logs " "WHERE user_id=:u"
+                ),
+                {"u": str(uid)},
+            )
+        ).one()
+    assert (row.endpoint, row.prompt_preview, row.status) == (
+        "/v1/chat/run",
+        "hello",
+        "completed",
+    )
 
 
 @pytest.mark.asyncio

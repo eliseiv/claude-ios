@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.admin.crm_service import CrmAdminService
 from app.admin.service import AdminService
@@ -47,6 +47,7 @@ from app.notifications.service import NotificationsService
 from app.observability.context import set_user_id
 from app.preferences.service import PreferencesService
 from app.profile.service import ProfileService
+from app.request_logs.service import RequestLogWriter
 from app.subscription.service import SubscriptionService
 from app.subscription.storekit import get_storekit_verifier
 from app.token_purchase.service import TokenPurchaseService
@@ -225,6 +226,17 @@ def require_media_generation_configured() -> None:
         raise MediaGenerationNotConfiguredError("media generation is not configured")
 
 
+def get_request_log_writer(session: DbSession) -> RequestLogWriter:
+    if session.bind is None:  # pragma: no cover - wiring invariant
+        raise RuntimeError("request DB session is not bound")
+    maker = async_sessionmaker(
+        bind=session.bind,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    return RequestLogWriter(maker)
+
+
 def get_apns_client() -> ApnsClient:
     return ApnsClient(get_settings())
 
@@ -237,7 +249,10 @@ def get_media_push_service(session: DbSession) -> MediaPushService:
     return MediaPushService(session, apns=get_apns_client())
 
 
-def get_media_generation_service(session: DbSession) -> MediaGenerationService:
+def get_media_generation_service(
+    session: DbSession,
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
+) -> MediaGenerationService:
     # ADR-060: the wallet debit and the media_jobs insert must land in ONE transaction, so the
     # wallet service is built on the same request-scoped session as the repository.
     # ADR-067: push notifier shares that session so push_sent_at lands with mark_completed.
@@ -247,6 +262,7 @@ def get_media_generation_service(session: DbSession) -> MediaGenerationService:
         wallet=WalletService(session, AuditService(session)),
         settings=get_settings(),
         push=get_media_push_service(session),
+        request_logs=request_logs,
     )
 
 
@@ -306,7 +322,8 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         # ADR-026 / ADR-068: global server-side tools (time.now, media.generate_*) with SystemClock
         # and the request-scoped MediaGenerationService (same wallet/session as /v1/media/*).
         global_tools=GlobalToolHandlers(
-            clock=SystemClock(), media=get_media_generation_service(session)
+            clock=SystemClock(),
+            media=get_media_generation_service(session, get_request_log_writer(session)),
         ),
         preferences=PreferencesService(session),
         # ADR-036: workspace context provider (instructions + knowledge files) for workspace chats.
@@ -332,7 +349,8 @@ def get_v2_orchestrator(session: DbSession) -> ChatOrchestrator:
         anthropic_client=get_generation_llm_client(),
         site_tools=SiteToolHandlers(session, website, audit),
         global_tools=GlobalToolHandlers(
-            clock=SystemClock(), media=get_media_generation_service(session)
+            clock=SystemClock(),
+            media=get_media_generation_service(session, get_request_log_writer(session)),
         ),
         preferences=PreferencesService(session),
         workspaces=WorkspacesService(WorkspacesRepository(session)),

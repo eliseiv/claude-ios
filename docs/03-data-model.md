@@ -14,6 +14,7 @@ erDiagram
     users ||--o| byok_keys : has
     users ||--o{ chat_sessions : owns
     users ||--o{ audit_logs : generates
+    users ||--o{ request_logs : requests
     chat_sessions ||--o{ chat_steps : contains
     chat_sessions ||--o{ tool_calls : contains
     chat_sessions ||--o{ audit_logs : relates
@@ -40,6 +41,7 @@ erDiagram
     chat_steps { uuid id PK }
     tool_calls { uuid id PK }
     audit_logs { uuid id PK }
+    request_logs { uuid id PK }
     projects { uuid id PK }
     site_files { uuid id PK }
     user_preferences { uuid user_id FK }
@@ -228,6 +230,42 @@ CREATE INDEX ix_audit_user_created ON audit_logs (user_id, created_at DESC);
 CREATE INDEX ix_audit_event_type ON audit_logs (event_type, created_at DESC);
 ```
 > Append-only на уровне приложения (нет UPDATE/DELETE из кода). Жёсткий запрет ревизий — потенциальный TD, см. [100-known-tech-debt.md](100-known-tech-debt.md#td-001).
+
+### 9a. request_logs (ADR-077, миграция `0023`)
+```sql
+CREATE TABLE request_logs (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             UUID NOT NULL, -- soft reference на verified JWT sub, ADR-077
+    endpoint            TEXT NOT NULL,
+    prompt_preview      TEXT,
+    status              TEXT NOT NULL,
+    status_code         INTEGER NOT NULL,
+    tokens_spent        NUMERIC(18,6),
+    provider_cost_usd   DOUBLE PRECISION,
+    refunded            BOOLEAN NOT NULL DEFAULT FALSE,
+    message_step_id     UUID,
+    media_job_id        UUID,
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at        TIMESTAMPTZ,
+    CONSTRAINT ck_request_logs_status
+      CHECK (status IN ('started','queued','completed','failed'))
+);
+CREATE INDEX ix_request_logs_user_started
+  ON request_logs (user_id, started_at DESC);
+CREATE UNIQUE INDEX ux_request_logs_media_job
+  ON request_logs (media_job_id) WHERE media_job_id IS NOT NULL;
+```
+> Одна строка = один backend route call; исключение — асинхронный media submit,
+> где та же строка затем обновляется poll/reconciler до terminal-state.
+> `duration_sec` не хранится и вычисляется как `completed_at-started_at`.
+> `tokens_spent` — credits списания, не input/output LLM tokens.
+> `provider_cost_usd=NULL` означает «не измерено», не ноль.
+> `audit_logs` остаётся независимым append-only журналом событий и не служит
+> источником request history.
+> `user_id` намеренно без FK: writer работает в независимой транзакции, а при
+> первом запросе lazy-provisioned `users` ещё не виден ей. FK создал бы
+> блокировку на незакоммиченном INSERT. Writer вызывается только после JWT auth;
+> CRM перед чтением отдельно проверяет существование пользователя.
 
 ### 10. projects (website-builder)
 ```sql

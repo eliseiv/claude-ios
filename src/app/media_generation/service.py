@@ -61,6 +61,7 @@ from app.media_generation.repository import (
 from app.models import MediaJob
 from app.notifications.push_service import MediaPushService
 from app.observability.logging import log_event
+from app.request_logs.service import RequestLogWriter
 from app.wallet.service import WalletService
 
 logger = logging.getLogger(__name__)  # == "app.media_generation.service"
@@ -112,12 +113,14 @@ class MediaGenerationService:
         wallet: WalletService,
         settings: Settings,
         push: MediaPushService | None = None,
+        request_logs: RequestLogWriter | None = None,
     ) -> None:
         self._repo = repo
         self._fal = fal
         self._wallet = wallet
         self._settings = settings
         self._push = push
+        self._request_logs = request_logs
 
     # ---- pricing ----
 
@@ -401,6 +404,10 @@ class MediaGenerationService:
                 # COMPLETED with nothing usable is a failed run from the user's point of view.
                 return await self._fail(job, error="generation produced no output")
             await self._repo.mark_completed(job, result=result)
+            if self._request_logs is not None:
+                await self._request_logs.finish_media(
+                    media_job_id=job.id, failed=False, refunded=False
+                )
             log_event(
                 logger,
                 logging.INFO,
@@ -438,6 +445,10 @@ class MediaGenerationService:
             )
             refunded = True
         await self._repo.mark_failed(job, error=error[:500], refunded=refunded)
+        if self._request_logs is not None:
+            await self._request_logs.finish_media(
+                media_job_id=job.id, failed=True, refunded=refunded
+            )
         log_event(
             logger,
             logging.WARNING,

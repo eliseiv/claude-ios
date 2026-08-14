@@ -215,3 +215,36 @@ Tool-loop сценарий описать связно (в `description` тег�
 
 ## Открытые вопросы
 Нет. Все решения зафиксированы выше; дефолты явны.
+
+## CRM Admin API: история запросов (ADR-077)
+
+`GET /v1/admin/users/{id}/requests` читает только `request_logs`, а не
+`audit_logs`. Audit event types (`billing_debit`, `policy_decision`,
+`chat_step`) не являются endpoint и не попадают в историю запросов.
+
+Ответ, новые записи первыми:
+
+```json
+{
+  "total": 1,
+  "items": [{
+    "endpoint": "/v1/chat/v2/run",
+    "prompt_preview": "Краткий фрагмент запроса",
+    "status_code": 200,
+    "status": "ok",
+    "duration_sec": 1.25,
+    "sent_at": "2026-08-14T10:00:00Z",
+    "tokens_spent": 2,
+    "provider_cost_usd": null,
+    "refunded": false
+  }]
+}
+```
+
+- `tokens_spent` — credits, реально списанные в этом API-вызове;
+- `provider_cost_usd=null` — стоимость провайдера не измерена;
+- `refunded=true` не обнуляет `tokens_spent`;
+- незавершённая media-задача отдаётся как `slow`/`202`;
+- completed дольше 30 секунд → `slow`; failed → `error`;
+- старые `audit_logs` не преобразуются: до первого нового запроса список
+  может быть пустым.
