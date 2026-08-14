@@ -225,11 +225,17 @@ Tool-loop сценарий описать связно (в `description` тег�
 
 - чат: один **ход** (`message_step_id`) = одна строка, `endpoint` = `chat:<model>`,
   `tokens_spent` — точное списание из `ledger_transactions`. Ход tool-loop’а не
-  размножается по шагам;
+  размножается по шагам. `duration_sec` — из журнала, иначе
+  `max(assistant.created_at) − min(step.created_at)` по шагам хода (ADR-079);
 - media: `media_jobs`, `endpoint` = `<kind>:<model_id>`, длительность —
   `updated_at - created_at`, `refunded` — из `credits_refunded`;
 - `request_logs` добавляет то, чего в доменных таблицах нет физически:
   **упавшие** и **ещё выполняющиеся** запросы, а также длительность новых ходов.
+
+Себестоимость (`provider_cost_usd`) считается по закупочным прайсам (ADR-079):
+чат — точно по токенам `usage`; media — из `media_jobs.provider_cost_usd` (новая
+запись) или восстановлением из `credits_charged` (старая). Там, где восстановление
+даёт оценку сверху (посекундное видео), `provider_cost_estimated=true`.
 
 Ответ, новые записи первыми:
 
@@ -244,7 +250,8 @@ Tool-loop сценарий описать связно (в `description` тег�
     "duration_sec": 1.25,
     "sent_at": "2026-08-14T10:00:00Z",
     "tokens_spent": 2,
-    "provider_cost_usd": null,
+    "provider_cost_usd": 0.009,
+    "provider_cost_estimated": false,
     "refunded": false
   }]
 }
@@ -252,7 +259,10 @@ Tool-loop сценарий описать связно (в `description` тег�
 
 - `tokens_spent` — credits, реально списанные за этот запрос; `null` = «не
   измерено» (например, ход без строки ledger), а не ноль;
-- `provider_cost_usd=null` — стоимость провайдера не измерена;
+- `provider_cost_usd=null` — стоимость провайдера не измерена (неизвестная модель
+  или нет данных для расчёта); измеренный `0` — это ноль, не «не измерено»;
+- `provider_cost_estimated=true` — оценка сверху из тарифной пачки; `false` —
+  точное значение; `null` — себестоимости нет;
 - `refunded=true` не обнуляет `tokens_spent`;
 - незавершённая media-задача отдаётся как `slow`/`202`;
 - completed дольше 30 секунд → `slow`; failed → `error`. Порог общий с 232,

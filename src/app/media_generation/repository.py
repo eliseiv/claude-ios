@@ -9,6 +9,7 @@ a single transaction — if the fal submit between them fails, the debit rolls b
 from __future__ import annotations
 
 import datetime
+import decimal
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -58,6 +59,7 @@ class MediaJobsRepository:
         status: str,
         prompt: str,
         credits_charged: int,
+        provider_cost_usd: float | None = None,
         parent_job_id: uuid.UUID | None = None,
         input_image_urls: list[str] | None = None,
     ) -> MediaJob:
@@ -73,6 +75,9 @@ class MediaJobsRepository:
             status=status,
             prompt=prompt,
             credits_charged=credits_charged,
+            provider_cost_usd=(
+                None if provider_cost_usd is None else decimal.Decimal(str(provider_cost_usd))
+            ),
             credits_refunded=False,
             parent_job_id=parent_job_id,
             input_image_urls=input_image_urls or None,

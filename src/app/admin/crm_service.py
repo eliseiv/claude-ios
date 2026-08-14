@@ -8,16 +8,25 @@ from __future__ import annotations
 
 import datetime
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.service import AdminService
 from app.audit.service import EVENT_CRM_SUBSCRIPTION_GRANT, AuditEvent, AuditService
 from app.config import Settings, get_settings
 from app.errors import InsufficientCreditsError, UserNotFoundError
+from app.media_generation.catalog import find_model
+from app.pricing.provider_prices import (
+    ProviderCost,
+    chat_cost_usd,
+    media_cost_usd_from_credits,
+    round_usd,
+)
 from app.schemas.crm_admin import (
     CrmPaymentItem,
     CrmPaymentListResponse,
@@ -60,15 +69,24 @@ _PROMPT_PREVIEW_MAX = 200
 # таблицах нет, — кода ответа и длительности; агрегат по `message_step_id` обязателен, потому что
 # продолжение через `/tool-result` — отдельный HTTP-запрос с тем же `message_step_id`, и без
 # группировки соединение размножило бы ход.
+#
+# Себестоимость и длительность НЕ считаются в SQL: обе выводятся из закупочных прайсов
+# (`app.pricing.provider_prices`, ADR-079), а прайс — это данные приложения, не запроса.
+# Поэтому SQL отдаёт СЫРЬЁ (`usages`, `credits`, `asset_count`, `source`), а деньги считает
+# Python — там же, где эти прайсы тестируются.
 _REQUEST_HISTORY_SQL = """
     WITH turns AS (
         SELECT s.message_step_id AS message_step_id,
                min(s.created_at) AS sent_at,
-               (array_remove(array_agg(s.usage->>'model' ORDER BY s.seq DESC), NULL))[1] AS model
+               max(s.created_at) FILTER (WHERE s.role = 'assistant') AS answered_at,
+               (array_remove(array_agg(s.usage->>'model' ORDER BY s.seq DESC), NULL))[1] AS model,
+               jsonb_agg(s.usage ORDER BY s.seq)
+                 FILTER (WHERE s.role = 'assistant' AND s.usage IS NOT NULL) AS usages
           FROM chat_steps s
           JOIN chat_sessions cs ON cs.id = s.session_id
-         WHERE cs.user_id = :uid AND s.role = 'assistant'
+         WHERE cs.user_id = :uid
          GROUP BY s.message_step_id
+        HAVING count(*) FILTER (WHERE s.role = 'assistant') > 0
     ), logged AS (
         SELECT message_step_id,
                max(status_code) AS status_code,
@@ -77,13 +95,24 @@ _REQUEST_HISTORY_SQL = """
          WHERE user_id = :uid AND message_step_id IS NOT NULL
          GROUP BY message_step_id
     )
-    SELECT CASE WHEN t.model IS NULL THEN 'chat' ELSE 'chat:' || t.model END AS endpoint,
+    SELECT 'chat' AS source,
+           CASE WHEN t.model IS NULL THEN 'chat' ELSE 'chat:' || t.model END AS endpoint,
            NULL::text AS prompt_preview,
            COALESCE(l.status_code, 200) AS status_code,
-           CASE WHEN l.duration_sec > :slow THEN 'slow' ELSE 'ok' END AS status,
-           l.duration_sec::float AS duration_sec,
+           -- Длительность хода: измеренная журналом, иначе — от пользовательского шага до
+           -- последнего ответа модели. Второе доступно РЕТРОАКТИВНО (у `chat_steps` есть
+           -- `created_at` с первого дня), поэтому «время обработки» перестаёт быть пустым
+           -- у всех, кто писал в чат до появления журнала.
+           COALESCE(
+             l.duration_sec,
+             EXTRACT(EPOCH FROM (t.answered_at - t.sent_at))
+           )::float AS duration_sec,
            t.sent_at AS sent_at,
            lt.amount::float AS tokens_spent,
+           NULL::text AS model_id,
+           NULL::int AS credits,
+           NULL::int AS asset_count,
+           t.usages AS usages,
            NULL::float AS provider_cost_usd,
            false AS refunded
       FROM turns t
@@ -93,7 +122,8 @@ _REQUEST_HISTORY_SQL = """
             AND lt.idempotency_key = t.message_step_id::text
             AND lt.type = 'debit'
     UNION ALL
-    SELECT j.kind || ':' || j.model_id AS endpoint,
+    SELECT 'media' AS source,
+           j.kind || ':' || j.model_id AS endpoint,
            left(j.prompt, :preview) AS prompt_preview,
            CASE j.status
              WHEN 'completed' THEN 200
@@ -101,40 +131,43 @@ _REQUEST_HISTORY_SQL = """
              ELSE 202
            END AS status_code,
            CASE
-             WHEN j.status = 'failed' THEN 'error'
-             WHEN j.status <> 'completed' THEN 'slow'
-             WHEN EXTRACT(EPOCH FROM (j.updated_at - j.created_at)) > :slow THEN 'slow'
-             ELSE 'ok'
-           END AS status,
-           CASE
              WHEN j.status = 'completed'
              THEN EXTRACT(EPOCH FROM (j.updated_at - j.created_at))
            END::float AS duration_sec,
            j.created_at AS sent_at,
            j.credits_charged::float AS tokens_spent,
-           NULL::float AS provider_cost_usd,
+           j.model_id AS model_id,
+           j.credits_charged AS credits,
+           -- Число ассетов различает тарифные ступени изображений: делённые на него кредиты
+           -- дают цену ОДНОЙ картинки, а она однозначно указывает на разрешение, которого в
+           -- строке нет (ADR-079 §2).
+           CASE
+             WHEN jsonb_typeof(j.result -> 'assets') = 'array'
+             THEN jsonb_array_length(j.result -> 'assets')
+           END AS asset_count,
+           NULL::jsonb AS usages,
+           j.provider_cost_usd::float AS provider_cost_usd,
            j.credits_refunded AS refunded
       FROM media_jobs j
      WHERE j.user_id = :uid
     UNION ALL
-    SELECT r.endpoint AS endpoint,
+    SELECT 'log' AS source,
+           r.endpoint AS endpoint,
            r.prompt_preview AS prompt_preview,
            CASE
              WHEN r.status IN ('started', 'queued') THEN 202
              ELSE r.status_code
            END AS status_code,
            CASE
-             WHEN r.status = 'failed' THEN 'error'
-             WHEN r.status IN ('started', 'queued') THEN 'slow'
-             WHEN EXTRACT(EPOCH FROM (r.completed_at - r.started_at)) > :slow THEN 'slow'
-             ELSE 'ok'
-           END AS status,
-           CASE
              WHEN r.status = 'completed'
              THEN EXTRACT(EPOCH FROM (r.completed_at - r.started_at))
            END::float AS duration_sec,
            r.started_at AS sent_at,
            r.tokens_spent::float AS tokens_spent,
+           NULL::text AS model_id,
+           NULL::int AS credits,
+           NULL::int AS asset_count,
+           NULL::jsonb AS usages,
            r.provider_cost_usd AS provider_cost_usd,
            r.refunded AS refunded
       FROM request_logs r
@@ -144,12 +177,76 @@ _REQUEST_HISTORY_SQL = """
 """
 
 
+# Вкладка «Оплаты» = всё, что дало доступ или кредиты, а не только webhook-и провайдеров
+# (ADR-079 §3). Операции CRM берутся из `ledger_transactions` по namespace ключа
+# идемпотентности (`crm-sub-grant:` / `crm-tokens:`, см. `grant_subscription`/`adjust_tokens`):
+# только там лежит и время, и точное число кредитов. `amount = 0` — денег по такой операции не
+# поступало, и это не «сумма неизвестна», а ноль как факт.
+_PAYMENT_HISTORY_SQL = """
+    SELECT product_id AS title,
+           kind AS description,
+           COALESCE((payload->>'amount')::float, 0) AS amount,
+           COALESCE(payload->>'currency', 'RUB') AS currency,
+           'success' AS status,
+           processed_at AS occurred_at
+      FROM cloudpayments_webhook_events
+     WHERE user_id = :uid
+    UNION ALL
+    SELECT event_type AS title,
+           NULL AS description,
+           0 AS amount,
+           'USD' AS currency,
+           'success' AS status,
+           processed_at AS occurred_at
+      FROM adapty_webhook_events
+     WHERE user_id = :uid
+    UNION ALL
+    SELECT CASE
+             WHEN lt.idempotency_key LIKE 'crm-sub-grant:%'
+             THEN COALESCE(lt.meta->>'productId', 'Подписка')
+             ELSE 'Кредиты'
+           END AS title,
+           CASE
+             WHEN lt.idempotency_key LIKE 'crm-sub-grant:%'
+             THEN 'Подписка выдана из CRM (+' || lt.amount || ' кредитов), оплаты не было'
+             WHEN lt.type = 'credit'
+             THEN 'Начислено из CRM: +' || lt.amount || ' кредитов, оплаты не было'
+             ELSE 'Списано из CRM: -' || lt.amount || ' кредитов'
+           END AS description,
+           0 AS amount,
+           'USD' AS currency,
+           'success' AS status,
+           lt.created_at AS occurred_at
+      FROM ledger_transactions lt
+     WHERE lt.user_id = :uid
+       AND (
+         lt.idempotency_key LIKE 'crm-sub-grant:%'
+         OR lt.idempotency_key LIKE 'crm-tokens:%'
+       )
+"""
+
+
 def _iso_z(dt: datetime.datetime | None) -> str | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.UTC)
     return dt.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _request_status(status_code: int, duration_sec: float | None) -> str:
+    """Цвет строки в CRM: ошибка → длительность, и только потом «ok».
+
+    `202` — незавершённый запрос (медиа в очереди, оборванный чат): длительности у него ещё
+    нет, но и «ok» он не заслужил, поэтому идёт как `slow` — так же, как в 232.
+    """
+    if status_code >= 400:
+        return "error"
+    if status_code == 202:
+        return "slow"
+    if duration_sec is not None and duration_sec > _SLOW_THRESHOLD_SEC:
+        return "slow"
+    return "ok"
 
 
 def _subscription_active(status: str | None, expires_at: datetime.datetime | None) -> bool:
@@ -431,57 +528,35 @@ class CrmAdminService:
     async def list_payments(
         self, user_id: uuid.UUID, *, limit: int, offset: int
     ) -> CrmPaymentListResponse:
+        """Все события, которые дали пользователю доступ или кредиты (ADR-079 §3).
+
+        Раньше читались только webhook-и платёжных провайдеров, поэтому у пользователя с
+        подпиской, ВЫДАННОЙ из CRM, вкладка «Оплаты» была пустой — оператор видел «Оплат пока
+        нет» у человека с активным планом и тысячей кредитов на балансе и не мог понять, откуда
+        они. Выдача из CRM — не платёж, денег по ней не поступило, поэтому она попадает в
+        список с `amount = 0` и прямым описанием, а не с ценой плана: подставить цену значило
+        бы записать несуществующий доход.
+        """
         await self._admin._require_user_exists(user_id)
         limit = min(max(limit, 1), 100)
         offset = max(offset, 0)
 
-        total_cp = int(
+        params = {"uid": str(user_id)}
+        total = int(
             await self._session.scalar(
-                text("SELECT COUNT(*)::int FROM cloudpayments_webhook_events WHERE user_id = :uid"),
-                {"uid": str(user_id)},
+                text(f"WITH history AS ({_PAYMENT_HISTORY_SQL}) SELECT count(*) FROM history"),
+                params,
             )
             or 0
         )
-        total_ad = int(
-            await self._session.scalar(
-                text("SELECT COUNT(*)::int FROM adapty_webhook_events WHERE user_id = :uid"),
-                {"uid": str(user_id)},
-            )
-            or 0
-        )
-        total = total_cp + total_ad
-
         rows = (
             (
                 await self._session.execute(
                     text(
-                        """
-                    SELECT title, description, amount, currency, status, occurred_at FROM (
-                      SELECT
-                        product_id AS title,
-                        kind AS description,
-                        COALESCE((payload->>'amount')::float, 0) AS amount,
-                        COALESCE(payload->>'currency', 'RUB') AS currency,
-                        'success' AS status,
-                        processed_at AS occurred_at
-                      FROM cloudpayments_webhook_events
-                      WHERE user_id = :uid
-                      UNION ALL
-                      SELECT
-                        event_type AS title,
-                        NULL AS description,
-                        0 AS amount,
-                        'USD' AS currency,
-                        'success' AS status,
-                        processed_at AS occurred_at
-                      FROM adapty_webhook_events
-                      WHERE user_id = :uid
-                    ) p
-                    ORDER BY occurred_at DESC
-                    LIMIT :lim OFFSET :off
-                    """
+                        f"WITH history AS ({_PAYMENT_HISTORY_SQL}) "
+                        "SELECT * FROM history ORDER BY occurred_at DESC LIMIT :lim OFFSET :off"
                     ),
-                    {"uid": str(user_id), "lim": limit, "off": offset},
+                    {**params, "lim": limit, "off": offset},
                 )
             )
             .mappings()
@@ -522,18 +597,19 @@ class CrmAdminService:
           `message_step_id`/`media_job_id`, поэтому фильтр по двум `IS NULL` исключает
           двойной показ БЕЗ дедупликации по ключам.
 
-        `provider_cost_usd` остаётся `NULL` = «не измерено» (правило `NULL ≠ 0`): себестоимость
-        провайдера в этом сервисе не сохраняется, и `0` был бы выдумкой под видом факта.
+        Себестоимость (`provider_cost_usd`) считается по закупочным прайсам провайдеров
+        (ADR-079): для чата — точно по токенам из `usage`, для медиа — из точной цены,
+        записанной на сабмите, а для старых генераций — из `credits_charged`, потому что
+        кредиты выведены ИЗ того же прайса fal (ADR-061 §2). Там, где fal тарифицирует мельче
+        нашей кредитной пачки (посекундное видео), ответ помечается `provider_cost_estimated`
+        — оценкой сверху, а не выдаётся за факт. Неизвестная модель даёт `NULL` = «не
+        измерено» (правило `NULL ≠ 0`).
         """
         await self._admin._require_user_exists(user_id)
         limit = min(max(limit, 1), 100)
         offset = max(offset, 0)
 
-        params = {
-            "uid": str(user_id),
-            "preview": _PROMPT_PREVIEW_MAX,
-            "slow": _SLOW_THRESHOLD_SEC,
-        }
+        params = {"uid": str(user_id), "preview": _PROMPT_PREVIEW_MAX}
         total = int(
             await self._session.scalar(
                 text(f"WITH history AS ({_REQUEST_HISTORY_SQL}) SELECT count(*) FROM history"),
@@ -555,23 +631,53 @@ class CrmAdminService:
             .all()
         )
 
-        items = [
-            CrmRequestItem(
-                endpoint=str(r["endpoint"]),
-                prompt_preview=r["prompt_preview"],
-                status_code=int(r["status_code"]),
-                status=str(r["status"]),
-                duration_sec=None if r["duration_sec"] is None else float(r["duration_sec"]),
-                sent_at=_iso_z(r["sent_at"]) or "",
-                tokens_spent=None if r["tokens_spent"] is None else float(r["tokens_spent"]),
-                provider_cost_usd=(
-                    None if r["provider_cost_usd"] is None else float(r["provider_cost_usd"])
-                ),
-                refunded=bool(r["refunded"]),
+        items: list[CrmRequestItem] = []
+        for r in rows:
+            status_code = int(r["status_code"])
+            duration_sec = None if r["duration_sec"] is None else float(r["duration_sec"])
+            cost = self._provider_cost(r)
+            items.append(
+                CrmRequestItem(
+                    endpoint=str(r["endpoint"]),
+                    prompt_preview=r["prompt_preview"],
+                    status_code=status_code,
+                    status=_request_status(status_code, duration_sec),
+                    duration_sec=duration_sec,
+                    sent_at=_iso_z(r["sent_at"]) or "",
+                    tokens_spent=None if r["tokens_spent"] is None else float(r["tokens_spent"]),
+                    provider_cost_usd=round_usd(cost.usd),
+                    provider_cost_estimated=cost.estimated if cost.usd is not None else None,
+                    refunded=bool(r["refunded"]),
+                )
             )
-            for r in rows
-        ]
         return CrmRequestListResponse(total=total, items=items)
+
+    def _provider_cost(self, row: Mapping[str, Any] | RowMapping) -> ProviderCost:
+        """Себестоимость одной строки истории — по её источнику (ADR-079 §2)."""
+        source = row["source"]
+        if source == "chat":
+            usages = row["usages"] or []
+            return ProviderCost(chat_cost_usd(usages))
+        if source == "media":
+            stored = row["provider_cost_usd"]
+            if stored is not None:
+                # Записано на сабмите из фактических параметров запуска — точнее не бывает.
+                return ProviderCost(float(stored))
+            model = find_model(str(row["model_id"] or ""))
+            if model is None:
+                return ProviderCost(None)
+            credits = int(row["credits"] or 0)
+            asset_count = None if row["asset_count"] is None else int(row["asset_count"])
+            return media_cost_usd_from_credits(
+                model=model,
+                base_credits=self._settings.media_model_credits().get(
+                    model.id, model.default_credits
+                ),
+                credits_charged=credits,
+                asset_count=asset_count,
+            )
+        stored = row["provider_cost_usd"]
+        return ProviderCost(None if stored is None else float(stored))
 
     async def stats(
         self,

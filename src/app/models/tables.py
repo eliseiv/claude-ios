@@ -573,6 +573,12 @@ class MediaJob(Base):
     credits_refunded: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa_text("false")
     )
+    # What fal charges US for this run, in USD (ADR-079). Stamped at submit, where the values
+    # that move fal's bill — resolution, duration, audio, image count — are known; they are not
+    # persisted anywhere else, so without this column the cost of a run is only recoverable up
+    # to the credit pack it was billed in. NULL means "not measured" (job predates the column,
+    # or its model has no purchase price on file) and must never be read as $0.
+    provider_cost_usd: Mapped[decimal.Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
     # Normalized output ({"assets": [...]}) — not the raw upstream body.
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

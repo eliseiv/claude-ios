@@ -267,6 +267,11 @@ CREATE UNIQUE INDEX ux_request_logs_media_job
 > строки с `message_step_id IS NULL AND media_job_id IS NULL` — упавшие и ещё
 > выполняющиеся запросы. Успешный запрос всегда проставляет одну из двух
 > корреляций, поэтому это же условие исключает двойной показ.
+>
+> Себестоимость и длительность чата считаются по [ADR-079](adr/ADR-079-crm-provider-cost-duration-payments.md):
+> `media_jobs.provider_cost_usd` (миграция `0024`) хранит точную закупочную цену
+> fal, записанную на сабмите; у старых строк её нет — CRM восстанавливает цену
+> из `credits_charged` и при необходимости помечает `provider_cost_estimated`.
 > `audit_logs` остаётся независимым append-only журналом событий и не служит
 > источником request history.
 > `user_id` намеренно без FK: writer работает в независимой транзакции, а при

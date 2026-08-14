@@ -205,6 +205,9 @@ async def test_crm_requests_use_request_logs_not_audit_events(
         "sent_at": body["items"][0]["sent_at"],
         "tokens_spent": 2.0,
         "provider_cost_usd": None,
+        # Журнальная строка (упавший/незавершённый запрос) себестоимости не несёт: токенов у
+        # неё нет, а `null` уточнять нечем — поэтому и флаг точности `null`.
+        "provider_cost_estimated": None,
         "refunded": False,
     }
 
@@ -234,9 +237,17 @@ async def test_crm_requests_are_retroactive_from_chat_and_media(
         )
         await session.execute(
             text(
-                "INSERT INTO chat_steps (session_id, message_step_id, role, payload, usage) "
-                "VALUES (:sid, :msid, 'assistant', '{}'::jsonb, '{\"model\": \"gpt-4o\"}'::jsonb), "
-                "(:sid, :msid, 'assistant', '{}'::jsonb, '{\"model\": \"gpt-4o\"}'::jsonb)"
+                "INSERT INTO chat_steps (session_id, message_step_id, role, payload, usage, created_at) "
+                "VALUES "
+                "(:sid, :msid, 'user', '{}'::jsonb, NULL, now() - interval '3 seconds'), "
+                "(:sid, :msid, 'assistant', '{}'::jsonb, "
+                " '{\"model\": \"gpt-4o\", \"inputTokens\": 1000, \"outputTokens\": 100, "
+                "   \"cacheReadTokens\": 0, \"cacheWriteTokens\": 0}'::jsonb, "
+                " now() - interval '2 seconds'), "
+                "(:sid, :msid, 'assistant', '{}'::jsonb, "
+                " '{\"model\": \"gpt-4o\", \"inputTokens\": 2000, \"outputTokens\": 50, "
+                "   \"cacheReadTokens\": 0, \"cacheWriteTokens\": 0}'::jsonb, "
+                " now() - interval '1 seconds')"
             ),
             {"sid": str(sid), "msid": str(msid)},
         )
@@ -253,11 +264,12 @@ async def test_crm_requests_are_retroactive_from_chat_and_media(
                 INSERT INTO media_jobs (
                     user_id, model_id, kind, fal_endpoint, fal_request_id,
                     status_url, response_url, status, prompt,
-                    credits_charged, credits_refunded, created_at, updated_at
+                    credits_charged, credits_refunded, result, created_at, updated_at
                 ) VALUES (
                     :uid, 'veo-3.1', 'video', 'fal-ai/veo', 'req-retro',
                     'https://q/status', 'https://q', 'completed', 'a cat',
-                    64, true, now() - interval '10 seconds', now()
+                    64, true, '{"assets":[{"url":"https://x/a.mp4"}]}'::jsonb,
+                    now() - interval '10 seconds', now()
                 )
                 """
             ),
@@ -276,8 +288,11 @@ async def test_crm_requests_are_retroactive_from_chat_and_media(
     chat = by_endpoint["chat:gpt-4o"]
     assert chat["tokens_spent"] == 7.0
     assert chat["status"] == "ok"
-    assert chat["duration_sec"] is None  # не измерено — старых замеров у хода нет
-    assert chat["provider_cost_usd"] is None
+    # Длительность хода: от пользовательского шага до последнего ответа модели — 2 с.
+    assert chat["duration_sec"] == pytest.approx(2, abs=0.5)
+    # Два вызова gpt-4o: (1000×2.5+100×10 + 2000×2.5+50×10) / 1e6 = 0.009.
+    assert chat["provider_cost_usd"] == pytest.approx(0.009)
+    assert chat["provider_cost_estimated"] is False
 
     media = by_endpoint["video:veo-3.1"]
     assert media["tokens_spent"] == 64.0
@@ -285,6 +300,44 @@ async def test_crm_requests_are_retroactive_from_chat_and_media(
     assert media["prompt_preview"] == "a cat"
     assert media["status"] == "ok"
     assert media["duration_sec"] == pytest.approx(10, abs=1)
+    # 64 кредита / 32 за пачку × $0.80 = $1.60; Veo — оценка сверху (ADR-079 §2).
+    assert media["provider_cost_usd"] == pytest.approx(1.60)
+    assert media["provider_cost_estimated"] is True
+
+
+async def test_crm_payments_include_crm_subscription_grant(
+    crm_admin_client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Выдача подписки из CRM обязана появиться во вкладке «Оплаты».
+
+    Регрессия: вкладка читала только webhook-и провайдеров, поэтому у пользователя с
+    активным планом, выданным оператором, вкладка была пустой — ровно тот инцидент, что
+    показал d80034dc на проде.
+    """
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+
+    products = await crm_admin_client.get("/v1/admin/products", headers=_ADMIN_HEADERS)
+    assert products.status_code == 200
+    product_id = products.json()["items"][0]["product_id"]
+
+    grant = await crm_admin_client.post(
+        f"/v1/admin/users/{uid}/subscription",
+        headers=_ADMIN_HEADERS,
+        json={"product_id": product_id, "expires_in_days": 7, "grant_id": "pay-tab-1"},
+    )
+    assert grant.status_code == 200, grant.text
+
+    payments = await crm_admin_client.get(f"/v1/admin/users/{uid}/payments", headers=_ADMIN_HEADERS)
+    assert payments.status_code == 200
+    body = payments.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["title"] == product_id
+    assert item["amount"] == 0.0  # денег не поступало — ноль как факт, не «сумма неизвестна»
+    assert "CRM" in (item["description"] or "")
+    assert item["status"] == "success"
 
 
 async def test_request_log_writer_records_orchestrator_chat_debit(

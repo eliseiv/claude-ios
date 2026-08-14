@@ -61,6 +61,7 @@ from app.media_generation.repository import (
 from app.models import MediaJob
 from app.notifications.push_service import MediaPushService
 from app.observability.logging import log_event
+from app.pricing.provider_prices import media_cost_usd_of_run, round_usd
 from app.request_logs.service import RequestLogWriter
 from app.wallet.service import WalletService
 
@@ -213,6 +214,18 @@ class MediaGenerationService:
             resolution=_as_str(values.get("resolution")),
             generate_audio=_as_bool(values.get("generateAudio")),
         )
+        # Same resolved values, second question: what does the run cost US (ADR-079). Recorded
+        # here because this is the only place that knows them — `media_jobs` keeps the credits
+        # but not the knobs, so afterwards the fal bill is only recoverable up to a credit pack.
+        provider_cost_usd = round_usd(
+            media_cost_usd_of_run(
+                model=model,
+                num_images=_as_int(values.get("numImages")),
+                duration=_as_str(values.get("duration")),
+                resolution=_as_str(values.get("resolution")),
+                generate_audio=_as_bool(values.get("generateAudio")),
+            )
+        )
         await self._wallet.consume(
             user_id=user_id,
             amount=cost,
@@ -233,6 +246,7 @@ class MediaGenerationService:
             status=STATUS_QUEUED,
             prompt=prompt,
             credits_charged=cost,
+            provider_cost_usd=provider_cost_usd,
             parent_job_id=source_job_id,
             input_image_urls=list(image_urls) or None,
         )

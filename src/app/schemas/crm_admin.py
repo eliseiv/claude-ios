@@ -104,6 +104,10 @@ class CrmRequestItem(StrictModel):
     sent_at: str
     tokens_spent: float | None = None
     provider_cost_usd: float | None = None
+    # `true` — себестоимость выведена из тарифной пачки, а фактическая цена провайдера внутри
+    # пачки мельче (посекундное видео у fal), то есть это оценка СВЕРХУ; `false` — точное
+    # значение; `null` — себестоимости нет вовсе (нечего уточнять). ADR-079 §2.
+    provider_cost_estimated: bool | None = None
     refunded: bool | None = None
 
 
