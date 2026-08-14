@@ -44,6 +44,17 @@ def test_query_locale_uppercase_normalized() -> None:
     assert resolve_presets_locale("RU", None, _DEFAULT) == "ru"
 
 
+def test_query_locale_zh_hans_selected() -> None:
+    assert resolve_presets_locale("zh-Hans", None, _DEFAULT) == "zh-Hans"
+
+
+def test_query_locale_zh_hans_lowercase_and_underscore() -> None:
+    assert resolve_presets_locale("zh-hans", None, _DEFAULT) == "zh-Hans"
+    assert resolve_presets_locale("zh_Hans", None, _DEFAULT) == "zh-Hans"
+    assert resolve_presets_locale("zh-CN", None, _DEFAULT) == "zh-Hans"
+    assert resolve_presets_locale("zh", None, _DEFAULT) == "zh-Hans"
+
+
 def test_query_locale_whitespace_normalized() -> None:
     assert resolve_presets_locale("  ru  ", None, _DEFAULT) == "ru"
 
@@ -74,6 +85,12 @@ def test_accept_language_ru_region_maps_to_ru() -> None:
 
 def test_accept_language_en_region_maps_to_en() -> None:
     assert resolve_presets_locale(None, "en-US", _DEFAULT) == "en"
+
+
+def test_accept_language_zh_hans_maps_to_zh_hans() -> None:
+    assert resolve_presets_locale(None, "zh-Hans", _DEFAULT) == "zh-Hans"
+    assert resolve_presets_locale(None, "zh-Hans-CN,en;q=0.8", _DEFAULT) == "zh-Hans"
+    assert resolve_presets_locale(None, "zh-CN", _DEFAULT) == "zh-Hans"
 
 
 def test_accept_language_order_and_qweight_first_supported_wins() -> None:
@@ -134,6 +151,18 @@ def test_first_supported_language_strips_qweight() -> None:
     assert _first_supported_language("ru-RU;q=0.9") == "ru"
 
 
+def test_first_supported_language_zh_hans() -> None:
+    assert _first_supported_language("zh-Hans") == "zh-Hans"
+    assert _first_supported_language("fr,zh-Hans-CN;q=0.8") == "zh-Hans"
+
+
+def test_query_locale_zh_hant_unsupported_raises_422() -> None:
+    with pytest.raises(ValidationFailedError) as exc:
+        resolve_presets_locale("zh-Hant", None, _DEFAULT)
+    assert exc.value.status_code == 422
+    assert "zh-Hant" in str(exc.value)
+
+
 # ============================ Settings.resolved_presets_default_locale ============================
 def test_config_default_locale_ru() -> None:
     s = _settings(PRESETS_DEFAULT_LOCALE="ru")
@@ -148,6 +177,11 @@ def test_config_default_locale_unset_is_en() -> None:
 def test_config_default_locale_normalized() -> None:
     s = _settings(PRESETS_DEFAULT_LOCALE="  RU ")
     assert s.resolved_presets_default_locale() == "ru"
+
+
+def test_config_default_locale_zh_hans() -> None:
+    s = _settings(PRESETS_DEFAULT_LOCALE="zh-Hans")
+    assert s.resolved_presets_default_locale() == "zh-Hans"
 
 
 def test_config_default_locale_out_of_set_degrades_to_en_with_warning(

@@ -17,7 +17,7 @@ from fastapi import APIRouter, Header, Query, Request
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.chat.presets import (
     DEFAULT_PRESET_LOCALE,
-    SUPPORTED_PRESET_LOCALES,
+    canonicalize_preset_locale,
     preset_catalog,
 )
 from app.config import get_settings
@@ -36,48 +36,49 @@ def resolve_presets_locale(
     """Resolve the catalog locale by priority (ADR-049 §3). Pure — no I/O, no settings access.
 
     Order (first match wins):
-      1. ``query_locale`` (explicit ``?locale=``) — normalized ``strip().lower()``; must be in
-         ``SUPPORTED_PRESET_LOCALES``. Present-but-unsupported → ``ValidationFailedError`` (422):
+      1. ``query_locale`` (explicit ``?locale=``) — canonicalized via
+         ``canonicalize_preset_locale`` (``zh-Hans`` / ``zh_Hans`` / ``zh-CN`` → ``zh-Hans``,
+         ``ru-RU`` → ``ru``). Present-but-unsupported → ``ValidationFailedError`` (422):
          an explicit client intent must not be silently substituted (symmetric to unsupported_model,
          ADR-034 §3).
-      2. ``accept_language`` — first supported primary-subtag (``ru-RU`` → ``ru``); ``q``-weights
+      2. ``accept_language`` — first supported tag (full BCP-47, then prefix/alias); ``q``-weights
          are dropped. No supported subtag / blank / unparseable → silent fallback (no error), the
          header is not a strict client intent.
       3. ``default_locale`` — the per-instance default (already graceful, ADR-049 §4), if supported.
       4. ``DEFAULT_PRESET_LOCALE`` (``"en"``) — final canon fallback.
     """
     if query_locale is not None:
-        normalized = query_locale.strip().lower()
-        if normalized in SUPPORTED_PRESET_LOCALES:
-            return normalized
+        resolved = canonicalize_preset_locale(query_locale)
+        if resolved is not None:
+            return resolved
         raise ValidationFailedError(f"locale '{query_locale}' is not supported")
 
     header_locale = _first_supported_language(accept_language)
     if header_locale is not None:
         return header_locale
 
-    if default_locale in SUPPORTED_PRESET_LOCALES:
-        return default_locale
+    default_resolved = canonicalize_preset_locale(default_locale)
+    if default_resolved is not None:
+        return default_resolved
     return DEFAULT_PRESET_LOCALE
 
 
 def _first_supported_language(accept_language: str | None) -> str | None:
-    """First supported primary-subtag from an ``Accept-Language`` header, else ``None`` (lenient).
+    """First supported locale from an ``Accept-Language`` header, else ``None`` (lenient).
 
-    Splits on ``,``, drops the ``;q=...`` weight, takes the part before ``-`` in lower case
-    (``ru-RU`` → ``ru``), and returns the first tag present in ``SUPPORTED_PRESET_LOCALES``. A
-    blank/unparseable header yields ``None`` (caller falls through). Standard content-negotiation
-    leniency: never raises.
+    Splits on ``,``, drops the ``;q=...`` weight, and canonicalizes each tag
+    (``zh-Hans-CN`` → ``zh-Hans``, ``ru-RU`` → ``ru``). A blank/unparseable header yields
+    ``None`` (caller falls through). Standard content-negotiation leniency: never raises.
     """
     if not accept_language:
         return None
     for part in accept_language.split(","):
-        tag = part.split(";", 1)[0].strip().lower()
+        tag = part.split(";", 1)[0].strip()
         if not tag:
             continue
-        primary = tag.split("-", 1)[0]
-        if primary in SUPPORTED_PRESET_LOCALES:
-            return primary
+        resolved = canonicalize_preset_locale(tag)
+        if resolved is not None:
+            return resolved
     return None
 
 
@@ -100,11 +101,11 @@ async def list_presets(
     locale: str | None = Query(
         default=None,
         description=(
-            "Желаемый язык каталога (например `en` или `ru`). Если не указан — язык определяется "
-            "по заголовку `Accept-Language`, иначе используется язык по умолчанию для инстанса. "
-            "Недопустимое значение возвращает ошибку 422."
+            "Желаемый язык каталога (например `en`, `ru` или `zh-Hans`). Если не указан — язык "
+            "определяется по заголовку `Accept-Language`, иначе используется язык по умолчанию "
+            "для инстанса. Недопустимое значение возвращает ошибку 422."
         ),
-        examples=["ru"],
+        examples=["ru", "zh-Hans"],
     ),
     accept_language: str | None = Header(default=None),
 ) -> PresetsResponse:

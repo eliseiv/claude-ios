@@ -1029,8 +1029,8 @@ JWKS с публичным ключом (для самопроверки/отл�
 ### GET /v1/presets
 Пресеты промтов для чипов на главном экране чата (экран 4). Тап подставляет `prompt` в композер. Набор/тексты меняются деплоем backend **без релиза iOS-приложения**. [ADR-035](adr/ADR-035-prompt-presets-endpoint.md), [ADR-049](adr/ADR-049-presets-localization.md) (локализация), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1presets--пресеты-промтов-adr-035).
 **Заголовки:** `Authorization: Bearer <JWT>` (обязателен — как все `/v1/*`; каталог не секретен, контур единый). Опц. `Accept-Language` (см. резолвинг локали).
-**Query:** `locale` (опц., набор `en`/`ru`) — явный выбор локали; вне набора → `422`.
-**Резолвинг локали ([ADR-049](adr/ADR-049-presets-localization.md)):** `?locale=` → `Accept-Language` (первый поддерживаемый, `ru-RU`→`ru`) → per-instance `PRESETS_DEFAULT_LOCALE` (avelyra=`ru`, остальные=`en`) → `en`.
+**Query:** `locale` (опц., набор `en`/`ru`/`zh-Hans`) — явный выбор локали; вне набора → `422`.
+**Резолвинг локали ([ADR-049](adr/ADR-049-presets-localization.md)):** `?locale=` → `Accept-Language` (первый поддерживаемый, `ru-RU`→`ru`, `zh-Hans-CN`→`zh-Hans`) → per-instance `PRESETS_DEFAULT_LOCALE` (avelyra=`ru`, остальные=`en`) → `en`.
 **Response 200:**
 ```json
 { "locale": "ru", "presets": [

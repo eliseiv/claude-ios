@@ -23,9 +23,49 @@ from typing import Any, NamedTuple
 
 # Supported preset locales — single source of truth (ADR-049 §1; EN first = canon/fallback).
 # Extending = add the locale here AND fill title/prompt in the registry. Never hardcode "exactly 2".
-SUPPORTED_PRESET_LOCALES: tuple[str, ...] = ("en", "ru")
+# ``zh-Hans`` is the BCP-47 canonical form (iOS / Accept-Language); matching is case-insensitive.
+SUPPORTED_PRESET_LOCALES: tuple[str, ...] = ("en", "ru", "zh-Hans")
 # Canon and per-field fallback locale (ADR-049 §1). Its key is required in every preset.
 DEFAULT_PRESET_LOCALE: str = "en"
+
+# Aliases that resolve to a supported locale after ``strip().lower().replace("_", "-")``.
+# ``zh`` / ``zh-cn`` / ``zh-sg`` → Simplified Chinese (the only Chinese catalog we ship).
+# Traditional tags (``zh-hant``, ``zh-tw``, ``zh-hk``) are intentionally absent → unsupported.
+_PRESET_LOCALE_ALIASES: dict[str, str] = {
+    "zh": "zh-Hans",
+    "zh-cn": "zh-Hans",
+    "zh-sg": "zh-Hans",
+    "zh-hans": "zh-Hans",
+    "zh-hans-cn": "zh-Hans",
+}
+
+
+def canonicalize_preset_locale(raw: str | None) -> str | None:
+    """Map a client locale tag onto ``SUPPORTED_PRESET_LOCALES``, or ``None`` if unsupported.
+
+    Matching is case-insensitive and accepts ``_`` as ``-`` (``zh_Hans`` → ``zh-Hans``).
+    Tries the full tag, then progressively shorter prefixes (``zh-Hans-CN`` → ``zh-Hans``,
+    ``ru-RU`` → ``ru``), then the alias table. Empty / blank → ``None``.
+    """
+    if raw is None:
+        return None
+    tag = raw.strip().lower().replace("_", "-")
+    if not tag:
+        return None
+    by_lower = {locale.lower(): locale for locale in SUPPORTED_PRESET_LOCALES}
+    if tag in by_lower:
+        return by_lower[tag]
+    aliased = _PRESET_LOCALE_ALIASES.get(tag)
+    if aliased is not None:
+        return aliased
+    # Prefix fallback is only against the supported set (``ru-RU`` → ``ru``).
+    # Aliases like ``zh`` must not steal ``zh-Hant`` / ``zh-TW``.
+    parts = tag.split("-")
+    for length in range(len(parts) - 1, 0, -1):
+        candidate = "-".join(parts[:length])
+        if candidate in by_lower:
+            return by_lower[candidate]
+    return None
 
 
 class Preset(NamedTuple):
@@ -51,6 +91,7 @@ _PRESETS: tuple[Preset, ...] = (
         title={
             "en": "Plan Week",
             "ru": "Планирование недели",
+            "zh-Hans": "规划本周",
         },
         prompt={
             "en": (
@@ -61,6 +102,9 @@ _PRESETS: tuple[Preset, ...] = (
                 "Помоги спланировать предстоящую неделю. Расспроси меня о приоритетах, сроках и "
                 "обязательствах, а затем предложи сбалансированное расписание по дням."
             ),
+            "zh-Hans": (
+                "帮我规划接下来的一周。先问我优先级、截止日期和已有安排，然后给出平衡的每日日程。"
+            ),
         },
     ),
     Preset(
@@ -69,6 +113,7 @@ _PRESETS: tuple[Preset, ...] = (
         title={
             "en": "Meeting Notes",
             "ru": "Заметки со встречи",
+            "zh-Hans": "会议纪要",
         },
         prompt={
             "en": (
@@ -80,6 +125,10 @@ _PRESETS: tuple[Preset, ...] = (
                 "задачи с ответственными и открытые вопросы. Я вставлю заметки следующим "
                 "сообщением."
             ),
+            "zh-Hans": (
+                "把我的会议草稿整理成清晰纪要：关键决策、待办（含负责人）和未决问题。"
+                "我接下来会粘贴笔记。"
+            ),
         },
     ),
     Preset(
@@ -88,6 +137,7 @@ _PRESETS: tuple[Preset, ...] = (
         title={
             "en": "Tasks from Photo",
             "ru": "Задачи с фото",
+            "zh-Hans": "从照片提取任务",
         },
         prompt={
             "en": (
@@ -98,6 +148,9 @@ _PRESETS: tuple[Preset, ...] = (
                 "Я прикреплю фото заметки, доски или списка. Выдели из него все конкретные "
                 "задачи и верни их в виде понятного чек-листа."
             ),
+            "zh-Hans": (
+                "我会附上一张便签、白板或清单的照片。请从中提取所有可执行任务，并以清晰的清单返回。"
+            ),
         },
     ),
     Preset(
@@ -106,6 +159,7 @@ _PRESETS: tuple[Preset, ...] = (
         title={
             "en": "Design Brief",
             "ru": "Дизайн-бриф",
+            "zh-Hans": "设计简报",
         },
         prompt={
             "en": (
@@ -116,6 +170,9 @@ _PRESETS: tuple[Preset, ...] = (
                 "Помоги составить лаконичный дизайн-бриф. Расспроси меня о цели, аудитории, объёме "
                 "работ, ограничениях и критериях успеха, а затем подготовь бриф."
             ),
+            "zh-Hans": (
+                "帮我写一份简洁的设计简报。先问我目标、受众、范围、限制和成功标准，然后起草简报。"
+            ),
         },
     ),
     Preset(
@@ -124,6 +181,7 @@ _PRESETS: tuple[Preset, ...] = (
         title={
             "en": "Daily Review",
             "ru": "Итоги дня",
+            "zh-Hans": "每日回顾",
         },
         prompt={
             "en": (
@@ -134,6 +192,9 @@ _PRESETS: tuple[Preset, ...] = (
                 "Проведи меня через короткий разбор дня: что удалось сделать, что осталось "
                 "незавершённым и какие три главных приоритета на завтра."
             ),
+            "zh-Hans": (
+                "带我做一次简短的每日回顾：今天完成了什么、还有什么未完成，以及明天的三个优先事项。"
+            ),
         },
     ),
     Preset(
@@ -142,6 +203,7 @@ _PRESETS: tuple[Preset, ...] = (
         title={
             "en": "Summarize Text",
             "ru": "Краткое изложение",
+            "zh-Hans": "文本摘要",
         },
         prompt={
             "en": (
@@ -152,6 +214,9 @@ _PRESETS: tuple[Preset, ...] = (
                 "Кратко изложи текст, который я пришлю. Дай обзор в трёх предложениях, а затем "
                 "ключевые мысли списком. Я вставлю текст следующим сообщением."
             ),
+            "zh-Hans": (
+                "总结我提供的文本。先用三句话概述，再用要点列出关键信息。我接下来会粘贴文本。"
+            ),
         },
     ),
     Preset(
@@ -160,6 +225,7 @@ _PRESETS: tuple[Preset, ...] = (
         title={
             "en": "Project Structure",
             "ru": "Структура проекта",
+            "zh-Hans": "项目结构",
         },
         prompt={
             "en": (
@@ -169,6 +235,9 @@ _PRESETS: tuple[Preset, ...] = (
             "ru": (
                 "Помоги продумать структуру проекта. Расспроси о типе проекта и целях, а затем "
                 "предложи структуру папок и файлов с кратким обоснованием."
+            ),
+            "zh-Hans": (
+                "帮我设计项目结构。先问项目类型和目标，然后给出文件夹/文件布局并简要说明理由。"
             ),
         },
     ),

@@ -127,6 +127,41 @@ async def test_query_locale_en_on_ru_instance_returns_english(
 
 
 @pytest.mark.asyncio
+async def test_query_locale_zh_hans_returns_simplified_chinese(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    restore_default_locale: None,
+) -> None:
+    get_settings().presets_default_locale = "en"
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+    r = await client.get("/v1/presets?locale=zh-Hans", headers=auth_headers(uid))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["locale"] == "zh-Hans"
+    assert _title_of(body["presets"], "plan_week") == "规划本周"
+
+
+@pytest.mark.asyncio
+async def test_accept_language_zh_hans_returns_simplified_chinese(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    restore_default_locale: None,
+) -> None:
+    get_settings().presets_default_locale = "en"
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+    r = await client.get(
+        "/v1/presets",
+        headers={**auth_headers(uid), "Accept-Language": "zh-Hans-CN,en;q=0.8"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["locale"] == "zh-Hans"
+    assert _title_of(body["presets"], "plan_week") == "规划本周"
+
+
+@pytest.mark.asyncio
 async def test_query_locale_unsupported_returns_422(
     client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],

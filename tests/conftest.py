@@ -568,6 +568,7 @@ async def client(
     from app.api_gateway.routers import byok as byok_router
     from app.api_gateway.routers import chat as chat_router
     from app.api_gateway.routers import models as models_router
+    from app.api_gateway.routers import presets as presets_router
     from app.api_gateway.routers import subscription as sub_router
     from app.api_gateway.routers import wallet as wallet_router
 
@@ -576,6 +577,7 @@ async def client(
     byok_router.enforce_other_limits = _allow_other  # type: ignore[assignment]
     sub_router.enforce_other_limits = _allow_other  # type: ignore[assignment]
     models_router.enforce_other_limits = _allow_other  # type: ignore[assignment]
+    presets_router.enforce_other_limits = _allow_other  # type: ignore[assignment]
 
     app = create_app()
     app.dependency_overrides[deps.get_db] = _override_db
@@ -596,6 +598,7 @@ async def client(
     byok_router.enforce_other_limits = orig_other  # type: ignore[assignment]
     sub_router.enforce_other_limits = orig_other  # type: ignore[assignment]
     models_router.enforce_other_limits = orig_other  # type: ignore[assignment]
+    presets_router.enforce_other_limits = orig_other  # type: ignore[assignment]
 
 
 # ----------------------------- DB seeding helpers -----------------------------

@@ -1089,18 +1089,18 @@ class Settings(BaseSettings):
     def resolved_presets_default_locale(self) -> str:
         """Per-instance default locale for GET /v1/presets, validated gracefully (ADR-049 §4).
 
-        Normalizes ``presets_default_locale`` (``strip().lower()``) and returns it if it is in
-        ``SUPPORTED_PRESET_LOCALES``. A value outside the set degrades to ``DEFAULT_PRESET_LOCALE``
+        Canonicalizes ``presets_default_locale`` (``zh-Hans`` / ``zh_Hans`` / ``RU``) and returns
+        the supported form. A value outside the set degrades to ``DEFAULT_PRESET_LOCALE``
         (``"en"``) and logs a WARNING — mis-configured env falls back to a safe default instead of
         crashing the process, mirroring ``token_products()``/``allowed_models_for()`` (ADR-034 §1).
         Pure (no I/O). Cached via get_settings()'s lru_cache; the WARNING fires once per process.
         """
-        from app.chat.presets import DEFAULT_PRESET_LOCALE, SUPPORTED_PRESET_LOCALES
+        from app.chat.presets import DEFAULT_PRESET_LOCALE, canonicalize_preset_locale
         from app.observability.logging import get_logger
 
-        normalized = self.presets_default_locale.strip().lower()
-        if normalized in SUPPORTED_PRESET_LOCALES:
-            return normalized
+        resolved = canonicalize_preset_locale(self.presets_default_locale)
+        if resolved is not None:
+            return resolved
         get_logger("app.config").warning(
             "PRESETS_DEFAULT_LOCALE=%r is not a supported locale; falling back to %r",
             self.presets_default_locale,

@@ -57,6 +57,10 @@ def test_preset_catalog_ru_has_seven_entries() -> None:
     assert len(preset_catalog("ru")) == 7
 
 
+def test_preset_catalog_zh_hans_has_seven_entries() -> None:
+    assert len(preset_catalog("zh-Hans")) == 7
+
+
 def test_preset_catalog_deterministic_order_en() -> None:
     ids = [p["id"] for p in preset_catalog("en")]
     assert ids == _EXPECTED_IDS
@@ -68,6 +72,7 @@ def test_preset_catalog_order_identical_across_locales() -> None:
     # Chip order (declaration order) is stable in every locale (ADR-049 §1 invariant).
     assert [p["id"] for p in preset_catalog("en")] == _EXPECTED_IDS
     assert [p["id"] for p in preset_catalog("ru")] == _EXPECTED_IDS
+    assert [p["id"] for p in preset_catalog("zh-Hans")] == _EXPECTED_IDS
 
 
 def test_preset_catalog_is_pure_no_shared_mutable_state() -> None:
@@ -113,6 +118,21 @@ def test_title_and_prompt_differ_between_en_and_ru() -> None:
     for pid in _EXPECTED_IDS:
         assert en[pid]["title"] != ru[pid]["title"], f"title not localized for {pid}"
         assert en[pid]["prompt"] != ru[pid]["prompt"], f"prompt not localized for {pid}"
+
+
+def test_title_and_prompt_differ_between_en_and_zh_hans() -> None:
+    en = {p["id"]: p for p in preset_catalog("en")}
+    zh = {p["id"]: p for p in preset_catalog("zh-Hans")}
+    for pid in _EXPECTED_IDS:
+        assert en[pid]["title"] != zh[pid]["title"], f"title not localized for {pid}"
+        assert en[pid]["prompt"] != zh[pid]["prompt"], f"prompt not localized for {pid}"
+
+
+def test_zh_hans_titles_and_ids_stable() -> None:
+    zh = {p["id"]: p for p in preset_catalog("zh-Hans")}
+    assert zh["plan_week"]["title"] == "规划本周"
+    assert zh["summarize_text"]["title"] == "文本摘要"
+    assert {p["id"]: p["icon"] for p in preset_catalog("zh-Hans")} == _EXPECTED_ICONS
 
 
 def test_ru_titles_verbatim_from_adr() -> None:
