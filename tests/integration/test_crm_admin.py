@@ -306,6 +306,95 @@ async def test_crm_requests_are_retroactive_from_chat_and_media(
     assert media["provider_cost_estimated"] is True
 
 
+async def test_crm_user_detail_reports_revenue_and_media_stats(
+    crm_admin_client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Блоки «Доход и провайдеры» и «Генерация фото и видео» (ADR-079 §5).
+
+    Регрессия: оба блока приходили `null`, и карточка пользователя Claude IOS в CRM была
+    беднее карточки 232 — оператор не видел ни расхода по вендорам, ни счётчиков генераций.
+    """
+    async with db_sessionmaker() as session:
+        uid = await seed_user(session)
+        sid = uuid.uuid4()
+        msid = uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO chat_sessions (id, user_id, project_id, mode) "
+                "VALUES (:sid, :uid, 'p', 'credits')"
+            ),
+            {"sid": str(sid), "uid": uid},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO chat_steps "
+                "(session_id, message_step_id, role, payload, usage) "
+                "VALUES (:sid, :msid, 'assistant', '{}'::jsonb, "
+                ' \'{"model": "gpt-4o", "inputTokens": 1000, "outputTokens": 100, '
+                '   "cacheReadTokens": 0, "cacheWriteTokens": 0}\'::jsonb)'
+            ),
+            {"sid": str(sid), "msid": str(msid)},
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO media_jobs (
+                    user_id, model_id, kind, fal_endpoint, fal_request_id,
+                    status_url, response_url, status, prompt,
+                    credits_charged, credits_refunded, result, created_at, updated_at
+                ) VALUES (
+                    :uid, 'kling-video', 'video', 'fal-ai/kling', 'req-rev-1',
+                    'https://q/status', 'https://q', 'completed', 'a cat',
+                    28, false, '{"assets":[{"url":"https://x/a.mp4"}]}'::jsonb,
+                    now() - interval '20 seconds', now()
+                ), (
+                    :uid, 'nano-banana-2', 'image', 'fal-ai/nb2', 'req-rev-2',
+                    'https://q/status', 'https://q', 'failed', 'a dog',
+                    4, true, NULL, now() - interval '5 seconds', now()
+                )
+                """
+            ),
+            {"uid": uid},
+        )
+        await session.commit()
+
+    detail = await crm_admin_client.get(f"/v1/admin/users/{uid}", headers=_ADMIN_HEADERS)
+    assert detail.status_code == 200
+    body = detail.json()
+
+    revenue = body["revenue"]
+    assert revenue is not None
+    # Kling 2.5: 28 кредитов = 2 пачки = $0.70; nano-banana-2: 4 кредита × $0.02 = $0.08.
+    assert revenue["providers"]["Fal"] == pytest.approx(0.78)
+    # gpt-4o: (1000×2.5 + 100×10) / 1e6.
+    assert revenue["providers"]["OpenAI"] == pytest.approx(0.0035)
+    assert revenue["api_cost_usd"] == pytest.approx(0.7835)
+    assert revenue["income_usd"] == 0.0  # выдачи из CRM доходом не являются
+
+    media = body["media_stats"]
+    assert media["videos"] == {"total": 1, "success": 1, "failed": 0}
+    assert media["photos"] == {"total": 1, "success": 0, "failed": 1}
+    # Среднее — только по завершённым: у провалившейся задачи `updated_at` — момент ошибки.
+    assert media["avg_generation_sec"]["video"] == pytest.approx(20, abs=1)
+    assert media["avg_generation_sec"]["photo"] is None
+    assert media["avg_generation_sec"]["overall"] == pytest.approx(20, abs=1)
+
+
+async def test_crm_user_detail_without_activity_hides_optional_blocks(
+    crm_admin_client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Нет активности — нет блоков: пустые нули выглядели бы как измеренный ноль расхода."""
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+
+    detail = await crm_admin_client.get(f"/v1/admin/users/{uid}", headers=_ADMIN_HEADERS)
+    assert detail.status_code == 200
+    assert detail.json()["revenue"] is None
+    assert detail.json()["media_stats"] is None
+
+
 async def test_crm_payments_include_crm_subscription_grant(
     crm_admin_client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],

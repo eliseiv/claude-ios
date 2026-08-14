@@ -20,14 +20,19 @@ from app.admin.service import AdminService
 from app.audit.service import EVENT_CRM_SUBSCRIPTION_GRANT, AuditEvent, AuditService
 from app.config import Settings, get_settings
 from app.errors import InsufficientCreditsError, UserNotFoundError
-from app.media_generation.catalog import find_model
+from app.media_generation.catalog import KIND_IMAGE, KIND_VIDEO, find_model
 from app.pricing.provider_prices import (
+    PROVIDER_FAL,
     ProviderCost,
     chat_cost_usd,
+    chat_cost_usd_by_provider,
     media_cost_usd_from_credits,
     round_usd,
 )
 from app.schemas.crm_admin import (
+    CrmMediaAvgSec,
+    CrmMediaBucket,
+    CrmMediaStats,
     CrmPaymentItem,
     CrmPaymentListResponse,
     CrmProductItem,
@@ -41,6 +46,7 @@ from app.schemas.crm_admin import (
     CrmUserDetailResponse,
     CrmUserListItem,
     CrmUserListResponse,
+    CrmUserRevenue,
     CrmUserSubscription,
 )
 from app.wallet.service import WalletService
@@ -503,6 +509,8 @@ class CrmAdminService:
 
         external_id = await self._external_id(user_id)
         plan_id = row["plan"]
+        revenue = await self._revenue(user_id)
+        media_stats = await self._media_stats(user_id)
         return CrmUserDetailResponse(
             id=str(row["id"]),
             external_id=external_id,
@@ -521,8 +529,139 @@ class CrmAdminService:
                 last_payment_at=_iso_z(last_payment["processed_at"]) if last_payment else None,
                 last_payment_method=None,
             ),
-            revenue=None,
-            media_stats=None,
+            revenue=revenue,
+            media_stats=media_stats,
+        )
+
+    async def _revenue(self, user_id: uuid.UUID) -> CrmUserRevenue | None:
+        """Блок «Доход и провайдеры»: сколько получили с пользователя и сколько заплатили за него.
+
+        Расход считается по тем же строкам истории и тем же прайсам, что и колонка
+        «Себестоимость» (ADR-079), поэтому сумма блока и сумма колонки не могут разойтись.
+        Строки, себестоимость которых не измерена, в сумму не входят — это занижение,
+        но занижение ЧЕСТНОЕ: подставлять ноль за неизвестную цену нельзя.
+
+        Часть медиастрок восстановлена из тарифной пачки (оценка сверху), поэтому расход по
+        `Fal` — верхняя граница; точные значения приходят с новыми генерациями.
+
+        Доход считается ТОЛЬКО по платежам в USD: рублёвые платежи CloudPayments лежат в
+        рублях, курса у сервиса нет, а сложить рубли с долларами в одно поле — значит выдать
+        неверное число за факт. Выдачи из CRM доходом не являются по определению.
+        """
+        rows = await self._history_rows(user_id)
+        providers: dict[str, float] = {}
+        for row in rows:
+            if row["source"] == "chat":
+                per_provider = chat_cost_usd_by_provider(row["usages"] or [])
+                for provider, cost in (per_provider or {}).items():
+                    providers[provider] = providers.get(provider, 0.0) + cost
+                continue
+            if row["source"] != "media":
+                # Журнальные строки — упавшие/незавершённые запросы без доменной пары; вендор
+                # у них не определён, а себестоимости нет (`request_logs.provider_cost_usd`
+                # никто не пишет), поэтому в разбивку по провайдерам им нечего добавить.
+                continue
+            cost_value = self._provider_cost(row).usd
+            if cost_value is None:
+                continue
+            providers[PROVIDER_FAL] = providers.get(PROVIDER_FAL, 0.0) + cost_value
+
+        income_usd = float(
+            await self._session.scalar(
+                text(
+                    "SELECT COALESCE(SUM((payload->>'amount')::float), 0) "
+                    "FROM cloudpayments_webhook_events "
+                    "WHERE user_id = :uid AND payload->>'currency' = 'USD'"
+                ),
+                {"uid": str(user_id)},
+            )
+            or 0.0
+        )
+        if not providers and income_usd == 0.0 and not rows:
+            return None
+        return CrmUserRevenue(
+            income_usd=round(income_usd, 2),
+            api_cost_usd=round_usd(sum(providers.values())) or 0.0,
+            providers={name: round_usd(value) or 0.0 for name, value in sorted(providers.items())},
+        )
+
+    async def _media_stats(self, user_id: uuid.UUID) -> CrmMediaStats | None:
+        """Блок «Генерация фото и видео» — прямо из `media_jobs`.
+
+        Среднее время считается только по завершённым задачам: у провалившейся `updated_at`
+        отмечает момент ошибки, и включать его в «среднее время генерации» значило бы
+        измерять скорость отказа как скорость генерации.
+        """
+        rows = (
+            (
+                await self._session.execute(
+                    text(
+                        """
+                    SELECT kind,
+                           count(*)::int AS total,
+                           count(*) FILTER (WHERE status = 'completed')::int AS success,
+                           count(*) FILTER (WHERE status = 'failed')::int AS failed,
+                           avg(EXTRACT(EPOCH FROM (updated_at - created_at)))
+                             FILTER (WHERE status = 'completed') AS avg_sec
+                      FROM media_jobs
+                     WHERE user_id = :uid
+                     GROUP BY kind
+                    """
+                    ),
+                    {"uid": str(user_id)},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if not rows:
+            return None
+
+        buckets = {
+            str(row["kind"]): CrmMediaBucket(
+                total=int(row["total"]), success=int(row["success"]), failed=int(row["failed"])
+            )
+            for row in rows
+        }
+        averages = {
+            str(row["kind"]): (
+                None if row["avg_sec"] is None else float(row["avg_sec"]),
+                int(row["success"]),
+            )
+            for row in rows
+        }
+        weighted = [(avg, count) for avg, count in averages.values() if avg is not None and count]
+        overall = (
+            sum(avg * count for avg, count in weighted) / sum(count for _, count in weighted)
+            if weighted
+            else None
+        )
+        empty = CrmMediaBucket(total=0, success=0, failed=0)
+        return CrmMediaStats(
+            photos=buckets.get(KIND_IMAGE, empty),
+            videos=buckets.get(KIND_VIDEO, empty),
+            avg_generation_sec=CrmMediaAvgSec(
+                photo=averages.get(KIND_IMAGE, (None, 0))[0],
+                video=averages.get(KIND_VIDEO, (None, 0))[0],
+                overall=overall,
+            ),
+        )
+
+    async def _history_rows(self, user_id: uuid.UUID) -> list[RowMapping]:
+        """Вся история запросов пользователя без пагинации — сырьё для агрегатов блока «Доход».
+
+        Тот же SQL, что и у вкладки «Запросы»: два разных запроса дали бы два разных ответа
+        на один вопрос «сколько стоил этот пользователь».
+        """
+        return list(
+            (
+                await self._session.execute(
+                    text(f"WITH history AS ({_REQUEST_HISTORY_SQL}) SELECT * FROM history"),
+                    {"uid": str(user_id), "preview": _PROMPT_PREVIEW_MAX},
+                )
+            )
+            .mappings()
+            .all()
         )
 
     async def list_payments(

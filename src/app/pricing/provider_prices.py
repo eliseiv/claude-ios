@@ -113,37 +113,55 @@ def _has_token_counts(usage: Mapping[str, Any]) -> bool:
     )
 
 
-def chat_cost_usd(usages: Sequence[Mapping[str, Any]]) -> float | None:
-    """Cost of one chat TURN: the sum over every LLM call it made.
+PROVIDER_OPENAI = "OpenAI"
+PROVIDER_ANTHROPIC = "Anthropic"
+PROVIDER_FAL = "Fal"
+
+
+def provider_of_chat_model(model: str) -> str:
+    """Which vendor's bill this model lands on. Only two chat providers exist here (ADR-033)."""
+    return PROVIDER_ANTHROPIC if model.strip().lower().startswith("claude") else PROVIDER_OPENAI
+
+
+def chat_cost_usd_by_provider(usages: Sequence[Mapping[str, Any]]) -> dict[str, float] | None:
+    """Cost of one chat TURN, split by vendor.
 
     A tool-loop turn calls the provider several times (each ``assistant`` step is one call)
     and is billed for each, so summing the steps is the cost — not an approximation of it.
+    The split exists because a turn CAN change model mid-loop, and the money then belongs to
+    two different bills.
 
     Returns ``None`` when the turn holds no usage at all, or when ANY of its calls is
     unpriceable — an unknown model, or a step with no token counts to price. A partial sum
     would understate the cost while looking like a full one.
     """
-    total = 0.0
-    priced = False
+    per_provider: dict[str, float] = {}
     for usage in usages:
         model = usage.get("model")
         prices = CHAT_TOKEN_PRICES.get(model) if isinstance(model, str) else None
-        if prices is None or not _has_token_counts(usage):
+        if prices is None or not isinstance(model, str) or not _has_token_counts(usage):
             return None
-        priced = True
         cache_read = _tokens(usage, "cacheReadTokens")
         input_tokens = _tokens(usage, "inputTokens")
         billed_input = (
             max(0, input_tokens - cache_read) if prices.cache_read_in_input else input_tokens
         )
-        total += (
+        cost = (
             billed_input * prices.input_usd
             + _tokens(usage, "outputTokens") * prices.output_usd
             + cache_read * prices.cache_read_usd
             + _tokens(usage, "cacheWriteTokens") * prices.cache_write_usd
         ) / _PER_MILLION
-        total += _tokens(usage, "webSearchRequests") * prices.web_search_usd_per_request
-    return total if priced else None
+        cost += _tokens(usage, "webSearchRequests") * prices.web_search_usd_per_request
+        provider = provider_of_chat_model(model)
+        per_provider[provider] = per_provider.get(provider, 0.0) + cost
+    return per_provider or None
+
+
+def chat_cost_usd(usages: Sequence[Mapping[str, Any]]) -> float | None:
+    """Cost of one chat TURN — the sum of :func:`chat_cost_usd_by_provider`."""
+    per_provider = chat_cost_usd_by_provider(usages)
+    return None if per_provider is None else sum(per_provider.values())
 
 
 # --- media --------------------------------------------------------------------------------
