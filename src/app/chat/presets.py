@@ -1,20 +1,24 @@
 """Prompt presets registry (ADR-035, localized by ADR-049): catalog for GET /v1/presets.
 
-Single source of truth for the chat home-screen preset chips (Plan Week, Meeting Notes, …).
-By the same pattern as ``tool_catalog()`` (``app.chat.tools``): a module-level static list +
-a pure ``preset_catalog(locale)`` that returns the entries in declaration order (= chip order on
-screen). No I/O, no state, no DB; provider/instance-agnostic — identical on every instance
-(ADR-033). Editing presets without a deploy (config-JSON / DB) is deferred — TD-026.
+Single source of truth for the chat home-screen preset chips (Plan Week, Meeting Notes, …)
+plus the later Agents-screen cards. By the same pattern as ``tool_catalog()``
+(``app.chat.tools``): a module-level static list + a pure ``preset_catalog(locale)`` that
+returns the entries in declaration order (= chip/card order). No I/O, no state, no DB;
+provider/instance-agnostic — identical on every instance (ADR-033). Editing presets without
+a deploy (config-JSON / DB) is deferred — TD-026.
 
-Localization (ADR-049): ``id`` and ``icon`` are stable machine identifiers and are NOT localized
-(client analytics/cache key by ``id``, ``icon`` is an SF Symbol resource); ``title`` and ``prompt``
-carry one string per locale. EN is the canon and per-field fallback (Q-035-2 partially closed).
+Localization (ADR-049): ``id`` and ``icon`` are stable machine identifiers and are NOT
+localized (client analytics/cache key by ``id``, ``icon`` is an SF Symbol resource);
+``title`` and ``prompt`` carry one string per locale. EN is the canon and per-field fallback.
 
 Each preset carries:
 - ``id``    — stable snake_case slug (``[a-z0-9_]``), unique in the set; stable across releases.
 - ``icon``  — SF Symbol name (ADR-035 §4); the iOS client renders it via ``Image(systemName:)``.
 - ``title`` — ``locale -> chip display name``; key ``"en"`` is REQUIRED (canon/fallback).
 - ``prompt``— ``locale -> composer text``; key ``"en"`` is REQUIRED (canon/fallback).
+
+Public catalog shape is unchanged: ``{id, title, icon, prompt}`` (ADR-035). New Agents cards
+are appended after the original seven chips so existing iOS apps keep working.
 """
 
 from __future__ import annotations
@@ -81,9 +85,13 @@ class Preset(NamedTuple):
     prompt: dict[str, str]
 
 
-# Static registry — single source of truth (ADR-035 §2/§3, ADR-049 §1.1). Declaration order IS the
-# chip order on the chat home screen. Editing without a deploy is intentionally out of scope
-# (TD-026). EN strings are unchanged from ADR-035 §3; RU strings are the approved ADR-049 §1.1 set.
+def _loc(en: str, ru: str, zh: str) -> dict[str, str]:
+    return {"en": en, "ru": ru, "zh-Hans": zh}
+
+
+# Static registry — single source of truth (ADR-035 §2/§3, ADR-049 §1.1). Declaration order IS
+# the chip/card order. The first seven ids are the original home-screen chips and must stay
+# first (existing iOS apps). Agents-screen cards follow.
 _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="plan_week",
@@ -240,6 +248,223 @@ _PRESETS: tuple[Preset, ...] = (
                 "帮我设计项目结构。先问项目类型和目标，然后给出文件夹/文件布局并简要说明理由。"
             ),
         },
+    ),
+    # --- Agents screen (appended; public fields stay {id, title, icon, prompt}) ---
+    Preset(
+        id="editor",
+        icon="pencil",
+        title=_loc("Editor", "Редактор", "编辑"),
+        prompt=_loc(
+            "You are an editor. Improve the text I provide: fix clarity, tone, and structure "
+            "without changing the meaning. I'll paste the draft next.",
+            "Ты редактор. Улучши текст, который я пришлю: ясность, тон и структуру, "
+            "не меняя смысл. Я вставлю черновик следующим сообщением.",
+            "你是编辑。在不改变原意的前提下，改进我提供的文本的清晰度、语气和结构。我接下来会粘贴草稿。",
+        ),
+    ),
+    Preset(
+        id="letters",
+        icon="envelope",
+        title=_loc("Letters", "Письма", "信件"),
+        prompt=_loc(
+            "Help me write a clear, professional letter or email. Ask who it's for, the goal, "
+            "and the tone, then draft it.",
+            "Помоги написать понятное профессиональное письмо. Расспроси, кому оно, какая цель "
+            "и какой тон, а затем подготовь черновик.",
+            "帮我写一封清晰、专业的信或邮件。先问收件人、目的和语气，然后起草。",
+        ),
+    ),
+    Preset(
+        id="analyst",
+        icon="chart.bar",
+        title=_loc("Analyst", "Аналитик", "分析师"),
+        prompt=_loc(
+            "You are an analyst. Break down the data or situation I share, highlight what "
+            "matters, and give a concise conclusion with next steps.",
+            "Ты аналитик. Разбери данные или ситуацию, которую я опишу: выдели главное и дай "
+            "короткий вывод со следующими шагами.",
+            "你是分析师。拆解我提供的数据或情况，标出重点，并给出简要结论和下一步。",
+        ),
+    ),
+    Preset(
+        id="ideas",
+        icon="lightbulb",
+        title=_loc("Ideas", "Идеи", "点子"),
+        prompt=_loc(
+            "Help me generate solutions and new approaches. Ask about the problem and "
+            "constraints, then propose several distinct options with a short rationale.",
+            "Помоги придумать решения и новые подходы. Расспроси о задаче и ограничениях, "
+            "затем предложи несколько разных вариантов с кратким обоснованием.",
+            "帮我想出解决方案和新思路。先问问题和限制，然后给出几个不同方案并简要说明理由。",
+        ),
+    ),
+    Preset(
+        id="code",
+        icon="chevron.left.forwardslash.chevron.right",
+        title=_loc("Code", "Код", "代码"),
+        prompt=_loc(
+            "You are a coding assistant. Write or fix code, explain errors in plain language, "
+            "and show a working example. I'll describe the task or paste the snippet next.",
+            "Ты помощник по коду. Напиши или исправь код, объясни ошибки простыми словами "
+            "и покажи рабочий пример. Я опишу задачу или вставлю фрагмент следующим сообщением.",
+            "你是编程助手。编写或修复代码，用简单语言解释错误，并给出可运行示例。我接下来会描述任务或粘贴代码。",
+        ),
+    ),
+    Preset(
+        id="documents",
+        icon="doc.text.magnifyingglass",
+        title=_loc("Documents", "Документы", "文档"),
+        prompt=_loc(
+            "Analyze the file or document I share. Extract the key facts and give a clear "
+            "conclusion I can act on.",
+            "Проанализируй файл или документ, который я пришлю. Выдели ключевые факты и дай "
+            "понятный вывод, с которым можно работать.",
+            "分析我分享的文件或文档。提取关键事实，并给出可执行的清晰结论。",
+        ),
+    ),
+    Preset(
+        id="finances",
+        icon="banknote",
+        title=_loc("Finances", "Финансы", "财务"),
+        prompt=_loc(
+            "Help me plan a budget and expenses. Ask about income, fixed costs, and goals, "
+            "then propose a simple monthly plan.",
+            "Помоги спланировать бюджет и расходы. Расспроси о доходах, постоянных тратах "
+            "и целях, затем предложи простой план на месяц.",
+            "帮我规划预算和开支。先问收入、固定支出和目标，然后给出简单的月度计划。",
+        ),
+    ),
+    Preset(
+        id="advisor",
+        icon="person.crop.circle",
+        title=_loc("Advisor", "Советник", "顾问"),
+        prompt=_loc(
+            "Help me think a decision through. Ask clarifying questions, lay out the options "
+            "with trade-offs, and recommend a next step. I stay responsible for the choice.",
+            "Помоги разобраться и принять решение. Задай уточняющие вопросы, разложи варианты "
+            "с плюсами и минусами и предложи следующий шаг. Решение остаётся за мной.",
+            "帮我理清并做出决定。先问清楚情况，列出选项和利弊，并建议下一步。最终选择由我负责。",
+        ),
+    ),
+    Preset(
+        id="planner",
+        icon="list.bullet.clipboard",
+        title=_loc("Planner", "Планер", "规划"),
+        prompt=_loc(
+            "Help me organize tasks, goals, and a schedule. Ask about deadlines and energy, "
+            "then propose a realistic plan.",
+            "Помоги организовать задачи, цели и расписание. Расспроси о сроках и нагрузке, "
+            "затем предложи реалистичный план.",
+            "帮我整理任务、目标和日程。先问截止日期和精力，然后给出可行计划。",
+        ),
+    ),
+    Preset(
+        id="studies",
+        icon="book",
+        title=_loc("Studies", "Учёба", "学习"),
+        prompt=_loc(
+            "Explain the topic I name in simple words. Start with the idea, then a short "
+            "example, and check that I understood.",
+            "Объясни тему, которую я назову, простыми словами. Сначала суть, затем короткий "
+            "пример — и проверь, что я понял.",
+            "用简单的话解释我提出的主题。先讲核心，再给一个短例子，并确认我是否理解。",
+        ),
+    ),
+    Preset(
+        id="translator",
+        icon="globe",
+        title=_loc("Translator", "Переводчик", "翻译"),
+        prompt=_loc(
+            "Translate and adapt the text I provide. Keep the meaning, match the tone, and "
+            "ask which languages if I don't specify.",
+            "Переведи и адаптируй текст, который я пришлю. Сохрани смысл, подбери тон и "
+            "уточни языки, если я их не укажу.",
+            "翻译并改写我提供的文本。保持原意、匹配语气；若我未说明语言，先问清楚。",
+        ),
+    ),
+    Preset(
+        id="health",
+        icon="heart",
+        title=_loc("Health", "Здоровье", "健康"),
+        prompt=_loc(
+            "Help me with habits and everyday balance (sleep, movement, routine). You are not "
+            "a doctor — no diagnoses. Ask what I want to change and propose a small plan.",
+            "Помоги с привычками и повседневным балансом (сон, движение, режим). Ты не врач — "
+            "без диагнозов. Расспроси, что хочу изменить, и предложи небольшой план.",
+            "帮我改善习惯和日常平衡（睡眠、运动、作息）。你不是医生，不要诊断。先问我想改变什么，再给一个小计划。",
+        ),
+    ),
+    Preset(
+        id="creator",
+        icon="paintpalette",
+        title=_loc("Creator", "Креатор", "创作者"),
+        prompt=_loc(
+            "Help me create ideas, stories, or a script. Ask about the format, audience, and "
+            "mood, then draft a few options.",
+            "Помоги придумать идеи, историю или сценарий. Расспроси о формате, аудитории и "
+            "настроении, затем набросай несколько вариантов.",
+            "帮我创作点子、故事或剧本。先问形式、受众和氛围，然后起草几个方案。",
+        ),
+    ),
+    Preset(
+        id="movies",
+        icon="film",
+        title=_loc("Movies", "Кино", "电影"),
+        prompt=_loc(
+            "Recommend films for my mood. Ask what I feel like watching, what I've already "
+            "seen, and any limits (genre, length), then suggest a short list with why.",
+            "Подбери фильмы под настроение. Расспроси, что хочется посмотреть, что уже видел "
+            "и какие ограничения (жанр, длительность), затем дай короткий список с пояснением.",
+            "按我的心情推荐电影。先问想看什么、已经看过什么以及限制（类型、时长），然后给一个短名单并说明理由。",
+        ),
+    ),
+    Preset(
+        id="quizzes",
+        icon="questionmark.circle",
+        title=_loc("Quizzes", "Викторины", "问答"),
+        prompt=_loc(
+            "Make a quiz. Ask about the topic and difficulty, then ask questions one by one "
+            "and score the answers.",
+            "Составь викторину. Расспроси тему и сложность, затем задавай вопросы по одному "
+            "и проверяй ответы.",
+            "出一套问答。先问主题和难度，然后一题一题提问并评分。",
+        ),
+    ),
+    Preset(
+        id="companion",
+        icon="bubble.left.and.bubble.right",
+        title=_loc("Companion", "Собеседник", "闲聊"),
+        prompt=_loc(
+            "Be a friendly conversation partner. Follow my topic, ask live questions, and "
+            "keep the chat going without a formal report.",
+            "Будь дружелюбным собеседником. Подхвати тему, задавай живые вопросы и веди "
+            "разговор без официального отчёта.",
+            "做友好的聊天对象。跟上我的话题，提出自然的问题，轻松把对话进行下去，不必写成报告。",
+        ),
+    ),
+    Preset(
+        id="stories",
+        icon="book.closed",
+        title=_loc("Stories", "Истории", "故事"),
+        prompt=_loc(
+            "Write a story and develop the plot with me. Ask about genre, characters, and "
+            "length, then start a chapter I can continue.",
+            "Напиши рассказ и развивай сюжет вместе со мной. Расспроси о жанре, героях и "
+            "объёме, затем начни главу, которую я смогу продолжить.",
+            "和我一起写故事、推进情节。先问类型、人物和篇幅，然后写一章让我续写。",
+        ),
+    ),
+    Preset(
+        id="games",
+        icon="gamecontroller",
+        title=_loc("Games", "Игры", "游戏"),
+        prompt=_loc(
+            "Invent a challenge or a short game we can play in chat. Explain the rules in "
+            "one pass and start the first round.",
+            "Придумай челлендж или короткую игру, в которую можно сыграть в чате. Объясни "
+            "правила за один раз и запусти первый раунд.",
+            "发明一个能在聊天里玩的挑战或小游戏。一次说清规则，然后开始第一轮。",
+        ),
     ),
 )
 

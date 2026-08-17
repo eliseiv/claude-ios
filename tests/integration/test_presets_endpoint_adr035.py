@@ -3,7 +3,7 @@
 JWT-protected like GET /v1/tools and GET /v1/models. Uses the shared hermetic `client` (real PG
 container, faked external clients, rate limits fail open without Redis). Covers:
 - 401 without a JWT / with a broken bearer; 200 with a valid JWT;
-- body: exactly the seven presets in the canonical deterministic order, all four fields non-empty,
+- body: original seven chips first, then Agents cards, all four fields non-empty,
   ids unique snake_case;
 - response identity is provider-agnostic (ADR-033): identical body under LLM_PROVIDER anthropic vs
   openai (registry is a static, provider-neutral catalog);
@@ -34,6 +34,24 @@ _EXPECTED_IDS = [
     "daily_review",
     "summarize_text",
     "project_structure",
+    "editor",
+    "letters",
+    "analyst",
+    "ideas",
+    "code",
+    "documents",
+    "finances",
+    "advisor",
+    "planner",
+    "studies",
+    "translator",
+    "health",
+    "creator",
+    "movies",
+    "quizzes",
+    "companion",
+    "stories",
+    "games",
 ]
 _SNAKE_CASE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 _FIELDS = ("id", "title", "icon", "prompt")
@@ -63,7 +81,7 @@ async def test_presets_broken_bearer_401(client: AsyncClient) -> None:
 
 # ----------------------------- happy path / contract -----------------------------
 @pytest.mark.asyncio
-async def test_presets_returns_seven_in_order(
+async def test_presets_returns_catalog_in_order(
     client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -72,7 +90,7 @@ async def test_presets_returns_seven_in_order(
     r = await client.get("/v1/presets", headers=auth_headers(uid))
     assert r.status_code == 200, r.text
     presets = r.json()["presets"]
-    assert len(presets) == 7
+    assert len(presets) == len(_EXPECTED_IDS)
     assert [p["id"] for p in presets] == _EXPECTED_IDS
 
 

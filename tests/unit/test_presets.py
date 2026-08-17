@@ -1,10 +1,11 @@
 """Unit tests for the prompt-presets registry (ADR-035, localized ADR-049).
 
 ``app.chat.presets.preset_catalog(locale)`` is pure (no I/O, no state, no DB) and
-provider/instance-agnostic. It returns the seven static presets in declaration order (= chip
-order on the chat home screen) as a list of ``{id, title, icon, prompt}`` dicts. ``id``/``icon``
-are stable machine identifiers (NOT localized); ``title``/``prompt`` carry the resolved-locale
-string with a per-field EN fallback.
+provider/instance-agnostic. It returns the static presets in declaration order (= chip
+order) as a list of ``{id, title, icon, prompt}`` dicts. The original seven home-screen
+chips stay first; Agents-screen cards are appended. ``id``/``icon`` are stable machine
+identifiers (NOT localized); ``title``/``prompt`` carry the resolved-locale string with a
+per-field EN fallback.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from app.chat.presets import (
 )
 
 # Canonical order and id set (ADR-035 §2) — declaration order IS the chip order.
-_EXPECTED_IDS = [
+_ORIGINAL_IDS = [
     "plan_week",
     "meeting_notes",
     "tasks_from_photo",
@@ -27,6 +28,27 @@ _EXPECTED_IDS = [
     "summarize_text",
     "project_structure",
 ]
+_AGENT_IDS = [
+    "editor",
+    "letters",
+    "analyst",
+    "ideas",
+    "code",
+    "documents",
+    "finances",
+    "advisor",
+    "planner",
+    "studies",
+    "translator",
+    "health",
+    "creator",
+    "movies",
+    "quizzes",
+    "companion",
+    "stories",
+    "games",
+]
+_EXPECTED_IDS = _ORIGINAL_IDS + _AGENT_IDS
 # Stable SF-Symbol icons per id (ADR-035 §4, ADR-049 §1.1) — locale-independent.
 _EXPECTED_ICONS = {
     "plan_week": "calendar",
@@ -36,6 +58,24 @@ _EXPECTED_ICONS = {
     "daily_review": "checklist",
     "summarize_text": "doc.text",
     "project_structure": "folder",
+    "editor": "pencil",
+    "letters": "envelope",
+    "analyst": "chart.bar",
+    "ideas": "lightbulb",
+    "code": "chevron.left.forwardslash.chevron.right",
+    "documents": "doc.text.magnifyingglass",
+    "finances": "banknote",
+    "advisor": "person.crop.circle",
+    "planner": "list.bullet.clipboard",
+    "studies": "book",
+    "translator": "globe",
+    "health": "heart",
+    "creator": "paintpalette",
+    "movies": "film",
+    "quizzes": "questionmark.circle",
+    "companion": "bubble.left.and.bubble.right",
+    "stories": "book.closed",
+    "games": "gamecontroller",
 }
 # A few RU ground-truth strings (ADR-049 §1.1) asserted verbatim.
 _RU_TITLES = {
@@ -43,22 +83,30 @@ _RU_TITLES = {
     "meeting_notes": "Заметки со встречи",
     "summarize_text": "Краткое изложение",
     "project_structure": "Структура проекта",
+    "editor": "Редактор",
+    "letters": "Письма",
+    "companion": "Собеседник",
+    "games": "Игры",
 }
 _SNAKE_CASE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 _FIELDS = ("id", "title", "icon", "prompt")
 
 
 # ----------------------------- shape / order (per locale) -----------------------------
-def test_preset_catalog_en_has_seven_entries() -> None:
-    assert len(preset_catalog("en")) == 7
+def test_preset_catalog_en_has_expected_entries() -> None:
+    assert len(preset_catalog("en")) == len(_EXPECTED_IDS)
 
 
-def test_preset_catalog_ru_has_seven_entries() -> None:
-    assert len(preset_catalog("ru")) == 7
+def test_preset_catalog_ru_has_expected_entries() -> None:
+    assert len(preset_catalog("ru")) == len(_EXPECTED_IDS)
 
 
-def test_preset_catalog_zh_hans_has_seven_entries() -> None:
-    assert len(preset_catalog("zh-Hans")) == 7
+def test_preset_catalog_zh_hans_has_expected_entries() -> None:
+    assert len(preset_catalog("zh-Hans")) == len(_EXPECTED_IDS)
+
+
+def test_original_seven_chips_remain_first() -> None:
+    assert [p["id"] for p in preset_catalog("en")[:7]] == _ORIGINAL_IDS
 
 
 def test_preset_catalog_deterministic_order_en() -> None:
@@ -81,7 +129,7 @@ def test_preset_catalog_is_pure_no_shared_mutable_state() -> None:
     first[0]["title"] = "MUTATED"
     first.append({"id": "x", "title": "x", "icon": "x", "prompt": "x"})
     second = preset_catalog("en")
-    assert len(second) == 7
+    assert len(second) == len(_EXPECTED_IDS)
     assert second[0]["title"] != "MUTATED"
 
 
