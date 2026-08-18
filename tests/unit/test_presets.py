@@ -2,10 +2,11 @@
 
 ``app.chat.presets.preset_catalog(locale)`` is pure (no I/O, no state, no DB) and
 provider/instance-agnostic. It returns the static presets in declaration order (= chip
-order) as a list of ``{id, title, icon, prompt}`` dicts. The original seven home-screen
-chips stay first; Agents-screen cards are appended. ``id``/``icon`` are stable machine
-identifiers (NOT localized); ``title``/``prompt`` carry the resolved-locale string with a
-per-field EN fallback.
+order) as a list of ``{id, title, icon, prompt, category}`` dicts. The original seven
+home-screen chips stay first (``category`` is ``None``); Agents-screen cards are appended
+with a genre slug. ``id``/``icon``/``category`` are stable machine identifiers (NOT
+localized); ``title``/``prompt`` carry the resolved-locale string with a per-field EN
+fallback.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import re
 
 from app.chat.presets import (
     DEFAULT_PRESET_LOCALE,
+    PRESET_CATEGORIES,
     SUPPORTED_PRESET_LOCALES,
     preset_catalog,
 )
@@ -89,7 +91,28 @@ _RU_TITLES = {
     "games": "Игры",
 }
 _SNAKE_CASE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
-_FIELDS = ("id", "title", "icon", "prompt")
+_FIELDS = ("id", "title", "icon", "prompt", "category")
+# Agents-screen genres from the iOS tabs (Работа / Жизнь / Развлечения).
+_EXPECTED_CATEGORIES = {
+    "editor": "work",
+    "letters": "work",
+    "analyst": "work",
+    "ideas": "work",
+    "code": "work",
+    "documents": "work",
+    "finances": "life",
+    "advisor": "life",
+    "planner": "life",
+    "studies": "life",
+    "translator": "life",
+    "health": "life",
+    "creator": "entertainment",
+    "movies": "entertainment",
+    "quizzes": "entertainment",
+    "companion": "entertainment",
+    "stories": "entertainment",
+    "games": "entertainment",
+}
 
 
 # ----------------------------- shape / order (per locale) -----------------------------
@@ -137,10 +160,14 @@ def test_preset_catalog_all_four_fields_present_and_non_empty_every_locale() -> 
     for locale in SUPPORTED_PRESET_LOCALES:
         for p in preset_catalog(locale):
             assert set(p.keys()) == set(_FIELDS), f"unexpected fields ({locale}) {p}"
-            for field in _FIELDS:
+            for field in ("id", "title", "icon", "prompt"):
                 value = p[field]
                 assert isinstance(value, str), f"{field} not a str ({locale}) on {p['id']}"
                 assert value.strip(), f"{field} empty ({locale}) on preset {p['id']}"
+            category = p["category"]
+            assert (
+                category is None or category in PRESET_CATEGORIES
+            ), f"bad category ({locale}) on {p['id']}: {category!r}"
 
 
 def test_preset_catalog_ids_unique_snake_case() -> None:
@@ -237,3 +264,23 @@ def test_partial_locale_field_falls_back_to_en_per_field() -> None:
         presets_mod._PRESETS = original
     assert ru[0]["title"] == "RU Заголовок"  # locale value used where present
     assert ru[0]["prompt"] == "EN prompt only"  # missing field → EN fallback
+    assert ru[0]["category"] is None
+
+
+# ----------------------------- category (ADR-080) -----------------------------
+def test_home_chips_have_null_category() -> None:
+    by_id = {p["id"]: p["category"] for p in preset_catalog("en")}
+    for pid in _ORIGINAL_IDS:
+        assert by_id[pid] is None, f"home chip {pid} must not carry a genre"
+
+
+def test_agent_categories_match_ios_tabs() -> None:
+    by_id = {p["id"]: p["category"] for p in preset_catalog("en")}
+    assert {pid: by_id[pid] for pid in _AGENT_IDS} == _EXPECTED_CATEGORIES
+
+
+def test_category_identical_across_locales() -> None:
+    en = {p["id"]: p["category"] for p in preset_catalog("en")}
+    ru = {p["id"]: p["category"] for p in preset_catalog("ru")}
+    zh = {p["id"]: p["category"] for p in preset_catalog("zh-Hans")}
+    assert en == ru == zh

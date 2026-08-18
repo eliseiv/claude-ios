@@ -1035,10 +1035,12 @@ JWKS с публичным ключом (для самопроверки/отл�
 ```json
 { "locale": "ru", "presets": [
   { "id": "plan_week", "title": "Планирование недели", "icon": "calendar",
-    "prompt": "Помоги спланировать предстоящую неделю. ..." }
+    "prompt": "Помоги спланировать предстоящую неделю. ...", "category": null },
+  { "id": "editor", "title": "Редактор", "icon": "pencil",
+    "prompt": "Ты редактор. ...", "category": "work" }
 ] }
 ```
-- `locale` — фактически отданная локаль (аддитивно). `id` — стабильный slug (snake_case, **не локализуется**). `title` — имя чипа (на локали). `icon` — имя **SF Symbol** (не emoji; клиент рендерит `Image(systemName:)`, fallback при отсутствии; **не локализуется**). `prompt` — текст в композер (на локали). Порядок = порядок чипов (един во всех локалях); все поля пресета обязательны.
+- `locale` — фактически отданная локаль (аддитивно). `id` — стабильный slug (snake_case, **не локализуется**). `title` — имя чипа (на локали). `icon` — имя **SF Symbol** (не emoji; клиент рендерит `Image(systemName:)`, fallback при отсутствии; **не локализуется**). `prompt` — текст в композер (на локали). `category` — жанр агента `work`/`life`/`entertainment` или `null` у чипов главного экрана (аддитивно, [ADR-080](adr/ADR-080-preset-categories.md); старые клиенты игнорируют). Порядок = порядок чипов (един во всех локалях); `id`/`title`/`icon`/`prompt` обязательны.
 - Дефолтный набор (7): `plan_week`, `meeting_notes`, `tasks_from_photo`, `design_brief`, `daily_review`, `summarize_text`, `project_structure`.
 - Провайдер/инстанс-агностично; локализуются только `title`/`prompt`, EN — канон/fallback (per-field). Без БД/миграции/биллинга; read-only без побочных эффектов. Без env/без запроса локали → EN как раньше (обратная совместимость; [Q-035-2](99-open-questions.md) частично закрыт [ADR-049](adr/ADR-049-presets-localization.md)).
 **Коды:** `200`; `401`; `422` (явный `?locale=` вне набора); `429`.

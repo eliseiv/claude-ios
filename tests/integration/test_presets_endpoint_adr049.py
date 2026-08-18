@@ -262,4 +262,4 @@ async def test_response_has_exactly_locale_and_presets(
     # StrictModel top level: exactly {locale, presets}.
     assert set(body.keys()) == {"locale", "presets"}
     for p in body["presets"]:
-        assert set(p.keys()) == {"id", "title", "icon", "prompt"}
+        assert set(p.keys()) == {"id", "title", "icon", "prompt", "category"}

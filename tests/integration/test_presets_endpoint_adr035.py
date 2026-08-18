@@ -54,7 +54,36 @@ _EXPECTED_IDS = [
     "games",
 ]
 _SNAKE_CASE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
-_FIELDS = ("id", "title", "icon", "prompt")
+_FIELDS = ("id", "title", "icon", "prompt", "category")
+_HOME_IDS = {
+    "plan_week",
+    "meeting_notes",
+    "tasks_from_photo",
+    "design_brief",
+    "daily_review",
+    "summarize_text",
+    "project_structure",
+}
+_AGENT_CATEGORIES = {
+    "editor": "work",
+    "letters": "work",
+    "analyst": "work",
+    "ideas": "work",
+    "code": "work",
+    "documents": "work",
+    "finances": "life",
+    "advisor": "life",
+    "planner": "life",
+    "studies": "life",
+    "translator": "life",
+    "health": "life",
+    "creator": "entertainment",
+    "movies": "entertainment",
+    "quizzes": "entertainment",
+    "companion": "entertainment",
+    "stories": "entertainment",
+    "games": "entertainment",
+}
 
 
 @pytest.fixture
@@ -107,11 +136,15 @@ async def test_presets_all_fields_non_empty_and_ids_unique_snake_case(
     ids = [p["id"] for p in presets]
     assert len(ids) == len(set(ids)), f"duplicate ids: {ids}"
     for p in presets:
-        # StrictModel: exactly the four contract fields, nothing extra.
+        # StrictModel: contract fields only (category is additive and nullable).
         assert set(p.keys()) == set(_FIELDS), f"unexpected fields on {p}"
-        for field in _FIELDS:
+        for field in ("id", "title", "icon", "prompt"):
             assert isinstance(p[field], str) and p[field].strip(), f"{field} empty on {p['id']}"
         assert _SNAKE_CASE.match(p["id"]), f"id not snake_case: {p['id']!r}"
+        if p["id"] in _HOME_IDS:
+            assert p["category"] is None, f"home chip {p['id']} must have null category"
+        else:
+            assert p["category"] == _AGENT_CATEGORIES[p["id"]], p
 
 
 # ----------------------------- provider-agnostic identity (ADR-033) -----------------------------

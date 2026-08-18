@@ -622,7 +622,15 @@ Backend только инициирует tool-call; исполняет клие
       "id": "plan_week",
       "title": "Планирование недели",
       "icon": "calendar",
-      "prompt": "Помоги спланировать предстоящую неделю. Расспроси меня о приоритетах, сроках и обязательствах, а затем предложи сбалансированное расписание по дням."
+      "prompt": "Помоги спланировать предстоящую неделю. Расспроси меня о приоритетах, сроках и обязательствах, а затем предложи сбалансированное расписание по дням.",
+      "category": null
+    },
+    {
+      "id": "editor",
+      "title": "Редактор",
+      "icon": "pencil",
+      "prompt": "Ты редактор. Улучши текст, который я пришлю: ясность, тон и структуру, не меняя смысл. Я вставлю черновик следующим сообщением.",
+      "category": "work"
     }
   ]
 }
@@ -632,10 +640,13 @@ Backend только инициирует tool-call; исполняет клие
 - `title` — отображаемое имя чипа (на выбранной локали).
 - `icon` — имя **SF Symbol** (например `calendar`, `doc.text`, `camera`); клиент рендерит `Image(systemName:)`, при отсутствии символа — клиентский fallback. Не emoji ([ADR-035 §4](../../adr/ADR-035-prompt-presets-endpoint.md)). **Не локализуется** (стабильный ресурс iOS).
 - `prompt` — plain-text (на выбранной локали), подставляется в композер при тапе (без шаблонов/плейсхолдеров на старте).
-- Порядок элементов = порядок чипов на экране (детерминированный, порядок объявления в реестре) — **един во всех локалях**. Все 4 поля пресета обязательны и непусты.
+- `category` ([ADR-080](../../adr/ADR-080-preset-categories.md), **аддитивно**, nullable) — жанр карточки на экране агентов. Стабильный slug, **не локализуется**: `work` (работа), `life` (жизнь), `entertainment` (развлечения). `null` — чип главного экрана (первые 7), не агент. Старые клиенты игнорируют поле (Swift `JSONDecoder` по умолчанию пропускает неизвестные ключи).
+- Порядок элементов = порядок чипов на экране (детерминированный, порядок объявления в реестре) — **един во всех локалях**. Поля `id`/`title`/`icon`/`prompt` обязательны и непусты; `category` всегда присутствует, но может быть `null`.
 - **Per-field EN-fallback:** если у выбранной локали не заполнено какое-то поле пресета, оно берётся из EN (канон); незаполненная/неизвестная локаль целиком → EN-каталог.
 
-**Дефолтный набор (7, со скрина):** `plan_week`, `meeting_notes`, `tasks_from_photo`, `design_brief`, `daily_review`, `summarize_text`, `project_structure` — EN-тексты в [ADR-035 §3](../../adr/ADR-035-prompt-presets-endpoint.md), RU-тексты в [ADR-049 §1.1](../../adr/ADR-049-presets-localization.md).
+**Дефолтный набор (7, со скрина):** `plan_week`, `meeting_notes`, `tasks_from_photo`, `design_brief`, `daily_review`, `summarize_text`, `project_structure` — EN-тексты в [ADR-035 §3](../../adr/ADR-035-prompt-presets-endpoint.md), RU-тексты в [ADR-049 §1.1](../../adr/ADR-049-presets-localization.md). У всех семерых `category` = `null` (чипы главного экрана).
+
+**Агенты (18, после семёрки, [ADR-080](../../adr/ADR-080-preset-categories.md)):** `work` — `editor`, `letters`, `analyst`, `ideas`, `code`, `documents`; `life` — `finances`, `advisor`, `planner`, `studies`, `translator`, `health`; `entertainment` — `creator`, `movies`, `quizzes`, `companion`, `stories`, `games`. Новый клиент группирует экран «Агенты» по `category != null`; старый продолжает читать только `id`/`title`/`icon`/`prompt`.
 
 **Совместимость:** без env и без запроса локали (`locale` отсутствует, `Accept-Language` без поддерживаемых, дефолт `en`) → EN-ответ как раньше; поле `locale` при этом = `"en"`. Без миграции; провайдер-агностично ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)).
 

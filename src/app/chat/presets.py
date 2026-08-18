@@ -12,13 +12,17 @@ localized (client analytics/cache key by ``id``, ``icon`` is an SF Symbol resour
 ``title`` and ``prompt`` carry one string per locale. EN is the canon and per-field fallback.
 
 Each preset carries:
-- ``id``    — stable snake_case slug (``[a-z0-9_]``), unique in the set; stable across releases.
-- ``icon``  — SF Symbol name (ADR-035 §4); the iOS client renders it via ``Image(systemName:)``.
-- ``title`` — ``locale -> chip display name``; key ``"en"`` is REQUIRED (canon/fallback).
-- ``prompt``— ``locale -> composer text``; key ``"en"`` is REQUIRED (canon/fallback).
+- ``id``       — stable snake_case slug (``[a-z0-9_]``), unique in the set; stable across releases.
+- ``icon``     — SF Symbol name (ADR-035 §4); the iOS client renders it via ``Image(systemName:)``.
+- ``title``    — ``locale -> chip display name``; key ``"en"`` is REQUIRED (canon/fallback).
+- ``prompt``   — ``locale -> composer text``; key ``"en"`` is REQUIRED (canon/fallback).
+- ``category`` — Agents-screen genre (``work`` / ``life`` / ``entertainment``), or ``None``
+  for the original home-screen chips. Locale-independent (ADR-080).
 
-Public catalog shape is unchanged: ``{id, title, icon, prompt}`` (ADR-035). New Agents cards
-are appended after the original seven chips so existing iOS apps keep working.
+Public catalog shape stays backward-compatible: existing fields ``{id, title, icon, prompt}``
+are unchanged (ADR-035). Agents cards are appended after the original seven chips.
+``category`` is additive (ADR-080): ``null`` on the original chips, a stable genre slug
+(``work`` / ``life`` / ``entertainment``) on Agents cards so iOS can group without hardcoding.
 """
 
 from __future__ import annotations
@@ -31,6 +35,9 @@ from typing import Any, NamedTuple
 SUPPORTED_PRESET_LOCALES: tuple[str, ...] = ("en", "ru", "zh-Hans")
 # Canon and per-field fallback locale (ADR-049 §1). Its key is required in every preset.
 DEFAULT_PRESET_LOCALE: str = "en"
+# Agents-screen genres (ADR-080). Stable slugs, not localized — iOS maps them to tab titles.
+# Home-screen chips use ``None`` so old clients that only show chips stay unchanged.
+PRESET_CATEGORIES: tuple[str, ...] = ("work", "life", "entertainment")
 
 # Aliases that resolve to a supported locale after ``strip().lower().replace("_", "-")``.
 # ``zh`` / ``zh-cn`` / ``zh-sg`` → Simplified Chinese (the only Chinese catalog we ship).
@@ -73,16 +80,18 @@ def canonicalize_preset_locale(raw: str | None) -> str | None:
 
 
 class Preset(NamedTuple):
-    """One prompt preset (ADR-035 §1, localized ADR-049 §1).
+    """One prompt preset (ADR-035 §1, localized ADR-049 §1, category ADR-080).
 
-    ``id``/``icon`` are stable and locale-independent; ``title``/``prompt`` are ``locale -> str``
-    maps whose ``"en"`` key is required (canon). All EN values are non-empty.
+    ``id``/``icon``/``category`` are stable and locale-independent; ``title``/``prompt`` are
+    ``locale -> str`` maps whose ``"en"`` key is required (canon). All EN values are non-empty.
+    ``category`` defaults to ``None`` (home-screen chip); Agents cards set a genre slug.
     """
 
     id: str
     icon: str
     title: dict[str, str]
     prompt: dict[str, str]
+    category: str | None = None
 
 
 def _loc(en: str, ru: str, zh: str) -> dict[str, str]:
@@ -249,10 +258,11 @@ _PRESETS: tuple[Preset, ...] = (
             ),
         },
     ),
-    # --- Agents screen (appended; public fields stay {id, title, icon, prompt}) ---
+    # --- Agents screen (appended; category is additive, original chips stay category=None) ---
     Preset(
         id="editor",
         icon="pencil",
+        category="work",
         title=_loc("Editor", "Редактор", "编辑"),
         prompt=_loc(
             "You are an editor. Improve the text I provide: fix clarity, tone, and structure "
@@ -265,6 +275,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="letters",
         icon="envelope",
+        category="work",
         title=_loc("Letters", "Письма", "信件"),
         prompt=_loc(
             "Help me write a clear, professional letter or email. Ask who it's for, the goal, "
@@ -277,6 +288,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="analyst",
         icon="chart.bar",
+        category="work",
         title=_loc("Analyst", "Аналитик", "分析师"),
         prompt=_loc(
             "You are an analyst. Break down the data or situation I share, highlight what "
@@ -289,6 +301,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="ideas",
         icon="lightbulb",
+        category="work",
         title=_loc("Ideas", "Идеи", "点子"),
         prompt=_loc(
             "Help me generate solutions and new approaches. Ask about the problem and "
@@ -301,6 +314,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="code",
         icon="chevron.left.forwardslash.chevron.right",
+        category="work",
         title=_loc("Code", "Код", "代码"),
         prompt=_loc(
             "You are a coding assistant. Write or fix code, explain errors in plain language, "
@@ -313,6 +327,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="documents",
         icon="doc.text.magnifyingglass",
+        category="work",
         title=_loc("Documents", "Документы", "文档"),
         prompt=_loc(
             "Analyze the file or document I share. Extract the key facts and give a clear "
@@ -325,6 +340,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="finances",
         icon="banknote",
+        category="life",
         title=_loc("Finances", "Финансы", "财务"),
         prompt=_loc(
             "Help me plan a budget and expenses. Ask about income, fixed costs, and goals, "
@@ -337,6 +353,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="advisor",
         icon="person.crop.circle",
+        category="life",
         title=_loc("Advisor", "Советник", "顾问"),
         prompt=_loc(
             "Help me think a decision through. Ask clarifying questions, lay out the options "
@@ -349,6 +366,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="planner",
         icon="list.bullet.clipboard",
+        category="life",
         title=_loc("Planner", "Планер", "规划"),
         prompt=_loc(
             "Help me organize tasks, goals, and a schedule. Ask about deadlines and energy, "
@@ -361,6 +379,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="studies",
         icon="book",
+        category="life",
         title=_loc("Studies", "Учёба", "学习"),
         prompt=_loc(
             "Explain the topic I name in simple words. Start with the idea, then a short "
@@ -373,6 +392,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="translator",
         icon="globe",
+        category="life",
         title=_loc("Translator", "Переводчик", "翻译"),
         prompt=_loc(
             "Translate and adapt the text I provide. Keep the meaning, match the tone, and "
@@ -385,6 +405,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="health",
         icon="heart",
+        category="life",
         title=_loc("Health", "Здоровье", "健康"),
         prompt=_loc(
             "Help me with habits and everyday balance (sleep, movement, routine). You are not "
@@ -397,6 +418,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="creator",
         icon="paintpalette",
+        category="entertainment",
         title=_loc("Creator", "Креатор", "创作者"),
         prompt=_loc(
             "Help me create ideas, stories, or a script. Ask about the format, audience, and "
@@ -409,6 +431,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="movies",
         icon="film",
+        category="entertainment",
         title=_loc("Movies", "Кино", "电影"),
         prompt=_loc(
             "Recommend films for my mood. Ask what I feel like watching, what I've already "
@@ -421,6 +444,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="quizzes",
         icon="questionmark.circle",
+        category="entertainment",
         title=_loc("Quizzes", "Викторины", "问答"),
         prompt=_loc(
             "Make a quiz. Ask about the topic and difficulty, then ask questions one by one "
@@ -433,6 +457,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="companion",
         icon="bubble.left.and.bubble.right",
+        category="entertainment",
         title=_loc("Companion", "Собеседник", "闲聊"),
         prompt=_loc(
             "Be a friendly conversation partner. Follow my topic, ask live questions, and "
@@ -445,6 +470,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="stories",
         icon="book.closed",
+        category="entertainment",
         title=_loc("Stories", "Истории", "故事"),
         prompt=_loc(
             "Write a story and develop the plot with me. Ask about genre, characters, and "
@@ -457,6 +483,7 @@ _PRESETS: tuple[Preset, ...] = (
     Preset(
         id="games",
         icon="gamecontroller",
+        category="entertainment",
         title=_loc("Games", "Игры", "游戏"),
         prompt=_loc(
             "Invent a challenge or a short game we can play in chat. Explain the rules in "
@@ -473,10 +500,11 @@ def preset_catalog(locale: str) -> list[dict[str, Any]]:
     """Machine-readable catalog of prompt presets for the given locale (ADR-035, ADR-049 §2).
 
     Pure (no I/O): iterates the static ``_PRESETS`` registry in declaration order (= chip order)
-    and returns a list of ``{id, title, icon, prompt}`` dicts. ``title``/``prompt`` are resolved
-    for ``locale`` with a per-field EN fallback — an unknown locale or a field missing for the
-    locale degrades to ``DEFAULT_PRESET_LOCALE`` (never an empty string). ``id``/``icon`` are
-    locale-independent. Locale resolution itself is the router's concern (ADR-049 §3), not here.
+    and returns a list of ``{id, title, icon, prompt, category}`` dicts. ``title``/``prompt`` are
+    resolved for ``locale`` with a per-field EN fallback — an unknown locale or a field missing
+    for the locale degrades to ``DEFAULT_PRESET_LOCALE`` (never an empty string). ``id``/``icon``/
+    ``category`` are locale-independent. Locale resolution itself is the router's concern
+    (ADR-049 §3), not here.
     """
     return [
         {
@@ -484,6 +512,7 @@ def preset_catalog(locale: str) -> list[dict[str, Any]]:
             "title": p.title.get(locale) or p.title[DEFAULT_PRESET_LOCALE],
             "icon": p.icon,
             "prompt": p.prompt.get(locale) or p.prompt[DEFAULT_PRESET_LOCALE],
+            "category": p.category,
         }
         for p in _PRESETS
     ]
