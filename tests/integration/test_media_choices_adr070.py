@@ -29,9 +29,16 @@ def fal_ready(monkeypatch: pytest.MonkeyPatch) -> None:
             queue_position=0,
         )
 
+    async def _rehost(self: object, url: str) -> str:
+        return url
+
     monkeypatch.setattr(
         "app.media_generation.fal_client.FalClient.submit",
         _submit,
+    )
+    monkeypatch.setattr(
+        "app.media_generation.fal_client.FalClient.rehost_reference_image",
+        _rehost,
     )
     yield
     get_settings.cache_clear()
@@ -274,7 +281,7 @@ async def test_video_wizard_asks_use_last_photo_after_image_job(
             {
                 "id": image_job_id,
                 "r": (
-                    '{"assets":[{"url":"https://fal.media/files/test/owl.png",'
+                    '{"assets":[{"url":"https://cdn.example.com/files/test/owl.png",'
                     '"contentType":"image/png"}]}'
                 ),
             },
