@@ -232,16 +232,18 @@ class FalClient:
     async def _get_bytes(self, url: str) -> bytes:
         """Download a trusted-host still. The fal key is not sent: result CDNs are public."""
         try:
-            async with httpx.AsyncClient(timeout=self._settings.fal_timeout_seconds) as client:
-                async with client.stream("GET", url) as response:
-                    self._raise_for_status(response, endpoint=_REHOST_ENDPOINT)
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in response.aiter_bytes():
-                        total += len(chunk)
-                        if total > _MAX_REFERENCE_DOWNLOAD_BYTES:
-                            raise ValidationFailedError("reference image is too large to reuse")
-                        chunks.append(chunk)
+            async with (
+                httpx.AsyncClient(timeout=self._settings.fal_timeout_seconds) as client,
+                client.stream("GET", url) as response,
+            ):
+                self._raise_for_status(response, endpoint=_REHOST_ENDPOINT)
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > _MAX_REFERENCE_DOWNLOAD_BYTES:
+                        raise ValidationFailedError("reference image is too large to reuse")
+                    chunks.append(chunk)
         except httpx.TimeoutException as exc:
             raise self._upstream_error("download_timeout", endpoint=_REHOST_ENDPOINT) from exc
         except httpx.RequestError as exc:

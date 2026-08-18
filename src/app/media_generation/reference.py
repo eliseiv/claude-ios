@@ -27,15 +27,15 @@ def prepare_reference_jpeg(content: bytes) -> bytes:
         image.load()
     except (OSError, ValueError) as exc:
         raise ValueError("reference image is not a readable still") from exc
-    image = image.convert("RGB")
-    width, height = image.size
+    still = image.convert("RGB")
+    width, height = still.size
     long_side = max(width, height)
     if long_side > _MAX_LONG_SIDE:
         scale = _MAX_LONG_SIDE / long_side
-        image = image.resize(
+        still = still.resize(
             (max(1, int(width * scale)), max(1, int(height * scale))),
             Image.Resampling.LANCZOS,
         )
     out = BytesIO()
-    image.save(out, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
+    still.save(out, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
     return out.getvalue()
