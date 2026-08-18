@@ -64,6 +64,13 @@ DEFAULT_GENERATION_MODE = "general"
 DEFAULT_ADVERTISED_GENERATION_MODES: tuple[str, ...] = ("general", "research", "reasoning")
 
 
+class TemporaryTurn(StrictModel):
+    """One turn of a client-side temporary-chat transcript (5115-era iOS)."""
+
+    role: Literal["user", "assistant"] = Field(description="Роль реплики: `user` или `assistant`.")
+    content: str = Field(min_length=1, description="Текст реплики (непустой).")
+
+
 class ChatRunRequest(StrictModel):
     """Legacy request for one chat turn.
 
@@ -145,6 +152,38 @@ class ChatRunRequest(StrictModel):
             "ход. Требует sessionId."
         ),
     )
+    # 5115-era iOS (novirell review binary) sends these on `/v1/chat/run`. StrictModel
+    # extra=forbid would 422 the in-review build; accept them as optional. `temporary` is
+    # honored (same as v2). `dialogMode` / `history` are ignored. Non-empty `actionPrompt`
+    # counts as turn content when `message` is empty.
+    dialogMode: str | None = Field(
+        default=None,
+        description=(
+            "Легаси-поле 5115 (`smart`/`search`/…). Опционально; принимается, чтобы старый "
+            "клиент не ловил 422 extra=forbid. На этом бэке режим задаёт `generationMode`."
+        ),
+    )
+    actionPrompt: str | None = Field(
+        default=None,
+        description=(
+            "Легаси-поле 5115: скрытый промт экшена. Опционально. Если `message` пуст, "
+            "непустое значение используется как текст хода."
+        ),
+    )
+    temporary: bool = Field(
+        default=False,
+        description=(
+            "Временный чат. Учитывается только при создании сессии (`sessionId` отсутствует); "
+            "на продолжении игнорируется. Такой чат не появляется в `GET /v1/chats`."
+        ),
+    )
+    history: list[TemporaryTurn] | None = Field(
+        default=None,
+        description=(
+            "Легаси-поле 5115: клиентский транскрипт временного чата. Опционально; "
+            "принимается (чтобы не 422), на этом бэке история берётся из сессии."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_sizes(self) -> ChatRunRequest:
@@ -166,8 +205,15 @@ class ChatRunRequest(StrictModel):
         # whitespace-only message with no attachment is also rejected (→ 422). The size limit below
         # still applies (an empty string trivially passes); a non-empty message is unchanged.
         # ADR-070: ChatV2RunRequest may carry mediaSelection instead of message/attachments.
+        # 5115 iOS: a non-empty actionPrompt is also enough to make the turn valid.
         has_media_selection = getattr(self, "mediaSelection", None) is not None
-        if not self.message.strip() and not self.attachments and not has_media_selection:
+        has_action_prompt = bool(self.actionPrompt is not None and self.actionPrompt.strip())
+        if (
+            not self.message.strip()
+            and not self.attachments
+            and not has_media_selection
+            and not has_action_prompt
+        ):
             raise ValueError("message or at least one attachment is required")
         settings = get_settings()
         if len(self.message.encode("utf-8")) > settings.size_limit_message:
@@ -178,6 +224,14 @@ class ChatRunRequest(StrictModel):
             if len(json.dumps(self.context).encode("utf-8")) > settings.size_limit_context:
                 raise ValueError("context exceeds size limit")
         return self
+
+    def effective_user_text(self) -> str:
+        """Visible `message`, or 5115 `actionPrompt` when the message is empty."""
+        if self.message.strip():
+            return self.message
+        if self.actionPrompt is not None and self.actionPrompt.strip():
+            return self.actionPrompt
+        return self.message
 
 
 class MediaSelectionIn(StrictModel):
@@ -202,7 +256,8 @@ class ChatV2RunRequest(ChatRunRequest):
 
     `temporary` is session-fixed at creation (like `model` / `workspaceProjectId`): a temporary
     session is hidden from ``GET /v1/chats`` but still usable by ``sessionId`` for multi-turn;
-    the client deletes it via ``DELETE /v1/chats/{id}``. Legacy ``/v1/chat/run`` rejects the field.
+    the client deletes it via ``DELETE /v1/chats/{id}``. Also accepted on legacy ``/v1/chat/run``
+    (5115-era iOS).
     """
 
     generationMode: GenerationMode = Field(

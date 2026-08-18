@@ -64,9 +64,35 @@ def test_temporary_accepts_true_on_v2() -> None:
     assert req.temporary is True
 
 
-def test_legacy_chat_run_request_rejects_temporary() -> None:
-    with pytest.raises(ValidationError):
-        ChatRunRequest.model_validate(_run_payload(temporary=True))
+def test_legacy_chat_run_request_accepts_5115_compat_fields() -> None:
+    req = ChatRunRequest.model_validate(
+        _run_payload(
+            dialogMode="smart",
+            temporary=True,
+            actionPrompt="Explain simpler",
+            history=[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
+        )
+    )
+    assert req.dialogMode == "smart"
+    assert req.temporary is True
+    assert req.actionPrompt == "Explain simpler"
+    assert req.history is not None and len(req.history) == 2
+
+
+def test_v2_run_request_accepts_5115_compat_fields() -> None:
+    req = ChatV2RunRequest.model_validate(
+        _run_payload(dialogMode="search", actionPrompt="x", history=[], temporary=False)
+    )
+    assert req.dialogMode == "search"
+    assert req.actionPrompt == "x"
+    assert req.history == []
+
+
+def test_action_prompt_alone_is_valid_turn() -> None:
+    req = ChatRunRequest.model_validate(
+        {"userId": str(_UID), "mode": "credits", "message": "", "actionPrompt": "Summarize"}
+    )
+    assert req.effective_user_text() == "Summarize"
 
 
 def test_generation_mode_credit_costs_are_configurable_positive_values() -> None:

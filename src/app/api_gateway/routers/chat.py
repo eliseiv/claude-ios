@@ -580,14 +580,14 @@ async def chat_run(
         raise RateLimitedError("rate limit exceeded")
 
     log_id = await request_logs.start(
-        user_id=current.user_id, endpoint=request.url.path, prompt=body.message
+        user_id=current.user_id, endpoint=request.url.path, prompt=body.effective_user_text()
     )
     try:
         out = await orchestrator.run(
             user_id=current.user_id,
             project_id=body.projectId,
             session_id=body.sessionId,
-            message=body.message,
+            message=body.effective_user_text(),
             mode=body.mode,
             assistant_mode=body.assistantMode,
             attachments=body.attachments,
@@ -596,6 +596,7 @@ async def chat_run(
             context=body.context,
             edit_message_step_id=body.editMessageStepId,
             generation_backend="legacy",
+            temporary=body.temporary,
         )
     except BaseException as exc:
         await request_logs.fail(
@@ -653,14 +654,14 @@ async def chat_v2_run(
         else None
     )
     log_id = await request_logs.start(
-        user_id=current.user_id, endpoint=request.url.path, prompt=body.message
+        user_id=current.user_id, endpoint=request.url.path, prompt=body.effective_user_text()
     )
     try:
         out = await orchestrator.run(
             user_id=current.user_id,
             project_id=body.projectId,
             session_id=body.sessionId,
-            message=body.message,
+            message=body.effective_user_text(),
             mode=body.mode,
             assistant_mode=body.assistantMode,
             attachments=body.attachments,
@@ -759,7 +760,7 @@ async def chat_v2_run_stream(
 
     user_id = current.user_id
     log_id = await request_logs.start(
-        user_id=user_id, endpoint=request.url.path, prompt=body.message
+        user_id=user_id, endpoint=request.url.path, prompt=body.effective_user_text()
     )
     db_dep = request.app.dependency_overrides.get(get_db, get_db)
     queue: asyncio.Queue[ChatStreamEvent | BaseException | None] = asyncio.Queue()
@@ -781,7 +782,7 @@ async def chat_v2_run_stream(
                     user_id=user_id,
                     project_id=body.projectId,
                     session_id=body.sessionId,
-                    message=body.message,
+                    message=body.effective_user_text(),
                     mode=body.mode,
                     assistant_mode=body.assistantMode,
                     attachments=body.attachments,

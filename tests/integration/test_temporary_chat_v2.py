@@ -151,12 +151,14 @@ async def test_temporary_chat_delete_cascades(
 
 
 @pytest.mark.asyncio
-async def test_legacy_run_rejects_temporary_field(
+async def test_legacy_run_accepts_temporary_field(
     client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
 ) -> None:
     async with db_sessionmaker() as s:
         uid = await seed_user(s, subscription="active", balance=5)
+    fake_anthropic.responses = [fake_anthropic.text_result("ok")]
 
     resp = await client.post(
         "/v1/chat/run",
@@ -165,7 +167,10 @@ async def test_legacy_run_rejects_temporary_field(
             "message": "nope",
             "mode": "credits",
             "temporary": True,
+            "dialogMode": "smart",
+            "actionPrompt": "be brief",
+            "history": [],
         },
         headers=auth_headers(uid),
     )
-    assert resp.status_code == 422, resp.text
+    assert resp.status_code == 200, resp.text
