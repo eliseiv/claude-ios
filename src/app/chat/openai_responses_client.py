@@ -42,6 +42,11 @@ from app.chat.tools import UnknownToolNameError, openai_tool_function, to_domain
 from app.config import get_settings
 from app.errors import UpstreamError, ValidationFailedError
 
+# gpt-4o / gpt-4.1 reject Responses `reasoning.effort` (400 unsupported_parameter).
+# The public `generationMode=reasoning` still has to work on instances whose default
+# or session model is gpt-4o — remap to a catalog model that accepts the knob.
+_DEFAULT_OPENAI_REASONING_MODEL = "gpt-5-mini"
+
 
 class OpenAIResponsesClient(OpenAIClient):
     """OpenAI LLMClient implementation backed only by the Responses API.
@@ -99,6 +104,19 @@ class OpenAIResponsesClient(OpenAIClient):
         if generation_mode == "research":
             serialized.append({"type": "web_search"})
         return serialized
+
+    @staticmethod
+    def _supports_reasoning_effort(model: str) -> bool:
+        """True for OpenAI models that accept Responses ``reasoning.effort``."""
+        lowered = model.strip().lower()
+        return lowered.startswith(("gpt-5", "o1", "o3", "o4"))
+
+    @classmethod
+    def _model_for_generation_mode(cls, model: str, generation_mode: str) -> str:
+        """Use a reasoning-capable model when the public reasoning mode is on."""
+        if generation_mode == "reasoning" and not cls._supports_reasoning_effort(model):
+            return _DEFAULT_OPENAI_REASONING_MODEL
+        return model
 
     @classmethod
     def _responses_content_part(cls, block: dict[str, Any], *, user: bool) -> dict[str, Any] | None:
@@ -516,6 +534,7 @@ class OpenAIResponsesClient(OpenAIClient):
             if generation_mode in {"general", "research", "reasoning", "study_learn"}
             else "general"
         )
+        model = self._model_for_generation_mode(model, generation_mode)
         client = self._client
         if api_key is not None:
             client = client.with_options(api_key=api_key)
@@ -580,6 +599,7 @@ class OpenAIResponsesClient(OpenAIClient):
             if generation_mode in {"general", "research", "reasoning", "study_learn"}
             else "general"
         )
+        model = self._model_for_generation_mode(model, generation_mode)
         client = self._client
         if api_key is not None:
             client = client.with_options(api_key=api_key)

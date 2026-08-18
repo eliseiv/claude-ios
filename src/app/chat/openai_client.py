@@ -86,6 +86,9 @@ def _log_upstream_error(exc: Exception, *, model: str, status_code: int | None) 
     }
     if status_code is not None:
         fields["status_code"] = status_code
+    message = getattr(exc, "message", None)
+    if isinstance(message, str) and message:
+        fields["errorMessage"] = message[:500]
     log_event(_logger, level, "llm_upstream_error", **fields)
     llm_upstream_errors_total.labels(
         provider=_PROVIDER,

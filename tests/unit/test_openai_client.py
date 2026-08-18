@@ -496,7 +496,56 @@ async def test_responses_reasoning_sends_effort_and_parses_reasoning_tokens() ->
 
     sent = fake.responses.calls[0]
     assert sent["reasoning"] == {"effort": "high"}
+    # Default OPENAI_MODEL is gpt-4o, which rejects reasoning.effort — remap to gpt-5-mini.
+    assert sent["model"] == "gpt-5-mini"
     assert result.usage.reasoning_tokens == 6
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_keeps_gpt5_and_reuses_matching_state() -> None:
+    client, fake = _client_with_responses_fake()
+    fake.responses.next_response = _response(response_id="resp_next", text="ok")
+
+    await client.create_message(
+        system_prompt="s",
+        messages=[NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "q"}])],
+        tools=[],
+        attachments=None,
+        model="gpt-5",
+        generation_mode="reasoning",
+        provider_state={"provider": "openai", "responseId": "resp_prev", "model": "gpt-5"},
+    )
+
+    sent = fake.responses.calls[0]
+    assert sent["model"] == "gpt-5"
+    assert sent["reasoning"] == {"effort": "medium"}
+    assert sent["previous_response_id"] == "resp_prev"
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_remaps_gpt4o_and_drops_mismatched_state() -> None:
+    client, fake = _client_with_responses_fake()
+    fake.responses.next_response = _response(response_id="resp_next", text="ok")
+
+    await client.create_message(
+        system_prompt="s",
+        messages=[
+            NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "old"}]),
+            NeutralMessage(role="assistant", content_blocks=[{"type": "text", "text": "ans"}]),
+            NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "q"}]),
+        ],
+        tools=[],
+        attachments=None,
+        model="gpt-4o",
+        generation_mode="reasoning",
+        provider_state={"provider": "openai", "responseId": "resp_prev", "model": "gpt-4o"},
+    )
+
+    sent = fake.responses.calls[0]
+    assert sent["model"] == "gpt-5-mini"
+    assert sent["reasoning"] == {"effort": "medium"}
+    # Stored gpt-4o response id must not be chained onto gpt-5-mini.
+    assert sent["previous_response_id"] is openai.NOT_GIVEN
 
 
 @pytest.mark.asyncio

@@ -2265,7 +2265,7 @@ class ChatOrchestrator:
             {
                 "provider": "openai",
                 "responseId": result.provider_response_id,
-                "model": model,
+                "model": result.usage.model or model,
             },
         )
 
