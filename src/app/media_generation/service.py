@@ -180,6 +180,11 @@ class MediaGenerationService:
             image_urls = await self._assets_of_source(
                 user_id=user_id, source_job_id=source_job_id, limit=model.max_input_images
             )
+        if image_urls and model.kind == KIND_VIDEO:
+            # Kling/Veo fetch the still themselves. fal image-result URLs are often too large
+            # (20 MB / 8:1 PNG) and fail as ``body.image_url: Failed to download the file``.
+            # Rehost a compact JPEG on fal-cdn-v3 BEFORE the debit so a failed copy is free.
+            image_urls = [await self._fal.rehost_reference_image(url) for url in image_urls]
         variant = model.variant_for(with_image=bool(image_urls))
         if variant is None:
             raise ValidationFailedError(f"model {model.id} does not accept a reference image")

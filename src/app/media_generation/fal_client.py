@@ -28,6 +28,7 @@ from app.errors import (
     UpstreamError,
     ValidationFailedError,
 )
+from app.media_generation.reference import prepare_reference_jpeg
 from app.observability.logging import log_event
 
 logger = logging.getLogger(__name__)  # == "app.media_generation.fal_client"
@@ -42,6 +43,10 @@ FAL_CANCELED = "CANCELED"
 # Label for the storage calls in logs and error mapping. Not a generation endpoint — the observable
 # field is shared with submit/status/result so one query covers every outgoing fal call.
 _UPLOAD_ENDPOINT = "storage/upload"
+_REHOST_ENDPOINT = "storage/rehost"
+# Cap on a reference fetch (the failing still was ~20 MB). Larger than that is not a still
+# Kling can ingest; fail before we debit credits.
+_MAX_REFERENCE_DOWNLOAD_BYTES = 40 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -198,6 +203,52 @@ class FalClient:
             mediaType=media_type,
         )
         return file_url
+
+    async def rehost_reference_image(self, url: str) -> str:
+        """Copy a fal result still onto fal-cdn-v3 at a size Kling can download.
+
+        Only fetches hosts already on the upload allowlist (SSRF). Foreign https URLs (a user's
+        own CDN) are returned unchanged — Kling fetches those itself.
+        """
+        if not self._upload_host_allowed(url):
+            return url
+        content = await self._get_bytes(url)
+        try:
+            prepared = prepare_reference_jpeg(content)
+        except ValueError as exc:
+            raise ValidationFailedError("reference image is not a readable still") from exc
+        hosted = await self.upload(
+            content=prepared, media_type="image/jpeg", file_name="reference.jpg"
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "fal_reference_rehosted",
+            sourceBytes=len(content),
+            hostedBytes=len(prepared),
+        )
+        return hosted
+
+    async def _get_bytes(self, url: str) -> bytes:
+        """Download a trusted-host still. The fal key is not sent: result CDNs are public."""
+        try:
+            async with httpx.AsyncClient(timeout=self._settings.fal_timeout_seconds) as client:
+                async with client.stream("GET", url) as response:
+                    self._raise_for_status(response, endpoint=_REHOST_ENDPOINT)
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > _MAX_REFERENCE_DOWNLOAD_BYTES:
+                            raise ValidationFailedError("reference image is too large to reuse")
+                        chunks.append(chunk)
+        except httpx.TimeoutException as exc:
+            raise self._upstream_error("download_timeout", endpoint=_REHOST_ENDPOINT) from exc
+        except httpx.RequestError as exc:
+            raise self._upstream_error("download_connect_error", endpoint=_REHOST_ENDPOINT) from exc
+        if not chunks:
+            raise ValidationFailedError("reference image is empty")
+        return b"".join(chunks)
 
     async def _put_bytes(self, url: str, *, content: bytes, media_type: str) -> None:
         """Upload the raw body to the slot URL. The slot URL carries its own authorization, so our

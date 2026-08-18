@@ -30,8 +30,8 @@ _JOBS_URL = "/v1/media/jobs"
 
 _FAL_KEY = "fal-test-key-abc123"  # noqa: S105 - test-only static secret
 _QUEUE_BASE = "https://queue.fal.run"
-_ASSET_A = "https://v3.fal.media/files/a/out-a.png"
-_ASSET_B = "https://v3.fal.media/files/b/out-b.png"
+_ASSET_A = "https://cdn.example.com/out-a.png"
+_ASSET_B = "https://cdn.example.com/out-b.png"
 
 
 def _submit_body(endpoint: str, request_id: str) -> dict[str, Any]:

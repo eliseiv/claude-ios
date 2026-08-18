@@ -27,6 +27,8 @@ dependencies = [
     "cryptography>=43,<44",
     "prometheus-client>=0.21,<0.22",
     "pypdf>=5,<6",
+    # Resize oversized fal result images before image-to-video (Kling cannot fetch 20MB PNGs).
+    "pillow>=10.4,<12",
     # TD-019 (ADR-026 §10): tz database for zoneinfo on the slim runtime image
     # (python:3.12-slim-bookworm has no /usr/share/zoneinfo). Pure-Python fallback
     # used automatically by stdlib `zoneinfo` so `time.now` tz arg resolves in prod.
