@@ -312,6 +312,10 @@ class Settings(BaseSettings):
     # mediaSelection), while /v1/media/* still works if FAL_API_KEY is set. Default True keeps
     # prior behaviour on every instance. Per-instance (e.g. ravelumi: REST gallery only).
     chat_media_tools_enabled: bool = Field(default=True, alias="CHAT_MEDIA_TOOLS_ENABLED")
+    # ADR-081: comma-separated tool families to hide on THIS instance only
+    # (`files`, `calendar`, `reminders`, `site`). Empty (default) = offer the full set —
+    # other instances keep files/calendar/reminders/site. Unknown tokens are ignored + WARNING.
+    chat_disabled_tool_families_raw: str = Field(default="", alias="CHAT_DISABLED_TOOL_FAMILIES")
     # PUBLIC upstream host of the fal QUEUE API (async submit/poll; the sync fal.run host cannot
     # serve minute-long video runs). Fixed server-side — never taken from a request body — and
     # also the allowlist for the polling URLs fal returns (SSRF guard in FalClient).
@@ -1085,6 +1089,19 @@ class Settings(BaseSettings):
             value = value[len("http://") :]
         value = value.strip("/")
         return value
+
+    def disabled_tool_families(self) -> frozenset[str]:
+        """Per-instance tool-family denylist (ADR-081). Empty raw → empty set (full catalog)."""
+        from app.chat.tools import parse_disabled_tool_families
+        from app.observability.logging import get_logger
+
+        disabled, unknown = parse_disabled_tool_families(self.chat_disabled_tool_families_raw)
+        if unknown:
+            get_logger("app.config").warning(
+                "CHAT_DISABLED_TOOL_FAMILIES has unsupported tokens %s; ignored",
+                unknown,
+            )
+        return disabled
 
     def resolved_presets_default_locale(self) -> str:
         """Per-instance default locale for GET /v1/presets, validated gracefully (ADR-049 §4).

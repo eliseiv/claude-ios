@@ -82,6 +82,10 @@ GLOBAL_SERVER_SIDE_TOOLS = frozenset(
     }
 )
 
+# Families that CHAT_DISABLED_TOOL_FAMILIES may hide per instance (ADR-081). Empty env = none
+# hidden — every other instance keeps the full set. `media` stays on CHAT_MEDIA_TOOLS_ENABLED.
+DISABLEABLE_TOOL_FAMILIES: frozenset[str] = frozenset({"files", "calendar", "reminders", "site"})
+
 # Chat media tools (ADR-068 / ADR-070). Gated per-instance by CHAT_MEDIA_TOOLS_ENABLED (ADR-072);
 # orthogonal to FAL_API_KEY (which gates /v1/media/*).
 MEDIA_CHAT_TOOLS = frozenset(
@@ -690,6 +694,35 @@ def offered_media_chat_tool(tool_name: str, *, include_media_chat_tools: bool) -
     return include_media_chat_tools
 
 
+def tool_family(tool_name: str) -> str:
+    """Prefix before the first dot (`files.read` → `files`). A name without a dot is itself."""
+    return tool_name.split(".", 1)[0]
+
+
+def parse_disabled_tool_families(raw: str) -> tuple[frozenset[str], tuple[str, ...]]:
+    """Parse ``CHAT_DISABLED_TOOL_FAMILIES`` (comma-separated). Pure — no I/O.
+
+    Returns ``(accepted, unknown)``. Unknown tokens are not applied (caller may warn).
+    Empty / blank → ``(frozenset(), ())``.
+    """
+    accepted: set[str] = set()
+    unknown: list[str] = []
+    for part in raw.split(","):
+        token = part.strip().lower()
+        if not token:
+            continue
+        if token in DISABLEABLE_TOOL_FAMILIES:
+            accepted.add(token)
+        else:
+            unknown.append(token)
+    return frozenset(accepted), tuple(unknown)
+
+
+def offered_tool_family(tool_name: str, *, disabled_families: frozenset[str]) -> bool:
+    """ADR-081: hide one family (`files`/`calendar`/`reminders`/`site`) on this instance."""
+    return tool_family(tool_name) not in disabled_families
+
+
 def offered_in_generation_mode(tool_name: str, generation_mode: str) -> bool:
     """Axis C predicate (ADR-064 §3): may ``tool_name`` be offered in ``generation_mode``?
 
@@ -783,16 +816,20 @@ def tool_input_schema(tool_name: str) -> dict[str, Any]:
     return schema
 
 
-def tool_catalog() -> list[dict[str, Any]]:
-    """Machine-readable catalog of all backend tools for GET /v1/tools (ADR-019).
+def tool_catalog(*, disabled_families: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """Machine-readable catalog of backend tools for GET /v1/tools (ADR-019, ADR-081).
 
     Single source of truth: iterates ``_ARGS_BY_TOOL`` (deterministic order). Each entry carries
     the dotted domain ``name`` (NOT the anthropic-underscore transport name), description,
     ``mutating`` (name in MUTATING_TOOLS), ``execution`` ("server" for SERVER_SIDE_TOOLS ∪
     GLOBAL_SERVER_SIDE_TOOLS else "client", ADR-026 §2) and ``inputSchema`` (the args JSON Schema).
+    ``disabled_families`` (ADR-081) drops whole families on one instance; default empty = full
+    registry (axes A/B/C still do not filter this catalog).
     """
     catalog: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
+        if not offered_tool_family(name, disabled_families=disabled_families):
+            continue
         catalog.append(
             {
                 "name": name,
@@ -809,11 +846,29 @@ def tool_catalog() -> list[dict[str, Any]]:
     return catalog
 
 
+def _offered_to_model(
+    name: str,
+    *,
+    include_server_side: bool,
+    generation_mode: str,
+    include_media_chat_tools: bool,
+    disabled_families: frozenset[str],
+) -> bool:
+    if not include_server_side and name in SERVER_SIDE_TOOLS:
+        return False
+    if not offered_in_generation_mode(name, generation_mode):
+        return False
+    if not offered_media_chat_tool(name, include_media_chat_tools=include_media_chat_tools):
+        return False
+    return offered_tool_family(name, disabled_families=disabled_families)
+
+
 def anthropic_tool_definitions(
     *,
     include_server_side: bool = True,
     generation_mode: str = "general",
     include_media_chat_tools: bool = True,
+    disabled_families: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Tool definitions for the Anthropic messages API (input_schema per tool).
 
@@ -840,15 +895,13 @@ def anthropic_tool_definitions(
     """
     definitions: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
-        if not include_server_side and name in SERVER_SIDE_TOOLS:
-            # Axis A gate: drop project-scoped site.* when the session has no project (ADR-022 §2).
-            # GLOBAL_SERVER_SIDE_TOOLS (time.now) are deliberately NOT under this gate (ADR-026 §3).
-            continue
-        if not offered_in_generation_mode(name, generation_mode):
-            # Axis C gate: a mode-gated tool (quiz.generate) outside its modes (ADR-064 §3).
-            continue
-        if not offered_media_chat_tool(name, include_media_chat_tools=include_media_chat_tools):
-            # ADR-072: drop media.* chat tools when CHAT_MEDIA_TOOLS_ENABLED=false.
+        if not _offered_to_model(
+            name,
+            include_server_side=include_server_side,
+            generation_mode=generation_mode,
+            include_media_chat_tools=include_media_chat_tools,
+            disabled_families=disabled_families,
+        ):
             continue
         definitions.append(
             {
@@ -867,6 +920,7 @@ def neutral_tool_definitions(
     include_server_side: bool = True,
     generation_mode: str = "general",
     include_media_chat_tools: bool = True,
+    disabled_families: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Provider-neutral tool definitions (ADR-033 §4): ``{name(domain dotted), description,
     input_schema}``.
@@ -878,14 +932,17 @@ def neutral_tool_definitions(
     ``time.now`` are never gated — ADR-026 §3), and so is the ``generation_mode`` gate (ADR-064 §3
     axis C: ``quiz.generate`` only in ``study_learn``; the ``general`` default excludes it).
     ADR-072: ``include_media_chat_tools=False`` drops ``MEDIA_CHAT_TOOLS``.
+    ADR-081: ``disabled_families`` drops ``files`` / ``calendar`` / ``reminders`` / ``site``.
     """
     definitions: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
-        if not include_server_side and name in SERVER_SIDE_TOOLS:
-            continue
-        if not offered_in_generation_mode(name, generation_mode):
-            continue
-        if not offered_media_chat_tool(name, include_media_chat_tools=include_media_chat_tools):
+        if not _offered_to_model(
+            name,
+            include_server_side=include_server_side,
+            generation_mode=generation_mode,
+            include_media_chat_tools=include_media_chat_tools,
+            disabled_families=disabled_families,
+        ):
             continue
         definitions.append(
             {
@@ -933,6 +990,7 @@ def openai_tool_definitions(
     include_server_side: bool = True,
     generation_mode: str = "general",
     include_media_chat_tools: bool = True,
+    disabled_families: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Tool definitions for the OpenAI Chat Completions API (ADR-033 §4).
 
@@ -948,5 +1006,6 @@ def openai_tool_definitions(
             include_server_side=include_server_side,
             generation_mode=generation_mode,
             include_media_chat_tools=include_media_chat_tools,
+            disabled_families=disabled_families,
         )
     ]

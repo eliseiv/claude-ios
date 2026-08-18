@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.chat.tools import tool_catalog
+from app.config import get_settings
 from app.deps import CurrentUser
 from app.errors import RateLimitedError
 from app.schemas.tools import ToolsResponse
@@ -22,11 +23,14 @@ router = APIRouter(prefix="/v1/tools", tags=["Tools"])
     response_model=ToolsResponse,
     summary="Каталог инструментов",
     description=(
-        "Возвращает список всех поддерживаемых инструментов tool-loop: имя, описание, флаг "
-        "`mutating`, место исполнения (`client`/`server`) и JSON Schema аргументов."
+        "Возвращает список поддерживаемых на этом инстансе инструментов tool-loop: имя, "
+        "описание, флаг `mutating`, место исполнения (`client`/`server`) и JSON Schema "
+        "аргументов. Набор может быть сужен настройками инстанса."
     ),
 )
 async def list_tools(request: Request, current: CurrentUser) -> ToolsResponse:
     if not await enforce_other_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
-    return ToolsResponse.model_validate({"tools": tool_catalog()})
+    return ToolsResponse.model_validate(
+        {"tools": tool_catalog(disabled_families=get_settings().disabled_tool_families())}
+    )

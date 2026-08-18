@@ -69,6 +69,7 @@ from app.chat.tools import (
     neutral_tool_definitions,
     offered_in_generation_mode,
     offered_media_chat_tool,
+    offered_tool_family,
     validate_tool_args,
 )
 from app.config import get_settings
@@ -204,6 +205,44 @@ _SYSTEM_PROMPT_CODE = (
     + _TIME_NOW_INSTRUCTION
 )
 
+
+def _compose_system_prompt(assistant_mode: str, disabled: frozenset[str]) -> str:
+    """Base assistant_mode prompt, with disabled tool families stripped (ADR-081).
+
+    Empty ``disabled`` returns the canonical constants unchanged so existing instances keep
+    a byte-identical prefix (prompt cache).
+    """
+    if not disabled:
+        return _SYSTEM_PROMPT_CODE if assistant_mode == "code" else _SYSTEM_PROMPT_CHAT
+    local = [name for name in ("files", "calendar", "reminders") if name not in disabled]
+    site_on = "site" not in disabled
+    parts: list[str] = []
+    if assistant_mode == "code":
+        parts.append(
+            "You are a coding assistant integrated into an iOS app. Favor precise, technical "
+            "answers: produce correct, idiomatic code with brief explanations."
+        )
+    else:
+        parts.append("You are a helpful assistant integrated into an iOS app.")
+    if local and site_on and assistant_mode == "code":
+        parts.append(
+            f"You can call tools that the user's device executes locally ({', '.join(local)}) "
+            "and server-side site tools."
+        )
+    elif local:
+        parts.append(
+            f"You can call tools that the user's device executes locally ({', '.join(local)})."
+        )
+    elif site_on and assistant_mode == "code":
+        parts.append("You can call server-side site tools.")
+    parts.append("Use tools when needed and respond concisely.")
+    if assistant_mode == "code" and site_on:
+        parts.append(_SITE_BUILDER_INSTRUCTION)
+    parts.append(_CONVERSATION_MEMORY_INSTRUCTION)
+    parts.append(_TIME_NOW_INSTRUCTION)
+    return " ".join(parts)
+
+
 GenerationBackend = Literal["legacy", "v2"]
 
 # ADR-064 §7 (soft level) / 03-architecture §Режим study_learn: static EN suffix appended to the
@@ -230,8 +269,9 @@ def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") ->
     ``general``) never carries a mode suffix. Workspace instructions are layered on top of this by
     ``_system_prompt_with_workspace`` and therefore stay LAST (ADR-036 §3).
     ADR-072: media-generate instruction is appended only when ``CHAT_MEDIA_TOOLS_ENABLED``.
+    ADR-081: families in ``CHAT_DISABLED_TOOL_FAMILIES`` are omitted from the tool sentence.
     """
-    base = _SYSTEM_PROMPT_CODE if assistant_mode == "code" else _SYSTEM_PROMPT_CHAT
+    base = _compose_system_prompt(assistant_mode, get_settings().disabled_tool_families())
     if get_settings().chat_media_tools_enabled:
         base = f"{base} {_MEDIA_GENERATE_INSTRUCTION}"
     if generation_mode == "study_learn":
@@ -2074,6 +2114,7 @@ class ChatOrchestrator:
                     include_server_side=has_project,
                     generation_mode=effective_generation_mode,
                     include_media_chat_tools=get_settings().chat_media_tools_enabled,
+                    disabled_families=get_settings().disabled_tool_families(),
                 ),
                 "attachments": turn0_attachments,
                 "generation_mode": effective_generation_mode,
@@ -2525,6 +2566,26 @@ class ChatOrchestrator:
                     execution=ToolExecution.error(
                         "tool_not_available",
                         f"tool {tool_name} is not available in this generation mode",
+                    ),
+                    server_tools=server_tools,
+                )
+                continue
+
+            # ADR-081: whole family disabled on this instance (other instances keep the tools).
+            if not offered_tool_family(
+                tool_name,
+                disabled_families=get_settings().disabled_tool_families(),
+            ):
+                await self._record_refused_tool_call(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message_step_id=message_step_id,
+                    tool_name=tool_name,
+                    raw_args=raw_args,
+                    provider_tool_use_id=provider_tool_use_id,
+                    execution=ToolExecution.error(
+                        "tool_not_available",
+                        f"tool {tool_name} is not available on this instance",
                     ),
                     server_tools=server_tools,
                 )
