@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.chat.anthropic_client import AnthropicClient
+from app.chat.llm_client import generation_llm_client_for, llm_client_for
 from app.chat.openai_client import OpenAIClient
 from app.chat.openai_responses_client import OpenAIResponsesClient
 from app.chat.orchestrator import (
@@ -112,8 +112,12 @@ def test_legacy_flag_uses_openai_responses_not_completions() -> None:
         assert isinstance(
             _credits_llm(provider="openai", use_generation_v2=False), OpenAIResponsesClient
         )
-        assert isinstance(
-            _credits_llm(provider="anthropic", use_generation_v2=False), AnthropicClient
+        # Anthropic has one Messages client; the flag must not fork it.
+        assert _credits_llm(provider="anthropic", use_generation_v2=False) is llm_client_for(
+            "anthropic"
         )
+        assert _credits_llm(
+            provider="anthropic", use_generation_v2=False
+        ) is generation_llm_client_for("anthropic")
     finally:
         settings.chat_legacy_web_search_enabled = original
