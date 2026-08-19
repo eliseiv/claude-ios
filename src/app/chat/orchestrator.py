@@ -261,12 +261,43 @@ _STUDY_LEARN_INSTRUCTION = (
 )
 
 
+def _effective_generation_mode(
+    generation_mode: str,
+    *,
+    use_generation_v2: bool,
+) -> GenerationMode:
+    """ONE value for prompt / axis-C / provider / price (ADR-064 §3, ADR-082).
+
+    v2 uses the request (or restored) mode. Legacy is ``general`` unless this instance
+    opts into hosted web search on ``/v1/chat/*`` via ``CHAT_LEGACY_WEB_SEARCH_ENABLED``.
+    """
+    if use_generation_v2:
+        known: dict[str, GenerationMode] = {
+            "general": "general",
+            "research": "research",
+            "reasoning": "reasoning",
+            "study_learn": "study_learn",
+        }
+        return known.get(generation_mode, "general")
+    if get_settings().chat_legacy_web_search_enabled:
+        return "research"
+    return "general"
+
+
+def _turn_credit_cost(effective_generation_mode: str, *, use_generation_v2: bool) -> int:
+    """v2 (and opted-in legacy research) use the mode price; other legacy stays 1 credit."""
+    if use_generation_v2 or get_settings().chat_legacy_web_search_enabled:
+        return get_settings().chat_generation_credit_cost(effective_generation_mode)
+    return 1
+
+
 def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") -> str:
     """Base system prompt for the turn: assistant_mode prompt + the generation-mode suffix.
 
     The mode suffix is added ONLY for the modes that declare one (today: ``study_learn``, ADR-064).
-    ``generation_mode`` MUST be the EFFECTIVE mode of the turn, so the legacy path (forced
-    ``general``) never carries a mode suffix. Workspace instructions are layered on top of this by
+    ``generation_mode`` MUST be the EFFECTIVE mode of the turn. Legacy is ``general`` unless
+    ``CHAT_LEGACY_WEB_SEARCH_ENABLED`` lifts it to ``research`` (ADR-082) — still no study_learn
+    suffix there. Workspace instructions are layered on top of this by
     ``_system_prompt_with_workspace`` and therefore stay LAST (ADR-036 §3).
     ADR-072: media-generate instruction is appended only when ``CHAT_MEDIA_TOOLS_ENABLED``.
     ADR-081: families in ``CHAT_DISABLED_TOOL_FAMILIES`` are omitted from the tool sentence.
@@ -792,11 +823,12 @@ class ChatOrchestrator:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
         requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
         use_generation_v2 = requested_backend == "v2"
-        # ADR-064 §3 invariant «the effective mode is ONE value»: computed once, here, and reused
-        # for the system-prompt suffix, the axis-C tool gate, the provider call and the price. The
-        # legacy path forces `general`, which is why mode-gated tools are never offered there BY
-        # CONSTRUCTION — there is no separate legacy exception branch anywhere.
-        effective_generation_mode = generation_mode if use_generation_v2 else "general"
+        # ADR-064 §3 / ADR-082: ONE effective mode for prompt, axis-C, provider and price.
+        # Legacy is `general` unless CHAT_LEGACY_WEB_SEARCH_ENABLED lifts it to `research`.
+        # quiz.generate stays study_learn-only, so the axis-C gate still never fires on legacy.
+        effective_generation_mode = _effective_generation_mode(
+            generation_mode, use_generation_v2=use_generation_v2
+        )
         # ADR-034 §3: resolve the session-fixed model. None (no field) → NULL (= instance default,
         # never substituted in the DB so the row stays "instance default" even if env default
         # changes). The schema guarantees a non-empty value here, so .strip() is safe.
@@ -1002,10 +1034,8 @@ class ChatOrchestrator:
             payload=user_payload,
         )
 
-        generation_credit_cost = (
-            get_settings().chat_generation_credit_cost(effective_generation_mode)
-            if use_generation_v2
-            else 1
+        generation_credit_cost = _turn_credit_cost(
+            effective_generation_mode, use_generation_v2=use_generation_v2
         )
         decision, state = await self._evaluate(
             user_id,
@@ -1421,16 +1451,14 @@ class ChatOrchestrator:
 
         assert message_step_id is not None  # noqa: S101 - results is non-empty
 
-        # ADR-064 §12 / 03-architecture axis invariant 2: restore the turn's generation mode ONCE,
-        # here — BEFORE any leg can return — so every leg of this continuation (barrier still open,
-        # idempotent replay, real continuation) uses the SAME effective mode for the axis-C tool
-        # gate, the price and the turn-scoped `quiz` fallback. Reading it later would leave the two
-        # early-return legs without a mode and silently drop their `quiz`. Legacy stays `general`
-        # with no read at all.
+        # ADR-064 §12 / ADR-082: restore the turn's generation mode ONCE, here — BEFORE any
+        # leg can return — so every continuation uses the SAME effective mode. Legacy has no
+        # persisted generationMode; the helper returns `research` only when this instance opted
+        # into CHAT_LEGACY_WEB_SEARCH_ENABLED, else `general`.
         generation_mode = (
             await self._deps.repo.generation_mode_for_message_step(session_id, message_step_id)
             if use_generation_v2
-            else "general"
+            else _effective_generation_mode("general", use_generation_v2=False)
         )
 
         # Apply each result (per-item idempotency, ADR-005): already completed/errored → skip
@@ -1502,8 +1530,8 @@ class ChatOrchestrator:
             )
 
         mode = Mode(sess.mode)
-        generation_credit_cost = (
-            get_settings().chat_generation_credit_cost(generation_mode) if use_generation_v2 else 1
+        generation_credit_cost = _turn_credit_cost(
+            generation_mode, use_generation_v2=use_generation_v2
         )
         # Re-evaluate policy (access may have changed).
         decision, state = await self._evaluate(
@@ -2015,10 +2043,11 @@ class ChatOrchestrator:
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> ChatRunOut:
         use_generation_v2 = generation_backend == "v2"
-        # ADR-064 §3 / 03-architecture axis invariant 1: ONE effective mode value drives the axis-C
-        # tool gate, the provider call and (upstream) the price. Computing it twice — once for the
-        # tools, once for the provider — is exactly how the gate and the generation drift apart.
-        effective_generation_mode = generation_mode if use_generation_v2 else "general"
+        # ADR-064 §3 / ADR-082: ONE effective mode for axis-C, provider and price. Same helper
+        # as run()/tool_result — computing it twice with a different formula is how they drift.
+        effective_generation_mode = _effective_generation_mode(
+            generation_mode, use_generation_v2=use_generation_v2
+        )
         # ADR-069: stream text deltas only for non-study turns (anti-spoiler for quiz).
         emit_text_deltas = on_text_delta is not None and effective_generation_mode != "study_learn"
         # ADR-064 §7 producer 1: pool of THIS call, last-wins, threaded through every round.

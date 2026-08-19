@@ -316,6 +316,13 @@ class Settings(BaseSettings):
     # (`files`, `calendar`, `reminders`, `site`). Empty (default) = offer the full set —
     # other instances keep files/calendar/reminders/site. Unknown tokens are ignored + WARNING.
     chat_disabled_tool_families_raw: str = Field(default="", alias="CHAT_DISABLED_TOOL_FAMILIES")
+    # ADR-082: when True, legacy `/v1/chat/run` (and `/tool-result`) attach hosted web search
+    # by treating the turn as `research` (price = CHAT_CREDIT_COST_RESEARCH). Default False —
+    # every other instance keeps 1-credit general chat. Per-instance (orvianix / ravionet).
+    # Does not change `/v1/chat/v2/*` (the client already sends generationMode there).
+    chat_legacy_web_search_enabled: bool = Field(
+        default=False, alias="CHAT_LEGACY_WEB_SEARCH_ENABLED"
+    )
     # PUBLIC upstream host of the fal QUEUE API (async submit/poll; the sync fal.run host cannot
     # serve minute-long video runs). Fixed server-side — never taken from a request body — and
     # also the allowlist for the polling URLs fal returns (SSRF guard in FalClient).

@@ -100,9 +100,10 @@ MEDIA_CHAT_TOOLS = frozenset(
 # ONLY IF the EFFECTIVE generation mode of the turn is in its set. A tool ABSENT from this registry
 # is not mode-gated at all (all 14 others behave exactly as before). The gate is evaluated against
 # the same single value that goes to the provider and to billing
-# (`generation_mode if use_generation_v2 else "general"`), never against the request field — hence
-# the legacy path (forced `general`) never offers a mode-gated tool BY CONSTRUCTION, with no
-# special-case branch. Axes A (project) / B (assistant_mode) / C compose with logical AND.
+# (`_effective_generation_mode`: v2 = request/restored mode; legacy = `general`, or `research`
+# when CHAT_LEGACY_WEB_SEARCH_ENABLED — ADR-082), never against the request field. quiz.generate
+# is study_learn-only, so the legacy path still never offers a mode-gated tool. Axes A (project)
+# / B (assistant_mode) / C compose with logical AND.
 TOOL_GENERATION_MODES: dict[str, frozenset[str]] = {
     TOOL_QUIZ_GENERATE: frozenset({"study_learn"}),
 }

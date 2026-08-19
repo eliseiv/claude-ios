@@ -267,7 +267,8 @@ tool-вызова. Ошибка тихая (ничего не падает), п�
 
 Зачем: OpenAI v2 отделен от legacy из-за другого API (`Responses`). Anthropic v2 использует тот
 же Messages API, поэтому отдельный класс не нужен: режим включается обычным параметром
-`generation_mode`, который legacy path передает как `general`.
+`generation_mode`: legacy path передаёт `general`, либо `research` если на инстансе
+`CHAT_LEGACY_WEB_SEARCH_ENABLED` ([ADR-082](../../adr/ADR-082-legacy-web-search.md)).
 
 ## Provider clients
 
@@ -358,7 +359,7 @@ Legacy `/v1/chat/*` не ломается, потому что orchestrator на
   - tool-набор дополнительно фильтруется **по режиму** (ось C, [ADR-064 §3](../../adr/ADR-064-study-learn-quiz-generation-mode.md)):
     `neutral_tool_definitions(include_server_side=has_project, generation_mode=<эффективный режим>)`.
     Передаётся **тот же** эффективный режим, что уходит провайдеру и в биллинг
-    (`generation_mode if use_generation_v2 else "general"`), — одна величина, а не два вычисления;
+    (`_effective_generation_mode`), — одна величина, а не два вычисления;
   - OpenAI credit-mode может читать/писать `provider_state`;
   - `usage` получает `generationMode` и, при debit, `creditsCharged`.
 
@@ -374,7 +375,8 @@ Legacy `/v1/chat/*` не ломается, потому что orchestrator на
 
 ### `tool_result(..., generation_backend="legacy")`
 
-- legacy continuation всегда `general`, 1 кредит;
+- legacy continuation: `general` и 1 кредит, либо `research` и `CHAT_CREDIT_COST_RESEARCH`
+  при `CHAT_LEGACY_WEB_SEARCH_ENABLED` ([ADR-082](../../adr/ADR-082-legacy-web-search.md));
 - v2 continuation читает исходный `generationMode` через
   `generation_mode_for_message_step(...)` и списывает цену этого режима.
 
