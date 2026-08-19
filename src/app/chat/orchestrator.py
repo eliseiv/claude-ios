@@ -291,6 +291,16 @@ def _turn_credit_cost(effective_generation_mode: str, *, use_generation_v2: bool
     return 1
 
 
+def _uses_generation_client(use_generation_v2: bool) -> bool:
+    """OpenAI Chat Completions ignores ``generation_mode``; hosted web_search lives on Responses.
+
+    v2 always uses the generation client. Legacy does too when this instance opted into
+    ``CHAT_LEGACY_WEB_SEARCH_ENABLED`` — otherwise research mode is billed but never attached.
+    Anthropic uses the same Messages client on both factories.
+    """
+    return use_generation_v2 or get_settings().chat_legacy_web_search_enabled
+
+
 def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") -> str:
     """Base system prompt for the turn: assistant_mode prompt + the generation-mode suffix.
 
@@ -468,8 +478,8 @@ def _active_provider() -> str:
 
 
 def _credits_llm(*, provider: str, use_generation_v2: bool) -> LLMClient:
-    """Credits-path client for ``provider`` (legacy Completions vs v2 Responses/Messages)."""
-    if use_generation_v2:
+    """Credits-path client for ``provider`` (legacy Completions vs v2/opted-in Responses)."""
+    if _uses_generation_client(use_generation_v2):
         return generation_llm_client_for(provider)
     return llm_client_for(provider)
 
@@ -2076,7 +2086,7 @@ class ChatOrchestrator:
                 return self._blocked(session_id, BlockReason.byok_invalid)
             llm = (
                 generation_llm_client_for(byok_provider)
-                if use_generation_v2
+                if _uses_generation_client(use_generation_v2)
                 else llm_client_for(byok_provider)
             )
             effective_model = _model_for_provider(model, byok_provider)

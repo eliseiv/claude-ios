@@ -316,8 +316,14 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         wallet=WalletService(session, audit),
         byok=BYOKService(session, get_kms_client(), get_llm_client(), audit),
         audit=audit,
-        # ADR-033: inject the active provider's LLMClient (anthropic default | openai).
-        anthropic_client=get_llm_client(),
+        # ADR-033 / ADR-082: inject Completions on ordinary legacy; Responses when this
+        # instance opted into hosted web search on `/v1/chat/run` (Chat Completions
+        # ignores generation_mode, so research would otherwise be billed and never attached).
+        anthropic_client=(
+            get_generation_llm_client()
+            if get_settings().chat_legacy_web_search_enabled
+            else get_llm_client()
+        ),
         site_tools=SiteToolHandlers(session, website, audit),
         # ADR-026 / ADR-068: global server-side tools (time.now, media.generate_*) with SystemClock
         # and the request-scoped MediaGenerationService (same wallet/session as /v1/media/*).

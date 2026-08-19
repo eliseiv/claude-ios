@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from app.chat.orchestrator import _effective_generation_mode, _turn_credit_cost
+from app.chat.anthropic_client import AnthropicClient
+from app.chat.openai_client import OpenAIClient
+from app.chat.openai_responses_client import OpenAIResponsesClient
+from app.chat.orchestrator import (
+    _credits_llm,
+    _effective_generation_mode,
+    _turn_credit_cost,
+    _uses_generation_client,
+)
 from app.config import Settings, get_settings
 
 
@@ -90,3 +98,22 @@ def test_turn_credit_cost_legacy_flag_uses_research_price() -> None:
             settings.chat_legacy_web_search_enabled,
             settings.chat_credit_cost_research,
         ) = original
+
+
+def test_legacy_flag_uses_openai_responses_not_completions() -> None:
+    settings = get_settings()
+    original = settings.chat_legacy_web_search_enabled
+    settings.chat_legacy_web_search_enabled = False
+    try:
+        assert _uses_generation_client(False) is False
+        assert isinstance(_credits_llm(provider="openai", use_generation_v2=False), OpenAIClient)
+        settings.chat_legacy_web_search_enabled = True
+        assert _uses_generation_client(False) is True
+        assert isinstance(
+            _credits_llm(provider="openai", use_generation_v2=False), OpenAIResponsesClient
+        )
+        assert isinstance(
+            _credits_llm(provider="anthropic", use_generation_v2=False), AnthropicClient
+        )
+    finally:
+        settings.chat_legacy_web_search_enabled = original

@@ -17,9 +17,10 @@ Env **`CHAT_LEGACY_WEB_SEARCH_ENABLED`** (bool, default **`false`**, per-instanc
 Когда `true`, legacy `/v1/chat/run` и `/v1/chat/tool-result`:
 
 1. Эффективный режим хода = `research` (тот же hosted `web_search`, что у v2 research).
-2. Цена хода = `CHAT_CREDIT_COST_RESEARCH` (дефолт 3).
-3. Контракт запроса не меняется: поле `generationMode` на legacy по-прежнему 422.
-4. В ответе `usage.generationMode` / `usage.creditsCharged` **не** появляются (старые клиенты их не ждут).
+2. OpenAI-инстанс переключается с Chat Completions на Responses API (`OpenAIResponsesClient`). Completions **игнорирует** `generation_mode` — без этого шага режим `research` тарифицируется, а `web_search` модели не отдаётся (прод orvianix 2026-08-19: «Я не могу искать в интернете напрямую»).
+3. Цена хода = `CHAT_CREDIT_COST_RESEARCH` (дефолт 3).
+4. Контракт запроса не меняется: поле `generationMode` на legacy по-прежнему 422.
+5. В ответе `usage.generationMode` / `usage.creditsCharged` **не** появляются (старые клиенты их не ждут).
 
 `/v1/chat/v2/*` флаг не трогает: клиент как раньше шлёт `generationMode`.
 
