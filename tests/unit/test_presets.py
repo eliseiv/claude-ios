@@ -2,11 +2,12 @@
 
 ``app.chat.presets.preset_catalog(locale)`` is pure (no I/O, no state, no DB) and
 provider/instance-agnostic. It returns the static presets in declaration order (= chip
-order) as a list of ``{id, title, icon, prompt, category}`` dicts. The original seven
-home-screen chips stay first (``category`` is ``None``); Agents-screen cards are appended
-with a genre slug. ``id``/``icon``/``category`` are stable machine identifiers (NOT
-localized); ``title``/``prompt`` carry the resolved-locale string with a per-field EN
-fallback.
+order) as a list of ``{id, title, icon, prompt, category, subcategory, description}``
+dicts. The original seven home-screen chips stay first; Agents-screen cards are appended.
+Every shipped preset has ``category`` and ``subcategory``. Agents cards have
+``subcategory == id``. ``id``/``icon``/``category``/``subcategory`` are stable machine
+identifiers (NOT localized); ``title``/``prompt``/``description`` carry the resolved-locale
+string with a per-field EN fallback.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import re
 from app.chat.presets import (
     DEFAULT_PRESET_LOCALE,
     PRESET_CATEGORIES,
+    PRESET_SUBCATEGORIES,
     SUPPORTED_PRESET_LOCALES,
     preset_catalog,
 )
@@ -91,7 +93,7 @@ _RU_TITLES = {
     "games": "Игры",
 }
 _SNAKE_CASE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
-_FIELDS = ("id", "title", "icon", "prompt", "category")
+_FIELDS = ("id", "title", "icon", "prompt", "category", "subcategory", "description")
 # Agents-screen genres from the iOS tabs (Работа / Жизнь / Развлечения).
 _EXPECTED_CATEGORIES = {
     "editor": "work",
@@ -112,6 +114,44 @@ _EXPECTED_CATEGORIES = {
     "companion": "entertainment",
     "stories": "entertainment",
     "games": "entertainment",
+}
+_CHIP_CATEGORIES = {
+    "plan_week": "life",
+    "meeting_notes": "work",
+    "tasks_from_photo": "work",
+    "design_brief": "work",
+    "daily_review": "life",
+    "summarize_text": "work",
+    "project_structure": "work",
+}
+_CHIP_SUBCATEGORIES = {
+    "plan_week": "planner",
+    "meeting_notes": "documents",
+    "tasks_from_photo": "documents",
+    "design_brief": "ideas",
+    "daily_review": "planner",
+    "summarize_text": "editor",
+    "project_structure": "documents",
+}
+_RU_AGENT_DESCRIPTIONS = {
+    "editor": "Улучшает тексты, письма и документы",
+    "letters": "Создаёт понятные и профессиональные письма",
+    "analyst": "Разбирает данные и помогает найти главное",
+    "ideas": "Помогает придумать решения и новые подходы",
+    "code": "Пишет код и объясняет ошибки",
+    "documents": "Анализирует файлы и делает выводы",
+    "finances": "Помогает планировать бюджет и расходы",
+    "advisor": "Помогает разобраться и принять решение",
+    "planner": "Организует задачи, цели и расписание",
+    "studies": "Объясняет темы простыми словами",
+    "translator": "Переводит и адаптирует тексты",
+    "health": "Помогает с привычками и балансом",
+    "creator": "Создаёт идеи, истории и сценарии",
+    "movies": "Подбирает фильмы под настроение",
+    "quizzes": "Создаёт вопросы и проверяет знания",
+    "companion": "Общается на любые темы",
+    "stories": "Пишет рассказы и развивает сюжеты",
+    "games": "Придумывает челленджи и развлечения",
 }
 
 
@@ -165,9 +205,16 @@ def test_preset_catalog_all_four_fields_present_and_non_empty_every_locale() -> 
                 assert isinstance(value, str), f"{field} not a str ({locale}) on {p['id']}"
                 assert value.strip(), f"{field} empty ({locale}) on preset {p['id']}"
             category = p["category"]
+            assert category in PRESET_CATEGORIES, (
+                f"bad category ({locale}) on {p['id']}: {category!r}"
+            )
+            subcategory = p["subcategory"]
             assert (
-                category is None or category in PRESET_CATEGORIES
-            ), f"bad category ({locale}) on {p['id']}: {category!r}"
+                subcategory in PRESET_SUBCATEGORIES
+            ), f"bad subcategory ({locale}) on {p['id']}: {subcategory!r}"
+            assert isinstance(p["description"], str) and p["description"].strip(), (
+                f"description empty ({locale}) on {p['id']}"
+            )
 
 
 def test_preset_catalog_ids_unique_snake_case() -> None:
@@ -265,13 +312,19 @@ def test_partial_locale_field_falls_back_to_en_per_field() -> None:
     assert ru[0]["title"] == "RU Заголовок"  # locale value used where present
     assert ru[0]["prompt"] == "EN prompt only"  # missing field → EN fallback
     assert ru[0]["category"] is None
+    assert ru[0]["subcategory"] is None
+    assert ru[0]["description"] == ""
 
 
-# ----------------------------- category (ADR-080) -----------------------------
-def test_home_chips_have_null_category() -> None:
-    by_id = {p["id"]: p["category"] for p in preset_catalog("en")}
+# ----------------------------- category / subcategory (ADR-080 / ADR-083) ----------
+def test_every_shipped_preset_has_category_and_subcategory() -> None:
+    by_id = {p["id"]: p for p in preset_catalog("en")}
     for pid in _ORIGINAL_IDS:
-        assert by_id[pid] is None, f"home chip {pid} must not carry a genre"
+        assert by_id[pid]["category"] == _CHIP_CATEGORIES[pid], pid
+        assert by_id[pid]["subcategory"] == _CHIP_SUBCATEGORIES[pid], pid
+    for pid in _AGENT_IDS:
+        assert by_id[pid]["category"] == _EXPECTED_CATEGORIES[pid], pid
+        assert by_id[pid]["subcategory"] == pid, pid
 
 
 def test_agent_categories_match_ios_tabs() -> None:
@@ -279,8 +332,28 @@ def test_agent_categories_match_ios_tabs() -> None:
     assert {pid: by_id[pid] for pid in _AGENT_IDS} == _EXPECTED_CATEGORIES
 
 
-def test_category_identical_across_locales() -> None:
-    en = {p["id"]: p["category"] for p in preset_catalog("en")}
-    ru = {p["id"]: p["category"] for p in preset_catalog("ru")}
-    zh = {p["id"]: p["category"] for p in preset_catalog("zh-Hans")}
+def test_category_and_subcategory_identical_across_locales() -> None:
+    en = {p["id"]: (p["category"], p["subcategory"]) for p in preset_catalog("en")}
+    ru = {p["id"]: (p["category"], p["subcategory"]) for p in preset_catalog("ru")}
+    zh = {p["id"]: (p["category"], p["subcategory"]) for p in preset_catalog("zh-Hans")}
     assert en == ru == zh
+
+
+def test_agents_grid_is_subcategory_equals_id() -> None:
+    agents = [p for p in preset_catalog("ru") if p["id"] == p["subcategory"]]
+    assert [p["id"] for p in agents] == _AGENT_IDS
+
+
+def test_ru_agent_descriptions_match_design() -> None:
+    ru = {p["id"]: p["description"] for p in preset_catalog("ru")}
+    for pid, expected in _RU_AGENT_DESCRIPTIONS.items():
+        assert ru[pid] == expected, f"RU description mismatch for {pid}: {ru[pid]!r}"
+
+
+def test_description_localized_like_title() -> None:
+    en = {p["id"]: p["description"] for p in preset_catalog("en")}
+    ru = {p["id"]: p["description"] for p in preset_catalog("ru")}
+    zh = {p["id"]: p["description"] for p in preset_catalog("zh-Hans")}
+    for pid in _EXPECTED_IDS:
+        assert en[pid] != ru[pid], f"description not localized for {pid}"
+        assert en[pid] != zh[pid], f"description not localized for {pid}"

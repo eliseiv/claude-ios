@@ -1035,14 +1035,17 @@ JWKS с публичным ключом (для самопроверки/отл�
 ```json
 { "locale": "ru", "presets": [
   { "id": "plan_week", "title": "Планирование недели", "icon": "calendar",
-    "prompt": "Помоги спланировать предстоящую неделю. ...", "category": null },
+    "prompt": "Помоги спланировать предстоящую неделю. ...",
+    "category": "life", "subcategory": "planner",
+    "description": "Планирует неделю по приоритетам" },
   { "id": "editor", "title": "Редактор", "icon": "pencil",
-    "prompt": "Ты редактор. ...", "category": "work" }
+    "prompt": "Ты редактор. ...", "category": "work", "subcategory": "editor",
+    "description": "Улучшает тексты, письма и документы" }
 ] }
 ```
-- `locale` — фактически отданная локаль (аддитивно). `id` — стабильный slug (snake_case, **не локализуется**). `title` — имя чипа (на локали). `icon` — имя **SF Symbol** (не emoji; клиент рендерит `Image(systemName:)`, fallback при отсутствии; **не локализуется**). `prompt` — текст в композер (на локали). `category` — жанр агента `work`/`life`/`entertainment` или `null` у чипов главного экрана (аддитивно, [ADR-080](adr/ADR-080-preset-categories.md); старые клиенты игнорируют). Порядок = порядок чипов (един во всех локалях); `id`/`title`/`icon`/`prompt` обязательны.
+- `locale` — фактически отданная локаль (аддитивно). `id` — стабильный slug (snake_case, **не локализуется**). `title` — имя чипа (на локали). `icon` — имя **SF Symbol** (не emoji; клиент рендерит `Image(systemName:)`, fallback при отсутствии; **не локализуется**). `prompt` — текст в композер (на локали). `description` — однострочная подпись карточки (на локали, [ADR-083](adr/ADR-083-preset-subcategories-and-descriptions.md)). `category` — жанр `work`/`life`/`entertainment` (аддитивно, [ADR-080](adr/ADR-080-preset-categories.md) / [ADR-083](adr/ADR-083-preset-subcategories-and-descriptions.md); на отгружаемом каталоге всегда заполнен). `subcategory` — карточка агента; на агенте совпадает с `id`, чип указывает на ближайшую ([ADR-083](adr/ADR-083-preset-subcategories-and-descriptions.md)). Старые клиенты игнорируют новые поля. Порядок = порядок чипов (един во всех локалях); `id`/`title`/`icon`/`prompt`/`description` обязательны.
 - Дефолтный набор (7): `plan_week`, `meeting_notes`, `tasks_from_photo`, `design_brief`, `daily_review`, `summarize_text`, `project_structure`.
-- Провайдер/инстанс-агностично; локализуются только `title`/`prompt`, EN — канон/fallback (per-field). Без БД/миграции/биллинга; read-only без побочных эффектов. Без env/без запроса локали → EN как раньше (обратная совместимость; [Q-035-2](99-open-questions.md) частично закрыт [ADR-049](adr/ADR-049-presets-localization.md)).
+- Провайдер/инстанс-агностично; локализуются `title`/`prompt`/`description`, EN — канон/fallback (per-field). Без БД/миграции/биллинга; read-only без побочных эффектов. Без env/без запроса локали → EN как раньше (обратная совместимость; [Q-035-2](99-open-questions.md) частично закрыт [ADR-049](adr/ADR-049-presets-localization.md)).
 **Коды:** `200`; `401`; `422` (явный `?locale=` вне набора); `429`.
 
 ---

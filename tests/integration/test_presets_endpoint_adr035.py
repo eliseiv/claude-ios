@@ -54,7 +54,7 @@ _EXPECTED_IDS = [
     "games",
 ]
 _SNAKE_CASE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
-_FIELDS = ("id", "title", "icon", "prompt", "category")
+_FIELDS = ("id", "title", "icon", "prompt", "category", "subcategory", "description")
 _HOME_IDS = {
     "plan_week",
     "meeting_notes",
@@ -141,10 +141,14 @@ async def test_presets_all_fields_non_empty_and_ids_unique_snake_case(
         for field in ("id", "title", "icon", "prompt"):
             assert isinstance(p[field], str) and p[field].strip(), f"{field} empty on {p['id']}"
         assert _SNAKE_CASE.match(p["id"]), f"id not snake_case: {p['id']!r}"
+        assert p["category"] in {"work", "life", "entertainment"}, p
+        assert isinstance(p["subcategory"], str) and p["subcategory"], p
+        assert isinstance(p["description"], str) and p["description"].strip(), p
         if p["id"] in _HOME_IDS:
-            assert p["category"] is None, f"home chip {p['id']} must have null category"
+            assert p["subcategory"] != p["id"], f"home chip {p['id']} must point at an agent card"
         else:
             assert p["category"] == _AGENT_CATEGORIES[p["id"]], p
+            assert p["subcategory"] == p["id"], p
 
 
 # ----------------------------- provider-agnostic identity (ADR-033) -----------------------------
