@@ -205,16 +205,16 @@ def test_preset_catalog_all_four_fields_present_and_non_empty_every_locale() -> 
                 assert isinstance(value, str), f"{field} not a str ({locale}) on {p['id']}"
                 assert value.strip(), f"{field} empty ({locale}) on preset {p['id']}"
             category = p["category"]
-            assert category in PRESET_CATEGORIES, (
-                f"bad category ({locale}) on {p['id']}: {category!r}"
-            )
+            assert (
+                category in PRESET_CATEGORIES
+            ), f"bad category ({locale}) on {p['id']}: {category!r}"
             subcategory = p["subcategory"]
             assert (
                 subcategory in PRESET_SUBCATEGORIES
             ), f"bad subcategory ({locale}) on {p['id']}: {subcategory!r}"
-            assert isinstance(p["description"], str) and p["description"].strip(), (
-                f"description empty ({locale}) on {p['id']}"
-            )
+            assert (
+                isinstance(p["description"], str) and p["description"].strip()
+            ), f"description empty ({locale}) on {p['id']}"
 
 
 def test_preset_catalog_ids_unique_snake_case() -> None:
