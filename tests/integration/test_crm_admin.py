@@ -395,6 +395,50 @@ async def test_crm_user_detail_without_activity_hides_optional_blocks(
     assert detail.json()["media_stats"] is None
 
 
+async def test_crm_payments_include_admin_wallet_grant(
+    crm_admin_client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Swagger `/v1/admin/wallet/grant` must show up on the CRM payments tab.
+
+    Regression: the tab only matched `crm-tokens:` / `crm-sub-grant:` keys, so a docs/curl
+    grant (arbitrary idempotencyKey, meta.source=admin) left «Оплат пока нет» next to a
+    non-zero balance.
+    """
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+
+    grant = await crm_admin_client.post(
+        "/v1/admin/wallet/grant",
+        headers=_ADMIN_HEADERS,
+        json={
+            "userId": str(uid),
+            "amount": 100,
+            "idempotencyKey": f"manual-grant-{uid}-100",
+            "reason": "Manual support token grant",
+        },
+    )
+    assert grant.status_code == 200, grant.text
+
+    payments = await crm_admin_client.get(f"/v1/admin/users/{uid}/payments", headers=_ADMIN_HEADERS)
+    assert payments.status_code == 200
+    body = payments.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["title"] == "Кредиты"
+    assert item["amount"] == 0.0
+    assert "админки" in (item["description"] or "")
+    assert "+100" in (item["description"] or "")
+
+    listed = await crm_admin_client.get("/v1/admin/users?limit=10", headers=_ADMIN_HEADERS)
+    assert listed.status_code == 200
+    ids = [row["id"] for row in listed.json()["items"]]
+    assert str(uid) in ids
+    row = next(r for r in listed.json()["items"] if r["id"] == str(uid))
+    assert row["tokens"] == 100.0
+    assert row["is_paid"] is False
+
+
 async def test_crm_payments_include_crm_subscription_grant(
     crm_admin_client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],

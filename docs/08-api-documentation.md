@@ -138,6 +138,7 @@ OpenAPI-тексты (`summary`, `description` эндпоинтов, `Field(desc
 | `Tokens` | `POST /v1/tokens/purchase`, `GET /v1/tokens/products` | `bearerAuth` | Покупка пакетов токенов и каталог продуктов. |
 | `BYOK` | `POST /v1/byok/set`, `POST /v1/byok/toggle`, `POST /v1/byok/delete` | `bearerAuth` | Свой ключ Anthropic: сохранение, включение, удаление. |
 | `Admin` | `POST /v1/admin/wallet/grant`, `GET /v1/admin/wallet/{userId}` | `adminToken` | Операторские действия: начисление и просмотр кошелька. Авторизация — `X-Admin-Token`. |
+| `Admin (CRM)` | `GET /v1/admin/users`, карточка, оплаты, запросы | `adminToken` | Список и карточка пользователей для broad-crm. Тот же секрет. |
 | `Preview` | `GET /v1/preview/{projectId}/{token}/{path}` | none | Публичная отдача сгенерированных сайтов по подписанной ссылке (авторизация в подписи, без JWT, [ADR-010](adr/ADR-010-backend-hosted-preview.md)). |
 | `Chats` | `GET/PATCH/DELETE /v1/chats[/{id}]` (+ `/{id}/steps`) | `bearerAuth` | История чатов: список, переименование, удаление, шаги. |
 | `Profile` | `GET/PATCH /v1/profile` | `bearerAuth` | Профиль пользователя. |

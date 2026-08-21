@@ -5,6 +5,7 @@
 - Тип: bugfix-ADR
 - Связано: [ADR-061](ADR-061-fal-price-calibration-and-priced-defaults.md) (закупочные цены fal, из которых выведены кредиты), [ADR-077](ADR-077-crm-request-logs.md) / [ADR-078](ADR-078-crm-request-history-derived-from-domain.md) (история запросов), [ADR-015](ADR-015-consumable-token-iap.md) (кредиты ≠ доллары)
 - Модуль: [admin](../modules/admin/README.md), [media-generation](../modules/media-generation/README.md)
+- **Ревизия 2026-08-21:** §4 дополнен — `list_payments` также включает `POST /v1/admin/wallet/grant` (`meta.source=admin`) и `admin-sub-grant:%`. Тело §4 не переписано (immutability).
 
 ## Context
 

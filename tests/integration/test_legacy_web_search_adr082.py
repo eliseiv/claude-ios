@@ -38,6 +38,9 @@ async def test_legacy_run_default_stays_general_without_web_search(
         assert r.json()["status"] == "assistant_message"
         assert fake_anthropic.calls[-1]["generation_mode"] == "general"
         assert all(t.get("name") != "web_search" for t in fake_anthropic.calls[-1]["tools"])
+        from app.chat.orchestrator import _RESEARCH_INSTRUCTION
+
+        assert _RESEARCH_INSTRUCTION not in fake_anthropic.calls[-1]["system_prompt"]
         async with db_sessionmaker() as s:
             bal = await s.scalar(
                 text("SELECT balance FROM wallets WHERE user_id=:u"), {"u": str(uid)}
@@ -79,6 +82,9 @@ async def test_legacy_run_with_flag_attaches_web_search_and_charges_research(
         assert body["status"] == "assistant_message"
         assert fake_anthropic.calls[-1]["generation_mode"] == "research"
         assert any(t.get("name") == "web_search" for t in fake_anthropic.calls[-1]["tools"])
+        from app.chat.orchestrator import _RESEARCH_INSTRUCTION
+
+        assert _RESEARCH_INSTRUCTION in fake_anthropic.calls[-1]["system_prompt"]
         # Legacy response does not expose usage.generationMode / creditsCharged.
         usage = body.get("usage") or {}
         assert "generationMode" not in usage
@@ -124,5 +130,8 @@ async def test_legacy_flag_does_not_rewrite_v2_general(
         assert r.json()["usage"]["creditsCharged"] == 1
         assert fake_anthropic.calls[-1]["generation_mode"] == "general"
         assert all(t.get("name") != "web_search" for t in fake_anthropic.calls[-1]["tools"])
+        from app.chat.orchestrator import _RESEARCH_INSTRUCTION
+
+        assert _RESEARCH_INSTRUCTION not in fake_anthropic.calls[-1]["system_prompt"]
     finally:
         settings.chat_legacy_web_search_enabled = original

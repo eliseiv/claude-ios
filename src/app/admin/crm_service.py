@@ -184,10 +184,10 @@ _REQUEST_HISTORY_SQL = """
 
 
 # Вкладка «Оплаты» = всё, что дало доступ или кредиты, а не только webhook-и провайдеров
-# (ADR-079 §3). Операции CRM берутся из `ledger_transactions` по namespace ключа
-# идемпотентности (`crm-sub-grant:` / `crm-tokens:`, см. `grant_subscription`/`adjust_tokens`):
-# только там лежит и время, и точное число кредитов. `amount = 0` — денег по такой операции не
-# поступало, и это не «сумма неизвестна», а ноль как факт.
+# (ADR-079 §3, ревизия 2026-08-21). Операции CRM — namespace
+# `crm-sub-grant:` / `crm-tokens:`. Те же дыры давал `POST /v1/admin/wallet/grant` из
+# `/docs` (ключ произвольный, `meta.source=admin`) и `admin-sub-grant:` — баланс есть,
+# вкладка пустая. `amount = 0` — денег не поступало, ноль как факт.
 _PAYMENT_HISTORY_SQL = """
     SELECT product_id AS title,
            kind AS description,
@@ -209,12 +209,21 @@ _PAYMENT_HISTORY_SQL = """
     UNION ALL
     SELECT CASE
              WHEN lt.idempotency_key LIKE 'crm-sub-grant:%'
-             THEN COALESCE(lt.meta->>'productId', 'Подписка')
+               OR lt.idempotency_key LIKE 'admin-sub-grant:%'
+             THEN COALESCE(
+               lt.meta->>'productId',
+               lt.meta->>'plan',
+               'Подписка'
+             )
              ELSE 'Кредиты'
            END AS title,
            CASE
              WHEN lt.idempotency_key LIKE 'crm-sub-grant:%'
              THEN 'Подписка выдана из CRM (+' || lt.amount || ' кредитов), оплаты не было'
+             WHEN lt.idempotency_key LIKE 'admin-sub-grant:%'
+             THEN 'Подписка выдана из админки (+' || lt.amount || ' кредитов), оплаты не было'
+             WHEN lt.meta->>'source' = 'admin'
+             THEN 'Начислено из админки: +' || lt.amount || ' кредитов, оплаты не было'
              WHEN lt.type = 'credit'
              THEN 'Начислено из CRM: +' || lt.amount || ' кредитов, оплаты не было'
              ELSE 'Списано из CRM: -' || lt.amount || ' кредитов'
@@ -228,6 +237,8 @@ _PAYMENT_HISTORY_SQL = """
        AND (
          lt.idempotency_key LIKE 'crm-sub-grant:%'
          OR lt.idempotency_key LIKE 'crm-tokens:%'
+         OR lt.idempotency_key LIKE 'admin-sub-grant:%'
+         OR lt.meta->>'source' = 'admin'
        )
 """
 

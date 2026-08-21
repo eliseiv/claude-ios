@@ -301,7 +301,9 @@ client.responses.create(...)
 2. Если state валиден и модель совпадает, отправляет `previous_response_id` и только delta после
    последнего assistant-хода.
 3. Если state отсутствует/модель не совпала, собирает full replay из локального `chat_steps`.
-4. Для `research` добавляет OpenAI hosted `web_search`.
+4. Для `research` добавляет OpenAI hosted `web_search`. Системный суффикс режима
+   (обязать модель искать по теме, а не dummy-запросом) собирает orchestrator, не этот клиент
+   ([ADR-084](../../adr/ADR-084-research-system-prompt-suffix.md)).
 5. Для `reasoning` передает `reasoning={"effort": ...}`.
 6. Парсит `response.id` в `LLMResult.provider_response_id`.
 7. Для `study_learn` provider-knobs **не добавляет** — по параметрам вызова это обычная генерация
@@ -324,7 +326,7 @@ input-shape.
 Единственный Anthropic client. Использует Messages API:
 
 - `general` - обычный Messages call;
-- `research` - добавляет hosted web-search tool;
+- `research` - добавляет hosted web-search tool (суффикс промта — на orchestrator, [ADR-084](../../adr/ADR-084-research-system-prompt-suffix.md));
 - `reasoning` - передает extended thinking через `extra_body`;
 - `study_learn` - обычный Messages call, **без** web-search и **без** thinking (по knobs = `general`);
   отличие режима — в tool-наборе и системном промте, см.
@@ -463,12 +465,20 @@ wire-контракт запроса/ответа/инструмента — [02
 
 ### Системный промт режима
 
-К base-промту `assistant_mode` добавляется **статичная** EN-строка режима `study_learn` (перед
-workspace-инструкциями [ADR-036 §3](../../adr/ADR-036-workspaces-implementation.md), которые
-остаются последними): задавать вопросы **только** через `quiz.generate`, не повторять формулировки
-вопросов в тексте и не раскрывать правильные варианты/пояснения, сопроводительный текст держать
-коротким. Строка статична → внутри режима prompt-кэш стабилен; у `study_learn` при этом **своя**
-запись кэша (префикс отличается и суффиксом, и tool-набором) — это ожидаемо, не дефект.
+К base-промту `assistant_mode` добавляется **статичная** EN-строка режима, если режим её
+объявляет (перед workspace-инструкциями [ADR-036 §3](../../adr/ADR-036-workspaces-implementation.md),
+которые остаются последними). Строка статична → внутри режима prompt-кэш стабилен; у режима со
+суффиксом при этом **своя** запись кэша (префикс отличается и суффиксом, и tool-набором) — ожидаемо,
+не дефект.
+
+- `study_learn`: задавать вопросы **только** через `quiz.generate`, не повторять формулировки
+  вопросов в тексте и не раскрывать правильные варианты/пояснения, сопроводительный текст держать
+  коротким ([ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)).
+- `research` ([ADR-084](../../adr/ADR-084-research-system-prompt-suffix.md)): hosted web-search на
+  этом ходе живой; для текущих/sourced фактов вызывать его с запросом по теме пользователя, не
+  dummy/`calculator`; после результатов — ответ со ссылками; нельзя утверждать, что интернета нет.
+  Вешается на **эффективный** `research` (v2 и legacy с `CHAT_LEGACY_WEB_SEARCH_ENABLED`).
+  `tool_choice` не форсируется.
 
 ### Degrade вместо 422
 
@@ -497,6 +507,7 @@ workspace-инструкциями [ADR-036 §3](../../adr/ADR-036-workspaces-im
 - `OpenAIResponsesClient` отправляет `previous_response_id` и delta input.
 - `OpenAIResponsesClient` при mismatch модели делает full replay валидной Responses input-shape.
 - `AnthropicClient` добавляет web-search/thinking параметры только при `research/reasoning`.
+- `research` ([ADR-084](../../adr/ADR-084-research-system-prompt-suffix.md)): system-prompt хода содержит статичный суффикс только при эффективном `research` (v2 и legacy opt-in); dummy-поиск в промте запрещён; `tool_choice` не форсируется.
 - `AnthropicClient` в `general` делает обычный Messages call без v2 knobs.
 - `/v1/chat/v2/run` списывает mode-specific credits и позволяет переключать режимы в одной сессии.
 - `/v1/chat/v2/tool-result` сохраняет исходный mode/cost всего tool-loop хода.

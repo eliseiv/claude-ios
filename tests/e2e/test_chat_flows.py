@@ -196,6 +196,9 @@ async def test_generation_mode_switching_uses_turn_cost_and_llm_mode(
         assert b1["usage"]["creditsCharged"] == 3
         assert fake_anthropic.calls[-1]["generation_mode"] == "research"
         assert any(t.get("name") == "web_search" for t in fake_anthropic.calls[-1]["tools"])
+        from app.chat.orchestrator import _RESEARCH_INSTRUCTION
+
+        assert _RESEARCH_INSTRUCTION in fake_anthropic.calls[-1]["system_prompt"]
 
         r2 = await client.post(
             "/v1/chat/v2/run",
@@ -214,6 +217,9 @@ async def test_generation_mode_switching_uses_turn_cost_and_llm_mode(
         assert b2["usage"]["generationMode"] == "general"
         assert b2["usage"]["creditsCharged"] == 1
         assert fake_anthropic.calls[-1]["generation_mode"] == "general"
+        from app.chat.orchestrator import _RESEARCH_INSTRUCTION as _RESEARCH_SUFFIX
+
+        assert _RESEARCH_SUFFIX not in fake_anthropic.calls[-1]["system_prompt"]
 
         async with db_sessionmaker() as s:
             bal = await s.scalar(

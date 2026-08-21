@@ -260,6 +260,21 @@ _STUDY_LEARN_INSTRUCTION = (
     "accompanying text short."
 )
 
+# ADR-084: research suffix. Hosted web_search is already attached by the provider client, but the
+# base chat prompt only names device-local tools — gpt-5.1 then emits a dummy search
+# (`calculator: 1+1`) and claims it has no internet. Soft half (like study_learn): tell the model
+# the search is live and must be used for current facts. STATIC — no date/counters/turn content —
+# so the prompt-cache prefix stays byte-stable inside the mode. Workspace instructions stay LAST.
+_RESEARCH_INSTRUCTION = (
+    "This turn is a Research turn. You have a live hosted web-search tool on this turn; it is not "
+    "a device-local tool and it does reach the public internet. For questions that need current, "
+    "dated, or source-backed facts — prices, exchange rates, news, laws, scores, availability, "
+    "citations — you MUST use that web-search tool with a real query about the user's question. "
+    "Never send a dummy, calculator, or no-op query. After search results arrive, answer from them "
+    "and include working source links. Never claim you cannot look something up, have no internet "
+    "access, or can only give generic advice on a Research turn."
+)
+
 
 def _effective_generation_mode(
     generation_mode: str,
@@ -304,11 +319,12 @@ def _uses_generation_client(use_generation_v2: bool) -> bool:
 def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") -> str:
     """Base system prompt for the turn: assistant_mode prompt + the generation-mode suffix.
 
-    The mode suffix is added ONLY for the modes that declare one (today: ``study_learn``, ADR-064).
-    ``generation_mode`` MUST be the EFFECTIVE mode of the turn. Legacy is ``general`` unless
-    ``CHAT_LEGACY_WEB_SEARCH_ENABLED`` lifts it to ``research`` (ADR-082) — still no study_learn
-    suffix there. Workspace instructions are layered on top of this by
-    ``_system_prompt_with_workspace`` and therefore stay LAST (ADR-036 §3).
+    The mode suffix is added ONLY for the modes that declare one (``study_learn``, ADR-064;
+    ``research``, ADR-084). ``generation_mode`` MUST be the EFFECTIVE mode of the turn. Legacy is
+    ``general`` unless ``CHAT_LEGACY_WEB_SEARCH_ENABLED`` lifts it to ``research`` (ADR-082) — that
+    path gets the research suffix and still no study_learn suffix. Workspace instructions are
+    layered on top of this by ``_system_prompt_with_workspace`` and therefore stay LAST
+    (ADR-036 §3).
     ADR-072: media-generate instruction is appended only when ``CHAT_MEDIA_TOOLS_ENABLED``.
     ADR-081: families in ``CHAT_DISABLED_TOOL_FAMILIES`` are omitted from the tool sentence.
     """
@@ -317,6 +333,8 @@ def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") ->
         base = f"{base} {_MEDIA_GENERATE_INSTRUCTION}"
     if generation_mode == "study_learn":
         return f"{base}\n\n{_STUDY_LEARN_INSTRUCTION}"
+    if generation_mode == "research":
+        return f"{base}\n\n{_RESEARCH_INSTRUCTION}"
     return base
 
 
@@ -439,8 +457,8 @@ def _system_prompt_with_workspace(
     ``base(assistant_mode[, generation_mode])`` → ``\\n\\n`` → ``workspace.instructions`` when
     instructions are non-empty; otherwise the base prompt unchanged (so the prompt cache is not
     broken for sessions without instructions). Provider-agnostic (part of ``system``, identical for
-    both providers). Layer order is normative: base prompt → generation-mode suffix (ADR-064) →
-    workspace instructions LAST (ADR-036 §3).
+    both providers). Layer order is normative: base prompt → generation-mode suffix
+    (ADR-064 / ADR-084) → workspace instructions LAST (ADR-036 §3).
     """
     base = _system_prompt_for(assistant_mode, generation_mode)
     if instructions and instructions.strip():
