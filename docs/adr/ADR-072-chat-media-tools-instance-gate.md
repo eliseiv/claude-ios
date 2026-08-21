@@ -40,6 +40,8 @@ FAL_API_KEY=...
 CHAT_MEDIA_TOOLS_ENABLED=false
 ```
 
+Сейчас `false` на `ravelumi`, `novirell`, `claude-ios` (broadnova), `corvionet`, `lunexoro`. На остальных дефолт `true`.
+
 ## Последствия
 
 - (+) Разделение «ключ fal» и «генерация в чате» без отдельного образа.
