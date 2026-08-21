@@ -97,6 +97,7 @@ _ENDPOINT_TAG = {
     ("/v1/media/videos", "post"): "Media",
     ("/v1/media/jobs", "get"): "Media",
     ("/v1/media/jobs/{job_id}", "get"): "Media",
+    ("/v1/media/jobs/{job_id}/assets/{index}/{token}", "get"): "Media",
     ("/v1/notifications/device-token", "post"): "Notifications",
     ("/v1/notifications/device-token", "delete"): "Notifications",
     ("/v1/policy/effective", "get"): "Policy",
@@ -129,6 +130,11 @@ _AUTH_PUBLIC_PATHS = {
     ("/v1/auth/token", "post"),
     ("/v1/auth/refresh", "post"),
     ("/v1/auth/jwks", "get"),
+}
+
+# Signed media download (ADR-085): HMAC in the path, no user JWT (AVPlayer cannot send Bearer).
+_SIGNED_PUBLIC_PATHS = {
+    ("/v1/media/jobs/{job_id}/assets/{index}/{token}", "get"),
 }
 
 # Admin endpoints (ADR-009): authorized by the isolated adminToken scheme, NOT bearerAuth.
@@ -271,7 +277,9 @@ def test_admin_token_security_scheme_declared(openapi_schema: dict[str, Any]) ->
     [
         (p, m)
         for (p, m), tag in _ENDPOINT_TAG.items()
-        if p.startswith("/v1/") and (p, m) not in _AUTH_PUBLIC_PATHS
+        if p.startswith("/v1/")
+        and (p, m) not in _AUTH_PUBLIC_PATHS
+        and (p, m) not in _SIGNED_PUBLIC_PATHS
     ],
 )
 def test_v1_endpoints_require_bearer_auth(
@@ -298,6 +306,16 @@ def test_auth_endpoints_have_no_security(
     assert not op.get(
         "security"
     ), f"{method.upper()} {path} must be public, got {op.get('security')}"
+
+
+@pytest.mark.parametrize(("path", "method"), sorted(_SIGNED_PUBLIC_PATHS))
+def test_signed_media_download_has_no_security(
+    openapi_schema: dict[str, Any], path: str, method: str
+) -> None:
+    op = _operation(openapi_schema, path, method)
+    assert not op.get(
+        "security"
+    ), f"{method.upper()} {path} must be public (signed URL), got {op.get('security')}"
 
 
 @pytest.mark.parametrize(("path", "method"), sorted(_ADMIN_PATHS))
@@ -377,7 +395,11 @@ def test_authorization_not_a_parameter_on_protected_endpoints(
     # Spot-check the JWT-protected operations specifically: the lock comes from `security`,
     # never from an `authorization` header parameter.
     for path, method in _ENDPOINT_TAG:
-        if not path.startswith("/v1/") or (path, method) in _AUTH_PUBLIC_PATHS:
+        if (
+            not path.startswith("/v1/")
+            or (path, method) in _AUTH_PUBLIC_PATHS
+            or (path, method) in _SIGNED_PUBLIC_PATHS
+        ):
             continue
         op = _operation(openapi_schema, path, method)
         assert "authorization" not in _header_param_names(

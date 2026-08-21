@@ -41,6 +41,7 @@ Swagger UI должен позволять тестировщику автори
 - Служебные: `GET /health`, `GET /healthz` (алиас `/health`, [ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)), `GET /ready`, `GET /metrics` (защищён сетью/scrape-токеном, не входит в Swagger Authorize — см. [07-deployment.md](07-deployment.md#health--readiness)).
 - **Auth-issuer:** `POST /v1/auth/register`, `POST /v1/auth/token`, `POST /v1/auth/refresh`, `GET /v1/auth/jwks` — точка получения токена, защищены per-IP rate-limit ([контракт](modules/api-gateway/02-api-contracts.md)). Без security в OpenAPI — тестировщик вызывает их без авторизации, чтобы получить токен.
 - Preview: `GET /v1/preview/*` — авторизуются signed URL, не JWT. Без security scheme.
+- Media asset download: `GET`/`HEAD /v1/media/jobs/{jobId}/assets/{index}/{token}` — авторизуются signed URL, не JWT. Без security scheme.
 
 ### R2.4. Общее
 - Объявление security scheme в OpenAPI **не подменяет** реальную проверку (JWT — в `app/api_gateway/auth.py` / `deps.py`; admin — `require_admin`). Это только описание для клиента и Swagger UI. Источник истины аутентификации не меняется.

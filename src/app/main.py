@@ -138,8 +138,10 @@ _OPENAPI_TAGS = [
             "Генерация фото и видео через fal.ai. Сценарий: `GET /v1/media/models` → "
             "`POST /v1/media/images`|`/videos` (ответ `202`, задача в статусе `queued`, кредиты "
             "списаны) → опрос `GET /v1/media/jobs/{jobId}` до `completed`/`failed`. Неудачная "
-            "генерация возвращает кредиты. При `completed` (и фоновом reconciler) — push APNs "
-            "с `jobId`/`kind`/`mediaUrl`, если включены уведомления и зарегистрирован device token."
+            "генерация возвращает кредиты. Готовый файл — signed URL на этот домен "
+            "(`GET /v1/media/jobs/{jobId}/assets/{index}/{token}`, без JWT). При `completed` "
+            "(и фоновом reconciler) — push APNs с `jobId`/`kind`/`mediaUrl`, если включены "
+            "уведомления и зарегистрирован device token."
         ),
     },
     {

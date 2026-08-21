@@ -42,7 +42,12 @@ def _validate_https_urls(values: list[str]) -> list[str]:
 
 
 class MediaAssetSchema(StrictModel):
-    url: str = Field(description="Прямая ссылка на сгенерированный файл (CDN fal).")
+    url: str = Field(
+        description=(
+            "Ссылка на сгенерированный файл: signed URL на домен сервиса "
+            "(`/v1/media/jobs/{jobId}/assets/{index}/{token}`). Играйте как есть, без JWT."
+        )
+    )
     contentType: str | None = Field(
         default=None,
         description="MIME-тип файла, если провайдер его вернул (например `image/png`).",

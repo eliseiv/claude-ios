@@ -58,6 +58,7 @@ from app.media_generation.repository import (
     TERMINAL_STATUSES,
     MediaJobsRepository,
 )
+from app.media_generation.signed_url import public_asset_url
 from app.models import MediaJob
 from app.notifications.push_service import MediaPushService
 from app.observability.logging import log_event
@@ -338,6 +339,18 @@ class MediaGenerationService:
             return MediaJobView(job=job, assets=_assets_from_result(job.result))
         return await self._advance(job)
 
+    async def get_stored_asset(
+        self, *, job_id: uuid.UUID, index: int
+    ) -> tuple[MediaJob, MediaAsset]:
+        """Stored fal asset for the signed download route. Missing/OOB → 404."""
+        job = await self._repo.get_by_id(job_id)
+        if job is None:
+            raise NotFoundError("media job not found")
+        assets = _assets_from_result(job.result)
+        if index < 0 or index >= len(assets):
+            raise NotFoundError("media job not found")
+        return job, assets[index]
+
     async def advance(self, job: MediaJob) -> MediaJobView:
         """Advance one already-loaded job (used by the background reconciler, ADR-067)."""
         if job.status in TERMINAL_STATUSES:
@@ -441,7 +454,12 @@ class MediaGenerationService:
                     job_id=job.id,
                     user_id=job.user_id,
                     kind=job.kind,
-                    media_url=assets[0].url,
+                    media_url=public_asset_url(
+                        job_id=job.id,
+                        owner_user_id=job.user_id,
+                        index=0,
+                        stored_url=assets[0].url,
+                    ),
                 )
             return MediaJobView(job=job, assets=assets)
 

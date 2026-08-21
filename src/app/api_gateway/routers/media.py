@@ -16,6 +16,7 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request
+from starlette.responses import StreamingResponse
 
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.deps import (
@@ -24,7 +25,8 @@ from app.deps import (
     get_request_log_writer,
     require_media_generation_configured,
 )
-from app.errors import AppError, RateLimitedError, ValidationFailedError
+from app.errors import AppError, RateLimitedError, UnauthorizedError, ValidationFailedError
+from app.media_generation.asset_proxy import stream_fal_asset
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
@@ -33,6 +35,7 @@ from app.media_generation.catalog import (
 )
 from app.media_generation.cursor import InvalidCursorError, MediaJobCursor
 from app.media_generation.service import MediaGenerationService, MediaJobView
+from app.media_generation.signed_url import public_asset_url, verify_token
 from app.request_logs.service import RequestLogWriter
 from app.schemas.media import (
     ImageGenerationRequest,
@@ -71,8 +74,17 @@ def _job_response(view: MediaJobView) -> MediaJobResponse:
         creditsCharged=job.credits_charged,
         creditsRefunded=job.credits_refunded,
         assets=[
-            MediaAssetSchema(url=a.url, contentType=a.content_type, fileName=a.file_name)
-            for a in view.assets
+            MediaAssetSchema(
+                url=public_asset_url(
+                    job_id=job.id,
+                    owner_user_id=job.user_id,
+                    index=index,
+                    stored_url=a.url,
+                ),
+                contentType=a.content_type,
+                fileName=a.file_name,
+            )
+            for index, a in enumerate(view.assets)
         ],
         error=job.error,
         parentJobId=job.parent_job_id,
@@ -349,8 +361,8 @@ async def list_media_jobs(
     description=(
         "Актуальное состояние задачи. Пока задача не завершена, эндпоинт опрашивает провайдера и "
         "обновляет статус; после `completed`/`failed` отвечает из базы. При `completed` в `assets` "
-        "лежат ссылки на результат, при `failed` — причина в `error`, а кредиты уже возвращены. "
-        "Чужая или несуществующая задача — `404`."
+        "лежат signed-ссылки на результат (наш домен, без JWT на скачивании), при `failed` — "
+        "причина в `error`, а кредиты уже возвращены. Чужая или несуществующая задача — `404`."
     ),
 )
 async def get_media_job(
@@ -362,6 +374,48 @@ async def get_media_job(
     await _rate_limit(current.user_id)
     view = await media.get_job(user_id=current.user_id, job_id=job_id)
     return _job_response(view)
+
+
+@router.api_route(
+    "/jobs/{job_id}/assets/{index}/{token}",
+    methods=["HEAD"],
+    include_in_schema=False,
+)
+@router.get(
+    "/jobs/{job_id}/assets/{index}/{token}",
+    summary="Скачать сгенерированный файл",
+    description=(
+        "Байты готового ассета. Без JWT — авторизация в подписи пути. Передайте `assets[].url` "
+        "как есть: `AVPlayer` заголовок Bearer не шлёт. Поддерживается `Range` (`206`). "
+        "Битый или просроченный токен — `401`; нет файла — `404`. Опросите задачу заново, "
+        "чтобы получить свежую ссылку. `HEAD` на том же пути отдаёт те же заголовки без тела."
+    ),
+    responses={
+        200: {"description": "Полный файл."},
+        206: {"description": "Диапазон байт."},
+        401: {"description": "Битый или просроченный токен."},
+        404: {"description": "Задача или ассет не найдены."},
+    },
+)
+async def download_media_asset(
+    request: Request,
+    media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
+    job_id: Annotated[uuid.UUID, Path(description="Идентификатор задачи генерации.")],
+    index: Annotated[int, Path(ge=0, le=63, description="Индекс ассета в `assets`.")],
+    token: Annotated[str, Path(description="HMAC-токен из `assets[].url`.")],
+) -> StreamingResponse:
+    job, asset = await media.get_stored_asset(job_id=job_id, index=index)
+    if not verify_token(job_id=job.id, owner_user_id=job.user_id, index=index, token=token):
+        raise UnauthorizedError("unauthorized")
+    method: Literal["GET", "HEAD"] = "HEAD" if request.method == "HEAD" else "GET"
+    return await stream_fal_asset(
+        url=asset.url,
+        method=method,
+        range_header=request.headers.get("range"),
+        if_range=request.headers.get("if-range"),
+        content_type_hint=asset.content_type,
+        job_id=str(job.id),
+    )
 
 
 @router.delete(

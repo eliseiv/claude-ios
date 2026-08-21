@@ -2,7 +2,9 @@
 
 ## Аутентификация
 
-Все пять эндпоинтов `/v1/media/*` требуют `Authorization: Bearer <accessToken>` (JWT RS256). Идентичность берётся исключительно из проверенного claim `sub` ([ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)); поля `userId` в телах запросов **нет** — подделать владельца задачи нечем. Нет/невалидный токен → `401 unauthorized`.
+Все эндпоинты `/v1/media/*`, кроме обложек шаблонов и **download ассета**, требуют `Authorization: Bearer <accessToken>` (JWT RS256). Идентичность берётся исключительно из проверенного claim `sub` ([ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)); поля `userId` в телах запросов **нет** — подделать владельца задачи нечем. Нет/невалидный токен → `401 unauthorized`.
+
+`GET`/`HEAD /v1/media/jobs/{jobId}/assets/{index}/{token}` **без JWT** ([ADR-085](../../adr/ADR-085-media-asset-download-proxy.md)): авторизация — HMAC в пути (тот же `PREVIEW_URL_SECRET`, канон `media-asset|{jobId}|{ownerUserId}|{index}|{exp}`). Подпись привязана к владельцу строки `media_jobs`. Битый/просроченный токен → `401`; нет job / нет index / хост stored URL вне allowlist → `404`. Preview-токен на этот роут не принимается.
 
 ## Изоляция владельца
 
@@ -31,6 +33,7 @@
 - `FAL_API_KEY` — не в логах (redaction покрывает `*key*`), не в ответах, не в БД.
 - Тело ответа провайдера наверх не проксируется; исключение — текст `422`, который содержит только имя проблемного параметра (обрезается до 500 символов).
 - Промт пользователя хранится в `media_jobs.prompt` (нужен для листинга) и **не** попадает в структурные логи.
+- Полный URL CDN fal и signed token download-роута не логируются. Исходящий fetch только на хосты из `FAL_UPLOAD_HOST_SUFFIXES`, без follow-redirect.
 
 ## Валидация референсных изображений
 

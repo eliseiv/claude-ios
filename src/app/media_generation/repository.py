@@ -92,6 +92,17 @@ class MediaJobsRepository:
         )
         return row
 
+    async def get_by_id(self, job_id: uuid.UUID) -> MediaJob | None:
+        """Primary-key lookup for the signed download route (ADR-085).
+
+        Owner isolation is the HMAC (jobId + ownerUserId + index), not this query. Same
+        exception class as ``list_non_terminal``: a trusted in-process caller, not a user id.
+        """
+        row: MediaJob | None = await self._session.scalar(
+            select(MediaJob).where(MediaJob.id == job_id)
+        )
+        return row
+
     async def list_for_user(
         self,
         *,

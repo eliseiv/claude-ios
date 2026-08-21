@@ -379,6 +379,9 @@ class Settings(BaseSettings):
         default=15.0, alias="MEDIA_RECONCILE_INTERVAL_SECONDS"
     )
     media_reconcile_batch_size: int = Field(default=50, alias="MEDIA_RECONCILE_BATCH_SIZE")
+    # TTL of the HMAC token in GET /v1/media/jobs/{id}/assets/{index}/{token} (ADR-085).
+    # After expiry the client re-polls the job and gets a fresh URL. Secret is PREVIEW_URL_SECRET.
+    media_download_ttl_seconds: int = Field(default=86400, alias="MEDIA_DOWNLOAD_TTL_SECONDS")
 
     # --- APNs push (ADR-067 / TD-011) ---
     # Empty credentials => device-token CRUD still works; send is a no-op (warning logged).

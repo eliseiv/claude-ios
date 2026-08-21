@@ -17,7 +17,6 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -28,6 +27,7 @@ from app.errors import (
     UpstreamError,
     ValidationFailedError,
 )
+from app.media_generation.asset_hosts import fal_asset_host_allowed
 from app.media_generation.reference import prepare_reference_jpeg
 from app.observability.logging import log_event
 
@@ -163,14 +163,7 @@ class FalClient:
         operator allowlist instead, and require https: a PUT here carries a user's file, and
         sending it to whatever host an upstream body named is worse than not sending it at all.
         """
-        parsed = urlsplit(url)
-        if parsed.scheme != "https" or not parsed.hostname:
-            return False
-        host = parsed.hostname.lower()
-        return any(
-            host == suffix.lstrip(".") or host.endswith(suffix)
-            for suffix in self._settings.fal_upload_host_suffixes()
-        )
+        return fal_asset_host_allowed(url, self._settings.fal_upload_host_suffixes())
 
     async def upload(self, *, content: bytes, media_type: str, file_name: str) -> str:
         """Store a reference image with the provider and return its public https URL (ADR-062).

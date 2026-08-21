@@ -125,6 +125,13 @@ class UpstreamError(AppError):
     code = "upstream_error"
 
 
+class GatewayTimeoutError(AppError):
+    """Outgoing read of a proxied media asset timed out (ADR-085)."""
+
+    status_code = 504
+    code = "gateway_timeout"
+
+
 class ServiceUnavailableError(AppError):
     """A required dependency/feature is not configured (e.g. auth issuer has no private key).
 

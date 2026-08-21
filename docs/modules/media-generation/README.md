@@ -26,7 +26,8 @@
 - ✅ Оба режима в каждом маршруте: text-to-image / image-to-image и text-to-video / image-to-video — переключаются наличием `imageUrls`/`imageUrl`, endpoint провайдера выбирает сервер.
 - ✅ Параметры генерации: `aspectRatio`, `resolution`, `duration`, `numImages`, `outputFormat`, `negativePrompt`, `generateAudio`, `cfgScale`, `seed` — каждый валидируется против набора **режима** до списания.
 - ✅ Цена масштабируется объёмом выпуска: `× numImages` у изображений, `× ceil(duration / baseDurationSeconds)` у видео; баланс проверяется по итоговой цене.
-- ✅ `GET /v1/media/jobs/{jobId}` — опрос провайдера, пока задача не терминальна; `completed` → `assets`, `failed` → `error` + возврат кредитов (идемпотентный).
+- ✅ `GET /v1/media/jobs/{jobId}` — опрос провайдера, пока задача не терминальна; `completed` → `assets` (signed URL на наш домен, [ADR-085](../../adr/ADR-085-media-asset-download-proxy.md)), `failed` → `error` + возврат кредитов (идемпотентный).
+- ✅ `GET`/`HEAD /v1/media/jobs/{jobId}/assets/{index}/{token}` — стрим байтов с fal без JWT; в БД остаётся fal CDN.
 - ✅ `GET /v1/media/jobs` — лента владельца newest-first, read-only (провайдер не опрашивается), фильтр `kind`, курсорная пагинация ([ADR-063](../../adr/ADR-063-media-feed-edit-chains-and-job-deletion.md)).
 - ✅ `DELETE /v1/media/jobs/{jobId}` — убрать завершённую задачу из ленты; `409 job_not_terminal` на незавершённой (иначе некому вернуть кредиты при провале).
 - ✅ Цепочки правок: `sourceJobId` в запросе генерации, `parentJobId`/`inputImageUrls` в объекте задачи.
@@ -37,6 +38,7 @@
 - ✅ Каталог шаблонов галереи: `GET /v1/media/templates/images|videos`, публичный cover GET, admin POST/DELETE с base64-обложкой ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)); seed 5+5; не зависит от `FAL_API_KEY`.
 
 ## Changelog
+- 2026-08-21: прокси ассетов — signed URL вместо голого fal.media, `GET`/`HEAD …/assets/{index}/{token}` — [ADR-085](../../adr/ADR-085-media-asset-download-proxy.md); env `MEDIA_DOWNLOAD_TTL_SECONDS`.
 - 2026-08-11: quiz-like пикер параметров в чате — `media.ask_params` + `mediaChoices`/`mediaSelection` — [ADR-070](../../adr/ADR-070-media-choices-wizard.md); `/v1/media/*` без изменений.
 - 2026-08-11: chat tools `media.generate_image`/`media.generate_video` + `ChatResponse.mediaJobs` — [ADR-068](../../adr/ADR-068-media-generate-chat-tools.md); `/v1/media/*` без изменений.
 - 2026-08-10: каталог шаблонов галереи — `GET /v1/media/templates/images|videos`, cover GET, admin POST/DELETE — [ADR-066](../../adr/ADR-066-media-templates-catalog.md); миграция `0021_media_templates`, seed 5+5.

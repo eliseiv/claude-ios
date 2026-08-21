@@ -11,8 +11,9 @@ GET  /v1/media/models                  → модель, режимы и доп�
 POST /v1/media/uploads                 → 201 { url }   (только если генерируем по своей картинке)
 POST /v1/media/images | /videos        → 202 { jobId, status: "queued", creditsCharged }
 GET  /v1/media/jobs/{jobId}            → опрашивать до status = completed | failed
-                                          completed → assets[].url
+                                          completed → assets[].url (signed URL на наш домен)
                                           failed    → error, кредиты возвращены
+GET  /v1/media/jobs/{jobId}/assets/{i}/{token} → байты файла (без JWT; Range)
 POST /v1/media/images { sourceJobId }  → правка результата предыдущей задачи
 GET  /v1/media/jobs?cursor=…           → лента, новые сверху
 DELETE /v1/media/jobs/{jobId}          → убрать завершённую задачу из ленты
@@ -246,7 +247,9 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 
 Актуальное состояние задачи. Опрашивает провайдера, пока задача не терминальна; после `completed`/`failed` ответ идёт из БД. Параллельно фоновый reconciler ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)) продвигает non-terminal jobs без клиентского poll — нужен для media-ready push, когда iOS заморозил приложение.
 
-При переходе в `completed` (poll или reconciler) бэкенд один раз шлёт APNs (если `notificationsEnabled` + device token + `APNS_*`): custom keys `jobId`, `kind`, `mediaUrl` (= `assets[0].url`), `aps.mutable-content=1`. Deep link — по `jobId` (чата у media нет).
+При `completed` в `assets[].url` — **signed URL на наш домен** (`https://<SERVICE_DOMAIN>/v1/media/jobs/{jobId}/assets/{index}/{token}`), не голый `*.fal.media`. Сырой URL провайдера остаётся в БД (цепочки правок). Пустой `SERVICE_DOMAIN` — относительный путь. Просроченный токен: снова опросите эту ручку — придёт свежая ссылка.
+
+При переходе в `completed` (poll или reconciler) бэкенд один раз шлёт APNs (если `notificationsEnabled` + device token + `APNS_*`): custom keys `jobId`, `kind`, `mediaUrl` (= тот же signed `assets[0].url`), `aps.mutable-content=1`. Deep link — по `jobId` (чата у media нет).
 
 **Ответ `200`:**
 
@@ -260,7 +263,7 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
   "creditsCharged": 4,
   "creditsRefunded": false,
   "assets": [
-    { "url": "https://v3.fal.media/files/…/out.png", "contentType": "image/png", "fileName": "out.png" }
+    { "url": "https://zenquelo.shop/v1/media/jobs/e1f0c8a2-3b4d-4e5f-8a9b-0c1d2e3f4a5b/assets/0/e30.abc", "contentType": "image/png", "fileName": "out.png" }
   ],
   "error": null,
   "parentJobId": null,
@@ -281,7 +284,24 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 
 `contentType` и `fileName` заполняются, только если провайдер их вернул (у видео обычно `null`). `assets` непуст **только** при `completed`.
 
+`inputImageUrls` — исходные https-ссылки (часто fal); их не подменяем, файл забирает сервер для следующей генерации.
+
 **Интервал опроса.** Разумно: изображения — раз в 2 с, видео — раз в 5–10 с. Опрос лимитируется общим per-user rate limit (`RATE_LIMIT_OTHER_PER_USER`), превышение → `429`.
+
+---
+
+## `GET` / `HEAD` `/v1/media/jobs/{jobId}/assets/{index}/{token}`
+
+Байты готового ассета. **Без JWT** — авторизация в HMAC-токене пути (AVPlayer заголовок Bearer не шлёт). Тот же гейт `FAL_API_KEY`, что у остального `/v1/media/*`.
+
+Играйте / скачивайте `assets[].url` как есть. `HEAD` отдаёт те же заголовки без тела. Проброс `Range` / `If-Range` → `206` + `Content-Range` / `Accept-Ranges: bytes`.
+
+- `401` — битый или просроченный токен.
+- `404` — нет задачи, нет `index`, чужой токен не подходит к этой задаче, хост stored URL вне allowlist, файл у провайдера уже истёк.
+- `502` — провайдер недоступен.
+- `504` — таймаут исходящего чтения.
+
+Файл через нас не сохраняется: стрим с CDN fal на лету.
 
 ---
 
@@ -337,15 +357,16 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 
 | Код | HTTP | Когда |
 |---|---|---|
-| `unauthorized` | 401 | нет/невалидный Bearer |
-| `not_found` | 404 | чужая или несуществующая задача (в том числе в `sourceJobId`) |
+| `unauthorized` | 401 | нет/невалидный Bearer; на download-роуте — битый или просроченный signed token |
+| `not_found` | 404 | чужая или несуществующая задача (в том числе в `sourceJobId`); на download — нет index / хост вне allowlist / ассет истёк у провайдера |
 | `job_not_terminal` | 409 | попытка удалить задачу в статусе `queued`/`running` |
 | `insufficient_credits` | 409 | на балансе меньше **итоговой** цены (с учётом `numImages`/`duration`). **Списания не произошло**, задача не создана |
 | `validation_error` | 422 | **только на POST:** неизвестная модель; модель не того типа для маршрута; значение вне набора **режима** (`aspectRatio`/`resolution`/`duration`); параметр, которого у режима нет вовсе; не-`https` URL картинки; больше `maxInputImages` картинок; лишнее поле в теле; `sourceJobId` вместе с `imageUrls`/`imageUrl`; `sourceJobId` на незавершённую задачу, на видео или на задачу без результата; битый `cursor`. Также — если параметры отклонил сам провайдер при приёме (в `message` будет имя проблемного параметра). Отклонение уже принятого запуска приходит не этим кодом, а как `status: "failed"` |
 | `payload_too_large` | 413 | **только на `POST /v1/media/uploads`:** файл или тело запроса больше лимита |
 | `rate_limited` | 429 | превышен per-user лимит или лимит провайдера |
-| `upstream_error` | 502 | провайдер недоступен (таймаут, connect, 5xx, битый ответ). **Кредиты не списаны** — списание откатывается вместе с задачей |
-| `media_generation_not_configured` | 503 | генерация не настроена на инстансе (`FAL_API_KEY` не задан) либо провайдер отклонил ключ. Проблема оператора, не клиента. Так отвечают маршруты постановки/опроса/uploads/`GET /v1/media/models`. **Исключение:** `GET /v1/media/templates/*` и admin CRUD шаблонов не зависят от fal и при пустом ключе остаются доступны ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)) |
+| `upstream_error` | 502 | провайдер недоступен (таймаут, connect, 5xx, битый ответ). **Кредиты не списаны** — списание откатывается вместе с задачей. На download — исходящий fetch fal недоступен |
+| `media_generation_not_configured` | 503 | генерация не настроена на инстансе (`FAL_API_KEY` не задан) либо провайдер отклонил ключ. Проблема оператора, не клиента. Так отвечают маршруты постановки/опроса/uploads/`GET /v1/media/models` и download-роут. **Исключение:** `GET /v1/media/templates/*` и admin CRUD шаблонов не зависят от fal и при пустом ключе остаются доступны ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)) |
+| `gateway_timeout` | 504 | **только download:** исходящее чтение CDN fal превысило таймаут |
 
 **Инварианты биллинга, на которые можно опираться:**
 
