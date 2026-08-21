@@ -68,6 +68,7 @@ _TAG_ORDER = [
     "Tokens",
     "BYOK",
     "Admin",
+    "Admin (CRM)",
     "Preview",
     "Chats",
     "Workspaces",
