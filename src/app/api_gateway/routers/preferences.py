@@ -42,6 +42,8 @@ async def get_preferences(
         defaultAssistantMode=view.default_assistant_mode,
         notificationsEnabled=view.notifications_enabled,
         codeDefaults=view.code_defaults,
+        memoryEnabled=view.memory_enabled,
+        memorySearchScope=view.memory_search_scope,  # type: ignore[arg-type]
     )
 
 
@@ -66,9 +68,13 @@ async def patch_preferences(
         default_assistant_mode=body.defaultAssistantMode,
         notifications_enabled=body.notificationsEnabled,
         code_defaults=body.codeDefaults,
+        memory_enabled=body.memoryEnabled,
+        memory_search_scope=body.memorySearchScope,
     )
     return PreferencesResponse(
         defaultAssistantMode=view.default_assistant_mode,
         notificationsEnabled=view.notifications_enabled,
         codeDefaults=view.code_defaults,
+        memoryEnabled=view.memory_enabled,
+        memorySearchScope=view.memory_search_scope,  # type: ignore[arg-type]
     )

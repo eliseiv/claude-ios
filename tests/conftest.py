@@ -56,6 +56,8 @@ os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
 # ADR-067: disable the background media reconciler in the hermetic suite (poll path is
 # exercised explicitly; a live loop would race fal fakes across tests).
 os.environ["MEDIA_RECONCILE_INTERVAL_SECONDS"] = "0"
+os.environ["MEMORY_EMBEDDING_FAKE"] = "true"
+os.environ["MEMORY_ENABLED"] = "true"
 os.environ["APNS_KEY_ID"] = ""
 os.environ["APNS_TEAM_ID"] = ""
 os.environ["APNS_AUTH_KEY"] = ""
@@ -131,7 +133,7 @@ def make_jwt(
 def pg_url() -> Iterator[str]:
     from testcontainers.postgres import PostgresContainer
 
-    with PostgresContainer("postgres:16-alpine", driver="asyncpg") as pg:
+    with PostgresContainer("pgvector/pgvector:pg16", driver="asyncpg") as pg:
         url = pg.get_connection_url()
         os.environ["DATABASE_URL"] = url
         yield url

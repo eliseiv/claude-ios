@@ -99,6 +99,8 @@ from app.policy.engine import (
     evaluate,
 )
 from app.policy.loader import load_policy_state
+from app.memory.indexer import schedule_delete_from_message_step, schedule_index_turn
+from app.memory.service import MemoryService
 from app.preferences.service import PreferencesService
 from app.schemas.chat import AttachmentIn, GenerationMode
 from app.wallet.service import WalletService
@@ -786,6 +788,7 @@ class _Deps:
     preferences: PreferencesService
     # ADR-036: workspaces context provider (instructions + knowledge files) for workspace chats.
     workspaces: WorkspacesService
+    memory: MemoryService | None = None
 
 
 class ChatOrchestrator:
@@ -801,6 +804,7 @@ class ChatOrchestrator:
         preferences: PreferencesService,
         global_tools: GlobalToolHandlers | None = None,
         workspaces: WorkspacesService | None = None,
+        memory: MemoryService | None = None,
     ) -> None:
         self._session = session
         self._deps = _Deps(
@@ -824,6 +828,7 @@ class ChatOrchestrator:
                 if workspaces is not None
                 else WorkspacesService(WorkspacesRepository(session))
             ),
+            memory=memory,
         )
 
     # ---- public entrypoints ----
@@ -847,6 +852,7 @@ class ChatOrchestrator:
         temporary: bool = False,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
         media_selection: dict[str, Any] | None = None,
+        memory_search: bool | None = None,
     ) -> ChatRunOut:
         message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
         requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
@@ -958,6 +964,7 @@ class ChatOrchestrator:
             if deleted is None:
                 raise MessageNotFoundError("message_not_found")
             await self._deps.repo.clear_provider_state(sess.id)
+            schedule_delete_from_message_step(sess.id, edit_message_step_id)
 
         # ADR-036 §3/§6 + ADR-038 §3: workspace `instructions` live in the `system` param (NOT in
         # history) and MUST be injected on EVERY turn of a session with a workspace — decoupled
@@ -1000,6 +1007,20 @@ class ChatOrchestrator:
                 )
 
         system_prompt = await self._system_prompt_with_last_media_job(sess.id, system_prompt)
+
+        prefs = await self._deps.preferences.get(user_id)
+        if self._deps.memory is not None:
+            memory_block = await self._deps.memory.build_context_for_turn(
+                user_id=user_id,
+                message=message,
+                memory_search=memory_search,
+                memory_enabled=prefs.memory_enabled,
+                memory_search_scope=prefs.memory_search_scope,
+                workspace_project_id=sess.workspace_project_id,
+                exclude_session_id=sess.id,
+            )
+            if memory_block:
+                system_prompt = f"{system_prompt}\n\n{memory_block}"
 
         # ADR-020 / ADR-033 §3,§5: validate inline attachments (provider-aware) and split into
         # (a) the PreparedAttachments handed to the client ONCE on turn 0 — the client builds the
@@ -2455,6 +2476,7 @@ class ChatOrchestrator:
             await self._deps.repo.touch_session(sess)
 
         await self._session.commit()
+        schedule_index_turn(session_id, message_step_id)
         return ChatRunOut(
             status="assistant_message",
             session_id=session_id,

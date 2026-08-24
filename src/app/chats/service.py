@@ -26,6 +26,7 @@ from app.chats.cursor import ChatCursor, ChatHistoryCursor, InvalidCursorError
 from app.chats.provider_blocks import to_domain_blocks
 from app.chats.repository import ChatsRepository, strip_context_block
 from app.errors import NotFoundError, ValidationFailedError, WorkspaceNotFoundError
+from app.memory.indexer import schedule_delete_session_chunks
 from app.models import ChatSession, ChatStep, ToolCall
 from app.workspaces.service import WorkspacesService
 
@@ -605,3 +606,4 @@ class ChatsService:
         if not deleted:
             # Idempotent: a missing/foreign chat (incl. already-deleted) → 404 (chats/02).
             raise NotFoundError("chat not found")
+        schedule_delete_session_chunks(session_id)

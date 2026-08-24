@@ -597,6 +597,7 @@ async def chat_run(
             edit_message_step_id=body.editMessageStepId,
             generation_backend="legacy",
             temporary=body.temporary,
+            memory_search=body.memorySearch,
         )
     except BaseException as exc:
         await request_logs.fail(
@@ -673,6 +674,7 @@ async def chat_v2_run(
             generation_backend="v2",
             temporary=body.temporary,
             media_selection=media_selection,
+            memory_search=body.memorySearch,
         )
     except BaseException as exc:
         await request_logs.fail(
@@ -795,6 +797,7 @@ async def chat_v2_run_stream(
                     temporary=body.temporary,
                     on_text_delta=_on_delta,
                     media_selection=media_selection,
+                    memory_search=body.memorySearch,
                 )
                 await request_logs.finish_chat(
                     log_id,

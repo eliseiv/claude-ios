@@ -496,6 +496,21 @@ class Settings(BaseSettings):
         default=12 * 1024 * 1024, alias="WORKSPACE_REQUEST_BODY_LIMIT"
     )
 
+    # --- Cross-chat RAG memory ---
+    memory_enabled: bool = Field(default=True, alias="MEMORY_ENABLED")
+    memory_embedding_fake: bool = Field(default=False, alias="MEMORY_EMBEDDING_FAKE")
+    memory_embedding_model: str = Field(
+        default="text-embedding-3-small", alias="MEMORY_EMBEDDING_MODEL"
+    )
+    memory_embedding_dimensions: int = Field(default=1536, alias="MEMORY_EMBEDDING_DIMENSIONS")
+    memory_chunk_max_chars: int = Field(default=1500, alias="MEMORY_CHUNK_MAX_CHARS")
+    memory_chunk_overlap_chars: int = Field(default=200, alias="MEMORY_CHUNK_OVERLAP_CHARS")
+    memory_search_top_k: int = Field(default=8, alias="MEMORY_SEARCH_TOP_K")
+    memory_retrieval_max_chars: int = Field(default=8000, alias="MEMORY_RETRIEVAL_MAX_CHARS")
+    memory_explicit_max_chars: int = Field(default=4000, alias="MEMORY_EXPLICIT_MAX_CHARS")
+    memory_explicit_entry_max_chars: int = Field(default=4000, alias="MEMORY_EXPLICIT_ENTRY_MAX_CHARS")
+    memory_hybrid_vector_weight: float = Field(default=0.7, alias="MEMORY_HYBRID_VECTOR_WEIGHT")
+
     # --- DB connection pool (02-tech-stack.md, sized for ~10k users / 2-3 replicas) ---
     # Per-process pool. Effective max conns ≈ (pool_size + max_overflow) * workers * replicas;
     # keep below Postgres max_connections. architect documents the sizing math in docs.

@@ -28,6 +28,7 @@ from app.api_gateway.routers import (
     health,
     media,
     media_templates,
+    memory,
     models,
     notifications,
     policy,
@@ -224,6 +225,13 @@ _OPENAPI_TAGS = [
         ),
     },
     {
+        "name": "Memory",
+        "description": (
+            "Cross-chat RAG-память: семантический поиск по истории (`GET /v1/search`), "
+            "явные факты (`/v1/memories`), toggle в `/v1/preferences`."
+        ),
+    },
+    {
         "name": "Health",
         "description": "Служебные проверки и метрики (без JWT): liveness, readiness, Prometheus.",
     },
@@ -265,6 +273,7 @@ def create_app() -> FastAPI:
         auth,
         chat,
         tools,
+        memory,
         models,
         presets,
         media,

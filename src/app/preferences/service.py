@@ -24,6 +24,8 @@ class PreferencesView:
     default_assistant_mode: str
     notifications_enabled: bool
     code_defaults: dict[str, Any]
+    memory_enabled: bool
+    memory_search_scope: str
 
 
 def _defaults() -> PreferencesView:
@@ -31,6 +33,8 @@ def _defaults() -> PreferencesView:
         default_assistant_mode=DEFAULT_ASSISTANT_MODE,
         notifications_enabled=False,
         code_defaults={},
+        memory_enabled=False,
+        memory_search_scope="global",
     )
 
 
@@ -39,6 +43,8 @@ def _to_view(row: UserPreferences) -> PreferencesView:
         default_assistant_mode=row.default_assistant_mode,
         notifications_enabled=row.notifications_enabled,
         code_defaults=dict(row.code_defaults),
+        memory_enabled=row.memory_enabled,
+        memory_search_scope=row.memory_search_scope,
     )
 
 
@@ -62,9 +68,11 @@ class PreferencesService:
         self,
         user_id: uuid.UUID,
         *,
-        default_assistant_mode: str | None,
-        notifications_enabled: bool | None,
-        code_defaults: dict[str, Any] | None,
+        default_assistant_mode: str | None = None,
+        notifications_enabled: bool | None = None,
+        code_defaults: dict[str, Any] | None = None,
+        memory_enabled: bool | None = None,
+        memory_search_scope: str | None = None,
     ) -> PreferencesView:
         """Upsert preferences, updating only the provided (non-None) fields."""
         row = await self._load(user_id)
@@ -85,6 +93,14 @@ class PreferencesService:
                 code_defaults=(
                     code_defaults if code_defaults is not None else defaults.code_defaults
                 ),
+                memory_enabled=(
+                    memory_enabled if memory_enabled is not None else defaults.memory_enabled
+                ),
+                memory_search_scope=(
+                    memory_search_scope
+                    if memory_search_scope is not None
+                    else defaults.memory_search_scope
+                ),
             )
             self._session.add(row)
         else:
@@ -94,6 +110,10 @@ class PreferencesService:
                 row.notifications_enabled = notifications_enabled
             if code_defaults is not None:
                 row.code_defaults = code_defaults
+            if memory_enabled is not None:
+                row.memory_enabled = memory_enabled
+            if memory_search_scope is not None:
+                row.memory_search_scope = memory_search_scope
         await self._session.flush()
         await self._session.commit()
         return _to_view(row)

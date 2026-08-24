@@ -177,6 +177,13 @@ class ChatRunRequest(StrictModel):
             "на продолжении игнорируется. Такой чат не появляется в `GET /v1/chats`."
         ),
     )
+    memorySearch: bool | None = Field(
+        default=None,
+        description=(
+            "Cross-chat RAG retrieval: `true` — принудительно искать в прошлых диалогах; "
+            "`false` — не искать; `null` — auto-detect по формулировке + `memoryEnabled`."
+        ),
+    )
     history: list[TemporaryTurn] | None = Field(
         default=None,
         description=(

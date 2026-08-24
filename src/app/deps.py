@@ -45,6 +45,7 @@ from app.notifications.push_service import MediaPushService
 from app.notifications.repository import DevicePushTokensRepository
 from app.notifications.service import NotificationsService
 from app.observability.context import set_user_id
+from app.memory.service import MemoryService
 from app.preferences.service import PreferencesService
 from app.profile.service import ProfileService
 from app.request_logs.service import RequestLogWriter
@@ -307,6 +308,13 @@ def get_workspaces_service(session: DbSession) -> WorkspacesService:
     return WorkspacesService(WorkspacesRepository(session))
 
 
+def get_memory_service(session: DbSession) -> MemoryService:
+    return MemoryService(
+        session,
+        workspaces=WorkspacesService(WorkspacesRepository(session)),
+    )
+
+
 def get_orchestrator(session: DbSession) -> ChatOrchestrator:
     audit = AuditService(session)
     website = WebsiteService(session)
@@ -334,6 +342,7 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         preferences=PreferencesService(session),
         # ADR-036: workspace context provider (instructions + knowledge files) for workspace chats.
         workspaces=WorkspacesService(WorkspacesRepository(session)),
+        memory=get_memory_service(session),
     )
 
 
@@ -360,6 +369,7 @@ def get_v2_orchestrator(session: DbSession) -> ChatOrchestrator:
         ),
         preferences=PreferencesService(session),
         workspaces=WorkspacesService(WorkspacesRepository(session)),
+        memory=get_memory_service(session),
     )
 
 

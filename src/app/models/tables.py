@@ -29,6 +29,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import BIGINT, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:  # pragma: no cover - dev without sync dep
+    Vector = None  # type: ignore[misc, assignment]
+
 from app.models.base import Base
 
 # --- Enum value tuples (match CREATE TYPE in 03-data-model.md) ---
@@ -267,6 +272,70 @@ class ChatStep(Base):
     )
 
 
+class ChatChunk(Base):
+    """Indexed chat step fragment for cross-session semantic search (RAG memory)."""
+
+    __tablename__ = "chat_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    chat_step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    message_step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    workspace_project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    session_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("0"))
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[Any] = mapped_column(Vector(1536), nullable=False)  # type: ignore[misc]
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint("chat_step_id", "chunk_index", name="uq_chat_chunks_step_chunk"),
+        Index("ix_chat_chunks_user_created", "user_id", "created_at"),
+        Index("ix_chat_chunks_session", "session_id"),
+        Index("ix_chat_chunks_workspace", "user_id", "workspace_project_id"),
+    )
+
+
+class UserMemory(Base):
+    """Explicit user-provided facts (global or workspace-scoped)."""
+
+    __tablename__ = "user_memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace_projects.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'explicit'"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (Index("ix_user_memories_user", "user_id", "created_at"),)
+
+
 class ToolCall(Base):
     __tablename__ = "tool_calls"
 
@@ -439,6 +508,12 @@ class UserPreferences(Base):
     # Code-context defaults (language etc.); no secrets (validated + redacted).
     code_defaults: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=sa_text("'{}'::jsonb")
+    )
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("false")
+    )
+    memory_search_scope: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=sa_text("'global'")
     )
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now

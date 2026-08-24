@@ -4,7 +4,7 @@
 
 services:
   postgres:
-    image: postgres:16.4-bookworm
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
