@@ -469,7 +469,7 @@ INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elva
 | `corvionet` | `corvionet` | `corvionet.shop` | OpenAI (`LLM_PROVIDER=openai`) | 5-й |
 | `modavira` | `modavira` | `modavira.shop` | Anthropic (`LLM_PROVIDER=anthropic`) | 6-й |
 | `artolixo` | `artolixo` | `artolixo.shop` | Anthropic (`LLM_PROVIDER=anthropic`) | 7-й |
-| `lunexoro` | `lunexoro` | `lunexoro.shop` | Anthropic (`LLM_PROVIDER=anthropic`) | 8-й |
+| `lunexoro` | `lunexoro` | `lunexoro.shop` | OpenAI (`LLM_PROVIDER=openai`) | 8-й |
 | `ravionet` | `ravionet` | `ravionet.shop` | OpenAI (`LLM_PROVIDER=openai`) | 9-й |
 | `vireluma` | `vireluma` | `vireluma.shop` | OpenAI (`LLM_PROVIDER=openai`) | 10-й |
 | `taluneri` | `taluneri` | `taluneri.shop` | OpenAI (`LLM_PROVIDER=openai`) | 11-й |
@@ -481,11 +481,11 @@ INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elva
 | `novirell` | `novirell` | `novirell.shop` | OpenAI (`LLM_PROVIDER=openai`) | 17-й |
 | `selquro` | `selquro` | `selquro.shop` | OpenAI (`LLM_PROVIDER=openai`) | 18-й |
 | `marqelio` | `marqelio` | `marqelio.shop` | OpenAI (`LLM_PROVIDER=openai`) | 19-й |
-| `livonexa` | `livonexa` | не подтверждён — [Q-017-4](99-open-questions.md) | не подтверждён — [Q-017-4](99-open-questions.md) | 20-й |
-| `lumirexa` | `lumirexa` | не подтверждён — [Q-017-4](99-open-questions.md) | не подтверждён — [Q-017-4](99-open-questions.md) | 21-й |
-| `qoravena` | `qoravena` | не подтверждён — [Q-017-4](99-open-questions.md) | не подтверждён — [Q-017-4](99-open-questions.md) | 22-й |
+| `livonexa` | `livonexa` | `livonexa.shop` | OpenAI (`LLM_PROVIDER=openai`) | 20-й |
+| `lumirexa` | `lumirexa` | `lumirexa.shop` | OpenAI (`LLM_PROVIDER=openai`) | 21-й |
+| `qoravena` | `qoravena` | `qoravena.shop` | OpenAI (`LLM_PROVIDER=openai`) | 22-й |
 
-> **Три последние строки внесены задним числом (2026-08-24) — синхронизация docs с workflow.** `dir`/`project`/порядок взяты **посимвольно** из `INSTANCES` обоих workflow (коммиты `ff8ff2e`, `2b690f7` от 2026-08-21 правили только workflow, реестр в `docs/` не обновлялся — расхождение docs↔код держалось три дня). `SERVICE_DOMAIN` и провайдер этих трёх инстансов живут только в `/opt/<dir>/.env` на сервере и **не подтверждены** — они закрываются [Q-017-4](99-open-questions.md) командой сверки, приведённой во врезке выше. Догадка по шаблону `<dir>.shop` в реестр **не вписывается**: колонка домена управляет Traefik-роутером, и неверное значение здесь дороже пустого.
+> **Три последние строки внесены задним числом (2026-08-24) — синхронизация docs с workflow.** `dir`/`project`/порядок взяты **посимвольно** из `INSTANCES` обоих workflow (коммиты `ff8ff2e`, `2b690f7` от 2026-08-21 правили только workflow, реестр в `docs/` не обновлялся — расхождение docs↔код держалось три дня). `SERVICE_DOMAIN` и провайдер живут только в `/opt/<dir>/.env` на сервере; **сверены там же 2026-08-24** и внесены в реестр ([Q-017-4](99-open-questions.md) закрыт) — все три оказались `<dir>.shop` / `LLM_PROVIDER=openai`. Совпадение с шаблоном `<dir>.shop` — результат проверки, а не догадка: до сверки колонка оставалась пустой намеренно, потому что она управляет Traefik-роутером и неверное значение здесь дороже пустого. **Та же сверка вскрыла ошибку в реестре:** `lunexoro` числился Anthropic, а фактически `LLM_PROVIDER=openai` — исправлено. Значит провайдер в реестре не был проверен и для остальных строк: при следующем расхождении сверяйте колонку по `.env`, а не по памяти.
 
 > **Строка таблицы = провизионированный и работающий инстанс, а не цель.** Запись появляется здесь **шагом 9** [§Процедуры провижининга клона](#процедура-провижининга-клона-пошагово-для-devops) — то есть после того, как её шаги 1–8 выполнены (они идут **без** записи в реестре, и это норма) и `GET https://<домен>/healthz` отвечает `200` с этого инстанса. Подготовить правку в рабочем дереве заранее можно; **коммитить/пушить до `healthz 200` — нельзя**. Обратный порядок запрещён: запись, закоммиченная авансом, роняет свою deploy-итерацию на `cd /opt/<dir>` и попадает в `$FAILED` (остальные инстансы при этом не страдают — loop идёт без `set -e`, [§Процедура деплоя](#процедура-деплоя-github-actions--ssh)), то есть каждый прогон CI краснеет по несуществующему каталогу. **Прохождение [prod-checklist](#prod-readiness-checklist-must-configure-before-launch) строкой таблицы НЕ подразумевается** — чек-лист применяется к каждому инстансу отдельно и закрывается независимо от факта работы.
 
