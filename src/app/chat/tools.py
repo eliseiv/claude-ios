@@ -352,11 +352,17 @@ TIME_NOW_TZ_MAX_LENGTH = 64
 
 
 class DocumentCreateArgs(_StrictModel):
-    """Args for document.create (ADR-090 §3)."""
+    """Args for document.create (ADR-090 §3).
 
-    filename: str
-    mediaType: str
-    content: str
+    Все поля НЕОБЯЗАТЕЛЬНЫ, дефолты подставляет обработчик. Причина та же, что у `tz` в
+    `time.now`: пропущенный или кривой аргумент инструмента обязан выродиться в tool-result
+    ошибку, а не уронить ход с `422`. Модель, не приславшая `mediaType`, роняла весь ответ —
+    воспроизведено на проде 2026-08-24.
+    """
+
+    filename: str | None = None
+    mediaType: str | None = None
+    content: str | None = None
 
 
 class DocumentListArgs(_StrictModel):
@@ -364,14 +370,18 @@ class DocumentListArgs(_StrictModel):
 
 
 class DocumentReadArgs(_StrictModel):
-    documentId: str
+    documentId: str | None = None
 
 
 class DocumentUpdateArgs(_StrictModel):
-    """Args for document.update: содержимое заменяется ЦЕЛИКОМ, патча нет (ADR-090 §3)."""
+    """Args for document.update: содержимое заменяется ЦЕЛИКОМ, патча нет (ADR-090 §3).
 
-    documentId: str
-    content: str
+    Необязательность — по той же причине, что и в create: пропуск аргумента даёт tool-result
+    ошибку (обработчик проверит `documentId`), а не `422` на весь ход.
+    """
+
+    documentId: str | None = None
+    content: str | None = None
 
 
 class TimeNowArgs(_StrictModel):

@@ -443,3 +443,21 @@ def test_ordinary_provider_failures_are_not_marked_blocked() -> None:
     assert not _looks_like_provider_content_refusal("body.image_url: Failed to download the file")
     assert not _looks_like_provider_content_refusal("upstream timeout")
     assert not _looks_like_provider_content_refusal("generation produced no output")
+
+
+# --- ADR-090: аргументы инструментов не роняют ход -------------------------------------------
+
+
+def test_document_tool_args_are_all_optional() -> None:
+    """Пропущенный аргумент обязан дать tool-result ошибку, а не 422 на весь ход.
+
+    Реальный случай (2026-08-24, прод): модель не прислала `mediaType`, строгая модель аргументов
+    отвергла вызов, и ответ пользователю не сформировался вовсе. Тот же принцип уже зафиксирован
+    для `tz` в `time.now` (ADR-026 §6).
+    """
+    from app.chat.tools import DocumentCreateArgs, DocumentReadArgs, DocumentUpdateArgs
+
+    assert DocumentCreateArgs().mediaType is None
+    assert DocumentCreateArgs(filename="a").content is None
+    assert DocumentReadArgs().documentId is None
+    assert DocumentUpdateArgs().content is None

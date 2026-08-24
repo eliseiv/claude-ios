@@ -357,6 +357,13 @@ class GlobalToolHandlers:
                 docs = await self._documents.list(user_id=user_id, session_id=session_id)
                 return ToolExecution.ok({"documents": [_doc_brief(d) for d in docs]})
             if tool_name == TOOL_DOCUMENT_CREATE:
+                content = args.get("content")
+                if not content:
+                    # Пустой документ бесполезен и запутает пользователя в списке файлов; модели
+                    # проще досоздать его заново, чем понять, почему файл нулевой.
+                    return ToolExecution.error(
+                        DOCUMENT_INVALID_ERROR_CODE, "content is required and must not be empty"
+                    )
                 view = await self._documents.create(
                     user_id=user_id,
                     session_id=session_id,
