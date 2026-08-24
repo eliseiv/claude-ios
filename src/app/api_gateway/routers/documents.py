@@ -66,6 +66,12 @@ def _content_disposition(filename: str) -> str:
     предпочитают. Разделители пути вырезаны раньше, в сервисе.
     """
     ascii_name = filename.encode("ascii", "ignore").decode("ascii").replace('"', "").strip()
+    # У кириллического имени от ASCII-остатка выживает только расширение («мой отчёт.md» → «.md»),
+    # а файл с именем из одной точки — скрытый на Unix и безымянный в любом UI. Поэтому запас
+    # получает осмысленную основу; настоящее имя всё равно приезжает в filename*.
+    stem, dot, ext = ascii_name.rpartition(".")
+    if not stem:
+        ascii_name = f"document{dot}{ext}" if dot else ""
     fallback = ascii_name or "document"
     quoted = urllib.parse.quote(filename, safe="")
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quoted}"

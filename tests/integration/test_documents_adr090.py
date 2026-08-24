@@ -120,6 +120,10 @@ async def test_download_serves_file(
     assert (
         "filename*=UTF-8''" in disp
     ), "кириллица переживает latin-1 заголовок только через RFC 5987"
+    assert (
+        'filename=".md"' not in disp
+    ), "ASCII-запас не вырождается в одно расширение: файл с именем из точки — скрытый на Unix"
+    assert 'filename="document' in disp, "у запаса осмысленная основа"
 
 
 @pytest.mark.asyncio
