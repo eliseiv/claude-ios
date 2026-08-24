@@ -15,6 +15,12 @@ from app.preferences.service import PreferencesService
 from tests.conftest import auth_headers, seed_user
 
 
+@pytest.fixture(autouse=True)
+def _enable_memory_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MEMORY_ENABLED", "true")
+    get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_search_and_memories_flow(
     client: AsyncClient,

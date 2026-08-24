@@ -82,6 +82,8 @@ from app.errors import (
     ValidationFailedError,
     WorkspaceNotFoundError,
 )
+from app.memory.indexer import schedule_delete_from_message_step, schedule_index_turn
+from app.memory.service import MemoryService
 from app.models import ChatSession, ChatStep, ToolCall
 from app.observability.logging import log_event
 from app.observability.metrics import (
@@ -99,8 +101,6 @@ from app.policy.engine import (
     evaluate,
 )
 from app.policy.loader import load_policy_state
-from app.memory.indexer import schedule_delete_from_message_step, schedule_index_turn
-from app.memory.service import MemoryService
 from app.preferences.service import PreferencesService
 from app.schemas.chat import AttachmentIn, GenerationMode
 from app.wallet.service import WalletService

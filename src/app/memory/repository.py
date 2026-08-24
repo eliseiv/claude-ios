@@ -5,9 +5,9 @@ from __future__ import annotations
 import datetime
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ChatChunk, ChatSession, ChatStep, UserMemory
@@ -183,7 +183,7 @@ class MemoryRepository:
             if anchor_seq is not None:
                 stmt = stmt.where(ChatStep.seq > anchor_seq)
         rows = await self._session.execute(stmt)
-        return list(rows.all())
+        return list(rows.tuples())
 
     async def count_indexed_steps(self, user_id: uuid.UUID) -> int:
         return int(
@@ -268,11 +268,14 @@ class MemoryRepository:
         )
 
     async def delete_memory(self, memory_id: uuid.UUID, user_id: uuid.UUID) -> bool:
-        result = await self._session.execute(
-            delete(UserMemory).where(
-                UserMemory.id == memory_id,
-                UserMemory.user_id == user_id,
-            )
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                delete(UserMemory).where(
+                    UserMemory.id == memory_id,
+                    UserMemory.user_id == user_id,
+                )
+            ),
         )
         return (result.rowcount or 0) > 0
 

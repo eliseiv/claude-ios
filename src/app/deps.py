@@ -40,12 +40,12 @@ from app.media_generation.repository import MediaJobsRepository
 from app.media_generation.service import MediaGenerationService
 from app.media_generation.templates_repository import MediaTemplatesRepository
 from app.media_generation.templates_service import MediaTemplatesService
+from app.memory.service import MemoryService
 from app.notifications.apns_client import ApnsClient
 from app.notifications.push_service import MediaPushService
 from app.notifications.repository import DevicePushTokensRepository
 from app.notifications.service import NotificationsService
 from app.observability.context import set_user_id
-from app.memory.service import MemoryService
 from app.preferences.service import PreferencesService
 from app.profile.service import ProfileService
 from app.request_logs.service import RequestLogWriter

@@ -57,7 +57,7 @@ os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
 # exercised explicitly; a live loop would race fal fakes across tests).
 os.environ["MEDIA_RECONCILE_INTERVAL_SECONDS"] = "0"
 os.environ["MEMORY_EMBEDDING_FAKE"] = "true"
-os.environ["MEMORY_ENABLED"] = "true"
+os.environ["MEMORY_ENABLED"] = "false"
 os.environ["APNS_KEY_ID"] = ""
 os.environ["APNS_TEAM_ID"] = ""
 os.environ["APNS_AUTH_KEY"] = ""

@@ -11,7 +11,10 @@ def test_extract_user_text_strips_context_block() -> None:
         "content": [
             {
                 "type": "text",
-                "text": "[Conversation settings for this message: codeLanguage=swift]\n\nHello SwiftUI",
+                "text": (
+                    "[Conversation settings for this message: codeLanguage=swift]\n\n"
+                    "Hello SwiftUI"
+                ),
             }
         ]
     }
