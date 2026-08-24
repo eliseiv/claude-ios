@@ -115,6 +115,68 @@ class ValidationFailedError(AppError):
     code = "validation_error"
 
 
+# --- Вложения: отдельный code на каждую форму отказа (ADR-089 §3) --------------------------
+# HTTP-статус (422) и текст message СОХРАНЕНЫ дословно: клиенты, разбирающие строку, не ломаются;
+# новые клиенты ветвятся по code. Неизвестный code клиент обязан трактовать как generic-ошибку
+# своего HTTP-статуса (forward-compat, ADR-089 §3).
+
+
+class TooManyAttachmentsError(ValidationFailedError):
+    code = "too_many_attachments"
+
+
+class AttachmentTooLargeError(ValidationFailedError):
+    code = "attachment_too_large"
+
+
+class AttachmentsTotalTooLargeError(ValidationFailedError):
+    code = "attachments_total_too_large"
+
+
+class UnsupportedMediaTypeError(ValidationFailedError):
+    code = "unsupported_media_type"
+
+
+class AttachmentMediaTypeMismatchError(ValidationFailedError):
+    code = "attachment_media_type_mismatch"
+
+
+class InvalidBase64Error(ValidationFailedError):
+    code = "invalid_base64"
+
+
+class PdfUnreadableError(ValidationFailedError):
+    code = "pdf_unreadable"
+
+
+class PdfTooManyPagesError(ValidationFailedError):
+    code = "pdf_too_many_pages"
+
+
+class ContentPolicyViolationError(ValidationFailedError):
+    """422 content_policy_violation: тело схемно валидно, отвергнут КОНТЕНТ (ADR-086 §9).
+
+    Код намеренно отличается от validation_error — это было прямым требованием багрепорта.
+    Категории провайдера в тело ошибки НЕ кладутся: это подсказка, как обойти фильтр.
+    """
+
+    code = "content_policy_violation"
+
+
+class ModerationUnavailableError(AppError):
+    """503 moderation_unavailable: провайдер модерации недоступен, fail-closed (ADR-086 §7)."""
+
+    status_code = 503
+    code = "moderation_unavailable"
+
+
+class ModerationNotConfiguredError(AppError):
+    """503 moderation_not_configured: MODERATION_ENABLED=true, но ключ не резолвится."""
+
+    status_code = 503
+    code = "moderation_not_configured"
+
+
 class RateLimitedError(AppError):
     status_code = 429
     code = "rate_limited"

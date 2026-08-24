@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import uuid
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -41,6 +42,7 @@ from app.media_generation.service import MediaGenerationService
 from app.media_generation.templates_repository import MediaTemplatesRepository
 from app.media_generation.templates_service import MediaTemplatesService
 from app.memory.service import MemoryService
+from app.moderation import ModerationService
 from app.notifications.apns_client import ApnsClient
 from app.notifications.push_service import MediaPushService
 from app.notifications.repository import DevicePushTokensRepository
@@ -250,6 +252,16 @@ def get_media_push_service(session: DbSession) -> MediaPushService:
     return MediaPushService(session, apns=get_apns_client())
 
 
+@lru_cache(maxsize=1)
+def get_moderation_service() -> ModerationService:
+    """Единственный экземпляр клиента модерации на процесс (ADR-086).
+
+    Кэшируется как прочие исходящие клиенты: HTTP-пул и настройки не зависят от запроса, а
+    пересоздание клиента на каждый вызов стоило бы нового соединения на горячем пути генерации.
+    """
+    return ModerationService(settings=get_settings())
+
+
 def get_media_generation_service(
     session: DbSession,
     request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
@@ -264,6 +276,7 @@ def get_media_generation_service(
         settings=get_settings(),
         push=get_media_push_service(session),
         request_logs=request_logs,
+        moderation=get_moderation_service(),
     )
 
 
@@ -343,6 +356,8 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         # ADR-036: workspace context provider (instructions + knowledge files) for workspace chats.
         workspaces=WorkspacesService(WorkspacesRepository(session)),
         memory=get_memory_service(session),
+        # ADR-086 §3: модерация хода с вложениями — до записи шага и до вызова LLM.
+        moderation=get_moderation_service(),
     )
 
 
@@ -370,6 +385,8 @@ def get_v2_orchestrator(session: DbSession) -> ChatOrchestrator:
         preferences=PreferencesService(session),
         workspaces=WorkspacesService(WorkspacesRepository(session)),
         memory=get_memory_service(session),
+        # ADR-086 §3: модерация хода с вложениями — до записи шага и до вызова LLM.
+        moderation=get_moderation_service(),
     )
 
 

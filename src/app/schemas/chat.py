@@ -26,6 +26,31 @@ AttachmentMediaType = Literal[
 ]
 
 
+def _mib(value: int) -> str:
+    """Человекочитаемый размер для OpenAPI-описаний."""
+    return f"{value / (1024 * 1024):.10g} MiB"
+
+
+def _attachment_limits_text() -> str:
+    """Действующие лимиты вложений — ВЫЧИСЛЯЮТСЯ из Settings (08-api-documentation.md R9).
+
+    Числа в описании обязаны приходить из того же источника, что и проверки, иначе документация
+    начинает врать при первой калибровке (ровно это и произошло: лимиты пришлось искать перебором).
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    return (
+        f"Лимиты (по декодированным байтам): изображение ≤ {_mib(s.attachment_max_bytes_image)}, "
+        f"документ (PDF) ≤ {_mib(s.attachment_max_bytes_document)}, "
+        f"суммарно все вложения хода ≤ {_mib(s.attachment_total_bytes)}, "
+        f"не более {s.attachment_max_count} вложений за ход, "
+        f"страниц в PDF ≤ {s.attachment_pdf_max_pages}. "
+        f"Всё тело запроса ≤ {_mib(s.attachment_request_body_limit)} → иначе "
+        "`413 payload_too_large`."
+    )
+
+
 class AttachmentIn(StrictModel):
     """Вложение в base64. Только inline base64 — ссылки (URL) не принимаются."""
 
@@ -45,7 +70,10 @@ class AttachmentIn(StrictModel):
     )
     data: str = Field(
         min_length=1,
-        description="Содержимое файла в base64. Только inline base64 — URL запрещены.",
+        description=(
+            "Содержимое файла в base64. Только inline base64 — URL запрещены. "
+            + _attachment_limits_text()
+        ),
     )
 
 
@@ -136,9 +164,12 @@ class ChatRunRequest(StrictModel):
     attachments: list[AttachmentIn] | None = Field(
         default=None,
         description=(
-            "Вложения в base64 (фото/PDF/текст), отправляемые модели только в первом "
-            "сообщении. Опционально. Только base64, URL запрещены. В `/v1/chat/tool-result` не "
-            "принимаются."
+            "Вложения в base64 (фото/PDF/текст) для ЭТОГО хода. Принимаются на ЛЮБОМ ходу "
+            "сессии — не только в первом сообщении чата. Модель видит их в том ходе, в котором "
+            "они присланы; на следующих ходах они не пересылаются (в истории остаётся текстовый "
+            "плейсхолдер) и при `editMessageStepId` не наследуются — чтобы регенерация снова "
+            "учитывала файл, приложите его заново. В `/v1/chat/tool-result` не принимаются. "
+            "Опционально. Только base64, URL запрещены. " + _attachment_limits_text()
         ),
     )
     context: dict[str, Any] | None = Field(

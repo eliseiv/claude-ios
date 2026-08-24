@@ -4,6 +4,8 @@ JWT, владелец = `sub`.
 
 > **Статус транспорта (важно).** Активный MVP-транспорт вложений — **inline base64** в `POST /v1/chat/run` ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)), а не двухшаговый upload ниже. Описанный в этом файле `POST /v1/attachments` (multipart) — спроектированный, но **отложенный** путь ([ADR-014](../../adr/ADR-014-multimodal-attachments.md) → Superseded для транспорта; [TD-015](../../100-known-tech-debt.md)). Канонический контракт inline-вложений — [chat-orchestrator/02-api-contracts.md](../chat-orchestrator/02-api-contracts.md) и [API-REFERENCE.md §Вложения](../../API-REFERENCE.md).
 >
+> **Действующие лимиты и коды ошибок inline-вложений — НЕ в этом файле.** Значения ниже относятся к **отложенной** двухшаговой модели и не описывают работающий MVP. Канонические лимиты (число, размер по классу, суммарный, PDF-страницы, transport-лимит тела) и разведённые `error.code` — [chat-orchestrator/02-api-contracts.md §Лимиты вложений](../chat-orchestrator/02-api-contracts.md#лимиты-вложений-adr-089) и [ADR-089](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md). Контракт «на каком ходе принимаются» — [ADR-088](../../adr/ADR-088-attachments-per-turn-contract.md). Модерация UGC — [ADR-086](../../adr/ADR-086-ugc-moderation.md).
+>
 > **PDF на обоих провайдерах.** Класс `document` (`application/pdf`) принимается и на anthropic (нативный `document`-блок), и на OpenAI (content-часть `file` или извлечённый `pypdf`-текст — фолбэк) — [ADR-041](../../adr/ADR-041-openai-native-pdf-attachment.md), закрывает [TD-023](../../100-known-tech-debt.md). Маппинг провайдер-aware ([ADR-033 §5](../../adr/ADR-033-llm-provider-abstraction.md)).
 
 ## POST /v1/attachments

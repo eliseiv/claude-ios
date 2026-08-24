@@ -63,8 +63,10 @@ flowchart TB
     end
 ```
 
-## Модули (18 + наблюдаемость)
-> 9 базовых/реализованных (1–9) + 8 расширения Figma-gap (10–17, спроектированы — backend по спринтам, см. [figma-gap-analysis.md](figma-gap-analysis.md)) + Auth (18, встроенный issuer — спроектирован, [ADR-018](adr/ADR-018-embedded-auth-issuer.md)).
+## Модули
+> 9 базовых/реализованных (1–9) + 8 расширения Figma-gap (10–17, см. [figma-gap-analysis.md](figma-gap-analysis.md)) + Auth (18, встроенный issuer, [ADR-018](adr/ADR-018-embedded-auth-issuer.md)) + модули, добавленные позже (19+).
+>
+> **Число модулей здесь намеренно НЕ фиксируется цифрой в заголовке** (прежнее «18 + наблюдаемость» протухло молча — каталог модулей рос, заголовок нет). Единственный первоисточник состава — каталог [`docs/modules/`](modules/); таблица ниже — его читаемая проекция.
 
 | # | Модуль | Ответственность | Документация |
 |---|---|---|---|
@@ -86,7 +88,11 @@ flowchart TB
 | 16 | **Token Purchase** | Consumable StoreKit IAP → идемпотентный grant кредитов ([ADR-015](adr/ADR-015-consumable-token-iap.md)), отдельно от подписки. | [modules/token-purchase](modules/token-purchase/README.md) |
 | 17 | **Notifications** | Toggle (в preferences) + регистрация APNs device-токена. Отправка push → [TD-011](100-known-tech-debt.md). | [modules/notifications](modules/notifications/README.md) |
 | 18 | **Auth** | **Встроенный issuer** ([ADR-018](adr/ADR-018-embedded-auth-issuer.md), закрывает [Q-005-1](99-open-questions.md)): выпуск RS256 JWT (`/v1/auth/register|token|refresh`, `jwks`), device-based identity, refresh-rotation. **Sign in with Apple** ([ADR-043](adr/ADR-043-sign-in-with-apple.md), закрывает [Q-018-2](99-open-questions.md)): `/v1/auth/apple` — верификация Apple identity token → НАША пара, кросс-девайс аккаунт (`auth_identities`). Верификация НАШИХ токенов — существующим `JwtVerifier` (API Gateway). | [modules/auth](modules/auth/README.md) |
+| 19 | **Media Generation** | Генерация изображений и видео через fal.ai ([ADR-060](adr/ADR-060-media-generation-fal.md)): каталог моделей, постановка задачи со списанием кредитов, опрос до терминала с возвратом при провале, лента, прокси ассетов по signed URL ([ADR-085](adr/ADR-085-media-asset-download-proxy.md)). Активируется per-instance (`FAL_API_KEY`). | [modules/media-generation](modules/media-generation/README.md) |
+| — | **Moderation (cross-cutting)** | Проверка пользовательского контента перед платной операцией и перед выдачей результата ([ADR-086](adr/ADR-086-ugc-moderation.md)): один провайдер (`omni-moderation-latest`) на чат-вложения, промпты/референсы генерации и результаты image-генерации. **Не зависит от `LLM_PROVIDER`**, собственного API наружу не имеет, вердикт отдаётся полем `moderation` задачи и кодом `content_policy_violation`. | [ADR-086](adr/ADR-086-ugc-moderation.md), [05-security.md §Модерация UGC](05-security.md#модерация-пользовательского-контента-ugc-adr-086) |
 | — | **Observability** | Cross-cutting: метрики, структурированные логи с correlation id, трейсы, алерты. | этот документ + [05-security.md](05-security.md) |
+
+> Таблица не перечисляет все пакеты `src/app/` (billing-adapty, billing-cloudpayments, memory, request_logs/CRM и др. описаны собственными модульными ТЗ в [`docs/modules/`](modules/)) — состав смотреть там.
 
 > **Расширение Figma-gap (2026-06-02):** модули 10–17 добавлены по результатам [figma-gap-analysis.md](figma-gap-analysis.md). Это внутренние пакеты монолита (не сервисы). Биллинг/policy/tool-loop инварианты сохранены. Терминология: `assistant_mode` (тип ассистента chat/code) ≠ `billing_mode` (= `chat_sessions.mode`, оплата credits/byok) — [ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md); workspace-проекты ≠ website-builder `projects` — [ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md).
 
@@ -96,6 +102,7 @@ flowchart TB
 - **Wallet** — единственный, кто пишет в `ledger_transactions` и `wallets`. Атомарность через транзакцию БД + idempotency key.
 - **BYOK** — единственный, кто расшифровывает ключи; отдаёт plaintext ключ только Chat Orchestrator in-memory на время вызова, не логирует.
 - **Audit** — только append. Никто не редактирует/удаляет audit-записи.
+- **Moderation** ([ADR-086](adr/ADR-086-ugc-moderation.md)) — cross-cutting сервис без собственного API. Вызывается ровно из четырёх мест: `ChatOrchestrator.run` (ход с вложениями), `MediaGenerationService.submit` (промпт + клиентские референсы, **до** `wallet.consume`), `MediaGenerationService._advance` (результат image-генерации, **после** списания ⇒ с возвратом кредитов), `MediaGenerationService.upload_reference_image`. Больше ниоткуда: единственные точки вызова — условие того, что модерацию нельзя обойти, отправив запрос «мимо» слоя.
 
 ## Основной поток /v1/chat/run
 
@@ -109,8 +116,16 @@ sequenceDiagram
     participant A as Anthropic
     participant AU as Audit
 
-    C->>GW: POST /v1/chat/run (JWT, mode, message)
+    participant M as Moderation
+    C->>GW: POST /v1/chat/run (JWT, mode, message[, attachments])
     GW->>GW: auth (JWT) + lazy provisioning users (upsert ON CONFLICT DO NOTHING, ADR-007) + rate limit + validate + size limits (генерация correlation X-Request-Id)
+    opt ход С вложениями (ADR-086)
+        O->>M: moderate(текст + text-вложения + все изображения)
+        alt отклонено
+            M-->>GW: content_policy_violation
+            GW-->>C: 422 {error.code: content_policy_violation}  // шаг не записан, кредит не списан
+        end
+    end
     GW->>P: evaluate(userId, mode)
     alt blocked
         P-->>GW: blocked(blockReason)
@@ -130,6 +145,10 @@ sequenceDiagram
         GW-->>C: 200 {status, sessionId, ...}
     end
 ```
+
+> **Диаграмма выше — полный порядок хода, включая шаг модерации ([ADR-086](adr/ADR-086-ugc-moderation.md)).** Модерация вызывается **только** на ходе с непустым `attachments[]`, **после** валидации вложений и **до** записи user-шага (то есть до Policy и до вызова провайдера). Ход без вложений идёт как раньше. Отказ — технический `422 content_policy_violation`, **не** бизнес-`blocked`: он описывает содержимое запроса, а не права пользователя, поэтому в `blockReason` не входит и правило «blocked = 200» ([ADR-004](adr/ADR-004-blocked-http-200.md)) на него не распространяется.
+>
+> **Контраст с media-генерацией (обе стороны помечены).** В чате списание идёт **после** успешной генерации, поэтому «модерация до списания» там выполняется автоматически. В `/v1/media/*` кредиты списываются **на сабмите**, поэтому там порядок «модерация → `wallet.consume`» — явный нормативный инвариант ([ADR-086 §4](adr/ADR-086-ugc-moderation.md), [media-generation/03-architecture.md](modules/media-generation/03-architecture.md)), а результат дополнительно проверяется **после** списания и потому обязан возвращать кредиты. Правило одного потока на другой не переносить.
 
 ## Tool-loop поток
 

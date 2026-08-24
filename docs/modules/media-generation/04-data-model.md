@@ -2,6 +2,8 @@
 
 Одна таблица — `media_jobs` (миграция `0018_media_jobs`, down_revision `0017_subscription_will_renew`; миграция `0019_media_edit_chain` добавляет цепочку правок, single head). Существующие таблицы не изменяются: списание и возврат кредитов идут через существующий `WalletService` и ложатся в `ledger_transactions`.
 
+Колонка `moderation` добавляется **отдельной expand-only миграцией** ([ADR-086](../../adr/ADR-086-ugc-moderation.md)); номер ревизии определяется на момент реализации (следующий свободный, single head сохраняется). Backfill не выполняется: у старых строк `moderation IS NULL`, и это честно означает «не проверялось».
+
 ## `media_jobs`
 
 | Колонка | Тип | Описание |
@@ -20,7 +22,8 @@
 | `credits_refunded` | `boolean` NOT NULL default `false` | вернулись ли кредиты (только у `failed`) |
 | `parent_job_id` | `uuid` NULL FK → `media_jobs(id)` ON DELETE SET NULL | из результата какой задачи сделана эта ([ADR-063 §2](../../adr/ADR-063-media-feed-edit-chains-and-job-deletion.md)). `SET NULL`, а не `CASCADE`: удаление исходника убирает его из ленты, но не стирает выросшие из него правки |
 | `input_image_urls` | `jsonb` NULL | ссылки, реально ушедшие на вход. Хранится, а не выводится из родителя: родителя могут удалить, а «из чего сделано» лента показывать обязана |
-| `result` | `jsonb` NULL | **нормализованный** результат `{assets: [{url, contentType, fileName}], description?, seed?}` — не сырое тело провайдера |
+| `result` | `jsonb` NULL | **нормализованный** результат `{assets: [{url, contentType, fileName}], description?, seed?}` — не сырое тело провайдера. При блокировке пост-модерацией пишется `{"assets": []}` (ассеты отбрасываются, [ADR-086 §5](../../adr/ADR-086-ugc-moderation.md)) |
+| `moderation` | `jsonb` NULL | вердикт модерации ([ADR-086 §10](../../adr/ADR-086-ugc-moderation.md)): `{status, stage, categories, checkedAt, provider, model}`. `NULL` = **не проверялось** (строка создана до ADR-086 либо `MODERATION_ENABLED=false`) и отдаётся клиенту как `status: "unchecked"` — никогда как `passed` |
 | `error` | `text` NULL | причина провала, ≤ 500 символов |
 | `created_at` | `timestamptz` NOT NULL default `now()` | постановка в очередь |
 | `updated_at` | `timestamptz` NOT NULL default `now()` | последний переход состояния |
@@ -44,6 +47,8 @@
 | Операция | Ключ | Тип записи | `meta.source` |
 |---|---|---|---|
 | списание при постановке | `media-gen:{jobId}` | `debit` | `media_generation` |
-| возврат при провале | `media-refund:{jobId}` | `credit` | `media_generation_refund` |
+| возврат при провале **или при блокировке результата модерацией** | `media-refund:{jobId}` | `credit` | `media_generation_refund` |
 
 Один `jobId` ⇒ не более одного списания и не более одного возврата, сколько бы раз клиент ни повторил запрос или опрос.
+
+**Отдельного namespace под возврат по модерации нет намеренно** ([ADR-086 §5](../../adr/ADR-086-ugc-moderation.md)): у одной задачи возможна ровно одна причина возврата (она терминальна), и общий ключ гарантирует, что «провал у провайдера» и «блокировка результата» не сложатся в два начисления.

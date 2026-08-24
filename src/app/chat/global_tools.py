@@ -47,8 +47,11 @@ from app.chat.tools import (
     content_free_args_error,
 )
 from app.errors import (
+    ContentPolicyViolationError,
     InsufficientCreditsError,
     MediaGenerationNotConfiguredError,
+    ModerationNotConfiguredError,
+    ModerationUnavailableError,
     NotFoundError,
     PayloadTooLargeError,
     UpstreamError,
@@ -72,6 +75,13 @@ MEDIA_INVALID_ERROR_CODE = "invalid_media_request"
 MEDIA_NOT_CONFIGURED_ERROR_CODE = "media_not_configured"
 MEDIA_INSUFFICIENT_CREDITS_ERROR_CODE = "insufficient_credits"
 MEDIA_UPSTREAM_ERROR_CODE = "media_upstream_error"
+# ADR-086 §9: отказ модерации на пути chat-tools ход НЕ роняет — модель получает tool-result
+# error и может переформулировать промпт. Контраст: на REST-пути /v1/media/* тот же отказ —
+# жёсткий 422/503, потому что там нет модели, которая переформулирует, а есть клиент, которому
+# нужен машиночитаемый отказ.
+MEDIA_CONTENT_POLICY_ERROR_CODE = "content_policy_violation"
+MEDIA_MODERATION_UNAVAILABLE_ERROR_CODE = "moderation_unavailable"
+MEDIA_MODERATION_NOT_CONFIGURED_ERROR_CODE = "moderation_not_configured"
 
 # Cap auto-uploads from chat attachments (matches media.generate_image imageUrls max).
 _TURN_IMAGE_UPLOAD_MAX = 14
@@ -172,6 +182,21 @@ class GlobalToolHandlers:
                     data=img.data,
                 )
                 urls.append(uploaded.url)
+        except ContentPolicyViolationError:
+            return ToolExecution.error(
+                MEDIA_CONTENT_POLICY_ERROR_CODE,
+                "изображение отклонено правилами контента",
+            )
+        except ModerationUnavailableError:
+            return ToolExecution.error(
+                MEDIA_MODERATION_UNAVAILABLE_ERROR_CODE,
+                "проверка контента временно недоступна; попробуйте позже",
+            )
+        except ModerationNotConfiguredError:
+            return ToolExecution.error(
+                MEDIA_MODERATION_NOT_CONFIGURED_ERROR_CODE,
+                "проверка контента не настроена на этом инстансе",
+            )
         except PayloadTooLargeError as exc:
             return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, str(exc)[:400])
         except ValidationFailedError as exc:
@@ -371,6 +396,25 @@ class GlobalToolHandlers:
                 image_urls=image_urls,
                 params=params,
                 source_job_id=source_job_id,
+            )
+        except ContentPolicyViolationError:
+            # ДО ValidationFailedError: ContentPolicyViolationError — его подкласс, и общая ветка
+            # перехватила бы отказ модерации раньше, отдав generic invalid_media_request.
+            return ToolExecution.error(
+                MEDIA_CONTENT_POLICY_ERROR_CODE,
+                "запрос отклонён правилами контента: переформулируйте описание",
+            )
+        except ModerationUnavailableError:
+            # Ход не роняем: потерять весь ход из-за аварии провайдера модерации хуже, чем вернуть
+            # модели ошибку инструмента — она сообщит пользователю и предложит повторить.
+            return ToolExecution.error(
+                MEDIA_MODERATION_UNAVAILABLE_ERROR_CODE,
+                "проверка контента временно недоступна; попробуйте позже",
+            )
+        except ModerationNotConfiguredError:
+            return ToolExecution.error(
+                MEDIA_MODERATION_NOT_CONFIGURED_ERROR_CODE,
+                "проверка контента не настроена на этом инстансе",
             )
         except MediaGenerationNotConfiguredError:
             return ToolExecution.error(

@@ -77,13 +77,13 @@ class Settings(BaseSettings):
         alias="OPENAI_API_KEY_BACKUP",
         validation_alias=AliasChoices("OPENAI_API_KEY_BACKUP", "OPEN_AI_BACK_UP_API_KEY"),
     )
-    openai_model: str = Field(default="gpt-4o", alias="OPENAI_MODEL")
+    openai_model: str = Field(default="gpt-4.1", alias="OPENAI_MODEL")
     # Output budget per call (parity with ANTHROPIC_MAX_TOKENS=16000).
     openai_max_tokens: int = Field(default=16000, alias="OPENAI_MAX_TOKENS")
     openai_timeout_seconds: float = Field(default=120.0, alias="OPENAI_TIMEOUT_SECONDS")
     openai_max_retries: int = Field(default=2, alias="OPENAI_MAX_RETRIES")
     # BYOK active model reported when keyStatus=valid on an OpenAI instance (ADR-016/ADR-033 §7).
-    openai_byok_default_model: str = Field(default="gpt-4o", alias="OPENAI_BYOK_DEFAULT_MODEL")
+    openai_byok_default_model: str = Field(default="gpt-4.1", alias="OPENAI_BYOK_DEFAULT_MODEL")
 
     # --- Anthropic ---
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
@@ -444,6 +444,11 @@ class Settings(BaseSettings):
 
     # --- Size limits in bytes (Q-003-2 defaults, TD-004) ---
     size_limit_body: int = Field(default=512 * 1024, alias="SIZE_LIMIT_BODY")
+    # ADR-089 §2: сколько байт тела дочитать и отбросить перед отдачей 413, чтобы клиент успел
+    # дописать запрос и ПРОЧИТАТЬ ответ. Без drain закрытие сокета на середине аплоада и есть тот
+    # broken pipe, который приложение показывает как «нет связи». Бюджет ограничен: безлимитный
+    # drain отменял бы смысл самого лимита.
+    size_limit_drain_bytes: int = Field(default=1024 * 1024, alias="SIZE_LIMIT_DRAIN_BYTES")
     size_limit_message: int = Field(default=32 * 1024, alias="SIZE_LIMIT_MESSAGE")
     size_limit_context: int = Field(default=64 * 1024, alias="SIZE_LIMIT_CONTEXT")
     size_limit_tool_result: int = Field(default=256 * 1024, alias="SIZE_LIMIT_TOOL_RESULT")
@@ -495,6 +500,29 @@ class Settings(BaseSettings):
     workspace_request_body_limit: int = Field(
         default=12 * 1024 * 1024, alias="WORKSPACE_REQUEST_BODY_LIMIT"
     )
+
+    # --- Модерация UGC (ADR-086) ---------------------------------------------------------
+    # Пре-модерация промптов/референсов/вложений и пост-модерация результата фото-генерации
+    # через OpenAI omni-moderation. Fail-closed по умолчанию (§7): цена пропуска непроверенного
+    # UGC несимметрична цене временной недоступности двух поверхностей.
+    moderation_enabled: bool = Field(default=True, alias="MODERATION_ENABLED")
+    # SECRET. Пусто → фолбэк на OPENAI_API_KEY. На anthropic-инстансах обязателен явно.
+    moderation_api_key: str = Field(default="", alias="MODERATION_API_KEY")
+    moderation_model: str = Field(default="omni-moderation-latest", alias="MODERATION_MODEL")
+    # Фиксированный хост исходящего вызова (SSRF-guard): берётся из конфига, не из запроса.
+    moderation_base_url: str = Field(
+        default="https://api.openai.com/v1", alias="MODERATION_BASE_URL"
+    )
+    moderation_timeout_seconds: float = Field(default=10.0, alias="MODERATION_TIMEOUT_SECONDS")
+    moderation_max_retries: int = Field(default=1, alias="MODERATION_MAX_RETRIES")
+    moderation_block_categories_raw: str = Field(
+        default="sexual,sexual/minors,violence/graphic,self-harm,self-harm/intent,"
+        "self-harm/instructions",
+        alias="MODERATION_BLOCK_CATEGORIES",
+    )
+    moderation_text_max_chars: int = Field(default=4000, alias="MODERATION_TEXT_MAX_CHARS")
+    # Аварийный переключатель оператора (§7). true = осознанное снижение соответствия сторам.
+    moderation_fail_open: bool = Field(default=False, alias="MODERATION_FAIL_OPEN")
 
     # --- Cross-chat RAG memory ---
     memory_enabled: bool = Field(default=True, alias="MEMORY_ENABLED")
@@ -985,6 +1013,29 @@ class Settings(BaseSettings):
                 seen.add(model_id)
                 rows.append((model_id, display_name, False, provider))
         return rows
+
+    def moderation_api_key_resolved(self) -> str:
+        """Ключ модерации: явный MODERATION_API_KEY, иначе фолбэк на OPENAI_API_KEY (ADR-086 §11).
+
+        Пусто ⇒ на инстансе с MODERATION_ENABLED=true модерируемые поверхности отдают
+        503 moderation_not_configured (проблема оператора, не пользователя).
+        """
+        explicit = self.moderation_api_key.strip()
+        return explicit or self.openai_api_key.strip()
+
+    def moderation_block_categories(self) -> frozenset[str]:
+        """BLOCK-набор категорий (ADR-086 §6).
+
+        ``sexual/minors`` входит ВСЕГДА, даже если оператор удалил её из env — это не
+        настраиваемая политика.
+        """
+        parsed = {
+            item.strip().lower()
+            for item in self.moderation_block_categories_raw.split(",")
+            if item.strip()
+        }
+        parsed.add("sexual/minors")
+        return frozenset(parsed)
 
     def byok_default_model_for(self, provider: str) -> str:
         """BYOK default model for a SPECIFIC provider (ADR-044 §5/§6, ADR-016).

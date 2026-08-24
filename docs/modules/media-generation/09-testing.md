@@ -54,6 +54,34 @@
 
 **Листинг и изоляция:** newest-first, без опроса провайдера; фильтр `kind`; чужая задача → `404` и отсутствует в списке; несуществующая → `404`; `401` на JWT-маршрутах.
 
+### Модерация UGC ([ADR-086](../../adr/ADR-086-ugc-moderation.md))
+
+Клиент модерации подменяется на границе HTTP так же, как fal (surgical monkeypatch внутри модуля модерации) — по сети тесты не ходят.
+
+**Пре-модерация (вход).**
+- Отклонённый промпт → `422 content_policy_violation`; **баланс не изменился**, строки `media_jobs` нет, исходящего вызова к fal **не было**. Тот же набор проверок — для отклонённого `imageUrls`/`imageUrl` и для `POST /v1/media/uploads`.
+- **Diff-тест порядка (обязателен):** перенос вызова модерации **после** `wallet.consume` обязан ронять тест — иначе спецификация «до списания» ничем не залочена и повторится дефект из BUG-006. Проверяется наблюдаемым фактом: при отклонении баланс равен исходному.
+- Изображения, подставленные из `sourceJobId`, **не** уходят в модерацию (счётчик вызовов провайдера модерации = 1 на промпт, а не 1+N).
+- Тело ошибки **не содержит** названий сработавших категорий (анти-эвейд), но задача, прошедшая проверку, несёт их в `moderation.categories` при `flagged`.
+
+**Пост-модерация (выход).**
+- `COMPLETED` + вердикт `blocked` → `status: "failed"`, `assets: []`, `error: "content_policy_violation"`, `creditsRefunded: true`, `moderation.status: "blocked"`; повторный опрос **не** возвращает кредиты второй раз (ключ `media-refund:{jobId}`); media-ready push **не** отправлен.
+- **Ассеты не достижимы:** после блокировки signed-URL download-роут по `index=0` отдаёт `404` (в `result` ассетов нет). Тест обязан падать, если реализация сохранит `assets` и лишь пометит вердикт.
+- `COMPLETED` + `flagged` → `status: "completed"`, ассеты выданы, `creditsRefunded: false`, `moderation.status: "flagged"`.
+- `kind=video` → пост-модерация не вызывается вовсе (счётчик вызовов провайдера на опросе = 0), `moderation.stage` остаётся `input`.
+
+**Отказ провайдера модерации.**
+- На сабмите: `503 moderation_unavailable`, баланс не изменился, задачи нет (fail-closed).
+- На опросе: задача остаётся non-terminal, `mark_completed` не выполнен, следующий опрос доводит её до терминала.
+- `MODERATION_FAIL_OPEN=true` → операция проходит, вердикт `unchecked`, инкремент `moderation_errors_total{reason="fail_open"}`.
+- `MODERATION_ENABLED=true` без ключа → `503 moderation_not_configured` **без** исходящего вызова.
+
+**Контракт поля.**
+- `moderation` присутствует и в `GET /v1/media/jobs/{jobId}`, и в **каждом** элементе `GET /v1/media/jobs` (тест обязан проверять именно ленту — иначе History снова покажет заблокированное).
+- Строка с `moderation IS NULL` (эмуляция задачи, созданной до ADR-086) отдаётся как `{"status":"unchecked","stage":null,"categories":[],"checkedAt":null}` — **не** как `passed`.
+
+**Сквозная достижимость (declared ≠ wired).** Удаление строки вызова модерации из `submit` либо из `_advance` обязано ронять хотя бы один тест. Тест, который сам конструирует вердикт и проверяет только маппинг в схему, покрытием цепи **не считается**.
+
 ### `tests/integration/test_media_asset_proxy_adr085.py`
 completed job с fal URL → клиентский `assets[].url` на `SERVICE_DOMAIN` / относительный путь, в БД по-прежнему fal; валидный токен стримит байты (httpx mock); `Range` → `206`; битый токен → `401`; чужой owner / хост вне allowlist → `404`; push `mediaUrl` — signed URL.
 

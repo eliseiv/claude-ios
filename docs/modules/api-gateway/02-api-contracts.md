@@ -17,7 +17,11 @@ Gateway не добавляет собственных бизнес-endpoint, к
 | POST | /v1/chat/run | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md) |
 | POST | /v1/chat/tool-result | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md) |
 | POST | /v1/chat/v2/run | chat-orchestrator (режимы генерации; `study_learn` — [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) | [link](../chat-orchestrator/02-api-contracts.md#post-v1chatv2run) |
+| POST | /v1/chat/v2/run/stream | chat-orchestrator (SSE, [ADR-069](../../adr/ADR-069-sse-text-streaming.md); принимает те же `attachments[]`, поэтому под повышенным transport-лимитом — [ADR-089 §1](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)) | [link](../chat-orchestrator/02-api-contracts.md#post-v1chatv2runstream--sse-text-streaming-adr-069) |
 | POST | /v1/chat/v2/tool-result | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#post-v1chatv2tool-result) |
+| GET | /v1/models | chat-orchestrator (каталог инстанса, [ADR-075](../../adr/ADR-075-unified-instance-models-catalog.md)) | [link](../chat-orchestrator/02-api-contracts.md#get-v1models--список-доступных-моделей-инстанса-adr-034--adr-073--adr-075) |
+| GET | /v1/presets | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#get-v1presets--пресеты-промтов-adr-035) |
+| GET POST DELETE | /v1/media/models, /v1/media/uploads, /v1/media/images, /v1/media/videos, /v1/media/jobs[/{id}], /v1/media/templates/* | media-generation ([ADR-060](../../adr/ADR-060-media-generation-fal.md), [ADR-085](../../adr/ADR-085-media-asset-download-proxy.md)); модерация UGC — [ADR-086](../../adr/ADR-086-ugc-moderation.md) | [link](../media-generation/02-api-contracts.md) |
 | GET | /v1/chat/v2/capabilities | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#get-v1chatv2capabilities) |
 | GET | /v1/tools | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019) |
 | GET | /v1/policy/effective | policy-engine | [link](../policy-engine/02-api-contracts.md) |
@@ -51,7 +55,16 @@ Gateway не добавляет собственных бизнес-endpoint, к
 ```json
 { "error": { "code": "validation_error", "message": "human readable", "requestId": "..." } }
 ```
-`code` ∈ { `unauthorized`, `forbidden`, `not_found`, `conflict`, `payload_too_large`, `validation_error`, `rate_limited`, `internal_error`, `upstream_error` }.
+`code` ∈ базовый набор { `unauthorized`, `forbidden`, `not_found`, `conflict`, `payload_too_large`, `validation_error`, `rate_limited`, `internal_error`, `upstream_error` } **плюс доменные коды**, которые модули вводят вместо перегруженного `validation_error`/`service_unavailable`:
+
+| Код | HTTP | Кем вводится |
+|---|---|---|
+| `too_many_attachments`, `attachment_too_large`, `attachments_total_too_large`, `unsupported_media_type`, `attachment_media_type_mismatch`, `invalid_base64`, `pdf_unreadable`, `pdf_too_many_pages` | 422 | [ADR-089](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md) — отказы вложений; действуют на всех путях, использующих общие валидаторы (`/v1/chat/*`, `/v1/media/uploads`, `/v1/workspaces/{id}/files`) |
+| `content_policy_violation` | 422 | [ADR-086](../../adr/ADR-086-ugc-moderation.md) — контент отклонён модерацией |
+| `moderation_unavailable`, `moderation_not_configured` | 503 | [ADR-086](../../adr/ADR-086-ugc-moderation.md) — провайдер модерации недоступен / ключ не задан |
+| `subscription_required`, `session_not_found`, `user_not_found`, `workspace_not_found`, `message_not_found`, `insufficient_credits`, `job_not_terminal`, `unsupported_model`, `media_generation_not_configured`, `gateway_timeout`, … | по модулю | доменные коды соответствующих модулей (см. их `02-api-contracts.md`) |
+
+**Правило пополнения набора:** новый `code` вводится тогда, когда клиенту нужно **машиночитаемо** различить причину, которую иначе пришлось бы вычитывать из `message`. Разбор текста `message` контрактом не является и никогда им не станет. HTTP-статус при введении нового кода **не меняется** — иначе это breaking change для уже выпущенных клиентов.
 
 > Бизнес-блокировки НЕ используют этот формат — они возвращают `200 {status:"blocked", blockReason}` (см. [ADR-004](../../adr/ADR-004-blocked-http-200.md)).
 
@@ -62,7 +75,7 @@ Gateway не добавляет собственных бизнес-endpoint, к
 | 403 | `userId != sub` |
 | 404 | ресурс/сессия не найдены |
 | 409 | конфликт идемпотентности (тот же ключ, другой payload) |
-| 413 | превышен size-лимит |
+| 413 | превышен transport size-лимит тела. **Отдаётся как HTTP-ответ, а не разрывом соединения** ([ADR-089 §2](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)): guard считает фактически прочитанные байты (работает и без `Content-Length`), дочитывает ограниченный остаток тела и закрывает соединение уже после ответа |
 | 422 | невалидная схема |
 | 429 | превышен rate limit (жёсткий) |
 | 5xx | внутренняя/upstream ошибка |
