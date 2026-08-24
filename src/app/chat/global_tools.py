@@ -38,6 +38,10 @@ from app.chat.tools import (
     QUIZ_CONSTRAINTS_HINT,
     QUIZ_INVALID_ERROR_CODE,
     TIME_NOW_TZ_MAX_LENGTH,
+    TOOL_DOCUMENT_CREATE,
+    TOOL_DOCUMENT_LIST,
+    TOOL_DOCUMENT_READ,
+    TOOL_DOCUMENT_UPDATE,
     TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
     TOOL_MEDIA_GENERATE_VIDEO,
@@ -46,6 +50,8 @@ from app.chat.tools import (
     Quiz,
     content_free_args_error,
 )
+from app.documents import DocumentsService, DocumentView
+from app.documents.service import CREATED_BY_ASSISTANT
 from app.errors import (
     ContentPolicyViolationError,
     InsufficientCreditsError,
@@ -79,6 +85,12 @@ MEDIA_UPSTREAM_ERROR_CODE = "media_upstream_error"
 # error и может переформулировать промпт. Контраст: на REST-пути /v1/media/* тот же отказ —
 # жёсткий 422/503, потому что там нет модели, которая переформулирует, а есть клиент, которому
 # нужен машиночитаемый отказ.
+_DOCUMENT_TOOLS = frozenset(
+    {TOOL_DOCUMENT_CREATE, TOOL_DOCUMENT_LIST, TOOL_DOCUMENT_READ, TOOL_DOCUMENT_UPDATE}
+)
+DOCUMENT_INVALID_ERROR_CODE = "invalid_document_request"
+DOCUMENT_NOT_CONFIGURED_ERROR_CODE = "documents_not_available"
+
 MEDIA_CONTENT_POLICY_ERROR_CODE = "content_policy_violation"
 MEDIA_MODERATION_UNAVAILABLE_ERROR_CODE = "moderation_unavailable"
 MEDIA_MODERATION_NOT_CONFIGURED_ERROR_CODE = "moderation_not_configured"
@@ -117,9 +129,12 @@ class GlobalToolHandlers:
         self,
         clock: Clock | None = None,
         media: MediaGenerationService | None = None,
+        documents: DocumentsService | None = None,
     ) -> None:
         self._clock = clock if clock is not None else SystemClock()
         self._media = media
+        # ADR-090: None ⇒ document.* отдают tool-result error, ход не падает (как media без ключа).
+        self._documents = documents
 
     async def execute(
         self,
@@ -127,11 +142,16 @@ class GlobalToolHandlers:
         tool_name: str,
         args: dict[str, Any],
         user_id: uuid.UUID | None = None,
+        session_id: uuid.UUID | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
         last_image_job_id: str | None = None,
     ) -> ToolExecution:
         """Execute a global server-side tool. Returns a ToolExecution (result or error envelope)."""
+        if tool_name in _DOCUMENT_TOOLS:
+            return await self._document(
+                tool_name=tool_name, args=args, user_id=user_id, session_id=session_id
+            )
         if tool_name == TOOL_TIME_NOW:
             return self._time_now(args)
         if tool_name == TOOL_QUIZ_GENERATE:
@@ -312,6 +332,59 @@ class GlobalToolHandlers:
                 f"{content_free_args_error(exc)}; {QUIZ_CONSTRAINTS_HINT}",
             )
         return ToolExecution.ok(validated.model_dump())
+
+    async def _document(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        user_id: uuid.UUID | None,
+        session_id: uuid.UUID | None,
+    ) -> ToolExecution:
+        """Исполнить document.* (ADR-090 §3).
+
+        Все доменные отказы (лимиты, тип, чужой/несуществующий документ) отдаются tool-result
+        ошибкой, а НЕ поднимаются наружу: ход не должен падать из-за того, что модель попросила
+        слишком большой файл — она способна переформулировать. Тот же приём, что у media-
+        инструментов.
+        """
+        if self._documents is None or user_id is None or session_id is None:
+            return ToolExecution.error(
+                DOCUMENT_NOT_CONFIGURED_ERROR_CODE, "documents are not available in this context"
+            )
+        try:
+            if tool_name == TOOL_DOCUMENT_LIST:
+                docs = await self._documents.list(user_id=user_id, session_id=session_id)
+                return ToolExecution.ok({"documents": [_doc_brief(d) for d in docs]})
+            if tool_name == TOOL_DOCUMENT_CREATE:
+                view = await self._documents.create(
+                    user_id=user_id,
+                    session_id=session_id,
+                    filename=str(args.get("filename") or "document"),
+                    media_type=str(args.get("mediaType") or "text/markdown"),
+                    content=str(args.get("content") or ""),
+                    created_by=CREATED_BY_ASSISTANT,
+                )
+                return ToolExecution.ok(_doc_brief(view))
+            document_id = _parse_uuid(args.get("documentId"))
+            if document_id is None:
+                return ToolExecution.error(DOCUMENT_INVALID_ERROR_CODE, "documentId is not a uuid")
+            if tool_name == TOOL_DOCUMENT_READ:
+                view = await self._documents.get(
+                    user_id=user_id, session_id=session_id, document_id=document_id
+                )
+                return ToolExecution.ok({**_doc_brief(view), "content": view.content or ""})
+            view = await self._documents.update(
+                user_id=user_id,
+                session_id=session_id,
+                document_id=document_id,
+                content=str(args.get("content") or ""),
+            )
+            return ToolExecution.ok(_doc_brief(view))
+        except NotFoundError:
+            return ToolExecution.error(DOCUMENT_INVALID_ERROR_CODE, "document not found")
+        except ValidationFailedError as exc:
+            return ToolExecution.error(exc.code, str(exc)[:400])
 
     async def _media_generate(
         self,
@@ -494,3 +567,21 @@ class GlobalToolHandlers:
         result["timezone"] = str(zone.key)
         result["local"] = local_dt.isoformat()
         return ToolExecution.ok(result)
+
+
+def _doc_brief(view: DocumentView) -> dict[str, Any]:
+    """Краткая карточка документа для tool-result (без содержимого)."""
+    return {
+        "documentId": str(view.id),
+        "filename": view.filename,
+        "mediaType": view.media_type,
+        "size": view.size_bytes,
+        "version": view.version,
+    }
+
+
+def _parse_uuid(value: Any) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None

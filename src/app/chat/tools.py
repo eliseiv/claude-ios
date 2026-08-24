@@ -40,6 +40,14 @@ TOOL_SITE_DELETE = "site.delete"
 # routed before the project-scoped branch (no external_project_id, no has_project guard).
 TOOL_TIME_NOW = "time.now"
 
+# Global server-side document tools (ADR-090): текстовые документы чата, которые модель создаёт,
+# читает и правит, а клиент скачивает. Project-independent, как time.now. НЕ путать с files.* —
+# те исполняет УСТРОЙСТВО пользователя, эти живут на бэкенде и переживают ход.
+TOOL_DOCUMENT_CREATE = "document.create"
+TOOL_DOCUMENT_LIST = "document.list"
+TOOL_DOCUMENT_READ = "document.read"
+TOOL_DOCUMENT_UPDATE = "document.update"
+
 # Global server-side tool, MODE-GATED (quiz.generate, ADR-064): executed by the backend like
 # time.now and equally project-independent, but — unlike time.now — offered to the model ONLY when
 # the effective generation mode of the turn is `study_learn` (axis C, TOOL_GENERATION_MODES below).
@@ -79,6 +87,10 @@ GLOBAL_SERVER_SIDE_TOOLS = frozenset(
         TOOL_MEDIA_GENERATE_IMAGE,
         TOOL_MEDIA_GENERATE_VIDEO,
         TOOL_MEDIA_ASK_PARAMS,
+        TOOL_DOCUMENT_CREATE,
+        TOOL_DOCUMENT_LIST,
+        TOOL_DOCUMENT_READ,
+        TOOL_DOCUMENT_UPDATE,
     }
 )
 
@@ -174,6 +186,11 @@ _DOMAIN_TO_ANTHROPIC: dict[str, str] = {
     TOOL_MEDIA_GENERATE_IMAGE: "media_generate_image",
     TOOL_MEDIA_GENERATE_VIDEO: "media_generate_video",
     TOOL_MEDIA_ASK_PARAMS: "media_ask_params",
+    # ADR-090: тот же dot→underscore маппинг.
+    TOOL_DOCUMENT_CREATE: "document_create",
+    TOOL_DOCUMENT_LIST: "document_list",
+    TOOL_DOCUMENT_READ: "document_read",
+    TOOL_DOCUMENT_UPDATE: "document_update",
 }
 _ANTHROPIC_TO_DOMAIN: dict[str, str] = {a: d for d, a in _DOMAIN_TO_ANTHROPIC.items()}
 
@@ -328,6 +345,29 @@ class SiteDeleteArgs(_PathModel):
 # `invalid_timezone` (the turn survives, ADR-026 §6) rather than a 422 of the turn. It is therefore
 # NOT a pydantic max_length constraint here (that would 422 the turn instead).
 TIME_NOW_TZ_MAX_LENGTH = 64
+
+
+class DocumentCreateArgs(_StrictModel):
+    """Args for document.create (ADR-090 §3)."""
+
+    filename: str
+    mediaType: str
+    content: str
+
+
+class DocumentListArgs(_StrictModel):
+    """Args for document.list — их нет; строгая модель запрещает лишние ключи."""
+
+
+class DocumentReadArgs(_StrictModel):
+    documentId: str
+
+
+class DocumentUpdateArgs(_StrictModel):
+    """Args for document.update: содержимое заменяется ЦЕЛИКОМ, патча нет (ADR-090 §3)."""
+
+    documentId: str
+    content: str
 
 
 class TimeNowArgs(_StrictModel):
@@ -540,6 +580,10 @@ _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_MEDIA_GENERATE_IMAGE: MediaGenerateImageArgs,
     TOOL_MEDIA_GENERATE_VIDEO: MediaGenerateVideoArgs,
     TOOL_MEDIA_ASK_PARAMS: MediaAskParamsArgs,
+    TOOL_DOCUMENT_CREATE: DocumentCreateArgs,
+    TOOL_DOCUMENT_LIST: DocumentListArgs,
+    TOOL_DOCUMENT_READ: DocumentReadArgs,
+    TOOL_DOCUMENT_UPDATE: DocumentUpdateArgs,
 }
 
 
@@ -582,6 +626,23 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     TOOL_SITE_LIST: "List the files of the current website project.",
     TOOL_SITE_READ: "Read a file from the current website project by relative path.",
     TOOL_SITE_DELETE: "Delete a file from the current website project by relative path.",
+    TOOL_DOCUMENT_CREATE: (
+        "Create a text document stored on the server for THIS chat, which the user can then open "
+        "and download. Use it whenever the user asks for a file, a report, a table or any content "
+        "meant to be kept rather than just read in the reply. 'mediaType' is one of "
+        "'text/markdown', 'text/plain', 'text/csv', 'application/json'. Put the FULL content in "
+        "'content'."
+    ),
+    TOOL_DOCUMENT_LIST: "List the documents stored in this chat (id, filename, size, version).",
+    TOOL_DOCUMENT_READ: (
+        "Read the full content of a document of this chat by its id. Always read before updating "
+        "so your replacement is based on the current text."
+    ),
+    TOOL_DOCUMENT_UPDATE: (
+        "Replace the ENTIRE content of a document of this chat. There is no partial patch: send "
+        "the complete new text in 'content'. Read the document first unless you wrote it in this "
+        "same turn."
+    ),
     TOOL_TIME_NOW: (
         "Get the current date and time. Always returns UTC (ISO8601, unix timestamp, weekday). "
         "Pass an optional IANA timezone 'tz' (e.g. 'Europe/Moscow') to also get the local time. "

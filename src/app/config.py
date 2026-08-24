@@ -501,6 +501,17 @@ class Settings(BaseSettings):
         default=12 * 1024 * 1024, alias="WORKSPACE_REQUEST_BODY_LIMIT"
     )
 
+    # --- Документы чата (ADR-090) -----------------------------------------------------------
+    # Текстовые документы, которые модель создаёт/правит, а клиент скачивает. Скоуп — сессия:
+    # удаляются вместе с чатом (ON DELETE CASCADE), поэтому потолки заданы на сессию, а не на
+    # пользователя.
+    document_max_bytes: int = Field(default=256 * 1024, alias="DOCUMENT_MAX_BYTES")
+    document_max_count: int = Field(default=20, alias="DOCUMENT_MAX_COUNT")
+    document_total_bytes: int = Field(default=1024 * 1024, alias="DOCUMENT_TOTAL_BYTES")
+    # Срез СПИСКА документов (id+имя) в системном промте. Содержимое туда не попадает никогда —
+    # оно большое и меняется; для чтения есть document.read (ADR-090 §6).
+    document_context_max_chars: int = Field(default=2000, alias="DOCUMENT_CONTEXT_MAX_CHARS")
+
     # --- Модерация UGC (ADR-086) ---------------------------------------------------------
     # Пре-модерация промптов/референсов/вложений и пост-модерация результата фото-генерации
     # через OpenAI omni-moderation. Fail-closed по умолчанию (§7): цена пропуска непроверенного

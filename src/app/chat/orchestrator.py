@@ -75,6 +75,7 @@ from app.chat.tools import (
     validate_tool_args,
 )
 from app.config import get_settings
+from app.documents import DocumentsService
 from app.errors import (
     ContentPolicyViolationError,
     InsufficientCreditsError,
@@ -796,6 +797,8 @@ class _Deps:
     memory: MemoryService | None = None
     # ADR-086: None ⇒ модерация не выполняется (вердикт unchecked), ход идёт как раньше.
     moderation: ModerationService | None = None
+    # ADR-090: None ⇒ document.* недоступны, строка о документах в промт не добавляется.
+    documents: DocumentsService | None = None
 
 
 class ChatOrchestrator:
@@ -813,6 +816,7 @@ class ChatOrchestrator:
         workspaces: WorkspacesService | None = None,
         memory: MemoryService | None = None,
         moderation: ModerationService | None = None,
+        documents: DocumentsService | None = None,
     ) -> None:
         self._session = session
         self._deps = _Deps(
@@ -840,6 +844,7 @@ class ChatOrchestrator:
             # ADR-086: None ⇒ ход не модерируется (легаси-вызов без DI); фабрика в deps.py
             # передаёт общий экземпляр явно.
             moderation=moderation,
+            documents=documents,
         )
 
     # ---- public entrypoints ----
@@ -1084,6 +1089,16 @@ class ChatOrchestrator:
         has_turn_images = bool(prepared is not None and prepared.images)
         if not has_turn_images:
             system_prompt = await self._system_prompt_with_recent_photo(sess.id, system_prompt)
+
+        # ADR-090 §6: если в сессии есть документы — сообщить модели их id и имена. Без этой строки
+        # она не знает, что документы существуют, и не догадается вызвать document.list.
+        # Содержимое НЕ подмешивается: оно большое и меняется, для чтения есть document.read.
+        if self._deps.documents is not None:
+            documents_line = await self._deps.documents.context_line(
+                user_id=user_id, session_id=sess.id
+            )
+            if documents_line:
+                system_prompt = f"{system_prompt}\n\n{documents_line}"
 
         # ADR-036 §6: merge the workspace knowledge-file blocks with the request's inline
         # attachment blocks (project context first). Only the request attachments leave a persisted
@@ -2988,6 +3003,9 @@ class ChatOrchestrator:
             tool_name=tool_name,
             args=args,
             user_id=user_id,
+            # ADR-090: document.* адресуют документы в пределах ТЕКУЩЕЙ сессии — без session_id
+            # инструмент не смог бы отличить свой документ от чужого.
+            session_id=session_id,
             turn_images=turn_images,
             recent_image_urls=recent_image_urls,
             last_image_job_id=last_image_job_id,

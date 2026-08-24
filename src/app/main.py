@@ -25,6 +25,7 @@ from app.api_gateway.routers import (
     byok,
     chat,
     chats,
+    documents,
     health,
     media,
     media_templates,
@@ -225,6 +226,13 @@ _OPENAPI_TAGS = [
         ),
     },
     {
+        "name": "Documents",
+        "description": (
+            "Текстовые документы чата: загрузка, список, чтение, замена содержимого и скачивание "
+            "файлом. Те же документы создаёт и правит модель инструментами `document.*`."
+        ),
+    },
+    {
         "name": "Memory",
         "description": (
             "Cross-chat RAG-память: семантический поиск по истории (`GET /v1/search`), "
@@ -286,6 +294,7 @@ def create_app() -> FastAPI:
         admin,
         preview,
         chats,
+        documents,
         workspaces,
         profile,
         preferences,

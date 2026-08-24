@@ -35,6 +35,7 @@ from app.chats.repository import ChatsRepository
 from app.chats.service import ChatsService
 from app.config import get_settings
 from app.db import session_scope
+from app.documents import DocumentsService
 from app.errors import ForbiddenError, MediaGenerationNotConfiguredError, UnauthorizedError
 from app.media_generation.fal_client import FalClient
 from app.media_generation.repository import MediaJobsRepository
@@ -262,6 +263,14 @@ def get_moderation_service() -> ModerationService:
     return ModerationService(settings=get_settings())
 
 
+def get_documents_service(session: DbSession) -> DocumentsService:
+    """Документы чата (ADR-090) на той же request-scoped сессии, что и остальной домен."""
+    return DocumentsService(session, get_settings())
+
+
+get_documents_service_dep = Annotated[DocumentsService, Depends(get_documents_service)]
+
+
 def get_media_generation_service(
     session: DbSession,
     request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
@@ -351,6 +360,7 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         global_tools=GlobalToolHandlers(
             clock=SystemClock(),
             media=get_media_generation_service(session, get_request_log_writer(session)),
+            documents=get_documents_service(session),
         ),
         preferences=PreferencesService(session),
         # ADR-036: workspace context provider (instructions + knowledge files) for workspace chats.
@@ -358,6 +368,8 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         memory=get_memory_service(session),
         # ADR-086 §3: модерация хода с вложениями — до записи шага и до вызова LLM.
         moderation=get_moderation_service(),
+        # ADR-090: document.* + строка о документах в системном промте.
+        documents=get_documents_service(session),
     )
 
 
@@ -387,6 +399,8 @@ def get_v2_orchestrator(session: DbSession) -> ChatOrchestrator:
         memory=get_memory_service(session),
         # ADR-086 §3: модерация хода с вложениями — до записи шага и до вызова LLM.
         moderation=get_moderation_service(),
+        # ADR-090: document.* + строка о документах в системном промте.
+        documents=get_documents_service(session),
     )
 
 

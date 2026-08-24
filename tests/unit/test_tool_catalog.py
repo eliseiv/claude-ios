@@ -47,6 +47,11 @@ _EXPECTED_NAMES = {
     "media.generate_image",
     "media.generate_video",
     "media.ask_params",
+    # ADR-090: документы чата — серверные, project-independent.
+    "document.create",
+    "document.list",
+    "document.read",
+    "document.update",
 }
 
 

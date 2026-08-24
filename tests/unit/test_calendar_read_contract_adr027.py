@@ -182,6 +182,12 @@ def test_other_tools_unchanged_by_adr027() -> None:
         "media.generate_image",
         "media.generate_video",
         "media.ask_params",
+        # ADR-090 добавил document.* — состав реестра расширился, но inputSchema соседей
+        # (в т.ч. calendar.read) обязан остаться прежним: это и проверяет тест ниже.
+        "document.create",
+        "document.list",
+        "document.read",
+        "document.update",
     }
 
 

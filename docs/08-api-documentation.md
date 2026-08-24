@@ -146,7 +146,7 @@ OpenAPI-тексты (`summary`, `description` эндпоинтов, `Field(desc
 | `Preferences` | `GET/PATCH /v1/preferences` | `bearerAuth` | Пользовательские настройки. |
 | `Health` | `GET /health`, `GET /healthz`, `GET /ready`, `GET /metrics` | none | Служебные проверки и метрики (без auth). `/healthz` — алиас `/health` ([ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)). |
 
-Каждый endpoint имеет ровно один тег из таблицы и security согласно колонке (R2). Порядок в `openapi_tags` = фактический порядок в `_OPENAPI_TAGS` (`src/app/main.py`) — источник истины именно там, этот список обязан ему соответствовать и проверяется тестом `test_api_documentation.py::_TAG_ORDER`: `Auth`, `Chat`, `Tools`, `Models`, `Presets`, `Media`, `Notifications`, `Policy`, `Wallet`, `Subscription`, `Tokens`, `BYOK`, `Admin`, `Admin (CRM)`, `Preview`, `Chats`, `Workspaces`, `Profile`, `Preferences`, `Memory`, `Health`.
+Каждый endpoint имеет ровно один тег из таблицы и security согласно колонке (R2). Порядок в `openapi_tags` = фактический порядок в `_OPENAPI_TAGS` (`src/app/main.py`) — источник истины именно там, этот список обязан ему соответствовать и проверяется тестом `test_api_documentation.py::_TAG_ORDER`: `Auth`, `Chat`, `Tools`, `Models`, `Presets`, `Media`, `Notifications`, `Policy`, `Wallet`, `Subscription`, `Tokens`, `BYOK`, `Admin`, `Admin (CRM)`, `Preview`, `Chats`, `Workspaces`, `Profile`, `Preferences`, `Documents`, `Memory`, `Health`.
 
 > Прочие модули расширения (workspaces, snippets, attachments, notifications — см. [карту маршрутов](modules/api-gateway/02-api-contracts.md)) получают собственные теги по тому же принципу: пользовательский JWT (`bearerAuth`), лаконичные тексты (R2ter), один тег на endpoint.
 

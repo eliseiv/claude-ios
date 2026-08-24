@@ -153,6 +153,26 @@ class PdfTooManyPagesError(ValidationFailedError):
     code = "pdf_too_many_pages"
 
 
+class DocumentTooLargeError(ValidationFailedError):
+    """422 document_too_large: один документ превышает DOCUMENT_MAX_BYTES (ADR-090 §7)."""
+
+    code = "document_too_large"
+
+
+class TooManyDocumentsError(ValidationFailedError):
+    code = "too_many_documents"
+
+
+class DocumentsTotalTooLargeError(ValidationFailedError):
+    code = "documents_total_too_large"
+
+
+class DocumentNotFoundError(NotFoundError):
+    """404 document_not_found: чужой или несуществующий документ неотличимы (изоляция)."""
+
+    code = "document_not_found"
+
+
 class ContentPolicyViolationError(ValidationFailedError):
     """422 content_policy_violation: тело схемно валидно, отвергнут КОНТЕНТ (ADR-086 §9).
 

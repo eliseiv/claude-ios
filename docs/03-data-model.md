@@ -512,6 +512,27 @@ ALTER TABLE media_jobs ADD COLUMN moderation JSONB NULL;
 ```
 > Вердикт модерации UGC: `{status, stage, categories, checkedAt, provider, model}` ([ADR-086 §10](adr/ADR-086-ugc-moderation.md)). Expand-only, **без backfill**: `NULL` = «не проверялось» (строка создана до фичи либо инстанс с `MODERATION_ENABLED=false`) и отдаётся клиенту как `status: "unchecked"` — **никогда** как `passed`. Номер ревизии определяется на момент реализации (следующий свободный, single head; перечень ревизий в `docs/` не ведётся — [07-deployment.md §Миграции](07-deployment.md#миграции)). Полный DDL таблицы — [modules/media-generation/04-data-model.md](modules/media-generation/04-data-model.md).
 
+## Таблица `chat_documents` (миграция `0027`, [ADR-090](adr/ADR-090-chat-documents.md), модуль `documents`)
+
+### 22. chat_documents (модуль `documents`)
+
+| Колонка | Тип | Ограничения | Смысл |
+|---|---|---|---|
+| `id` | `uuid` | PK, `gen_random_uuid()` | идентификатор документа |
+| `user_id` | `uuid` | FK `users.id` `ON DELETE CASCADE`, NOT NULL | владелец |
+| `session_id` | `uuid` | FK `chat_sessions.id` `ON DELETE CASCADE`, NOT NULL | чат, которому принадлежит документ |
+| `filename` | `text` | NOT NULL | имя без разделителей пути, расширение приведено к `media_type` |
+| `media_type` | `text` | NOT NULL | только `text/markdown`, `text/plain`, `text/csv`, `application/json` |
+| `content` | `text` | NOT NULL | содержимое; `TEXT`, а не `BYTEA` — формат текстовый по решению |
+| `size_bytes` | `integer` | NOT NULL, default `0` | размер в байтах UTF-8; по нему считаются потолки сессии |
+| `version` | `integer` | NOT NULL, default `1` | +1 на каждом обновлении; клиент по нему видит изменение |
+| `created_by` | `text` | NOT NULL, default `'user'` | `user` \| `assistant` — факт происхождения, на права НЕ влияет |
+| `created_at` / `updated_at` | `timestamptz` | NOT NULL, default `now()` | |
+
+Индекс: `ix_chat_documents_session_created (session_id, created_at)` — выборка всегда по сессии.
+
+**Каскад по `session_id` — следствие выбранного скоупа**, а не оптимизация: документ живёт ровно столько, сколько чат ([ADR-090 §2](adr/ADR-090-chat-documents.md)). Пользователь, которому документ дорог, обязан его скачать; клиент предупреждает при удалении чата с документами.
+
 ## Инварианты
 - `wallets.balance >= 0` — БД CHECK + проверка в Wallet (двойная защита).
 - **Один возврат на задачу генерации ([ADR-086 §5](adr/ADR-086-ugc-moderation.md)):** обе причины возврата — провал у провайдера и блокировка результата модерацией — используют **один** ключ идемпотентности `media-refund:{jobId}`. Отдельного namespace под модерацию нет намеренно: причины взаимоисключающи (обе терминальны), а общий ключ делает двойное начисление невозможным по построению.

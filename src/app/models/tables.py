@@ -609,6 +609,44 @@ class MediaTemplate(Base):
     )
 
 
+class ChatDocument(Base):
+    """Текстовый документ чата (ADR-090).
+
+    Скоуп — сессия: документ удаляется вместе с чатом (CASCADE). Содержимое хранится как TEXT,
+    а не BYTEA, потому что решение ограничивает формат текстовыми (ADR-090 §1) — модель порождает
+    текст напрямую, поэтому такой документ она умеет и создавать, и ПРАВИТЬ.
+    """
+
+    __tablename__ = "chat_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=sa_text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    media_type: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(nullable=False, server_default=sa_text("0"))
+    # Инкрементируется на КАЖДОМ update и отдаётся клиенту: без него приложение не отличит
+    # правленый документ от нетронутого (ADR-090 §3).
+    version: Mapped[int] = mapped_column(nullable=False, server_default=sa_text("1"))
+    # Факт происхождения для UI. На права НЕ влияет (ADR-090 §5).
+    created_by: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'user'"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (Index("ix_chat_documents_session_created", "session_id", "created_at"),)
+
+
 class MediaJob(Base):
     """One image/video generation run submitted to the fal.ai queue (ADR-060 §4, migration 0018).
 
