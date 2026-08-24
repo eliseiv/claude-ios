@@ -233,6 +233,7 @@ jobs:
           script_stop: false
           script: |
             set -uo pipefail   # NO `-e` on purpose — see script_stop note above (loop must visit ALL instances)
+            DEPLOY_SHA="${{ github.sha }}"
             # INCIDENT (2026-06-10) ROOT CAUSE & FIX
             # -----------------------------------------------------------------------------------
             # The combined `docker compose up -d --build` step exited 1 right after
@@ -275,9 +276,18 @@ jobs:
               dir="${entry%%:*}"; proj="${entry##*:}"
               echo "[deploy] === instance dir=/opt/$dir project=$proj ==="
               cd "/opt/$dir" || { echo "::error title=cd failed ($proj)::/opt/$dir missing"; FAILED="$FAILED $proj"; continue; }
-              echo "[deploy:$proj] git pull"
-              if ! git pull --ff-only; then
-                echo "::error title=git pull failed ($proj)::ff-only pull failed in /opt/$dir"; FAILED="$FAILED $proj"; continue
+              # Выкладываем ТОЧНЫЙ коммит, запустивший этот прогон, а не «текущий origin/main».
+              # `git pull` тянул HEAD ветки НА МОМЕНТ PULL: пока цикл идёт по 23 инстансам (минуты),
+              # в main успевает попасть новый коммит — и очередной инстанс уезжает на него. Так на
+              # ravionet (2026-08-24) уехал коммит, чей CI УПАЛ: гейт needs: не пускает свою джобу
+              # деплоя, но уже идущий цикл он не останавливает. Detached HEAD — то же состояние,
+              # что и в rollback-процедуре, возврат к ветке: git checkout main && git pull.
+              echo "[deploy:$proj] checkout $DEPLOY_SHA"
+              if ! git fetch --quiet origin "$DEPLOY_SHA" && ! git fetch --quiet origin; then
+                echo "::error title=git fetch failed ($proj)::cannot fetch $DEPLOY_SHA in /opt/$dir"; FAILED="$FAILED $proj"; continue
+              fi
+              if ! git checkout --quiet --detach "$DEPLOY_SHA"; then
+                echo "::error title=git checkout failed ($proj)::$DEPLOY_SHA not checked out in /opt/$dir"; FAILED="$FAILED $proj"; continue
               fi
               # (1) Build image on the server (REAL build failure => fail this instance).
               echo "[deploy:$proj] build (image built on the server)"

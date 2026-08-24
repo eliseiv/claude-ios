@@ -84,6 +84,9 @@ def test_mutating_flag_matches_mutating_tools() -> None:
         "reminders.create",
         "site.write_file",
         "site.delete",
+        # ADR-090: create/update пишут на сервере; list/read — нет.
+        "document.create",
+        "document.update",
     }
     assert expected_mutating == set(MUTATING_TOOLS)
     by_name = {t["name"]: t for t in tool_catalog()}

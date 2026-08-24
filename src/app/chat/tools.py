@@ -230,6 +230,10 @@ MUTATING_TOOLS = frozenset(
         TOOL_REMINDERS_CREATE,
         TOOL_SITE_WRITE_FILE,
         TOOL_SITE_DELETE,
+        # ADR-090: создание и замена содержимого меняют состояние на сервере — тот же признак,
+        # что у site.write_file. document.list/read только читают.
+        TOOL_DOCUMENT_CREATE,
+        TOOL_DOCUMENT_UPDATE,
     }
 )
 

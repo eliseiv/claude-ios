@@ -40,6 +40,11 @@ _EXPECTED_NAMES = {
     "media.generate_image",
     "media.generate_video",
     "media.ask_params",
+    # ADR-090: документы чата — серверные, project-independent.
+    "document.create",
+    "document.list",
+    "document.read",
+    "document.update",
 }
 _MUTATING = {
     "files.write",
@@ -48,6 +53,8 @@ _MUTATING = {
     "reminders.create",
     "site.write_file",
     "site.delete",
+    "document.create",
+    "document.update",
 }
 
 
@@ -104,6 +111,10 @@ async def test_tools_descriptor_contract(
                 "media.generate_image",
                 "media.generate_video",
                 "media.ask_params",
+                "document.create",
+                "document.list",
+                "document.read",
+                "document.update",
             }
             else "client"
         )

@@ -214,6 +214,13 @@ curl -fsS https://${SERVICE_DOMAIN}/healthz     # 200 once Traefik routes + TLS 
   `docker network inspect web` -> `.[0].IPAM.Config[].Subnet` (typically `172.x.0.0/16`).
 - All secrets (see below).
 
+> **Deploys leave `/opt/<dir>` on a detached HEAD.** The loop checks out the exact commit that
+> triggered the run (`${{ github.sha }}`) instead of pulling the branch tip, so a commit pushed
+> WHILE the loop is running can no longer ride along — that is how an instance once ended up on
+> a commit whose CI had failed (2026-08-24). `git log` on an instance therefore shows a detached
+> HEAD; that is the deployed version, not a mistake. Return to the branch with
+> `git checkout main && git pull`.
+
 ## Rollback (no registry/immutable tag — ADR-017)
 Per instance: run it in the `/opt/<dir>` of the instance being rolled back, with that instance's
 `-p <project>`. Other instances stay on the current commit unless rolled back too.

@@ -245,7 +245,8 @@ FAILED=""
 for entry in $INSTANCES; do
   dir="${entry%%:*}"; proj="${entry##*:}"
   cd "/opt/$dir"                                  || { FAILED="$FAILED $proj"; continue; }
-  git pull --ff-only                              || { FAILED="$FAILED $proj"; continue; }
+  git fetch --quiet origin "$DEPLOY_SHA" || git fetch --quiet origin                      || { FAILED="$FAILED $proj"; continue; }
+  git checkout --quiet --detach "$DEPLOY_SHA"     || { FAILED="$FAILED $proj"; continue; }
   # (1) explicit build (реальная ошибка сборки => fail инстанса)
   docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env build api migrate \
                                                   || { FAILED="$FAILED $proj"; continue; }
@@ -281,7 +282,8 @@ GitHub Secrets (обязательны для workflow): `SSH_HOST=87.239.135.15
 Что делает workflow по шагам **на каждый инстанс** (`dir:project` из `$INSTANCES`, claude-ios первым):
 
 1. **SSH на сервер** (`appleboy/ssh-action`, `script_stop: false`), затем loop по `$INSTANCES`; для инстанса `cd /opt/<dir>` (каталог стека: `docker-compose.prod.yml` + `.env`; сеть `web` уже создана). Неуспех `cd` → `$FAILED` + `continue`.
-2. **`git pull --ff-only`** — подтянуть актуальный код в `/opt/<dir>`. Неуспех → `$FAILED` + `continue`.
+2. **`git fetch` + `git checkout --detach "$DEPLOY_SHA"`** — выложить в `/opt/<dir>` ИМЕННО тот коммит, который запустил прогон (`${{ github.sha }}`), а не текущий `origin/main`. Неуспех → `$FAILED` + `continue`.
+   **Почему не `git pull`.** Pull тянет HEAD ветки **на момент выполнения pull**, а цикл идёт по всем инстансам минутами: коммит, попавший в `main` за это время, уезжает на очередной инстанс. Инцидент 2026-08-24: во время идущего деплоя был запушен новый коммит, и `ravionet` уехал на него — **при упавшем CI этого коммита**. Гейт `needs: [quality, test, build-image]` не пускает **свою** джобу деплоя, но уже идущий цикл не останавливает, поэтому защита от невыверенного кода держится именно на фиксации sha. Побочный эффект — деплой стал воспроизводимым: по логам прогона видно, какая версия уехала на каждый инстанс. Detached HEAD совпадает с состоянием после rollback-процедуры; возврат к ветке — `git checkout main && git pull`.
 3. **Build (явный):** `docker compose -p <proj> -f docker-compose.prod.yml --env-file .env build api migrate` — собирает образ `api`/`migrate` **на сервере**. Реальная ошибка сборки → `$FAILED` + `continue`.
 4. **Миграции (явные, ПЕРЕД api):** `docker compose -p <proj> ... run --rm migrate` (= `alembic upgrade head`; цепочка линейная, single head, состав — [`migrations/versions/`](../migrations/versions/), в docs не дублируется, см. [§Миграции](#миграции)) — до старта нового `api`. Миграции expand/contract (backward-compatible), старый `api` продолжает работать на время накатки. Реальная ошибка миграции → `$FAILED` + `continue`.
 5. **Старт (только up, без build):** `docker compose -p <proj> ... up -d --no-build` — поднимает новый `api` (образ уже собран в шаге 3). **rc этой команды НЕ доверяется** (фиксируется в `up_rc` через `|| up_rc=$?`): one-shot `migrate`-зависимость и BuildKit-сессия могут вернуть транзиентный non-zero при здоровом `api`. Источник истины готовности — readiness-gate (шаг 6), а не rc `up`.
@@ -519,7 +521,8 @@ INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elva
   for entry in $INSTANCES; do
     dir="${entry%%:*}"; proj="${entry##*:}"
     cd "/opt/$dir"                                                                          || { FAILED="$FAILED $proj"; continue; }
-    git pull --ff-only                                                                      || { FAILED="$FAILED $proj"; continue; }
+    git fetch --quiet origin "$DEPLOY_SHA" || git fetch --quiet origin                       || { FAILED="$FAILED $proj"; continue; }
+    git checkout --quiet --detach "$DEPLOY_SHA"                                             || { FAILED="$FAILED $proj"; continue; }
     docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env build api migrate  || { FAILED="$FAILED $proj"; continue; }   # (1) explicit build
     docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env run --rm migrate   || { FAILED="$FAILED $proj"; continue; }   # (2) explicit migrate перед api
     up_rc=0
