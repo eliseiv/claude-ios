@@ -369,3 +369,57 @@ def test_job_status_literal_gained_no_new_value() -> None:
         "completed",
         "failed",
     }
+
+
+# --- chat-tools: отказ модерации ход НЕ роняет (§9) -------------------------------------------
+
+
+class _RaisingMedia:
+    """Media-сервис, падающий заданной ошибкой на submit / upload."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def credits_for(self, model: Any) -> int:
+        return 1
+
+    async def submit(self, **kwargs: Any) -> Any:
+        raise self._error
+
+    async def upload_reference_image(self, **kwargs: Any) -> Any:
+        raise self._error
+
+
+async def _tool_verdict(error: Exception) -> Any:
+    from app.chat.global_tools import GlobalToolHandlers
+
+    handlers = GlobalToolHandlers(media=_RaisingMedia(error))  # type: ignore[arg-type]
+    return await handlers._media_generate(  # noqa: SLF001
+        kind="image",
+        args={"model": "fal-ai/nano-banana-pro", "prompt": "что угодно"},
+        user_id=uuid.uuid4(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_blocked_prompt_returns_policy_code_not_generic() -> None:
+    """ContentPolicyViolationError — подкласс ValidationFailedError.
+
+    Без отдельной ветки ВЫШЕ общей модель получила бы generic `invalid_media_request` и не поняла
+    бы, что промпт надо переформулировать, а не починить аргументы.
+    """
+    result = await _tool_verdict(ContentPolicyViolationError("нельзя"))
+    assert result.error_code == "content_policy_violation"
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_survives_moderation_outage() -> None:
+    """Авария провайдера модерации не должна стоить пользователю всего хода."""
+    result = await _tool_verdict(ModerationUnavailableError("down"))
+    assert result.error_code == "moderation_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_survives_missing_moderation_key() -> None:
+    result = await _tool_verdict(ModerationNotConfiguredError("no key"))
+    assert result.error_code == "moderation_not_configured"

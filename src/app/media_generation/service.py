@@ -67,6 +67,7 @@ from app.moderation.service import (
     STAGE_OUTPUT,
     SURFACE_MEDIA_RESULT,
     SURFACE_MEDIA_SUBMIT,
+    SURFACE_MEDIA_UPLOAD,
 )
 from app.notifications.push_service import MediaPushService
 from app.observability.logging import log_event
@@ -352,6 +353,18 @@ class MediaGenerationService:
         if len(content) > self._settings.media_upload_max_bytes:
             raise PayloadTooLargeError("file exceeds the maximum allowed size")
         _check_magic_bytes(media_type, content)
+
+        # ADR-086 §2: загруженный референс — пользовательские байты, которые станут входом платной
+        # генерации, поэтому проверяются здесь, ДО отправки провайдеру. Проверяем после валидации
+        # (кривой файл дешевле отбить раньше) и по data-URI, а не по URL: URL ещё не существует.
+        if self._moderation is not None:
+            verdict = await self._moderation.check(
+                surface=SURFACE_MEDIA_UPLOAD,
+                stage=STAGE_INPUT,
+                image_urls=[f"data:{media_type};base64,{data}"],
+            )
+            if verdict.blocked:
+                raise ContentPolicyViolationError("изображение отклонено правилами контента")
 
         url = await self._fal.upload(content=content, media_type=media_type, file_name=file_name)
         return UploadedFile(
