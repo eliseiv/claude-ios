@@ -74,6 +74,7 @@ _TAG_ORDER = [
     "Workspaces",
     "Profile",
     "Preferences",
+    "Memory",
     "Health",
 ]
 
