@@ -137,6 +137,15 @@ ARGS_DEGRADE_TOOLS = frozenset(
         TOOL_MEDIA_GENERATE_IMAGE,
         TOOL_MEDIA_GENERATE_VIDEO,
         TOOL_MEDIA_ASK_PARAMS,
+        # ADR-090: аргументы document.* тоже порождает модель, и ни один провайдер их не
+        # гарантирует. Прод 2026-08-24 дал два падения подряд на одном и том же вызове:
+        # пропущенный `mediaType`, затем ключ `mediatype` в нижнем регистре — оба роняли ВЕСЬ ход
+        # в 422, и пользователь не получал ответа. Причина попадания сюда та же, что у quiz/media:
+        # кривые аргументы — ОЖИДАЕМЫЙ исход, а не аномалия схемы.
+        TOOL_DOCUMENT_CREATE,
+        TOOL_DOCUMENT_LIST,
+        TOOL_DOCUMENT_READ,
+        TOOL_DOCUMENT_UPDATE,
     }
 )
 

@@ -31,6 +31,10 @@ from app.chat.tools import (
     QUIZ_CONSTRAINTS_HINT,
     QUIZ_INVALID_ERROR_CODE,
     SERVER_SIDE_TOOLS,
+    TOOL_DOCUMENT_CREATE,
+    TOOL_DOCUMENT_LIST,
+    TOOL_DOCUMENT_READ,
+    TOOL_DOCUMENT_UPDATE,
     TOOL_GENERATION_MODES,
     TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
@@ -205,6 +209,11 @@ def test_registries_are_disjoint_and_within_the_tool_namespace() -> None:
         TOOL_MEDIA_GENERATE_IMAGE,
         TOOL_MEDIA_GENERATE_VIDEO,
         TOOL_MEDIA_ASK_PARAMS,
+        # ADR-090: аргументы документов тоже порождает модель — тот же критерий попадания сюда.
+        TOOL_DOCUMENT_CREATE,
+        TOOL_DOCUMENT_LIST,
+        TOOL_DOCUMENT_READ,
+        TOOL_DOCUMENT_UPDATE,
     }
 
 

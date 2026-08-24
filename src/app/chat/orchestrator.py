@@ -36,7 +36,11 @@ from app.chat.attachment_refs import (
     upload_turn_attachment_refs,
 )
 from app.chat.attachments import ImageAttachmentRef, PreparedAttachments, prepare_attachments
-from app.chat.global_tools import MEDIA_INVALID_ERROR_CODE, GlobalToolHandlers
+from app.chat.global_tools import (
+    DOCUMENT_INVALID_ERROR_CODE,
+    MEDIA_INVALID_ERROR_CODE,
+    GlobalToolHandlers,
+)
 from app.chat.key_failover import (
     Attempt,
     build_attempt_chain,
@@ -62,6 +66,10 @@ from app.chat.tools import (
     QUIZ_CONSTRAINTS_HINT,
     QUIZ_INVALID_ERROR_CODE,
     SERVER_SIDE_TOOLS,
+    TOOL_DOCUMENT_CREATE,
+    TOOL_DOCUMENT_LIST,
+    TOOL_DOCUMENT_READ,
+    TOOL_DOCUMENT_UPDATE,
     TOOL_GENERATION_MODES,
     TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
@@ -113,6 +121,11 @@ from app.wallet.service import WalletService
 from app.website.tools import SiteToolHandlers, ToolExecution
 from app.workspaces.repository import WorkspacesRepository
 from app.workspaces.service import WorkspacesService
+
+# ADR-090: инструменты документов — их args-сбой вырождается в tool-ошибку (ARGS_DEGRADE_TOOLS).
+_DOCUMENT_TOOL_NAMES = frozenset(
+    {TOOL_DOCUMENT_CREATE, TOOL_DOCUMENT_LIST, TOOL_DOCUMENT_READ, TOOL_DOCUMENT_UPDATE}
+)
 
 logger = logging.getLogger("app.chat.orchestrator")
 
@@ -2778,6 +2791,10 @@ class ChatOrchestrator:
                 if tool_name == TOOL_QUIZ_GENERATE:
                     degrade_code = QUIZ_INVALID_ERROR_CODE
                     degrade_msg = f"{content_free_args_error(exc)}; {QUIZ_CONSTRAINTS_HINT}"
+                elif tool_name in _DOCUMENT_TOOL_NAMES:
+                    # Свой код, а не media-шный: модель по нему понимает, ЧТО переспросить.
+                    degrade_code = DOCUMENT_INVALID_ERROR_CODE
+                    degrade_msg = content_free_args_error(exc)
                 else:
                     degrade_code = MEDIA_INVALID_ERROR_CODE
                     degrade_msg = content_free_args_error(exc)

@@ -55,3 +55,28 @@ def test_document_tools_are_wired_on_both_branches() -> None:
             f"{factory.__name__}: GlobalToolHandlers собран без документов — "
             "document.* вернёт documents_not_available"
         )
+
+
+def test_document_tools_degrade_instead_of_killing_the_turn() -> None:
+    """Кривые аргументы document.* обязаны стать tool-ошибкой, а не 422 на весь ход.
+
+    Прод 2026-08-24 дал два падения подряд на одном вызове: пропущенный `mediaType`, затем ключ
+    `mediatype` в нижнем регистре. Оба роняли ход целиком, и пользователь не получал ответа.
+    Аргументы порождает модель — это ожидаемый исход, а не аномалия схемы, поэтому инструменты
+    входят в ARGS_DEGRADE_TOOLS наравне с quiz и media.
+    """
+    from app.chat.tools import (
+        ARGS_DEGRADE_TOOLS,
+        TOOL_DOCUMENT_CREATE,
+        TOOL_DOCUMENT_LIST,
+        TOOL_DOCUMENT_READ,
+        TOOL_DOCUMENT_UPDATE,
+    )
+
+    for name in (
+        TOOL_DOCUMENT_CREATE,
+        TOOL_DOCUMENT_LIST,
+        TOOL_DOCUMENT_READ,
+        TOOL_DOCUMENT_UPDATE,
+    ):
+        assert name in ARGS_DEGRADE_TOOLS, name
