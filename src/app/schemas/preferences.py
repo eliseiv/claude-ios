@@ -53,9 +53,7 @@ class PreferencesPatchRequest(StrictModel):
         default=None,
         description="Новые дефолты Code-контекста (≤ 8KB сериализованного JSON, без секретов).",
     )
-    memoryEnabled: bool | None = Field(
-        default=None, description="Toggle cross-chat памяти (RAG)."
-    )
+    memoryEnabled: bool | None = Field(default=None, description="Toggle cross-chat памяти (RAG).")
     memorySearchScope: Literal["global", "workspace"] | None = Field(
         default=None, description="Область auto-retrieval при генерации."
     )

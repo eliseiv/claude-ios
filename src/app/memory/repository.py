@@ -52,9 +52,7 @@ class MemoryRepository:
         role: str,
         chunks: list[tuple[int, str, list[float]]],
     ) -> None:
-        await self._session.execute(
-            delete(ChatChunk).where(ChatChunk.chat_step_id == chat_step_id)
-        )
+        await self._session.execute(delete(ChatChunk).where(ChatChunk.chat_step_id == chat_step_id))
         for chunk_index, chunk_text, embedding in chunks:
             row = ChatChunk(
                 user_id=user_id,
@@ -222,8 +220,10 @@ class MemoryRepository:
         workspace_project_id: uuid.UUID | None = None,
         scope: str = "global",
     ) -> list[MemoryRow]:
-        stmt = select(UserMemory).where(UserMemory.user_id == user_id).order_by(
-            UserMemory.created_at.desc()
+        stmt = (
+            select(UserMemory)
+            .where(UserMemory.user_id == user_id)
+            .order_by(UserMemory.created_at.desc())
         )
         if scope == "workspace" and workspace_project_id is not None:
             stmt = stmt.where(UserMemory.workspace_project_id == workspace_project_id)

@@ -508,7 +508,9 @@ class Settings(BaseSettings):
     memory_search_top_k: int = Field(default=8, alias="MEMORY_SEARCH_TOP_K")
     memory_retrieval_max_chars: int = Field(default=8000, alias="MEMORY_RETRIEVAL_MAX_CHARS")
     memory_explicit_max_chars: int = Field(default=4000, alias="MEMORY_EXPLICIT_MAX_CHARS")
-    memory_explicit_entry_max_chars: int = Field(default=4000, alias="MEMORY_EXPLICIT_ENTRY_MAX_CHARS")
+    memory_explicit_entry_max_chars: int = Field(
+        default=4000, alias="MEMORY_EXPLICIT_ENTRY_MAX_CHARS"
+    )
     memory_hybrid_vector_weight: float = Field(default=0.7, alias="MEMORY_HYBRID_VECTOR_WEIGHT")
 
     # --- DB connection pool (02-tech-stack.md, sized for ~10k users / 2-3 replicas) ---

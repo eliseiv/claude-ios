@@ -59,8 +59,7 @@ class MemoryIndexer:
         )
         vectors = await self._embedder.embed(parts)
         chunks = [
-            (idx, part, vec)
-            for idx, (part, vec) in enumerate(zip(parts, vectors, strict=True))
+            (idx, part, vec) for idx, (part, vec) in enumerate(zip(parts, vectors, strict=True))
         ]
         await self._repo.upsert_chunks(
             user_id=sess.user_id,
