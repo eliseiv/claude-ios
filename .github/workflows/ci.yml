@@ -209,6 +209,15 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # command_timeout MUST be set explicitly: appleboy/ssh-action defaults to 10m, and the
+          # INSTANCES loop needs longer than that — it builds, migrates and health-gates EVERY
+          # instance sequentially. At 22 instances the run already took 9-11m, i.e. it was passing
+          # by luck; the pgvector image pull pushed it over and the loop was killed mid-flight
+          # after 16 instances ("Run Command Timeout"), leaving the remaining 6 on the old
+          # revision while the earlier 16 moved on — the worst outcome, a SPLIT fleet.
+          # The value must exceed (per-instance build+migrate+readiness) x len(INSTANCES); raise it
+          # when instances are added, or the loop starts getting truncated again.
+          command_timeout: 30m
           # script_stop MUST be false. appleboy/ssh-action's `script_stop: true` injects `set -e`
           # into the remote script REGARDLESS of the `set -uo pipefail` declared below — i.e. it
           # would override our design and abort on the FIRST non-zero command. We deliberately do

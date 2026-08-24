@@ -79,6 +79,10 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # command_timeout: same reason as in ci.yml — the action's 10m default truncates the
+          # INSTANCES loop mid-flight and leaves the fleet split across two revisions. Keep the two
+          # workflows in step: this file exists to run the SAME loop by hand.
+          command_timeout: 30m
           # NOTE: identical hardened logic to the gated deploy job in ci.yml. We do NOT trust the
           # fused exit code of `compose up --build`; failures are managed explicitly so a real
           # failure goes red but a transient/benign one does not falsely abort the INSTANCES loop.
