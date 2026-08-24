@@ -80,3 +80,14 @@ def test_document_tools_degrade_instead_of_killing_the_turn() -> None:
         TOOL_DOCUMENT_UPDATE,
     ):
         assert name in ARGS_DEGRADE_TOOLS, name
+
+
+def test_filename_does_not_gain_a_second_extension() -> None:
+    """«Список покупок.txt» при markdown давал «Список покупок.txt.md» — воспроизведено на проде."""
+    from app.documents.service import _normalize_filename
+
+    assert _normalize_filename("Список покупок.txt", "text/markdown") == "Список покупок.md"
+    assert _normalize_filename("report", "text/markdown") == "report.md"
+    assert _normalize_filename("a.md", "text/markdown") == "a.md"
+    assert _normalize_filename("data.csv", "text/csv") == "data.csv"
+    assert _normalize_filename("../../etc/passwd", "text/plain") == "passwd.txt"

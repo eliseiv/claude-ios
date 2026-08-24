@@ -652,9 +652,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     TOOL_DOCUMENT_CREATE: (
         "Create a text document stored on the server for THIS chat, which the user can then open "
         "and download. Use it whenever the user asks for a file, a report, a table or any content "
-        "meant to be kept rather than just read in the reply. 'mediaType' is one of "
-        "'text/markdown', 'text/plain', 'text/csv', 'application/json'. Put the FULL content in "
-        "'content'."
+        "meant to be kept rather than just read in the reply. 'mediaType' is OPTIONAL and defaults "
+        "to 'text/markdown'; the other accepted values are 'text/plain', 'text/csv' and "
+        "'application/json'. Put the FULL content in 'content'. Do NOT invent a download link, URL "
+        "or file path in your reply — the app shows the stored document by itself; just say what "
+        "you saved."
     ),
     TOOL_DOCUMENT_LIST: "List the documents stored in this chat (id, filename, size, version).",
     TOOL_DOCUMENT_READ: (

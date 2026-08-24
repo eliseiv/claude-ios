@@ -245,5 +245,10 @@ def _normalize_filename(filename: str, media_type: str) -> str:
     name = (filename or "document").replace("\\", "/").split("/")[-1].strip() or "document"
     expected = _EXTENSION_BY_TYPE.get(media_type)
     if expected and not name.lower().endswith(expected):
+        # Сначала снимаем ЧУЖОЕ текстовое расширение, иначе модель, назвавшая файл «список.txt»
+        # при mediaType=text/markdown, получала «список.txt.md» — так и вышло на проде.
+        stem, dot, ext = name.rpartition(".")
+        if dot and f".{ext.lower()}" in _EXTENSION_BY_TYPE.values():
+            name = stem or name
         name = f"{name}{expected}"
     return name[:200]
