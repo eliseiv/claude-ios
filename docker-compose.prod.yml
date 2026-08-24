@@ -28,7 +28,14 @@
 
 services:
   postgres:
-    image: postgres:16.4-bookworm
+    # pgvector, не ванильный postgres: миграция 0025_memory_rag выполняет CREATE EXTENSION vector
+    # (ADR cross-chat RAG memory), и на голом образе она падает с
+    # `extension "vector" is not available`, останавливая ВСЮ цепочку миграций — а значит и
+    # каждый последующий деплой. Тот же тег уже стоит в docker-compose.yml (dev), так что прод
+    # перестаёт отличаться от среды, в которой миграции проверяются. Образ собран поверх
+    # postgres:16, поэтому смена с 16.4-bookworm — минорное обновление в пределах мажора 16:
+    # том данных совместим, dump/restore не требуется.
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
