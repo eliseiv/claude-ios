@@ -30,6 +30,7 @@ from app.chat.attachments import (
 )
 from app.config import Settings
 from app.errors import (
+    ContentPolicyViolationError,
     JobNotTerminalError,
     NotFoundError,
     PayloadTooLargeError,
@@ -60,6 +61,13 @@ from app.media_generation.repository import (
 )
 from app.media_generation.signed_url import public_asset_url
 from app.models import MediaJob
+from app.moderation import ModerationService, ModerationVerdict, unchecked_verdict
+from app.moderation.service import (
+    STAGE_INPUT,
+    STAGE_OUTPUT,
+    SURFACE_MEDIA_RESULT,
+    SURFACE_MEDIA_SUBMIT,
+)
 from app.notifications.push_service import MediaPushService
 from app.observability.logging import log_event
 from app.pricing.provider_prices import media_cost_usd_of_run, round_usd
@@ -116,6 +124,7 @@ class MediaGenerationService:
         settings: Settings,
         push: MediaPushService | None = None,
         request_logs: RequestLogWriter | None = None,
+        moderation: ModerationService | None = None,
     ) -> None:
         self._repo = repo
         self._fal = fal
@@ -123,6 +132,8 @@ class MediaGenerationService:
         self._settings = settings
         self._push = push
         self._request_logs = request_logs
+        # ADR-086: None только в тестах/легаси-сборке графа зависимостей — тогда вердикт unchecked.
+        self._moderation = moderation
 
     # ---- pricing ----
 
@@ -171,6 +182,9 @@ class MediaGenerationService:
         source_job_id: uuid.UUID | None = None,
     ) -> MediaJobView:
         model = self._resolve_model(model_id=model_id, kind=kind)
+        # ADR-086 §4: модерируются только URL, пришедшие ОТ КЛИЕНТА. Ассеты, подставленные из
+        # sourceJobId, — наши, уже прошедшие пост-модерацию, и повторно не проверяются.
+        client_image_urls = list(image_urls) if source_job_id is None else []
         if source_job_id is not None:
             if image_urls:
                 # Two ways to name the same input on one request would make "which wins?" a
@@ -232,6 +246,10 @@ class MediaGenerationService:
                 generate_audio=_as_bool(values.get("generateAudio")),
             )
         )
+        # ADR-086 §4: модерация входа ОБЯЗАНА стоять до списания — иначе повторяется ровно тот
+        # дефект, из-за которого написан багрепорт: за отклонённый контент уже списаны кредиты.
+        input_verdict = await self._moderate_input(prompt=prompt, image_urls=client_image_urls)
+
         await self._wallet.consume(
             user_id=user_id,
             amount=cost,
@@ -255,6 +273,7 @@ class MediaGenerationService:
             provider_cost_usd=provider_cost_usd,
             parent_job_id=source_job_id,
             input_image_urls=list(image_urls) or None,
+            moderation=input_verdict.to_payload(),
         )
         log_event(
             logger,
@@ -268,6 +287,27 @@ class MediaGenerationService:
             falEndpoint=variant.endpoint,
         )
         return MediaJobView(job=job, assets=[])
+
+    async def _moderate_input(self, *, prompt: str, image_urls: list[str]) -> ModerationVerdict:
+        """Пре-модерация промпта и клиентского референса (ADR-086 §4).
+
+        `blocked` → 422 content_policy_violation до единого списания. `flagged` вход проходит
+        дальше намеренно (§6): блокировать по flagged значило бы поток ложных отказов на
+        безобидных формулировках.
+        """
+        if self._moderation is None:
+            return unchecked_verdict()
+        verdict = await self._moderation.check(
+            surface=SURFACE_MEDIA_SUBMIT,
+            stage=STAGE_INPUT,
+            text=prompt,
+            image_urls=image_urls,
+        )
+        if verdict.blocked:
+            raise ContentPolicyViolationError(
+                "запрос отклонён правилами контента: измените описание или референс"
+            )
+        return verdict
 
     async def _assets_of_source(
         self, *, user_id: uuid.UUID, source_job_id: uuid.UUID, limit: int
@@ -435,7 +475,17 @@ class MediaGenerationService:
             if not assets:
                 # COMPLETED with nothing usable is a failed run from the user's point of view.
                 return await self._fail(job, error="generation produced no output")
-            await self._repo.mark_completed(job, result=result)
+            # ADR-086 §5: пост-модерация результата. Только image — omni-moderation не принимает
+            # видео; у видео-задачи moderation отражает вход (Q-086-2). Проверка ДО mark_completed,
+            # чтобы заблокированный ассет никогда не оказался в терминальном completed.
+            output_verdict = await self._moderate_output(job, assets)
+            if output_verdict is not None and output_verdict.blocked:
+                return await self._blocked_by_moderation(job, verdict=output_verdict)
+            await self._repo.mark_completed(
+                job,
+                result=result,
+                moderation=None if output_verdict is None else output_verdict.to_payload(),
+            )
             if self._request_logs is not None:
                 await self._request_logs.finish_media(
                     media_job_id=job.id, failed=False, refunded=False
@@ -467,6 +517,68 @@ class MediaGenerationService:
             return await self._fail(job, error=status.error or "generation failed upstream")
 
         await self._repo.mark_running(job)
+        return MediaJobView(job=job, assets=[])
+
+    async def _moderate_output(
+        self, job: MediaJob, assets: list[MediaAsset]
+    ) -> ModerationVerdict | None:
+        """Пост-модерация результата (ADR-086 §5). None = проверка неприменима, вердикт не меняем.
+
+        Видео не проверяется: провайдер модерации не принимает видеофайл. Отклонение промпта самим
+        fal приходит, как и раньше, обычным ``failed`` с текстом провайдера.
+        """
+        if self._moderation is None or job.kind != KIND_IMAGE:
+            return None
+        return await self._moderation.check(
+            surface=SURFACE_MEDIA_RESULT,
+            stage=STAGE_OUTPUT,
+            image_urls=[a.url for a in assets],
+        )
+
+    async def _blocked_by_moderation(
+        self, job: MediaJob, *, verdict: ModerationVerdict
+    ) -> MediaJobView:
+        """Результат отклонён модерацией: терминал без ассетов + возврат кредитов (ADR-086 §5).
+
+        Статус — существующий ``failed``: ``MediaJobResponse.status`` закрытый Literal, и новое
+        значение сломало бы декодеры уже выпущенных iOS-сборок. Исход различает поле ``moderation``.
+        Ассеты НЕ сохраняются в result — иначе файл остался бы достижим по signed-URL (ADR-085).
+        Push «media ready» не отправляется: он идёт только по ветке mark_completed.
+        """
+        refunded = job.credits_refunded
+        if not refunded and job.credits_charged > 0:
+            await self._wallet.grant(
+                user_id=job.user_id,
+                amount=job.credits_charged,
+                idempotency_key=f"media-refund:{job.id}",
+                meta={"source": "media_generation_refund", "model": job.model_id},
+                reason=_REFUND_REASON,
+            )
+            refunded = True
+        await self._repo.mark_failed(
+            job,
+            # error — человекочитаемый текст: выпущенные iOS-сборки показывают его пользователю
+            # как есть, а внутренние идентификаторы в user-facing текст не попадают
+            # (08-api-documentation.md R9.4). Машинный признак несёт moderation.status="blocked".
+            error="Результат отклонён правилами контента",
+            refunded=refunded,
+            moderation=verdict.to_payload(),
+            result={"assets": []},
+        )
+        if self._request_logs is not None:
+            await self._request_logs.finish_media(
+                media_job_id=job.id, failed=True, refunded=refunded
+            )
+        log_event(
+            logger,
+            logging.WARNING,
+            "media_generation_blocked",
+            userId=str(job.user_id),
+            jobId=str(job.id),
+            model=job.model_id,
+            categories=list(verdict.categories),
+            refundedCredits=job.credits_charged if refunded else 0,
+        )
         return MediaJobView(job=job, assets=[])
 
     async def _fail(self, job: MediaJob, *, error: str) -> MediaJobView:

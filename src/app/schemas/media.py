@@ -348,6 +348,33 @@ class VideoGenerationRequest(StrictModel):
         return None if value is None else _validate_https_urls([value])[0]
 
 
+class MediaJobModerationSchema(StrictModel):
+    """Вердикт модерации UGC (ADR-086 §8). Присутствует всегда и никогда не равен `null`."""
+
+    status: Literal["passed", "flagged", "blocked", "unchecked"] = Field(
+        description=(
+            "`passed` — контент проверен и безопасен; `flagged` — выдан, но помечен (показывайте "
+            "под блюром с тапом «Показать»); `blocked` — контент не выдан, показывайте заглушку "
+            "(`assets` пуст, кредиты возвращены); `unchecked` — проверка не выполнялась (задача "
+            "старше модерации или она выключена на инстансе). Рендерьте `unchecked` как `passed`."
+        )
+    )
+    stage: Literal["input", "output"] | None = Field(
+        default=None,
+        description=(
+            "Стадия вердикта: `input` — проверен промт и референс, `output` — проверен результат. "
+            "`null` при `unchecked`. У видео всегда `input` — результат видео не проверяется."
+        ),
+    )
+    categories: list[str] = Field(
+        default_factory=list,
+        description="Сработавшие категории провайдера. Пуст при `passed` и `unchecked`.",
+    )
+    checkedAt: datetime.datetime | None = Field(
+        default=None, description="Момент последней проверки; `null` при `unchecked`."
+    )
+
+
 class MediaJobResponse(StrictModel):
     jobId: uuid.UUID = Field(description="Идентификатор задачи для `GET /v1/media/jobs/{jobId}`.")
     status: Literal["queued", "running", "completed", "failed"] = Field(
@@ -366,6 +393,12 @@ class MediaJobResponse(StrictModel):
     )
     error: str | None = Field(
         default=None, description="Причина неудачи при `status = failed`, иначе null."
+    )
+    moderation: MediaJobModerationSchema = Field(
+        description=(
+            "Вердикт модерации контента. Поле присутствует всегда — ветка «поля нет» клиенту не "
+            "нужна. По `blocked` показывайте заглушку вместо контента, по `flagged` — блюр."
+        )
     )
     parentJobId: uuid.UUID | None = Field(
         default=None,

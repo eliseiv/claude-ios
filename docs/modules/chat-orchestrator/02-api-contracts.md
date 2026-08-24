@@ -31,7 +31,8 @@
 - **`model` (опц., session-fixed, [ADR-034](../../adr/ADR-034-user-model-selection.md) / [ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md)).** Выбор модели из разрешённого инстансом набора (`GET /v1/models`). Фиксируется на сессию при создании (как `mode`/`assistantMode`/`projectId`); **провайдер чата не меняется на resume**:
   - **без `model`** → сессия создаётся с `chat_sessions.model = NULL` = «дефолтная модель инстанса» (`ANTHROPIC_MODEL`/`OPENAI_MODEL` активного `LLM_PROVIDER`) — обратная совместимость;
   - **с `model`** → должен быть непустой строкой после `strip` (пустая/whitespace → `422`) **и** входить в **chat**-каталог инстанса (`GET /v1/models` с `modality=chat`: без `LLM_PROVIDERS` — allowlist активного провайдера; с dual — union обоих). Fal-id (`modality=photo`/`video`) → **`422 unsupported_model`**. Иначе → **`422 unsupported_model`** (`"model '<x>' is not available on this instance"`). Тихого фолбэка на дефолт нет — явный контракт ([ADR-034 §3](../../adr/ADR-034-user-model-selection.md)).
-  - **Resume-сессия:** `model` берётся из сессии (`chat_sessions.model`); поле запроса при resume **игнорируется** (не ошибка) — единообразно с `mode`/`assistantMode`/`projectId`. Смена провайдера внутри чата **не** поддерживается.
+  - **Resume-сессия:** `model` берётся из сессии (`chat_sessions.model`); поле запроса при resume **игнорируется** (не ошибка) — единообразно с `mode`/`assistantMode`/`projectId`. **Смена модели внутри начатой сессии не поддерживается и не планируется** ([ADR-087 §3](../../adr/ADR-087-default-chat-model-gpt-4-1.md)): чтобы говорить с другой моделью, клиент создаёт новый чат. Смена провайдера внутри чата **не** поддерживается тем более (история хранится в wire-формате провайдера, [TD-024](../../100-known-tech-debt.md)).
+  - **Дефолт инстанса ([ADR-087 §1](../../adr/ADR-087-default-chat-model-gpt-4-1.md)):** на инстансах `LLM_PROVIDER=openai` дефолтная модель чата — **`gpt-4.1`** (`OPENAI_MODEL`), а не `gpt-4o`: у `gpt-4o` встроенный guardrail отказывается описывать изображения с людьми (в системном промте сервиса такого правила нет). `gpt-4o` остаётся в каталоге и выбирается явно. Уже начатые сессии продолжаются на зафиксированной модели — backfill `chat_sessions.model` не выполняется.
   - **Биллинг от выбора модели не зависит** (1 кредит = 1 сообщение, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Возвращаемый `usage.model` отражает фактически использованную модель.
   - Без `LLM_PROVIDERS` инстанс одно-провайдерный ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) → выбрать чужую (Claude на openai-инстансе) нельзя. Dual ([ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md)) — opt-in.
 - **`projectId` (опц., [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)).** Основной поток сервиса — **чат-агрегатор**; website-builder — **опциональная** фича. Поле фиксируется на сессию при создании (как `mode`/`assistantMode`):
@@ -59,10 +60,11 @@
   - **Несуществующий ход:** если в сессии **нет user-шага** с `message_step_id = editMessageStepId` → **`404 message_not_found`**. Anchor хода ищется **строго по `role='user'`**; если `editMessageStepId` указывает на assistant/tool-шаг (нет user-шага) → тоже **`404 message_not_found`** (редактируется только сообщение пользователя, не ответ ассистента).
   - **Семантика усечения ([ADR-040 §2](../../adr/ADR-040-edit-message-and-regenerate.md)):** anchor = минимальный `chat_steps.seq` ([ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)) user-шага с этим `message_step_id`; удаляются все `chat_steps` с `seq >= anchor` **и явно** `tool_calls` усечённых ходов (по их `message_step_id`). `tool_calls` удаляются **явно**, т.к. их FK завязан на `chat_sessions` (`session_id`), **не** на `chat_steps` — каскад при удалении шагов **не** срабатывает, иначе остались бы осиротевшие `tool_calls`. Усечение — **до** записи нового user-шага, в той же транзакции запроса (общий commit хода).
   - **Биллинг (refund-policy, [ADR-040 §3](../../adr/ADR-040-edit-message-and-regenerate.md)):** регенерация = обычный ход с **новым** `message_step_id` → **новый дебит 1 кредита** ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md), идемпотентность по `(user_id, message_step_id)` сохраняется). **Возврата за удалённый старый ход НЕТ** (no-refund-on-edit): кредит за уже сгенерированный (ныне усечённый) ход потреблён. Пересмотр → [Q-040-2](../../99-open-questions.md).
-  - **Edge — редактирование ПЕРВОГО сообщения чата ([ADR-040 §4а](../../adr/ADR-040-edit-message-and-regenerate.md)):** усечение удаляет всю историю, сессия становится пустой, но **существует** → `ctx.is_new = False`. Поэтому **workspace-файлы НЕ переинъектируются** (turn-0-only, вариант a [ADR-038 §3.2](../../adr/ADR-038-move-chat-to-workspace.md)) — приемлемо и зафиксировано (симметрия с inline-attachments [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)); `instructions` workspace инъектируются как обычно (на каждом ходе, развязано от `is_new`, [ADR-038 §3](../../adr/ADR-038-move-chat-to-workspace.md)). Инлайн-attachments нового хода подаются как turn-0 нового хода. Пересмотр реинъекции файлов → [Q-040-3](../../99-open-questions.md).
+  - **Edge — редактирование ПЕРВОГО сообщения чата ([ADR-040 §4а](../../adr/ADR-040-edit-message-and-regenerate.md)):** усечение удаляет всю историю, сессия становится пустой, но **существует** → `ctx.is_new = False`. Поэтому **workspace-файлы НЕ переинъектируются** (turn-0-only, вариант a [ADR-038 §3.2](../../adr/ADR-038-move-chat-to-workspace.md)) — приемлемо и зафиксировано. **Контраст (обе стороны помечены, [ADR-088](../../adr/ADR-088-attachments-per-turn-contract.md)):** inline-attachments ведут себя **не так** — они принимаются на любом ходе, включая ход редактирования, но и **не наследуются** от редактируемого хода: подаётся ровно то, что пришло в этом запросе. Симметрию между двумя механизмами не выводить. `instructions` workspace инъектируются как обычно (на каждом ходе, развязано от `is_new`, [ADR-038 §3](../../adr/ADR-038-move-chat-to-workspace.md)). Инлайн-attachments нового хода подаются как turn-0 нового хода. Пересмотр реинъекции файлов → [Q-040-3](../../99-open-questions.md).
   - **Edge — открытый tool-loop ([ADR-040 §4б](../../adr/ADR-040-edit-message-and-regenerate.md)):** редактируемый или последующий ход с pending `tool_calls` / незакрытым барьером ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) — усечение удаляет эти шаги и их `tool_calls` → **никаких осиротевших `tool_calls`/незакрытых барьеров**. «Зависший» tool_call сбрасывается редактированием.
   - **Без `editMessageStepId` `/chat/run` не меняется** (обратная совместимость полная). Миграции нет. В `/chat/tool-result` поле не применимо (редактирование — только новый ход `/chat/run`).
-- `attachments[]` (опц., ≤ `ATTACHMENT_MAX_COUNT`, дефолт 10) — **inline base64-вложения** ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md), заменяет двухшаговую модель [ADR-014](../../adr/ADR-014-multimodal-attachments.md)). Принимаются **только** в первом (новом) пользовательском message-шаге `/chat/run`; в `/chat/tool-result` — **не** принимаются. Поля вложения:
+<a id="attachments-adr-020--adr-088"></a>
+- `attachments[]` (опц., ≤ `ATTACHMENT_MAX_COUNT`, дефолт 10) — **inline base64-вложения** ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md), заменяет двухшаговую модель [ADR-014](../../adr/ADR-014-multimodal-attachments.md)). Поля вложения:
   - `type` ∈ `image | document | text` — класс вложения.
   - `mediaType` — конкретный MIME, строго из allowlist (см. ниже); вне allowlist → `422 unsupported_media_type`.
   - `filename` (опц.) — для человекочитаемой разметки (особенно `text`-вложений).
@@ -74,6 +76,16 @@
   - **Валидация (фокус ревью, [05-security.md](../../05-security.md)):** соответствие `type`/`mediaType` реальному содержимому по magic bytes; лимиты проверяются **до** декодирования base64; PDF — guard числа страниц (анти-bomb). URL-вложения запрещены (нет backend-fetch).
   - **Реплей/хранение ([ADR-020 §3](../../adr/ADR-020-inline-base64-attachments-mvp.md)):** на первом витке полные content-блоки отправляются Claude; в `chat_steps.payload` сохраняется **лёгкий текстовый плейсхолдер** (НЕ base64); на последующих tool-витках реплеится только плейсхолдер (тяжёлый контент не повторяется).
   - **Биллинг:** обычный chat-шаг (1 кредит, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md) без изменений); vision/PDF-токены входят в message-шаг, отдельной тарификации нет.
+  - <a id="attachments-per-turn-adr-088"></a>**На каком ходе принимаются (нормативно, [ADR-088](../../adr/ADR-088-attachments-per-turn-contract.md); прежняя формулировка «только в первом сообщении» была неверна и породила BUG-004):**
+    - **вложения — свойство ХОДА, а не сессии.** `attachments[]` принимаются на **любом** ходе: и при создании сессии, и на продолжении (`sessionId` задан), и при редактировании (`editMessageStepId`). Роуты: `POST /v1/chat/run`, `POST /v1/chat/v2/run`, `POST /v1/chat/v2/run/stream`;
+    - в `/v1/chat/tool-result` и `/v1/chat/v2/tool-result` вложения **не** принимаются (лишнее поле → `422`): tool-result продолжает уже начатый ход;
+    - **байтами модель видит вложение только в своём ходе.** Внутри хода блоки подаются на **первом обращении к провайдеру**; на последующих витках tool-loop того же хода реплеится плейсхолдер. Слово «первый» в [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md) относится именно к витку хода, а не к первому сообщению сессии;
+    - **на следующих ходах прежние вложения модели не пересылаются** — в истории остаётся плейсхолдер. Практическое следствие: чтобы модель снова посмотрела на фото, его нужно **приложить снова**; ссылка «посмотри на предыдущее фото» без нового вложения будет отвечена по тексту плейсхолдера;
+    - **с `editMessageStepId` вложения НЕ наследуются.** Усечение удаляет user-шаг редактируемого хода вместе с плейсхолдерами, а base64 нигде не хранится — наследовать нечего. Если в запросе с `editMessageStepId` нет `attachments[]`, регенерация идёт **без** фото. Клиент, дающий «изменить сообщение с фото», обязан переслать вложение;
+    - > **Контраст с файлами-знаниями workspace (обе стороны помечены намеренно).** Файлы workspace подаются **только на turn 0 новой сессии** и на resume/редактировании не переинъектируются ([ADR-036 §6](../../adr/ADR-036-workspaces-implementation.md), [ADR-038 §3.2](../../adr/ADR-038-move-chat-to-workspace.md)) — у них правило действительно «только первый ход сессии». У inline-вложений — противоположное. Правило одного механизма на другой **не переносить**.
+  - <a id="attachments-moderation-adr-086"></a>**Модерация ([ADR-086](../../adr/ADR-086-ugc-moderation.md)).** Ход с непустым `attachments[]` проходит модерацию **до** записи user-шага и **до** обращения к LLM. Проверяется: текст `message` (сырой, до склейки с context-блоком) + декодированное содержимое вложений класса `text` + **все** вложения класса `image`. Вложения класса `document` (PDF) в модерацию не уходят ([Q-086-1](../../99-open-questions.md)). Нарушение → **`422 content_policy_violation`**: шагов в БД нет, провайдер не вызывался, кредит не списан, только что созданная пустая сессия откатывается вместе с транзакцией запроса. Недоступность провайдера модерации → `503 moderation_unavailable` (fail-closed), не настроен ключ → `503 moderation_not_configured`.
+    - **Ход БЕЗ вложений не модерируется** — он не порождает медиа и не оплачивает генерацию; добавлять round-trip к каждому текстовому сообщению ради контента, который приложение не показывает как медиа, — переоценка риска (симметричный критерий [ADR-086 §2](../../adr/ADR-086-ugc-moderation.md)).
+  - **Коды ошибок вложений разведены ([ADR-089 §3](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)):** `too_many_attachments`, `attachment_too_large`, `attachments_total_too_large`, `unsupported_media_type`, `attachment_media_type_mismatch`, `invalid_base64`, `pdf_unreadable`, `pdf_too_many_pages` — все `422`, тексты `message` сохранены дословно; `validation_error` остаётся только за ошибками схемы.
 <a id="context-adr-037"></a>
 - **`context` (опц., object, per-message, [ADR-037](../../adr/ADR-037-chatrunrequest-context-allowlist-injection.md)).** Доп-настройки **текущего хода** (не сессии). В отличие от session-fixed `mode`/`assistantMode`/`model`/`projectId`/`workspaceProjectId`, `context` присылается и применяется на **каждом** `/chat/run` и может меняться по ходу чата. **Не** хранится в `chat_sessions`, **миграции БД нет** — влияет на содержимое текущего user-сообщения, которое персистится как user-step (`chat_steps.payload`) → корректный replay.
   - **Allowlist ключей** (всё остальное игнорируется; значения нормализуются `strip`, пустое после strip → ключ игнорируется):
@@ -91,7 +103,25 @@
   - **Кэш-инвариант / провайдер-агностичность.** `system`+`tools` от `context` не зависят → prompt-кэш Anthropic не инвалидируется; блок — обычный текст в user-content → одинаково на Anthropic и OpenAI ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)).
   - **Не виден в истории/превью ([ADR-042](../../adr/ADR-042-hide-context-block-from-user-facing-history.md)).** Блок персистится внутри текста user-шага (для replay), но **в user-facing выводе скрыт**: при отдаче истории `GET /v1/chats/{id}` и превью `GET /v1/chats` ведущий блок `[Conversation settings for this message: …]` срезается (read-time strip, единый helper). Хранение `chat_steps.payload` и реплей модели (`_build_messages`) **не меняются** — модель по-прежнему получает блок. См. [chats/02-api-contracts.md §GET /v1/chats/{id}](../chats/02-api-contracts.md#get-v1chatsid).
   - **Обратная совместимость.** Без `context` / пустой объект / нет валидных ключей → user-сообщение = только `message` (поведение неизменно). Биллинг неизменен (1 кредит, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Расширение allowlist → [Q-037-1](../../99-open-questions.md); связь с `preferences.code_defaults` (вне scope) → [TD-028](../../100-known-tech-debt.md).
-- Size-лимиты: `message` ≤ 32KB, `context` ≤ 64KB (см. [05-security.md](../../05-security.md)). **Тело `/v1/chat/run` и `/v1/chat/v2/run` имеет повышенный transport-лимит** (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB) для inline base64-вложений — общий лимит `≤512KB` прочих роутов **не меняется**, повышение применяется точным сравнением пути к этим двум роутам (`tool-result` под него не подпадает) ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md), [05-security.md](../../05-security.md)). Лимиты на вложения: одно ≤ `ATTACHMENT_MAX_BYTES_IMAGE` (дефолт 5 MB) / `ATTACHMENT_MAX_BYTES_DOCUMENT` (дефолт 8 MB), суммарно ≤ `ATTACHMENT_TOTAL_BYTES` (дефолт 10 MB).
+<a id="лимиты-вложений-adr-089"></a>
+- **Size-лимиты (все значения — дефолты `src/app/config.py`, конфигурируемы; [ADR-089](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md), [05-security.md](../../05-security.md)):**
+
+  | Что | Лимит (env) | Дефолт | Нарушение |
+  |---|---|---|---|
+  | `message` | `SIZE_LIMIT_MESSAGE` | 32 KB | `422 validation_error` |
+  | `context` (сериализованный JSON) | `SIZE_LIMIT_CONTEXT` | 64 KB | `422 validation_error` |
+  | число вложений в ходе | `ATTACHMENT_MAX_COUNT` | 10 | `422 too_many_attachments` |
+  | одно вложение класса `image`/`text` | `ATTACHMENT_MAX_BYTES_IMAGE` | 5 MB | `422 attachment_too_large` |
+  | одно вложение класса `document` (PDF) | `ATTACHMENT_MAX_BYTES_DOCUMENT` | 8 MB | `422 attachment_too_large` |
+  | сумма всех вложений хода | `ATTACHMENT_TOTAL_BYTES` | 10 MB | `422 attachments_total_too_large` |
+  | страниц в PDF | `ATTACHMENT_PDF_MAX_PAGES` | 100 | `422 pdf_too_many_pages` |
+  | тело запроса роутов с вложениями | `ATTACHMENT_REQUEST_BODY_LIMIT` | 12 MB | `413 payload_too_large` |
+  | тело прочих роутов `/v1/*` | `SIZE_LIMIT_BODY` | 512 KB | `413 payload_too_large` |
+  | `result` в `/chat/tool-result` (поэлементно) | `SIZE_LIMIT_TOOL_RESULT` | 256 KB | `422 validation_error` |
+
+  Размер вложения считается **после** декодирования base64, но проверяется **до** него (по длине base64-строки) — anti memory-DoS.
+
+  **Повышенный transport-лимит применяется по инварианту, а не по списку путей ([ADR-089 §1](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)):** он действует на **каждом** роуте, тело которого может содержать `attachments[]` — сегодня это `POST /v1/chat/run`, `POST /v1/chat/v2/run` и `POST /v1/chat/v2/run/stream`. Остальные роуты (включая обе версии `tool-result` и `capabilities`) остаются на общем `SIZE_LIMIT_BODY`. Превышение отдаётся **как HTTP-ответ `413`**, а не разрывом соединения ([ADR-089 §2](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)); `message` ошибки содержит действующий лимит роута в байтах.
 - При старте нового пользовательского message-шага Orchestrator генерирует `messageStepId` (UUID), персистирует его в `chat_steps.message_step_id` и `tool_calls.message_step_id`. Он един для всех tool-раундов шага (включая re-entry через `/chat/tool-result`) и используется как ключ идемпотентности credits-debit ([ADR-005](../../adr/ADR-005-idempotency-ledger.md), [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). `messageStepId` — внутренняя величина биллинга, не путать с gateway correlation `requestId` (`X-Request-Id`).
 
 ### Response (200)
@@ -222,6 +252,8 @@
 #### Request
 Все поля [`POST /v1/chat/run`](#post-v1chatrun) (`userId`, `sessionId`, `projectId`, `message`, `mode`, `assistantMode`, `model`, `workspaceProjectId`, `attachments`, `context`, `editMessageStepId` — семантика, валидация и коды **идентичны**) **плюс одно**:
 
+> **`attachments` здесь ровно тот же контракт**, включая приём на **любом** ходе сессии ([ADR-088](../../adr/ADR-088-attachments-per-turn-contract.md)), модерацию хода с вложениями ([ADR-086](../../adr/ADR-086-ugc-moderation.md), нарушение → `422 content_policy_violation`), разведённые коды ошибок и [лимиты](#лимиты-вложений-adr-089). Повышенный transport-лимит тела действует и на `/v1/chat/v2/run`, и на `/v1/chat/v2/run/stream` ([ADR-089 §1](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)).
+
 ```json
 { "generationMode": "general | research | reasoning | study_learn" }
 ```
@@ -274,7 +306,9 @@
 
 ### POST /v1/chat/v2/run/stream — SSE text streaming ([ADR-069](../../adr/ADR-069-sse-text-streaming.md))
 
-Тот же body/auth/rate-limit, что у [`POST /v1/chat/v2/run`](#post-v1chatv2run). Ответ: `Content-Type: text/event-stream`.
+Тот же body/auth/rate-limit **и тот же transport-лимит тела**, что у [`POST /v1/chat/v2/run`](#post-v1chatv2run) ([ADR-089 §1](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md) — роут принимает те же `attachments[]`, поэтому подпадает под `ATTACHMENT_REQUEST_BODY_LIMIT`, а не под общий 512 KB). Ответ: `Content-Type: text/event-stream`.
+
+Отказы, вынесенные **до** старта стрима (валидация вложений, модерация, policy-ошибки), приходят обычным HTTP-ответом `4xx`/`5xx` в стандартном формате ошибки — SSE-кадр `error` используется только для сбоя **после** старта стрима.
 
 | event | data | когда |
 |-------|------|--------|
@@ -579,20 +613,27 @@ Backend только инициирует tool-call; исполняет клие
 ```json
 {
   "models": [
-    { "id": "gpt-4o", "displayName": "GPT-4o", "name": "GPT-4o", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null },
-    { "id": "claude-sonnet-4-5", "displayName": "Claude Sonnet 4.5", "name": "Claude Sonnet 4.5", "default": false, "provider": "anthropic", "modality": "chat", "variant": null, "family": null },
-    { "id": "fal-ai/nano-banana-pro", "displayName": "Nano Banana Pro", "name": "Nano Banana Pro", "default": true, "provider": "fal", "modality": "photo", "variant": "Text to Image", "family": "Nano-Banana-Pro" }
+    { "id": "gpt-4.1", "displayName": "GPT-4.1", "name": "GPT-4.1", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null },
+    { "id": "gpt-4o", "displayName": "GPT-4o", "name": "GPT-4o", "default": false, "provider": "openai", "modality": "chat", "variant": null, "family": null },
+    { "id": "fal-ai/nano-banana-pro", "displayName": "Nano Banana Pro", "name": "Nano Banana Pro", "default": true, "provider": "fal", "modality": "photo", "variant": "Text to Image", "family": "Nano-Banana-Pro" },
+    { "id": "fal-ai/veo3.1", "displayName": "Veo 3.1", "name": "Veo 3.1", "default": false, "provider": "fal", "modality": "video", "variant": "Text to Video", "family": "veo3.1" }
   ]
 }
 ```
-- `id` — для `modality=chat` уходит в `POST /v1/chat/run` `model`. Для photo/video — endpoint fal; в `chat.model` **не** принимается (`422`).
+- `id` — для `modality=chat` уходит в `POST /v1/chat/run` `model`. Для photo/video — endpoint fal; в `chat.model` **не** принимается (`422 unsupported_model`).
 - `displayName` / `name` — одно и то же человекочитаемое имя (`name` — дубль для клиентов, которые читают `name`).
-- `default` (bool) — у **chat** ровно один `true` (дефолт инстанса), он **первый** в массиве. При включённом fal у photo свой дефолт (`fal-ai/nano-banana-pro`). Video — все `false`.
+<a id="default-per-modality-adr-087"></a>
+- **`default` (bool) трактуется ТОЛЬКО внутри `modality` ([ADR-075](../../adr/ADR-075-unified-instance-models-catalog.md), уточнено [ADR-087 §4](../../adr/ADR-087-default-chat-model-gpt-4-1.md)).** Клиент обязан **сначала отфильтровать по `modality`**, и только потом читать `default`:
+  - `modality=chat` — ровно один `true` (дефолт инстанса), он **первый** в массиве;
+  - `modality=photo` — ровно один `true` (`fal-ai/nano-banana-pro`), только когда задан `FAL_API_KEY`;
+  - `modality=video` — **всегда `false`**: дефолтной видео-модели у инстанса нет.
+
+  Отсюда: в одном ответе одновременно присутствуют **до двух** `default: true` (chat и photo) — это контракт, а не дефект. Прочтение «ровно один `default: true` на весь ответ» неверно и было источником репорта BUG-003.
 - `provider` (`openai`\|`anthropic`\|`fal`) — аддитивное поле. Старые клиенты игнорируют неизвестные ключи.
-- `modality` (`chat`\|`photo`\|`video`) — селектор чата берёт только `chat`.
+- **`modality` (`chat`\|`photo`\|`video`) — стабильный машиночитаемый фильтр ([ADR-087 §5](../../adr/ADR-087-default-chat-model-gpt-4-1.md)):** существующие значения не переименовываются и не меняют смысла; расширение набора возможно только новым ADR и только добавлением значения; клиент обязан **игнорировать** строку с неизвестной ему `modality`, а не падать на ней. Селектор чата берёт только `chat`.
 - `variant` / `family` — режим и семейство fal; у chat всегда `null`.
 - **Пустой chat-allowlist** ⇒ дефолт инстанса первым + встроенный продуктовый каталог провайдера ([ADR-076](../../adr/ADR-076-builtin-chat-product-catalog.md)). Env allowlist добавляет extras и может переименовать; встроенные id не прячет.
-- Смена провайдера внутри чата **не** поддерживается (resume игнорирует `model`). `GET /v1/media/models` (короткие id, `modes[]`, цены) не заменяется.
+- **Смена модели и провайдера внутри чата не поддерживается** (resume игнорирует `model`, [ADR-087 §3](../../adr/ADR-087-default-chat-model-gpt-4-1.md)): выбранная модель фиксируется на сессию, для другой модели — новый чат. `GET /v1/media/models` (короткие id, `modes[]`, цены) не заменяется.
 
 **Коды:** `200`; `401` нет/невалидный JWT; `429` rate-limit.
 

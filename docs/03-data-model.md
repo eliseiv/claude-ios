@@ -506,8 +506,15 @@ ALTER TABLE byok_keys ADD COLUMN provider TEXT NULL;
 ```
 > Мульти-провайдерный BYOK ([ADR-044](adr/ADR-044-multi-provider-byok.md)): провайдер BYOK-ключа (`anthropic`/`openai`) определяется детектором префиксов по самому ключу, независимо от `LLM_PROVIDER`. Expand-only, **без backfill** (легаси-строки → `NULL` → fallback-детект по plaintext на генерации). Цепочка `0012`→`0013`, single head (`down_revision='0012'`). DDL колонки — [§5 byok_keys](#5-byok_keys).
 
+## Колонка `media_jobs.moderation` (expand-only, [ADR-086](adr/ADR-086-ugc-moderation.md), модуль `media-generation`)
+```sql
+ALTER TABLE media_jobs ADD COLUMN moderation JSONB NULL;
+```
+> Вердикт модерации UGC: `{status, stage, categories, checkedAt, provider, model}` ([ADR-086 §10](adr/ADR-086-ugc-moderation.md)). Expand-only, **без backfill**: `NULL` = «не проверялось» (строка создана до фичи либо инстанс с `MODERATION_ENABLED=false`) и отдаётся клиенту как `status: "unchecked"` — **никогда** как `passed`. Номер ревизии определяется на момент реализации (следующий свободный, single head; перечень ревизий в `docs/` не ведётся — [07-deployment.md §Миграции](07-deployment.md#миграции)). Полный DDL таблицы — [modules/media-generation/04-data-model.md](modules/media-generation/04-data-model.md).
+
 ## Инварианты
 - `wallets.balance >= 0` — БД CHECK + проверка в Wallet (двойная защита).
+- **Один возврат на задачу генерации ([ADR-086 §5](adr/ADR-086-ugc-moderation.md)):** обе причины возврата — провал у провайдера и блокировка результата модерацией — используют **один** ключ идемпотентности `media-refund:{jobId}`. Отдельного namespace под модерацию нет намеренно: причины взаимоисключающи (обе терминальны), а общий ключ делает двойное начисление невозможным по построению.
 - **Изоляция website-builder:** `site_files` → `projects` → `users` (FK `ON DELETE CASCADE`); доступ к файлам только через
   проект владельца. `projects.user_id` всегда соответствует существующей строке `users` (lazy-provisioning, [ADR-007](adr/ADR-007-lazy-user-provisioning.md)). Лимиты файла/проекта/числа файлов и path-traversal guard — на уровне приложения ([modules/website-builder/05-security.md](modules/website-builder/05-security.md)).
 - Идемпотентность списания — `ux_ledger_idempotency (user_id, idempotency_key)`. Для credits-debit `idempotency_key` = `messageStepId` (= `chat_steps.message_step_id`/`tool_calls.message_step_id`), единый на пользовательский message-шаг; гарантирует ровно 1 debit на шаг независимо от числа tool-раундов и re-entry. Это **не** `requestId` Gateway.

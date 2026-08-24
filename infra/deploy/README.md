@@ -65,6 +65,77 @@ Applies **per instance**: the automated deploy runs the same sequence for every 
   (expand/contract keeps the old code compatible). Rollback is per instance — it does not touch the
   other stacks.
 
+## Config that must reach the servers BEFORE the code is merged
+The deploy is automatic (push to `main` -> the CI deploy job loops over `$INSTANCES`), so a commit
+reaches every live instance within one pipeline. Any config value the new code READS therefore has
+to be in `/opt/<dir>/.env` **before** that code is merged. The two failure modes are different and
+both are named on purpose — an ordering rule stated for only one of them silently leaves the other
+unprotected:
+
+- **Hard (fail-closed) — an absent value takes the instance DOWN on the affected surfaces.**
+  The instance starts fine and then rejects real traffic. `MODERATION_API_KEY` (ADR-086) is of this
+  kind: the feature is on by default, and an instance where the key does not resolve answers
+  `503 moderation_not_configured` on `/v1/media/*` and on every chat turn with attachments.
+  Missing env here = outage.
+- **Soft (silent no-op) — an absent value leaves the instance on the OLD behaviour.**
+  `OPENAI_MODEL` / `OPENAI_BYOK_DEFAULT_MODEL` (ADR-087) are of this kind: both are set EXPLICITLY
+  in each live instance's `.env`, so changing the default in `src/app/config.py` never reaches
+  them. Nothing breaks, nothing 503s — the instance simply keeps serving `gpt-4o` and its
+  "I can't describe images containing people" refusal (BUG-003). Missing env here = the fix was
+  merged and did not happen, which is only discovered by a user report.
+
+Neither is worse than the other: the first is a loud outage, the second is a fix that quietly never
+shipped. Both are verified by the sweep below, not by reading the commit.
+
+### UGC moderation rollout (ADR-086) + default chat model (ADR-087)
+The roster of instances is deliberately NOT copied here (it goes stale on the first added
+instance) — it is `$INSTANCES` in the workflows / the registry table in `docs/07-deployment.md`
+§CI/CD-контракт: INSTANCES-loop. What to deliver is stated as a **predicate over each instance's
+own `.env`**, so it stays correct for instances added later:
+
+| Key | Deliver to | Why |
+|---|---|---|
+| `MODERATION_API_KEY` | every instance where `OPENAI_API_KEY` is EMPTY (in practice: registry provider = Anthropic, and any instance whose provider is not confirmed) | nothing else resolves -> all moderated surfaces `503` |
+| `MODERATION_API_KEY` | optional where `OPENAI_API_KEY` is non-empty | the documented fallback already resolves |
+| `OPENAI_MODEL=gpt-4.1` | every instance with `LLM_PROVIDER=openai` | explicit value shadows the new code default |
+| `OPENAI_BYOK_DEFAULT_MODEL=gpt-4.1` | every instance, both providers | multi-provider BYOK (ADR-044) applies it to an OpenAI BYOK key on ANY instance |
+| `ANTHROPIC_CHAT_FALLBACK_OPENAI_MODEL` | only where it is already set (it defaults to empty) | the cross-provider hop must not land the user back on `gpt-4o` |
+
+Remaining `MODERATION_*` keys ship with working defaults in `.env.prod.example` and need no
+per-instance action unless that instance is being recalibrated.
+
+**Sweep — run ON the server before merging the moderation code.** Prints one line per instance and
+never prints a secret value, only whether it is present. A value still holding an
+`.env.prod.example` placeholder (`<...>`) is counted as ABSENT — otherwise a verbatim template copy
+would report as configured and the instance would 503 anyway:
+```bash
+INSTANCES=$(grep -o 'INSTANCES="[^"]*"' /opt/claude-ios/.github/workflows/deploy.yml | cut -d'"' -f2)
+val() { v=$(sed -n "s/^$1=//p" "$2" 2>/dev/null | tail -1); case "$v" in "<"*) v="";; esac; printf '%s' "$v"; }
+for entry in $INSTANCES; do
+  dir="${entry%%:*}"; f="/opt/$dir/.env"
+  [ -f "$f" ] || { printf '%-12s NO .env AT %s\n' "$dir" "$f"; continue; }
+  prov=$(val LLM_PROVIDER "$f"); prov="${prov:-anthropic}"
+  if [ -n "$(val MODERATION_API_KEY "$f")" ] || [ -n "$(val OPENAI_API_KEY "$f")" ]; then
+    mod="ok"; else mod="MISSING -> 503 after merge"; fi
+  printf '%-12s provider=%-9s moderation=%-26s OPENAI_MODEL=%-10s BYOK=%s\n' \
+    "$dir" "$prov" "$mod" "$(val OPENAI_MODEL "$f")" "$(val OPENAI_BYOK_DEFAULT_MODEL "$f")"
+done
+```
+Green means: no `MISSING`, no `NO .env`, and `gpt-4.1` in both model columns of every
+`provider=openai` row. Fix the offenders, re-run the sweep, and only then merge.
+
+**Applying a change to a live instance** — editing `.env` alone does nothing; the running container
+keeps the old environment. Recreate it (per instance, no rebuild needed for an env-only change):
+```bash
+cd /opt/<dir>
+docker compose -p <project> -f docker-compose.prod.yml --env-file .env up -d --no-build api
+```
+Then verify functionally, per `docs/07-deployment.md` §Prod-readiness checklist: a benign
+`POST /v1/media/images` must NOT return `503 moderation_not_configured`, a knowingly disallowed
+prompt must return `422 content_policy_violation` **without** charging credits, and on an OpenAI
+instance `GET /v1/models` must list `gpt-4.1` first with `default: true` (read `default` inside a
+single `modality` — up to two rows carry `default: true`, chat and photo).
+
 ## CI/CD
 - `.github/workflows/ci.yml` — gate: ruff format/lint, mypy, pytest+coverage, docker build
   (validation only, **no registry push** under ADR-017). Blocks merge on failure. It also carries
@@ -157,7 +228,9 @@ curl -fsS https://${SERVICE_DOMAIN}/healthz
 ```
 
 ## Secrets
-All secrets (`ANTHROPIC_API_KEY`, JWT keys, `KMS_LOCAL_MASTER_KEY`/`KMS_*`, `APPSTORE_*`,
+All secrets (`ANTHROPIC_API_KEY`, `MODERATION_API_KEY` (ADR-086 — same fleet-wide sharing policy
+as `OPENAI_API_KEY`, i.e. NOT a fresh per-instance value), JWT keys,
+`KMS_LOCAL_MASTER_KEY`/`KMS_*`, `APPSTORE_*`,
 DB creds (`DATABASE_URL`/`POSTGRES_PASSWORD`), `REDIS_URL`, `METRICS_SCRAPE_TOKEN`,
 `ADMIN_API_SECRET` (+ `ADMIN_API_SECRET_PREV` during rotation), `PREVIEW_URL_SECRET`) come from
 the server's secret manager — never from a committed file or baked into the image
@@ -186,9 +259,12 @@ git check-ignore -v .env .env.prod .env.e2e \
   secrets. Sanity-check before commit (each line below should print NOTHING):
   ```bash
   grep -nE 'sk-ant-[A-Za-z0-9]' .env.prod.example      # real Anthropic key
+  grep -nE 'sk-(proj-)?[A-Za-z0-9_-]{20,}' .env.prod.example  # real OpenAI key (service OR moderation)
   grep -nE '(ADMIN_API_SECRET|PREVIEW_URL_SECRET|KMS_LOCAL_MASTER_KEY)=[A-Za-z0-9+/]{20,}' .env.prod.example
   grep -nE '(POSTGRES_PASSWORD|METRICS_SCRAPE_TOKEN)=[A-Za-z0-9+/]{16,}' .env.prod.example
   ```
+  The same greps apply to `.env.example` (the dev template) — it ships every `MODERATION_*` key
+  with `MODERATION_API_KEY` EMPTY, and an empty value is what must stay committed.
 - NEVER use `git add -f` (force) on `.env*` (except `.env*.example`), `.secrets/`, `*.pem`, `*.key`.
 - Defense-in-depth: `.gitignore` ignores `.env`, `.env.prod`, `.secrets/`, `*.pem`, `*.key`;
   `.dockerignore` keeps `.env*` (except `.env.example`), `.secrets/`, `*.pem`, `*.key`, and

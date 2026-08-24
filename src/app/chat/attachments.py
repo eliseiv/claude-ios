@@ -42,7 +42,17 @@ import json
 from dataclasses import dataclass, field
 
 from app.config import Settings
-from app.errors import ValidationFailedError
+from app.errors import (
+    AttachmentMediaTypeMismatchError,
+    AttachmentsTotalTooLargeError,
+    AttachmentTooLargeError,
+    InvalidBase64Error,
+    PdfTooManyPagesError,
+    PdfUnreadableError,
+    TooManyAttachmentsError,
+    UnsupportedMediaTypeError,
+    ValidationFailedError,
+)
 from app.schemas.chat import AttachmentIn
 
 # --- mediaType allowlist per class (fixed in code; Q-020-1 governs extension) ---------------
@@ -127,32 +137,36 @@ def _decode_base64(data: str) -> bytes:
         # validate=True rejects non-alphabet characters (truncated/garbage -> 422, not 500).
         return base64.b64decode(data, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ValidationFailedError("attachment data is not valid base64") from exc
+        raise InvalidBase64Error("attachment data is not valid base64") from exc
 
 
 def _check_magic_bytes(media_type: str, decoded: bytes) -> None:
     if media_type == "image/webp":
         # RIFF container with a WEBP fourcc at offset 8.
         if not (decoded[:4] == b"RIFF" and decoded[8:12] == b"WEBP"):
-            raise ValidationFailedError("attachment content does not match declared mediaType")
+            raise AttachmentMediaTypeMismatchError(
+                "attachment content does not match declared mediaType"
+            )
         return
     prefixes = _MAGIC_PREFIXES.get(media_type)
     if prefixes is None:  # pragma: no cover - allowlist guarantees a known image/pdf type here
         return
     if not any(decoded.startswith(prefix) for prefix in prefixes):
-        raise ValidationFailedError("attachment content does not match declared mediaType")
+        raise AttachmentMediaTypeMismatchError(
+            "attachment content does not match declared mediaType"
+        )
 
 
 def _decode_text(media_type: str, decoded: bytes) -> str:
     try:
         text = decoded.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ValidationFailedError("text attachment is not valid UTF-8") from exc
+        raise AttachmentMediaTypeMismatchError("text attachment is not valid UTF-8") from exc
     if media_type == "application/json":
         try:
             json.loads(text)
         except (ValueError, json.JSONDecodeError) as exc:
-            raise ValidationFailedError(
+            raise AttachmentMediaTypeMismatchError(
                 "attachment content does not match declared mediaType"
             ) from exc
     return text
@@ -169,14 +183,14 @@ def _check_pdf_pages(decoded: bytes, settings: Settings) -> None:
     try:
         reader = PdfReader(io.BytesIO(decoded))
         if reader.is_encrypted:
-            raise ValidationFailedError("password-protected PDF is not accepted")
+            raise PdfUnreadableError("password-protected PDF is not accepted")
         pages = len(reader.pages)
     except ValidationFailedError:
         raise
     except (PdfReadError, ValueError, OSError) as exc:
-        raise ValidationFailedError("PDF could not be parsed") from exc
+        raise PdfUnreadableError("PDF could not be parsed") from exc
     if pages > settings.attachment_pdf_max_pages:
-        raise ValidationFailedError("PDF exceeds the maximum allowed number of pages")
+        raise PdfTooManyPagesError("PDF exceeds the maximum allowed number of pages")
 
 
 def _placeholder(att: AttachmentIn, decoded_size: int) -> dict[str, str]:
@@ -282,7 +296,7 @@ def prepare_attachments(
     violation. Never logs attachment content.
     """
     if len(attachments) > settings.attachment_max_count:
-        raise ValidationFailedError("too many attachments")
+        raise TooManyAttachmentsError("too many attachments")
 
     content_blocks: list[dict[str, object]] = []
     placeholders: list[dict[str, str]] = []
@@ -293,15 +307,15 @@ def prepare_attachments(
         allowed = _ALLOWLIST.get(att.type)
         # type is constrained by the schema Literal; defensive guard keeps mypy/logic explicit.
         if allowed is None or att.mediaType not in allowed:  # pragma: no branch
-            raise ValidationFailedError(f"unsupported_media_type: {att.mediaType}")
+            raise UnsupportedMediaTypeError(f"unsupported_media_type: {att.mediaType}")
 
         # Limits BEFORE base64 decode (anti memory-DoS): bound decoded size from the b64 length.
         approx_decoded = _decoded_len_from_base64(att.data)
         if approx_decoded > _max_bytes_for(att.type, settings):
-            raise ValidationFailedError("attachment exceeds the maximum size")
+            raise AttachmentTooLargeError("attachment exceeds the maximum size")
         total_decoded += approx_decoded
         if total_decoded > settings.attachment_total_bytes:
-            raise ValidationFailedError("attachments exceed the total size limit")
+            raise AttachmentsTotalTooLargeError("attachments exceed the total size limit")
 
         decoded = _decode_base64(att.data)
         text: str | None = None

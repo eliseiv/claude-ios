@@ -20,7 +20,8 @@
 7. [Монетизация (кратко)](#14-монетизация-кратко)
 8. [Превью сайта для iOS](#15-превью-сайта-для-ios)
 9. [Лимиты и rate limits](#16-лимиты-и-rate-limits)
-10. [Как тестировать через Swagger](#23-как-тестировать-через-swagger)
+10. [Модерация контента (UGC)](#27-модерация-контента-ugc)
+11. [Как тестировать через Swagger](#23-как-тестировать-через-swagger)
 
 ---
 
@@ -95,16 +96,35 @@
 | **403** | `userId` в теле ≠ `sub` JWT; для preview — невалидная подпись/истёкший URL/чужой владелец |
 | **404** | ресурс/сессия/пользователь не найдены; для preview — проект или файл не найдены |
 | **409** | конфликт идемпотентности (тот же ключ — другой payload); недостаточно кредитов на момент списания |
-| **413** | превышен общий размер тела запроса (transport-уровень, до парсинга) |
-| **422** | невалидная схема/значение поля; превышен лимит отдельного поля; невалидная StoreKit-транзакция |
+| **413** | превышен общий размер тела запроса (transport-уровень, до парсинга). **Приходит как HTTP-ответ, а не разрыв соединения** — если вы видите broken pipe / «нет связи» на большом файле, это дефект, а не контракт |
+| **422** | невалидная схема/значение поля; превышен лимит отдельного поля; отклонение вложения; отклонение контента модерацией; невалидная StoreKit-транзакция |
 | **429** | превышен rate limit |
-| **502 / 5xx** | внутренняя ошибка или ошибка upstream (Anthropic / App Store / KMS) |
+| **502 / 5xx** | внутренняя ошибка или ошибка upstream (Anthropic / App Store / KMS / провайдер модерации) |
 
 Стандартный формат технической ошибки (4xx/5xx):
 ```json
 { "error": { "code": "validation_error", "message": "human readable", "requestId": "..." } }
 ```
-`code` ∈ `unauthorized | forbidden | not_found | conflict | payload_too_large | validation_error | rate_limited | internal_error | upstream_error`.
+Базовый набор `code`: `unauthorized | forbidden | not_found | conflict | payload_too_large | validation_error | rate_limited | internal_error | upstream_error`.
+
+**Доменные коды сверх базового набора** (ветвиться по `code`, не по тексту `message`):
+
+| Код | HTTP | Когда |
+|---|---|---|
+| `too_many_attachments` | 422 | вложений в ходе больше лимита |
+| `attachment_too_large` | 422 | одно вложение больше лимита своего класса |
+| `attachments_total_too_large` | 422 | суммарный размер вложений хода больше лимита |
+| `unsupported_media_type` | 422 | `mediaType` вне allowlist |
+| `attachment_media_type_mismatch` | 422 | содержимое не соответствует заявленному `mediaType` (magic bytes / UTF-8 / JSON) |
+| `invalid_base64` | 422 | `data` — не валидный base64 |
+| `pdf_unreadable` | 422 | PDF не парсится или защищён паролем |
+| `pdf_too_many_pages` | 422 | страниц в PDF больше лимита |
+| `content_policy_violation` | 422 | промпт / изображение / вложение отклонены модерацией ([раздел 27](#27-модерация-контента-ugc)) |
+| `moderation_unavailable` | 503 | провайдер модерации недоступен — операция не выполнена, повторите позже |
+| `moderation_not_configured` | 503 | модерация не настроена на инстансе (проблема оператора) |
+| `unsupported_model`, `workspace_not_found`, `message_not_found`, `session_not_found`, `insufficient_credits`, `job_not_terminal`, `subscription_required`, `media_generation_not_configured`, `gateway_timeout` | по разделу | доменные коды соответствующих эндпоинтов |
+
+> **Совместимость (2026-08-24, [ADR-089](adr/ADR-089-attachment-limits-and-error-taxonomy.md)).** Отказы вложений раньше приходили с `code: "validation_error"` и различались только текстом. Теперь у каждого свой `code`, **HTTP-статусы не изменились**, а тексты `message` сохранены **дословно** — клиент, который сегодня разбирает строку, продолжает работать; новый клиент ветвится по `code`.
 
 > Бизнес-блокировки **не** используют этот формат — они приходят как `200` со `status="blocked"`.
 
@@ -130,7 +150,7 @@
 | `assistantMode` | `chat` \| `code`, опц. | **assistant_mode** — тип ассистента (ADR-012). При отсутствии — дефолт из `GET /v1/preferences` (`defaultAssistantMode`), затем `chat`. Фиксируется при создании сессии. **Ортогонален `mode`** |
 | `model` | string, **опц.** | **Выбор модели** ([ADR-034](adr/ADR-034-user-model-selection.md)). Id из `GET /v1/models` (модели активного провайдера инстанса). **Session-fixed**: фиксируется при создании сессии; при resume берётся из сессии (поле запроса игнорируется). Без `model` → дефолтная модель инстанса (`ANTHROPIC_MODEL`/`OPENAI_MODEL`). Непустая после `strip`; вне allowlist → **`422 unsupported_model`** (тихого фолбэка нет). На биллинг не влияет (1 кредит, [ADR-006](adr/ADR-006-credit-billing-and-subscription-grant.md)); `usage.model` отражает использованную модель. |
 | `workspaceProjectId` | string (uuid), **опц.** | **Привязка чата к рабочему пространству** ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)/[ADR-036](adr/ADR-036-workspaces-implementation.md)). **Session-fixed**: фиксируется при создании сессии; при resume берётся из сессии (поле запроса игнорируется). При создании валидируется принадлежность workspace пользователю → чужой/несуществующий = **`404 workspace_not_found`**. При наличии: `workspace.instructions` подмешиваются в system-prompt после base-промта; файлы-знания workspace подаются как контекст (document/text → извлечённый текст, image → vision). **≠ `projectId`** (website-builder). На биллинг не влияет. |
-| `attachments` | array, опц. | **inline base64-вложения** (фото/PDF/текст), ≤ 10. Только в первом (новом) user-turn; в `/chat/tool-result` не принимаются. Каждый элемент: `{ type: image\|document\|text, mediaType, filename?, data (base64) }`. См. ниже. ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) |
+| `attachments` | array, опц. | **inline base64-вложения** (фото/PDF/текст), ≤ 10. **Принимаются на ЛЮБОМ ходе сессии** — и при создании, и на продолжении, и при редактировании ([ADR-088](adr/ADR-088-attachments-per-turn-contract.md)); в `/chat/tool-result` не принимаются. Каждый элемент: `{ type: image\|document\|text, mediaType, filename?, data (base64) }`. См. ниже. ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) |
 | `context` | object, опц. | **Per-message доп-настройки хода** ([ADR-037](adr/ADR-037-chatrunrequest-context-allowlist-injection.md)). НЕ session-fixed — присылается на каждый `/chat/run`, может меняться по ходу чата (без БД). Allowlist: `codeLanguage` (str≤40), `responseStyle` (`concise\|balanced\|detailed`), `verbosity` (`low\|medium\|high`), `tone` (str≤40), `locale` (str≤35 BCP-47-подобный). Неизвестные ключи и невалидные значения — **игнорируются** (lenient). Инъектируется в текущее user-сообщение (НЕ в system). Служебный блок **не виден** в истории `GET /v1/chats/{id}` и превью `GET /v1/chats` — срезается при отдаче ([ADR-042](adr/ADR-042-hide-context-block-from-user-facing-history.md)); хранение/реплей модели не меняются. Без валидных ключей → поведение неизменно. Size ≤ 64 KB сериализованного JSON (иначе `422`). |
 | `editMessageStepId` | string (uuid), **опц.** | **Редактирование отправленного сообщения** ([ADR-040](adr/ADR-040-edit-message-and-regenerate.md)). `messageStepId` хода, который надо отредактировать (берётся из `steps[].messageStepId` истории или `ChatResponse.messageStepId`). Backend усекает историю от этого хода (его user-шаг и всё после) и генерирует новый ход с переданными `message`/`attachments`/`context`. **Требует `sessionId`** (resume): без него → `422`. Чужая/несуществующая сессия → `404`; нет user-шага с этим `messageStepId` → `404 message_not_found`. Биллинг: новый ход = **новый дебит 1 кредита**, возврата за старый ход нет. См. callout ниже. |
 
@@ -143,7 +163,15 @@
 >
 > **Отправка без текста ([ADR-039](adr/ADR-039-optional-message-with-attachments.md)).** `message` можно оставить пустым, если есть ≥1 вложение (image-only / file-only ход) — UI «отправить фото/файл без подписи». Backend шлёт провайдеру только attachment-блоки (пустой text-блок не отправляется). На OpenAI-инстансе работает и image-only, и PDF-only ([ADR-041](adr/ADR-041-openai-native-pdf-attachment.md), см. ниже).
 >
-> MIME вне allowlist → `422`; рассогласование заявленного `mediaType` и реального содержимого (magic bytes) → `422`; невалидный base64 → `422`. URL-вложения не поддерживаются (только inline). Лимиты (дефолты, конфигурируемы): ≤ 10 вложений; одно ≤ 5 MB (image) / 8 MB (document); суммарно ≤ 10 MB; PDF ≤ 100 страниц; тело `/v1/chat/run` ≤ 12 MB (повышенный лимит **только** этого роута). **Биллинг неизменен: сообщение с вложениями = 1 кредит** ([ADR-006](adr/ADR-006-credit-billing-and-subscription-grant.md)). Содержимое вложений не логируется.
+> **На каком ходе принимаются ([ADR-088](adr/ADR-088-attachments-per-turn-contract.md), исправляет прежнюю формулировку «только в первом сообщении»).** Вложение — свойство **хода**, а не сессии:
+> - присылать `attachments[]` можно на **любом** ходе (`POST /v1/chat/run`, `POST /v1/chat/v2/run`, `POST /v1/chat/v2/run/stream`); в `/chat/tool-result` (обе версии) — нельзя;
+> - **байтами модель видит вложение только в том ходе, где оно прислано.** Внутри хода блоки уходят на первом обращении к модели, дальше в истории остаётся текстовый плейсхолдер;
+> - **на следующих ходах прежние вложения модели не пересылаются** — чтобы модель снова посмотрела на фото, **приложите его снова**. «Посмотри на предыдущее фото» без нового вложения будет отвечено по тексту плейсхолдера;
+> - **при `editMessageStepId` вложения не наследуются** — редактируя сообщение с фото, пришлите фото вместе с новым текстом, иначе регенерация пойдёт без него.
+>
+> **Модерация ([раздел 27](#27-модерация-контента-ugc)).** Ход **с вложениями** проверяется до генерации: текст сообщения + текстовые вложения + все изображения. Нарушение → `422 content_policy_violation` (кредит не списан, сообщение не сохранено). Ход **без** вложений не модерируется.
+>
+> MIME вне allowlist → `422 unsupported_media_type`; рассогласование заявленного `mediaType` и реального содержимого (magic bytes) → `422 attachment_media_type_mismatch`; невалидный base64 → `422 invalid_base64`; проблемы PDF → `422 pdf_unreadable`/`pdf_too_many_pages`. URL-вложения не поддерживаются (только inline). Лимиты (дефолты, конфигурируемы): ≤ 10 вложений (`422 too_many_attachments`); одно ≤ 5 MB (image/text) / 8 MB (document) (`422 attachment_too_large`); суммарно ≤ 10 MB (`422 attachments_total_too_large`); PDF ≤ 100 страниц; тело роутов, принимающих вложения, ≤ 12 MB (`413`, повышенный лимит **только** у них). **Биллинг неизменен: сообщение с вложениями = 1 кредит** ([ADR-006](adr/ADR-006-credit-billing-and-subscription-grant.md)). Содержимое вложений не логируется.
 >
 > **PDF на обоих провайдерах ([ADR-041](adr/ADR-041-openai-native-pdf-attachment.md), снято прежнее ограничение [ADR-033](adr/ADR-033-llm-provider-abstraction.md)/[TD-023](100-known-tech-debt.md)).** Сервис разворачивается мульти-инстансно на разных LLM-провайдерах одним кодом (выбор — env `LLM_PROVIDER`, дефолт `anthropic`). `type: document` (`application/pdf`) теперь принимается на **обоих** провайдерах: на **anthropic** — нативный `document`-блок (как прежде); на **OpenAI** (`LLM_PROVIDER=openai`, Chat Completions) — нативная content-часть `file` (data-URI `application/pdf`) либо извлечённый `pypdf`-текст как text-блок (фолбэк). `image`/`text` работают на обоих (картинки — через `image_url` data-URI). Контракт `attachments[]` един для обоих провайдеров; PDF можно отправлять на любой инстанс.
 >
@@ -179,7 +207,7 @@
 - **`tool_call`** — Claude запросил исполнение client-side инструмента(ов); iOS обязан исполнить **все** `toolCalls[]` и вернуть результаты через `/v1/chat/tool-result` (батч). Кредит на промежуточных tool-раундах не списывается. Server-side инструменты (`site.*`/`time.now`) исполняет backend сам и наружу как `tool_call` не отдаёт — но факт их выполнения за этот вызов виден в `serverTools[]` ([ADR-028](adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)). **Несколько tool-вызовов в одном ходе (parallel tool use):** все возвращаются в `toolCalls[]` — backend продолжит диалог только после получения результатов на **все** из них ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). **Если Claude в том же ходе выдал текст вместе с `tool_use`, он возвращается в `assistantMessage`** (тот же шаг, `stepId`) ([ADR-024](adr/ADR-024-history-payload-domain-normalization.md)).
 - **`blocked`** — генерация запрещена бизнес-правилом; смотри `blockReason`. **Особый случай `blockReason=max_tokens`** ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)): ответ Claude обрезан лимитом output-токенов; инструменты не отдаются (обрезаны), **кредит не списывается**, `usage`/`messageStepId`/`stepId` присутствуют. UX: повторить или сократить запрос.
 
-**Коды:** `200` (вкл. blocked); `401` (нет JWT); `403` (`userId ≠ sub`); `404` (сессия не найдена; `workspace_not_found`; `message_not_found` — `editMessageStepId` не резолвится в user-ход сессии, [ADR-040](adr/ADR-040-edit-message-and-regenerate.md)); `413` (тело > 12 MB — повышенный лимит этого роута под inline base64-вложения, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)); `422` (схема/`message` > 32 KB/`context` > 64 KB/вложение вне allowlist/невалидный base64/MIME-mismatch/PDF page-guard/`editMessageStepId` без `sessionId` — [ADR-040](adr/ADR-040-edit-message-and-regenerate.md)); `429` (rate limit); `502/5xx` (ошибка Anthropic/внутренняя).
+**Коды:** `200` (вкл. blocked); `401` (нет JWT); `403` (`userId ≠ sub`); `404` (сессия не найдена; `workspace_not_found`; `message_not_found` — `editMessageStepId` не резолвится в user-ход сессии, [ADR-040](adr/ADR-040-edit-message-and-regenerate.md)); `413 payload_too_large` (тело > 12 MB — повышенный лимит роутов с вложениями; приходит **ответом**, не разрывом соединения, [ADR-089](adr/ADR-089-attachment-limits-and-error-taxonomy.md)); `422` (`validation_error` — схема/`message` > 32 KB/`context` > 64 KB/`editMessageStepId` без `sessionId`; отдельные коды вложений — `too_many_attachments`/`attachment_too_large`/`attachments_total_too_large`/`unsupported_media_type`/`attachment_media_type_mismatch`/`invalid_base64`/`pdf_unreadable`/`pdf_too_many_pages`; `content_policy_violation` — отклонено модерацией); `429` (rate limit); `503` (`moderation_unavailable`/`moderation_not_configured`); `502/5xx` (ошибка провайдера LLM/внутренняя).
 
 ---
 
@@ -476,7 +504,7 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 
 > Старые клиенты, знающие только `valid`/`invalid`/`missing`, обязаны трактовать любой неизвестный статус как «не `valid`» (BYOK недоступен), не падая.
 
-**`activeModel`** — строка с активной моделью при `keyStatus=valid`; значение = BYOK-дефолт **провайдера, определённого по ключу** (`claude-sonnet-4-6` для Anthropic-ключа, `gpt-4o` для OpenAI-ключа); во всех остальных статусах — `null`.
+**`activeModel`** — строка с активной моделью при `keyStatus=valid`; значение = BYOK-дефолт **провайдера, определённого по ключу** (`claude-sonnet-4-6` для Anthropic-ключа, `gpt-4.1` для OpenAI-ключа — [ADR-087](adr/ADR-087-default-chat-model-gpt-4-1.md)); во всех остальных статусах — `null`.
 
 ### POST /v1/byok/set
 Сохранить и провалидировать ключ.
@@ -918,12 +946,17 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 ### Размер payload
 | Лимит | Значение | Нарушение |
 |---|---|---|
-| Общий размер тела запроса (все роуты, кроме upload-роутов ниже) | ≤ 512 KB | `413` |
-| Тело `/v1/chat/run` и `/v1/chat/v2/run` (повышенный — под inline base64-вложения, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) | ≤ 12 MB | `413` |
-| Тело `POST /v1/workspaces/{id}/files` (повышенный — под inline base64 workspace-файлов, [ADR-045](adr/ADR-045-per-path-body-limit-workspace-files.md)) | ≤ 12 MB | `413` |
-| `message` (`/chat/run`) | ≤ 32 KB; опц. при ≥1 attachment ([ADR-039](adr/ADR-039-optional-message-with-attachments.md)), иначе пустой → `422` | `422` |
-| `context` (`/chat/run`) | ≤ 64 KB | `422` |
-| `attachments[]` (`/chat/run`, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) | ≤ 10 шт.; одно ≤ 5 MB image / 8 MB document; суммарно ≤ 10 MB; PDF ≤ 100 стр. | `413`/`422` |
+| Общий размер тела запроса (все роуты, кроме перечисленных ниже) | ≤ 512 KB | `413 payload_too_large` |
+| Тело роутов, принимающих `attachments[]` — `/v1/chat/run`, `/v1/chat/v2/run`, **`/v1/chat/v2/run/stream`** ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md), [ADR-089 §1](adr/ADR-089-attachment-limits-and-error-taxonomy.md)) | ≤ 12 MB | `413 payload_too_large` |
+| Тело `POST /v1/workspaces/{id}/files` (повышенный — под inline base64 workspace-файлов, [ADR-045](adr/ADR-045-per-path-body-limit-workspace-files.md)) | ≤ 12 MB | `413 payload_too_large` |
+| Тело `POST /v1/media/uploads` (повышенный — под base64 референсного изображения, [ADR-062](adr/ADR-062-media-upload-via-fal-storage.md)) | ≤ 16 MB | `413 payload_too_large` |
+| `message` (`/chat/run`) | ≤ 32 KB; опц. при ≥1 attachment ([ADR-039](adr/ADR-039-optional-message-with-attachments.md)), иначе пустой → `422` | `422 validation_error` |
+| `context` (`/chat/run`) | ≤ 64 KB | `422 validation_error` |
+| `attachments[]` — число (`/chat/*`, [ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) | ≤ 10 шт. | `422 too_many_attachments` |
+| `attachments[]` — одно вложение | ≤ 5 MB (image/text) / 8 MB (document) | `422 attachment_too_large` |
+| `attachments[]` — сумма за ход | ≤ 10 MB | `422 attachments_total_too_large` |
+| `attachments[]` — страниц в PDF | ≤ 100 | `422 pdf_too_many_pages` |
+| Файл в `POST /v1/media/uploads` | ≤ 10 MB после декодирования | `413 payload_too_large` (**намеренно не `422`** — историческая асимметрия с чатом, статус не меняем ради совместимости) |
 | `result` (`/chat/tool-result`) | ≤ 256 KB | `422` |
 | `apiKey` (BYOK) | ≤ 4 KB | `422` |
 | Тело admin-запроса | ≤ 8 KB | `413`/`422` |
@@ -945,7 +978,9 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | Число файлов в проекте | ≤ 200 |
 | TTL preview signed URL | 15 минут (дефолт) |
 
-Все значения — конфигурируемые дефолты из server-side настроек; на проде могут быть откалиброваны.
+Все значения — конфигурируемые дефолты из server-side настроек; на проде могут быть откалиброваны. Действующие числа продублированы в описаниях полей OpenAPI и **вычисляются из тех же настроек**, что и сами проверки ([ADR-089 §4](adr/ADR-089-attachment-limits-and-error-taxonomy.md)) — расхождения текста и поведения быть не может.
+
+> **`413` приходит ответом, а не разрывом ([ADR-089 §2](adr/ADR-089-attachment-limits-and-error-taxonomy.md)).** Превышение transport-лимита отдаётся полноценным HTTP-ответом `{"error":{"code":"payload_too_large","message":"… limit of <N> bytes …"}}`: сервер дочитывает остаток тела в пределах служебного бюджета и только потом закрывает соединение. Клиенту следует показывать «файл слишком большой», а не «нет связи». Проверка не зависит от заголовка `Content-Length` — chunked-загрузка отклоняется так же.
 
 ---
 
@@ -1013,12 +1048,17 @@ JWKS с публичным ключом (для самопроверки/отл�
 **Response 200:**
 ```json
 { "models": [
-  { "id": "gpt-4o", "displayName": "GPT-4o", "name": "GPT-4o", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null },
-  { "id": "fal-ai/nano-banana-pro", "displayName": "Nano Banana Pro", "name": "Nano Banana Pro", "default": true, "provider": "fal", "modality": "photo", "variant": "Text to Image", "family": "Nano-Banana-Pro" }
+  { "id": "gpt-4.1", "displayName": "GPT-4.1", "name": "GPT-4.1", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null },
+  { "id": "gpt-4o", "displayName": "GPT-4o", "name": "GPT-4o", "default": false, "provider": "openai", "modality": "chat", "variant": null, "family": null },
+  { "id": "fal-ai/nano-banana-pro", "displayName": "Nano Banana Pro", "name": "Nano Banana Pro", "default": true, "provider": "fal", "modality": "photo", "variant": "Text to Image", "family": "Nano-Banana-Pro" },
+  { "id": "fal-ai/veo3.1", "displayName": "Veo 3.1", "name": "Veo 3.1", "default": false, "provider": "fal", "modality": "video", "variant": "Text to Video", "family": "veo3.1" }
 ] }
 ```
-- `id` — для `modality=chat` уходит в `POST /v1/chat/run` `model`. Fal-id в `chat.model` → `422`. `displayName`/`name` — одно имя для UI. Chat-`default:true` ровно один и идёт первым; у photo свой дефолт, если fal включён.
-- `provider` (`openai`\|`anthropic`\|`fal`), `modality` (`chat`\|`photo`\|`video`), `variant`/`family` (у chat `null`) — аддитивные поля; старые клиенты игнорируют.
+- `id` — для `modality=chat` уходит в `POST /v1/chat/run` `model`. Fal-id в `chat.model` → `422 unsupported_model`. `displayName`/`name` — одно имя для UI.
+- **`default` читается ТОЛЬКО внутри `modality` ([ADR-087 §4](adr/ADR-087-default-chat-model-gpt-4-1.md)):** сначала отфильтруйте по `modality`, потом берите `default`. У `chat` — ровно один `true` (и он первый в массиве), у `photo` — ровно один `true` при включённом fal, у `video` — **всегда `false`**. Поэтому в одном ответе законно встречаются **два** `default: true` (chat и photo); прочтение «ровно один на весь ответ» неверно.
+- **`modality` (`chat`\|`photo`\|`video`) — стабильный фильтр ([ADR-087 §5](adr/ADR-087-default-chat-model-gpt-4-1.md)):** значения не переименовываются и не меняют смысла; новое значение может быть только добавлено (отдельным решением), поэтому клиент обязан **игнорировать** строку с неизвестной `modality`, а не падать.
+- **Дефолт чата на OpenAI-инстансах — `gpt-4.1`** ([ADR-087](adr/ADR-087-default-chat-model-gpt-4-1.md)): у `gpt-4o` встроенный guardrail отказывался описывать изображения с людьми. `gpt-4o` остаётся в списке и выбирается явно. **Модель фиксируется на сессию** — сменить её внутри начатого чата нельзя (создайте новый чат); уже начатые чаты продолжаются на своей модели.
+- `provider` (`openai`\|`anthropic`\|`fal`), `variant`/`family` (у chat `null`) — аддитивные поля; старые клиенты игнорируют.
 - Chat без `LLM_PROVIDERS` — встроенный каталог активного провайдера ([ADR-076](adr/ADR-076-builtin-chat-product-catalog.md)) + дефолт первым. Env allowlist добавляет extras. С `LLM_PROVIDERS` — union обоих (нужны оба ключа). Leftover-ключ dual не включает. Пустой `FAL_API_KEY` — без fal-строк.
 **Коды:** `200`; `401`; `429`.
 
@@ -1103,6 +1143,44 @@ JWKS с публичным ключом (для самопроверки/отл�
 5. **Preview** через Swagger не тестируется обычным способом — `GET /v1/preview/*` открывается прямой signed-URL ссылкой в браузере (авторизация в URL, не в заголовке).
 
 > Если `/docs` отдаёт `404` — на этом окружении `DOCS_ENABLED=false` (рекомендация для prod). Тогда тестируй через `curl`/Postman по контрактам выше.
+
+---
+
+## 27. Модерация контента (UGC)
+
+Требование App Store 1.1.4 / 1.2: приложение с пользовательским контентом не должно ни генерировать, ни показывать объектный материал без фильтрации. Проверка выполняется **на backend** — клиент не может её отключить, и обходить её подменой клиента бессмысленно ([ADR-086](adr/ADR-086-ugc-moderation.md)).
+
+**Что проверяется**
+
+| Поверхность | Что уходит в проверку | Когда |
+|---|---|---|
+| `POST /v1/chat/run`, `/v1/chat/v2/run`, `/v1/chat/v2/run/stream` — **только ходы с `attachments[]`** | текст сообщения + текстовые вложения + все изображения (PDF — нет) | до сохранения сообщения и до вызова модели |
+| `POST /v1/media/images`, `POST /v1/media/videos` | `prompt` + присланные `imageUrls`/`imageUrl` | **до списания кредитов** |
+| `POST /v1/media/uploads` | загружаемое изображение | до отправки провайдеру |
+| результат генерации `kind: image` | сгенерированные изображения | после завершения генерации |
+
+Ход чата **без вложений** и результат генерации **видео** не модерируются (у видео проверяются только промпт и стартовый кадр — провайдер модерации не принимает видео).
+
+**Как это видно клиенту**
+
+- **Отказ на входе:** `422` с `code: "content_policy_violation"` и человекочитаемым `message`. **Кредиты не списаны**, задача не создана, сообщение не сохранено. Категории нарушения в теле ошибки намеренно не раскрываются.
+- **Провайдер модерации недоступен:** `503 moderation_unavailable` — операция не выполнена, кредиты не списаны, имеет смысл повторить. `503 moderation_not_configured` — модерация не настроена на инстансе (обращение к оператору).
+- **Вердикт по задаче генерации** — поле `moderation` в `GET /v1/media/jobs/{jobId}` **и в каждом элементе** `GET /v1/media/jobs`:
+
+```json
+"moderation": { "status": "flagged", "stage": "output", "categories": ["violence"], "checkedAt": "2026-08-24T11:20:48.117Z" }
+```
+
+| `status` | Состояние задачи | Что показывать |
+|---|---|---|
+| `passed` | `completed`, ассеты есть | обычный показ |
+| `flagged` | `completed`, ассеты есть, кредиты не возвращены | блюр + тап «Показать» |
+| `blocked` | `failed`, `assets: []`, `error: "content_policy_violation"`, `creditsRefunded: true` | заглушка вместо контента; кредиты уже вернулись |
+| `unchecked` | любое | показывать как `passed` — задача старше фичи либо модерация выключена на инстансе |
+
+Поле присутствует всегда и никогда не `null`. Заблокированный ассет не сохраняется и **недоступен** по signed-URL download-роуту.
+
+**Генерация из чата.** Если модель попыталась сгенерировать запрещённый контент через инструменты чата, ход **не падает**: в `serverTools[]` появляется запись со `status: "errored"` и `summary: "content_policy_violation"`, ассистент отвечает как обычно и может переформулировать запрос.
 
 ---
 

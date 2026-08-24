@@ -24,5 +24,6 @@
 - Лимиты/allowlist, изоляция владельца. Биллинг — обычный chat-шаг (ADR-006 без изменений).
 
 ## Changelog
+- 2026-08-24: **актуальные контракты inline-вложений — вне этого модуля.** Уточнены ссылки: контракт «на каком ходе принимаются» — [ADR-088](../../adr/ADR-088-attachments-per-turn-contract.md); лимиты и разведённые `error.code` + `413` без обрыва — [ADR-089](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md); модерация UGC — [ADR-086](../../adr/ADR-086-ugc-moderation.md). В [05-security.md](05-security.md) помечено, что перечисленные там значения относятся к отложенной модели (действующий `document`-лимит — 8 MB, не 10 MB). Модуль по-прежнему отложен ([TD-015](../../100-known-tech-debt.md)), кода не появилось.
 - 2026-06-02: bootstrap модуля (architect, Figma-gap). [ADR-014](../../adr/ADR-014-multimodal-attachments.md). Таблица `attachments`. orphan-retention → [TD-010](../../100-known-tech-debt.md); хранение в БД → [TD-009](../../100-known-tech-debt.md). См. [figma-gap-analysis.md](../../figma-gap-analysis.md).
 - 2026-06-03: модуль **отложен** ([TD-015](../../100-known-tech-debt.md)). MVP мультимодального ввода — inline base64 в `/v1/chat/run` ([ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)), без этого модуля. Транспорт ADR-014 → Superseded; модуль сохранён как будущий путь (reuse/большие файлы/object-storage).

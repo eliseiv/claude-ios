@@ -8,6 +8,8 @@ assistant_message (mode=credits). BYOK plaintext key is in-memory only, never lo
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -74,6 +76,7 @@ from app.chat.tools import (
 )
 from app.config import get_settings
 from app.errors import (
+    ContentPolicyViolationError,
     InsufficientCreditsError,
     MediaGenerationNotConfiguredError,
     MessageNotFoundError,
@@ -85,6 +88,8 @@ from app.errors import (
 from app.memory.indexer import schedule_delete_from_message_step, schedule_index_turn
 from app.memory.service import MemoryService
 from app.models import ChatSession, ChatStep, ToolCall
+from app.moderation import ModerationService
+from app.moderation.service import STAGE_INPUT, SURFACE_CHAT
 from app.observability.logging import log_event
 from app.observability.metrics import (
     blocked_requests_total,
@@ -789,6 +794,8 @@ class _Deps:
     # ADR-036: workspaces context provider (instructions + knowledge files) for workspace chats.
     workspaces: WorkspacesService
     memory: MemoryService | None = None
+    # ADR-086: None ⇒ модерация не выполняется (вердикт unchecked), ход идёт как раньше.
+    moderation: ModerationService | None = None
 
 
 class ChatOrchestrator:
@@ -805,6 +812,7 @@ class ChatOrchestrator:
         global_tools: GlobalToolHandlers | None = None,
         workspaces: WorkspacesService | None = None,
         memory: MemoryService | None = None,
+        moderation: ModerationService | None = None,
     ) -> None:
         self._session = session
         self._deps = _Deps(
@@ -829,6 +837,9 @@ class ChatOrchestrator:
                 else WorkspacesService(WorkspacesRepository(session))
             ),
             memory=memory,
+            # ADR-086: None ⇒ ход не модерируется (легаси-вызов без DI); фабрика в deps.py
+            # передаёт общий экземпляр явно.
+            moderation=moderation,
         )
 
     # ---- public entrypoints ----
@@ -1054,6 +1065,15 @@ class ChatOrchestrator:
         placeholders = prepared.placeholders if prepared is not None else []
         user_payload_content: list[dict[str, Any]] = [*text_blocks, *placeholders]
 
+        # ADR-086 §3: ход модерируется тогда и только тогда, когда в запросе есть вложения. Ход без
+        # вложений не порождает медиа и не оплачивает генерацию — модерация каждого текстового
+        # сообщения добавила бы round-trip на КАЖДЫЙ ход ради контента, который клиент не
+        # показывает как медиа. Точка вызова — после валидации вложений (кривой файл дешевле отбить
+        # раньше) и ДО add_step: нарушение ⇒ 422, ни одного шага в БД, ни одного вызова LLM, кредит
+        # не списан, только что созданная пустая сессия откатывается с транзакцией запроса.
+        if attachments:
+            await self._moderate_turn(message, attachments)
+
         # Persist fal https refs (TTL 1 day) for later useRecentImage — soft-fail if media off.
         attachment_refs: list[dict[str, Any]] = []
         if prepared is not None and prepared.images:
@@ -1123,6 +1143,40 @@ class ChatOrchestrator:
             generation_backend=requested_backend,
             on_text_delta=on_text_delta,
         )
+
+    async def _moderate_turn(self, message: str, attachments: list[AttachmentIn]) -> None:
+        """Пре-модерация хода с вложениями (ADR-086 §3). Нарушение → 422 до записи шага.
+
+        В один вызов уходят: текст хода (сырой ``message``, ДО склейки с context-блоком ADR-037)
+        вместе с содержимым текстовых вложений, и ВСЕ вложения класса ``image`` как data-URI.
+        Отдельного лимита «сколько картинок проверяем» нет и не вводится: любой такой лимит оставил
+        бы часть контента непроверенной, а число уже ограничено ``ATTACHMENT_MAX_COUNT``.
+        ``document`` (PDF) в модерацию не уходит — omni-moderation его не принимает (Q-086-1).
+        """
+        if self._deps.moderation is None:
+            return
+        texts: list[str] = [message] if message else []
+        image_urls: list[str] = []
+        for att in attachments:
+            if att.type == "image":
+                image_urls.append(f"data:{att.mediaType};base64,{att.data}")
+            elif att.type == "text":
+                try:
+                    texts.append(base64.b64decode(att.data, validate=True).decode("utf-8"))
+                except (binascii.Error, ValueError, UnicodeDecodeError):
+                    # prepare_attachments уже отбил бы такой файл; молча пропускаем, чтобы
+                    # модерация не превратилась во второй валидатор с иным вердиктом.
+                    continue
+        verdict = await self._deps.moderation.check(
+            surface=SURFACE_CHAT,
+            stage=STAGE_INPUT,
+            text="\n".join(texts),
+            image_urls=image_urls,
+        )
+        if verdict.blocked:
+            raise ContentPolicyViolationError(
+                "сообщение отклонено правилами контента: измените текст или вложение"
+            )
 
     async def _system_prompt_with_last_media_job(
         self, session_id: uuid.UUID, system_prompt: str

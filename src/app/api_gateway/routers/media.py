@@ -41,6 +41,7 @@ from app.schemas.media import (
     ImageGenerationRequest,
     MediaAssetSchema,
     MediaJobDeleteResponse,
+    MediaJobModerationSchema,
     MediaJobResponse,
     MediaJobsListResponse,
     MediaModelSchema,
@@ -61,6 +62,33 @@ router = APIRouter(
 async def _rate_limit(user_id: uuid.UUID) -> None:
     if not await enforce_other_limits(user_id=user_id):
         raise RateLimitedError("rate limit exceeded")
+
+
+def _moderation_schema(raw: object) -> MediaJobModerationSchema:
+    """Вердикт задачи для клиента (ADR-086 §8). Поле присутствует ВСЕГДА и не бывает null.
+
+    ``media_jobs.moderation IS NULL`` (задача старше модерации или она выключена на инстансе) →
+    ``unchecked``, а НЕ ``passed``: объявлять проверенным то, что никто не проверял, значит врать
+    клиенту так, что он не сможет это обнаружить.
+    """
+    if not isinstance(raw, dict):
+        return MediaJobModerationSchema(
+            status="unchecked", stage=None, categories=[], checkedAt=None
+        )
+    status = raw.get("status")
+    if status not in ("passed", "flagged", "blocked", "unchecked"):
+        status = "unchecked"
+    stage = raw.get("stage")
+    if stage not in ("input", "output"):
+        stage = None
+    categories = raw.get("categories")
+    checked_at = raw.get("checkedAt")
+    return MediaJobModerationSchema(
+        status=status,
+        stage=stage,
+        categories=[str(c) for c in categories] if isinstance(categories, list) else [],
+        checkedAt=checked_at,
+    )
 
 
 def _job_response(view: MediaJobView) -> MediaJobResponse:
@@ -87,6 +115,7 @@ def _job_response(view: MediaJobView) -> MediaJobResponse:
             for index, a in enumerate(view.assets)
         ],
         error=job.error,
+        moderation=_moderation_schema(job.moderation),
         parentJobId=job.parent_job_id,
         inputImageUrls=list(job.input_image_urls or []),
         createdAt=job.created_at,

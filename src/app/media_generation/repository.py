@@ -62,6 +62,7 @@ class MediaJobsRepository:
         provider_cost_usd: float | None = None,
         parent_job_id: uuid.UUID | None = None,
         input_image_urls: list[str] | None = None,
+        moderation: dict[str, Any] | None = None,
     ) -> MediaJob:
         row = MediaJob(
             id=job_id,
@@ -81,6 +82,7 @@ class MediaJobsRepository:
             credits_refunded=False,
             parent_job_id=parent_job_id,
             input_image_urls=input_image_urls or None,
+            moderation=moderation,
         )
         self._session.add(row)
         await self._session.flush()
@@ -152,17 +154,36 @@ class MediaJobsRepository:
         job.updated_at = _now()
         await self._session.flush()
 
-    async def mark_completed(self, job: MediaJob, *, result: dict[str, Any]) -> None:
+    async def mark_completed(
+        self, job: MediaJob, *, result: dict[str, Any], moderation: dict[str, Any] | None = None
+    ) -> None:
         job.status = STATUS_COMPLETED
         job.result = result
         job.error = None
+        if moderation is not None:
+            job.moderation = moderation
         job.updated_at = _now()
         await self._session.flush()
 
-    async def mark_failed(self, job: MediaJob, *, error: str, refunded: bool) -> None:
+    async def mark_failed(
+        self,
+        job: MediaJob,
+        *,
+        error: str,
+        refunded: bool,
+        moderation: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> None:
         job.status = STATUS_FAILED
         job.error = error
         job.credits_refunded = refunded
+        if moderation is not None:
+            job.moderation = moderation
+        if result is not None:
+            # ADR-086 §5: у заблокированного результата ассеты НЕ сохраняются — иначе файл остался
+            # бы достижим через signed-URL download-роут (ADR-085), и блокировка стала бы
+            # декоративной.
+            job.result = result
         job.updated_at = _now()
         await self._session.flush()
 

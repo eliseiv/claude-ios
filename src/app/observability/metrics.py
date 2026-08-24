@@ -90,3 +90,17 @@ llm_upstream_errors_total = Counter(
 
 def render_metrics() -> tuple[bytes, str]:
     return generate_latest(), CONTENT_TYPE_LATEST
+
+
+# ADR-086 §10: producer — места вызова модерации (ChatOrchestrator.run,
+# MediaGenerationService.submit / _advance / upload_reference_image); consumer — GET /metrics.
+moderation_decisions_total = Counter(
+    "moderation_decisions_total",
+    "Moderation verdicts by surface/stage/decision (ADR-086)",
+    ["surface", "stage", "decision"],
+)
+moderation_errors_total = Counter(
+    "moderation_errors_total",
+    "Moderation provider failures by reason (ADR-086)",
+    ["reason"],
+)

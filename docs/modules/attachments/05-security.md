@@ -1,7 +1,9 @@
 # Attachments — Security
 
+> ⚠️ **Этот файл описывает ОТЛОЖЕННУЮ двухшаговую модель ([TD-015](../../100-known-tech-debt.md)), а не работающий MVP.** Действующие лимиты и коды ошибок inline-вложений — [chat-orchestrator/02-api-contracts.md §Лимиты вложений](../chat-orchestrator/02-api-contracts.md#лимиты-вложений-adr-089) и [05-security.md §Мультимодальные вложения](../../05-security.md#мультимодальные-вложения--валидация-и-модель-угроз-adr-020). В частности, действующий лимит `document` — **8 MB** (`ATTACHMENT_MAX_BYTES_DOCUMENT`), а не 10 MB из проектных значений ниже.
+
 ## Size-лимиты (transport)
-- image ≤ 5 MB, document ≤ 10 MB (конфигурируемо, [Q-014-2](../../99-open-questions.md)). Multipart transport-guard на gateway → `413`. Это **отдельный** лимит от JSON `≤512KB` (бинарь не идёт в JSON, [ADR-014](../../adr/ADR-014-multimodal-attachments.md)).
+- image ≤ 5 MB, document ≤ 10 MB (**проектные значения отложенной модели**, конфигурируемо, [Q-014-2](../../99-open-questions.md); действующие значения MVP — по ссылке выше). Multipart transport-guard на gateway → `413`. Это **отдельный** лимит от JSON `≤512KB` (бинарь не идёт в JSON, [ADR-014](../../adr/ADR-014-multimodal-attachments.md)).
 - ≤ 10 вложений на сообщение (проверяется orchestrator при резолве `attachments[]`).
 
 ## Media_type allowlist ([Q-014-1](../../99-open-questions.md))
