@@ -393,6 +393,7 @@ def get_v2_orchestrator(session: DbSession) -> ChatOrchestrator:
         global_tools=GlobalToolHandlers(
             clock=SystemClock(),
             media=get_media_generation_service(session, get_request_log_writer(session)),
+            documents=get_documents_service(session),
         ),
         preferences=PreferencesService(session),
         workspaces=WorkspacesService(WorkspacesRepository(session)),
