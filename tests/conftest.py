@@ -58,6 +58,12 @@ os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
 os.environ["MEDIA_RECONCILE_INTERVAL_SECONDS"] = "0"
 os.environ["MEMORY_EMBEDDING_FAKE"] = "true"
 os.environ["MEMORY_ENABLED"] = "false"
+# ADR-086: модерация — исходящий вызов на горячем пути генерации, и она fail-closed. В
+# герметичной сюите её надо гасить по той же причине, что и MEMORY_ENABLED: иначе каждый
+# media/chat-тест уйдёт в 503 moderation_unavailable на попытке сходить к провайдеру.
+# Тесты самой модерации строят Settings напрямую и включают её явно.
+os.environ["MODERATION_ENABLED"] = "false"
+os.environ["MODERATION_API_KEY"] = ""
 os.environ["APNS_KEY_ID"] = ""
 os.environ["APNS_TEAM_ID"] = ""
 os.environ["APNS_AUTH_KEY"] = ""
