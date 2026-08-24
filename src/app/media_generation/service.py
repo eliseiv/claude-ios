@@ -65,17 +65,43 @@ from app.moderation import ModerationService, ModerationVerdict, unchecked_verdi
 from app.moderation.service import (
     STAGE_INPUT,
     STAGE_OUTPUT,
+    STATUS_BLOCKED,
     SURFACE_MEDIA_RESULT,
     SURFACE_MEDIA_SUBMIT,
     SURFACE_MEDIA_UPLOAD,
 )
 from app.notifications.push_service import MediaPushService
 from app.observability.logging import log_event
+from app.observability.metrics import moderation_decisions_total
 from app.pricing.provider_prices import media_cost_usd_of_run, round_usd
 from app.request_logs.service import RequestLogWriter
 from app.wallet.service import WalletService
 
-logger = logging.getLogger(__name__)  # == "app.media_generation.service"
+logger = logging.getLogger(__name__)
+
+# ADR-086 §5 (видео): omni-moderation не принимает видеофайл, поэтому пост-модерация результата
+# видео выполняется ЧУЖИМ сигналом — терминальным отказом самого fal по контент-политике. Флага в
+# ответе видео-моделей нет (output schema Kling/Veo — одно поле `video`), поэтому единственный
+# наблюдаемый признак — текст ошибки. Список маркеров намеренно узкий: расширять его догадками
+# значит помечать `blocked` обычные сбои провайдера.
+_FAL_CONTENT_POLICY_MARKERS = (
+    "content policy",
+    "content_policy",
+    "safety",
+    "nsfw",
+    "prohibited content",
+    "flagged",
+    "moderation",
+)
+
+
+def _looks_like_provider_content_refusal(error: str) -> bool:
+    """Отказ fal по контент-политике, отличённый от прочих провайдерских сбоев."""
+    lowered = error.lower()
+    return any(marker in lowered for marker in _FAL_CONTENT_POLICY_MARKERS)
+
+
+# == "app.media_generation.service"
 
 _REFUND_REASON = "media_generation_failed"
 
@@ -595,7 +621,13 @@ class MediaGenerationService:
         return MediaJobView(job=job, assets=[])
 
     async def _fail(self, job: MediaJob, *, error: str) -> MediaJobView:
-        """Mark the run failed and refund its credits (once, idempotently)."""
+        """Mark the run failed and refund its credits (once, idempotently).
+
+        ADR-086 §5: если провайдер отклонил запуск по СВОЕЙ контент-политике, это единственный
+        наблюдаемый сигнал модерации выхода для видео — он превращается в
+        ``moderation.status = "blocked"`` вместо безликого ``failed``, чтобы клиент показал
+        заглушку, а не «ошибку генерации». Кредиты возвращаются в любом случае, тем же ключом.
+        """
         refunded = job.credits_refunded
         if not refunded and job.credits_charged > 0:
             await self._wallet.grant(
@@ -606,7 +638,23 @@ class MediaGenerationService:
                 reason=_REFUND_REASON,
             )
             refunded = True
-        await self._repo.mark_failed(job, error=error[:500], refunded=refunded)
+        provider_refusal = _looks_like_provider_content_refusal(error)
+        moderation_payload = None
+        if provider_refusal:
+            moderation_payload = ModerationVerdict(
+                status=STATUS_BLOCKED,
+                stage=STAGE_OUTPUT,
+                categories=(),
+                checked_at=datetime.datetime.now(datetime.UTC),
+                provider="fal",
+                model=job.model_id,
+            ).to_payload()
+            moderation_decisions_total.labels(
+                surface=SURFACE_MEDIA_RESULT, stage=STAGE_OUTPUT, decision=STATUS_BLOCKED
+            ).inc()
+        await self._repo.mark_failed(
+            job, error=error[:500], refunded=refunded, moderation=moderation_payload
+        )
         if self._request_logs is not None:
             await self._request_logs.finish_media(
                 media_job_id=job.id, failed=True, refunded=refunded

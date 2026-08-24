@@ -423,3 +423,23 @@ async def test_chat_tool_survives_moderation_outage() -> None:
 async def test_chat_tool_survives_missing_moderation_key() -> None:
     result = await _tool_verdict(ModerationNotConfiguredError("no key"))
     assert result.error_code == "moderation_not_configured"
+
+
+# --- видео: пост-модерация чужим сигналом (§5) ------------------------------------------------
+
+
+def test_fal_content_refusal_is_recognised() -> None:
+    from app.media_generation.service import _looks_like_provider_content_refusal
+
+    assert _looks_like_provider_content_refusal("Request blocked by content policy")
+    assert _looks_like_provider_content_refusal("SAFETY filter triggered")
+    assert _looks_like_provider_content_refusal("output flagged as nsfw")
+
+
+def test_ordinary_provider_failures_are_not_marked_blocked() -> None:
+    """Узкий список маркеров: обычный сбой не должен выдаваться за блокировку контента."""
+    from app.media_generation.service import _looks_like_provider_content_refusal
+
+    assert not _looks_like_provider_content_refusal("body.image_url: Failed to download the file")
+    assert not _looks_like_provider_content_refusal("upstream timeout")
+    assert not _looks_like_provider_content_refusal("generation produced no output")
