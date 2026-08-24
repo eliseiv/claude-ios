@@ -90,6 +90,8 @@ async def test_push_skips_when_notifications_disabled() -> None:
             default_assistant_mode="chat",
             notifications_enabled=False,
             code_defaults={},
+            memory_enabled=False,
+            memory_search_scope="global",
         )
     )
     apns = MagicMock()
@@ -144,6 +146,8 @@ async def test_push_sends_and_drops_unregistered_token() -> None:
             default_assistant_mode="chat",
             notifications_enabled=True,
             code_defaults={},
+            memory_enabled=False,
+            memory_search_scope="global",
         )
     )
     apns = MagicMock()

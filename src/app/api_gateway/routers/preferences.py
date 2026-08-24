@@ -43,7 +43,7 @@ async def get_preferences(
         notificationsEnabled=view.notifications_enabled,
         codeDefaults=view.code_defaults,
         memoryEnabled=view.memory_enabled,
-        memorySearchScope=view.memory_search_scope,  # type: ignore[arg-type]
+        memorySearchScope=view.memory_search_scope,
     )
 
 
@@ -76,5 +76,5 @@ async def patch_preferences(
         notificationsEnabled=view.notifications_enabled,
         codeDefaults=view.code_defaults,
         memoryEnabled=view.memory_enabled,
-        memorySearchScope=view.memory_search_scope,  # type: ignore[arg-type]
+        memorySearchScope=view.memory_search_scope,
     )

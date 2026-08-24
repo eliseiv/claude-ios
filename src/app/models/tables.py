@@ -7,6 +7,7 @@ import decimal
 import uuid
 from typing import Any
 
+from pgvector.sqlalchemy import Vector  # type: ignore[import-untyped]
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -28,11 +29,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import BIGINT, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
-
-try:
-    from pgvector.sqlalchemy import Vector
-except ImportError:  # pragma: no cover - dev without sync dep
-    Vector = None  # type: ignore[misc, assignment]
 
 from app.models.base import Base
 
@@ -295,7 +291,7 @@ class ChatChunk(Base):
     role: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa_text("0"))
     text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[Any] = mapped_column(Vector(1536), nullable=False)  # type: ignore[misc]
+    embedding: Mapped[Any] = mapped_column(Vector(1536), nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )
@@ -666,6 +662,11 @@ class MediaJob(Base):
     # The reference-image URLs actually sent upstream. Persisted rather than derived from the
     # parent: the parent may be deleted, and the feed still has to show what this was made from.
     input_image_urls: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # ADR-086 §10: moderation verdict ({status, stage, categories, checkedAt, provider, model}).
+    # NULL means "never checked" (job predates the column, or MODERATION_ENABLED=false) and is
+    # rendered to the client as status="unchecked" — never as a silent "passed": claiming a
+    # verdict about content nobody inspected would be a lie the client cannot detect.
+    moderation: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # ADR-067: stamped once when a media-ready push is claimed (poll or reconciler).
     push_sent_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

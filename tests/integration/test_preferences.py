@@ -36,6 +36,8 @@ async def test_get_without_row_returns_defaults_and_does_not_write(
         "defaultAssistantMode": "chat",
         "notificationsEnabled": False,
         "codeDefaults": {},
+        "memoryEnabled": False,
+        "memorySearchScope": "global",
     }
     # GET must NOT create a row (lazy defaults only).
     assert await _row_count(db_sessionmaker, str(uid)) == 0
@@ -60,6 +62,8 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "defaultAssistantMode": "code",
         "notificationsEnabled": False,
         "codeDefaults": {},
+        "memoryEnabled": False,
+        "memorySearchScope": "global",
     }
     assert await _row_count(db_sessionmaker, str(uid)) == 1
 
@@ -78,6 +82,8 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "defaultAssistantMode": "code",
         "notificationsEnabled": False,
         "codeDefaults": {},
+        "memoryEnabled": False,
+        "memorySearchScope": "global",
     }
 
 

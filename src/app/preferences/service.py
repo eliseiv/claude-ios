@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +25,7 @@ class PreferencesView:
     notifications_enabled: bool
     code_defaults: dict[str, Any]
     memory_enabled: bool
-    memory_search_scope: str
+    memory_search_scope: Literal["global", "workspace"]
 
 
 def _defaults() -> PreferencesView:
@@ -44,7 +44,7 @@ def _to_view(row: UserPreferences) -> PreferencesView:
         notifications_enabled=row.notifications_enabled,
         code_defaults=dict(row.code_defaults),
         memory_enabled=row.memory_enabled,
-        memory_search_scope=row.memory_search_scope,
+        memory_search_scope=cast(Literal["global", "workspace"], row.memory_search_scope),
     )
 
 

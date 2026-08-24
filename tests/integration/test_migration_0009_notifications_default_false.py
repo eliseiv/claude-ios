@@ -34,7 +34,7 @@ _THIS_REV = "0009_notifications_default_false"
 def isolated_pg() -> Iterator[str]:
     from testcontainers.postgres import PostgresContainer
 
-    with PostgresContainer("postgres:16-alpine", driver="asyncpg") as pg:
+    with PostgresContainer("pgvector/pgvector:pg16", driver="asyncpg") as pg:
         yield pg.get_connection_url()
 
 
