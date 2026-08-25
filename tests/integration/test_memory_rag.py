@@ -30,7 +30,9 @@ async def test_search_and_memories_flow(
     async with db_sessionmaker() as session:
         uid = await seed_user(session, subscription="active", balance=20)
         prefs = PreferencesService(session)
-        await prefs.patch(uid, memory_enabled=True, memory_search_scope="global")
+        # ADR-091: персональной настройки памяти больше нет — гейт только инстансный, и его
+        # включает фикстура _enable_memory_for_tests выше. На пользователе включать нечего.
+        await prefs.patch(uid, memory_search_scope="global")
 
     fake_anthropic.responses = [fake_anthropic.text_result("indexed reply")]
     headers = auth_headers(uid)
@@ -87,7 +89,9 @@ async def test_memory_search_in_system_prompt(
     async with db_sessionmaker() as session:
         uid = await seed_user(session, subscription="active", balance=20)
         prefs = PreferencesService(session)
-        await prefs.patch(uid, memory_enabled=True, memory_search_scope="global")
+        # ADR-091: персональной настройки памяти больше нет — гейт только инстансный, и его
+        # включает фикстура _enable_memory_for_tests выше. На пользователе включать нечего.
+        await prefs.patch(uid, memory_search_scope="global")
 
     headers = auth_headers(uid)
     fake_anthropic.responses = [fake_anthropic.text_result("seed")]
