@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import UserPreferences
 
 DEFAULT_ASSISTANT_MODE = "chat"
@@ -33,12 +34,10 @@ def _defaults() -> PreferencesView:
         default_assistant_mode=DEFAULT_ASSISTANT_MODE,
         notifications_enabled=False,
         code_defaults={},
-        # Кросс-чатовая память включена по умолчанию (решение владельца 2026-08-25). Прежний
-        # дефолт `False` давал худшую комбинацию: чанки и факты писались КАЖДОМУ пользователю,
-        # а читать их модель не могла — данные собирались, польза не наступала, и пользователь
-        # не имел способа узнать, что фича существует и выключена (репорт iOS: «в одном чате
-        # сказал имя, в другом ответил, что не знает»).
-        memory_enabled=True,
+        # ADR-091: значение ПРОИЗВОДНОЕ от инстансного флага, персональной настройки больше нет.
+        # Колонка в БД сохранена (expand-only), но не читается — иначе у пользователей со старым
+        # `false` память осталась бы выключенной навсегда.
+        memory_enabled=get_settings().memory_enabled,
         memory_search_scope="global",
     )
 
@@ -48,7 +47,8 @@ def _to_view(row: UserPreferences) -> PreferencesView:
         default_assistant_mode=row.default_assistant_mode,
         notifications_enabled=row.notifications_enabled,
         code_defaults=dict(row.code_defaults),
-        memory_enabled=row.memory_enabled,
+        # Не row.memory_enabled: см. _defaults() — значение производное от инстансного флага.
+        memory_enabled=get_settings().memory_enabled,
         memory_search_scope=cast(Literal["global", "workspace"], row.memory_search_scope),
     )
 
@@ -76,7 +76,6 @@ class PreferencesService:
         default_assistant_mode: str | None = None,
         notifications_enabled: bool | None = None,
         code_defaults: dict[str, Any] | None = None,
-        memory_enabled: bool | None = None,
         memory_search_scope: str | None = None,
     ) -> PreferencesView:
         """Upsert preferences, updating only the provided (non-None) fields."""
@@ -98,9 +97,6 @@ class PreferencesService:
                 code_defaults=(
                     code_defaults if code_defaults is not None else defaults.code_defaults
                 ),
-                memory_enabled=(
-                    memory_enabled if memory_enabled is not None else defaults.memory_enabled
-                ),
                 memory_search_scope=(
                     memory_search_scope
                     if memory_search_scope is not None
@@ -115,8 +111,6 @@ class PreferencesService:
                 row.notifications_enabled = notifications_enabled
             if code_defaults is not None:
                 row.code_defaults = code_defaults
-            if memory_enabled is not None:
-                row.memory_enabled = memory_enabled
             if memory_search_scope is not None:
                 row.memory_search_scope = memory_search_scope
         await self._session.flush()

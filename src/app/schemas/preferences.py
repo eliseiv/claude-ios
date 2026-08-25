@@ -35,7 +35,11 @@ class PreferencesResponse(StrictModel):
         description="Дефолты Code-контекста (язык и т.п.). Без секретов."
     )
     memoryEnabled: bool = Field(
-        description="Включена ли cross-chat память (RAG + explicit facts). Opt-in."
+        description=(
+            "Работает ли на этом инстансе cross-chat память (RAG + факты о пользователе). "
+            "Значение инстансное, не персональное: включается оператором и через `PATCH` НЕ "
+            "меняется — поле только для чтения."
+        )
     )
     memorySearchScope: Literal["global", "workspace"] = Field(
         description="Область auto-retrieval: все чаты или только текущий workspace."
@@ -53,7 +57,6 @@ class PreferencesPatchRequest(StrictModel):
         default=None,
         description="Новые дефолты Code-контекста (≤ 8KB сериализованного JSON, без секретов).",
     )
-    memoryEnabled: bool | None = Field(default=None, description="Toggle cross-chat памяти (RAG).")
     memorySearchScope: Literal["global", "workspace"] | None = Field(
         default=None, description="Область auto-retrieval при генерации."
     )
@@ -64,7 +67,6 @@ class PreferencesPatchRequest(StrictModel):
             self.defaultAssistantMode is None
             and self.notificationsEnabled is None
             and self.codeDefaults is None
-            and self.memoryEnabled is None
             and self.memorySearchScope is None
         ):
             raise ValueError("at least one field is required")

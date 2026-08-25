@@ -62,7 +62,6 @@ class MemoryService:
         user_id: uuid.UUID,
         message: str,
         memory_search: bool | None,
-        memory_enabled: bool,
         memory_search_scope: str,
         workspace_project_id: uuid.UUID | None,
         exclude_session_id: uuid.UUID | None,
@@ -70,11 +69,12 @@ class MemoryService:
         if not resolve_memory_search(
             memory_search=memory_search,
             message=message,
-            memory_enabled=memory_enabled and self._settings.memory_enabled,
+            # ADR-091 (ревизия 2026-08-25): гейт ТОЛЬКО инстансный. Персональной настройки больше
+            # нет — память работает везде, где RAG включён оператором.
+            memory_enabled=self._settings.memory_enabled,
         ):
             explicit_only = await self._explicit_memory_block(
                 user_id=user_id,
-                memory_enabled=memory_enabled,
                 memory_search_scope=memory_search_scope,
                 workspace_project_id=workspace_project_id,
             )
@@ -94,7 +94,6 @@ class MemoryService:
         )
         explicit_block = await self._explicit_memory_block(
             user_id=user_id,
-            memory_enabled=memory_enabled,
             memory_search_scope=memory_search_scope,
             workspace_project_id=workspace_project_id,
         )
@@ -106,11 +105,10 @@ class MemoryService:
         self,
         *,
         user_id: uuid.UUID,
-        memory_enabled: bool,
         memory_search_scope: str,
         workspace_project_id: uuid.UUID | None,
     ) -> str | None:
-        if not memory_enabled or not self._settings.memory_enabled:
+        if not self._settings.memory_enabled:
             return None
         global_rows = await self._repo.list_memories(user_id, scope="global")
         workspace_rows: list[MemoryRow] = []

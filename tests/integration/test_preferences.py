@@ -36,9 +36,10 @@ async def test_get_without_row_returns_defaults_and_does_not_write(
         "defaultAssistantMode": "chat",
         "notificationsEnabled": False,
         "codeDefaults": {},
-        # Кросс-чатовая память включена по умолчанию (миграция 0028): чанки и факты писались
-        # всем пользователям и раньше, а прежний дефолт false запрещал модели их читать.
-        "memoryEnabled": True,
+        # ADR-091: значение ПРОИЗВОДНОЕ от инстансного MEMORY_ENABLED, а не персональное.
+        # В герметичной сюите он выключен (conftest), поэтому здесь False — и это ровно то,
+        # что должен видеть клиент: «на этом инстансе памяти нет».
+        "memoryEnabled": False,
         "memorySearchScope": "global",
     }
     # GET must NOT create a row (lazy defaults only).
@@ -64,7 +65,7 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "defaultAssistantMode": "code",
         "notificationsEnabled": False,
         "codeDefaults": {},
-        "memoryEnabled": True,
+        "memoryEnabled": False,
         "memorySearchScope": "global",
     }
     assert await _row_count(db_sessionmaker, str(uid)) == 1
@@ -84,7 +85,7 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "defaultAssistantMode": "code",
         "notificationsEnabled": False,
         "codeDefaults": {},
-        "memoryEnabled": True,
+        "memoryEnabled": False,
         "memorySearchScope": "global",
     }
 

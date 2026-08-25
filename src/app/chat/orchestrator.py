@@ -1043,7 +1043,6 @@ class ChatOrchestrator:
                 user_id=user_id,
                 message=message,
                 memory_search=memory_search,
-                memory_enabled=prefs.memory_enabled,
                 memory_search_scope=prefs.memory_search_scope,
                 workspace_project_id=sess.workspace_project_id,
                 exclude_session_id=sess.id,
