@@ -63,6 +63,13 @@ jobs:
     runs-on: ubuntu-latest
     # Integration/e2e use testcontainers, which need a Docker daemon (present on
     # ubuntu-latest runners). No service containers declared: testcontainers manages them.
+    env:
+      # Ryuk — контейнер-уборщик, который testcontainers поднимает, чтобы подчистить за собой на
+      # ДОЛГОЖИВУЩЕЙ машине. Раннер GitHub уничтожается после джобы, поэтому здесь он не нужен, а
+      # цена его есть: лишний pull с Docker Hub. Именно он и уронил прогон 32837143762 —
+      # `images/create?fromImage=testcontainers/ryuk` вернул 500, следом ImageNotFound, и упали ВСЕ
+      # интеграционные тесты, хотя код был исправен. Отключение убирает и зависимость, и pull.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@v4
 
