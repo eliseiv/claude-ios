@@ -456,7 +456,7 @@ Deploy-job (gated в `ci.yml` и ручной `deploy.yml`) получает н�
 
 **Нормативное значение (совпадает с фактическим `ci.yml` + `deploy.yml`):**
 ```
-INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo"
+INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo appbackend:appbackend stackstores:stackstores codecarts:codecarts devsupplyr:devsupplyr"
 ```
 **Нормативный список инстансов (источник истины, docs ↔ оба workflow совпадают).** Число действующих = число строк таблицы ниже; отдельной цифрой оно нигде не записывается (записанная цифра расходится с таблицей на первом же добавлении).
 
@@ -487,6 +487,10 @@ INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elva
 | `lumirexa` | `lumirexa` | `lumirexa.shop` | OpenAI (`LLM_PROVIDER=openai`) | 21-й |
 | `qoravena` | `qoravena` | `qoravena.shop` | OpenAI (`LLM_PROVIDER=openai`) | 22-й |
 | `benovalo` | `benovalo` | `benovalo.shop` | OpenAI (`LLM_PROVIDER=openai`) | 23-й |
+| `appbackend` | `appbackend` | `appbackend.shop` | OpenAI (`LLM_PROVIDER=openai`) | 24-й |
+| `stackstores` | `stackstores` | `stackstores.shop` | OpenAI (`LLM_PROVIDER=openai`) | 25-й |
+| `codecarts` | `codecarts` | `codecarts.shop` | OpenAI (`LLM_PROVIDER=openai`) | 26-й |
+| `devsupplyr` | `devsupplyr` | `devsupplyr.shop` | OpenAI (`LLM_PROVIDER=openai`) | 27-й |
 
 > **Три последние строки внесены задним числом (2026-08-24) — синхронизация docs с workflow.** `dir`/`project`/порядок взяты **посимвольно** из `INSTANCES` обоих workflow (коммиты `ff8ff2e`, `2b690f7` от 2026-08-21 правили только workflow, реестр в `docs/` не обновлялся — расхождение docs↔код держалось три дня). `SERVICE_DOMAIN` и провайдер живут только в `/opt/<dir>/.env` на сервере; **сверены там же 2026-08-24** и внесены в реестр ([Q-017-4](99-open-questions.md) закрыт) — все три оказались `<dir>.shop` / `LLM_PROVIDER=openai`. Совпадение с шаблоном `<dir>.shop` — результат проверки, а не догадка: до сверки колонка оставалась пустой намеренно, потому что она управляет Traefik-роутером и неверное значение здесь дороже пустого. **Та же сверка вскрыла ошибку в реестре:** `lunexoro` числился Anthropic, а фактически `LLM_PROVIDER=openai` — исправлено. Значит провайдер в реестре не был проверен и для остальных строк: при следующем расхождении сверяйте колонку по `.env`, а не по памяти.
 
