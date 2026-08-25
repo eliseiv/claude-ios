@@ -82,7 +82,7 @@ jobs:
           # command_timeout: same reason as in ci.yml — the action's 10m default truncates the
           # INSTANCES loop mid-flight and leaves the fleet split across two revisions. Keep the two
           # workflows in step: this file exists to run the SAME loop by hand.
-          command_timeout: 30m
+          command_timeout: 90m
           # NOTE: identical hardened logic to the gated deploy job in ci.yml. We do NOT trust the
           # fused exit code of `compose up --build`; failures are managed explicitly so a real
           # failure goes red but a transient/benign one does not falsely abort the INSTANCES loop.
@@ -122,6 +122,32 @@ jobs:
             # would re-create its Traefik router and take the domain back.
             INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo appbackend:appbackend stackstores:stackstores codecarts:codecarts devsupplyr:devsupplyr"
             FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
+            # ---- Порционная выкатка (инцидент 2026-08-25) --------------------------------------
+            # Цикл идёт по инстансам ПОДРЯД: пересборка образа + миграции + перезапуск на каждом.
+            # На 27 инстансах это перегружает машину настолько, что dockerd перестаёт успевать
+            # обслуживать контейнеры, следом отваливается sshd, и хост требует hard reboot из
+            # панели хостера. Так было дважды за сутки (утром при смене образа Postgres, днём при
+            # обычном деплое на 27). Диагноз оба раза одинаковый: не память и не диск, а
+            # CPU-голодание — 6 ядер на 230+ контейнеров.
+            # Поэтому после каждой порции ждём, пока load average опустится ниже числа ядер.
+            # Потолок берём из nproc, а не константой: добавят ядра — порог поднимется сам.
+            BATCH_SIZE=4
+            LOAD_CEILING=$(nproc)
+            BATCH_WAIT_MAX=60          # максимум 60 x 10s = 10 минут ожидания на порцию
+            BATCH_N=0
+            load1() { awk '{printf "%d", $1}' /proc/loadavg; }
+            wait_for_calm() {
+              i=0
+              while [ "$(load1)" -ge "$LOAD_CEILING" ] && [ "$i" -lt "$BATCH_WAIT_MAX" ]; do
+                [ "$i" -eq 0 ] && echo "[deploy] порция завершена, load=$(load1) >= $LOAD_CEILING — ждём разгрузки"
+                sleep 10; i=$((i+1))
+              done
+              if [ "$i" -ge "$BATCH_WAIT_MAX" ]; then
+                echo "::warning title=Load did not settle::load=$(load1) всё ещё >= $LOAD_CEILING после $((BATCH_WAIT_MAX*10))s; продолжаем, чтобы не зависнуть навсегда"
+              else
+                echo "[deploy] load=$(load1) — продолжаем"
+              fi
+            }
             for entry in $INSTANCES; do
               dir="${entry%%:*}"; proj="${entry##*:}"
               echo "[deploy] === instance dir=/opt/$dir project=$proj ==="
@@ -184,6 +210,11 @@ jobs:
                 if [ "$smoke_ok" -ne 1 ]; then
                   echo "::warning title=Smoke /healthz not green ($proj)::$url did not return 200 within 60s. The deploy (build+migrate+up) for $proj succeeded and api is healthy in-container; public DNS/A-record propagation or Traefik's Let's Encrypt cert (resolver 'le') may still be settling on the first deploy. Re-run this workflow once they are ready."
                 fi
+              fi
+              # Конец обработки инстанса: считаем порцию и ждём разгрузки перед следующей.
+              BATCH_N=$((BATCH_N+1))
+              if [ "$((BATCH_N % BATCH_SIZE))" -eq 0 ]; then
+                wait_for_calm
               fi
             done
             echo "[deploy] prune dangling build layers (best-effort)"
