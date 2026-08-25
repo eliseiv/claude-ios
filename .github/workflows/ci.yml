@@ -278,6 +278,33 @@ jobs:
             # a different service on the same server. It MUST stay out of this loop — redeploying it
             # would re-create its Traefik router and take the domain back.
             INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo appbackend:appbackend stackstores:stackstores codecarts:codecarts devsupplyr:devsupplyr"
+            # ---- Единая сборка образа (инцидент 2026-08-25) ------------------------------------
+            # ВСЕ инстансы выкатываются на ОДИН коммит ($DEPLOY_SHA) из одного Dockerfile, поэтому
+            # образ у них побайтово одинаковый — различаются только .env и имя проекта. Раньше цикл
+            # собирал его заново на каждом инстансе: 27 идентичных сборок подряд. Это и есть та
+            # нагрузка, что дважды за сутки укладывала хост (не память и не диск — CPU-голодание).
+            # Теперь собираем ОДИН раз и дальше только проставляем тег: 26 сборок из 27 исчезают.
+            # nice/ionice — сборка это фоновая работа, она не должна вытеснять обслуживание живых
+            # запросов на той же машине.
+            set -- $INSTANCES
+            FIRST_DIR="${1%%:*}"
+            BASE_IMAGE="claude-ios-deploy:$DEPLOY_SHA"
+            echo "[deploy] единая сборка образа $BASE_IMAGE из /opt/$FIRST_DIR"
+            if ! cd "/opt/$FIRST_DIR"; then
+              echo "::error title=prebuild cd failed::/opt/$FIRST_DIR missing"; exit 1
+            fi
+            git fetch --quiet origin "$DEPLOY_SHA" || git fetch --quiet origin || true
+            if ! git checkout --quiet --detach "$DEPLOY_SHA"; then
+              echo "::error title=prebuild checkout failed::$DEPLOY_SHA not checked out"; exit 1
+            fi
+            if ! nice -n 19 ionice -c 3 docker build -q -t "$BASE_IMAGE" -f Dockerfile . ; then
+              echo "::error title=prebuild failed::single image build failed; ни один инстанс не тронут"; exit 1
+            fi
+            echo "[deploy] образ собран, дальше инстансы только помечают его тегом"
+            # Пред-полётная проверка: не начинать выкатку на уже перегруженной машине. Сборка выше
+            # сама даёт пик, а после перезагрузки хоста 240 контейнеров стартуют одновременно и
+            # держат load трёхзначным минуты — заходить в цикл в этот момент значит повторить отказ.
+            wait_for_calm
             FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
             # ---- Порционная выкатка (инцидент 2026-08-25) --------------------------------------
             # Цикл идёт по инстансам ПОДРЯД: пересборка образа + миграции + перезапуск на каждом.
@@ -324,12 +351,21 @@ jobs:
               fi
               # (1) Build image on the server (REAL build failure => fail this instance).
               echo "[deploy:$proj] build (image built on the server)"
-              if ! docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env build api migrate; then
-                echo "::error title=build failed ($proj)::docker compose build returned non-zero"; FAILED="$FAILED $proj"; continue
+              # Образ уже собран ОДИН раз (см. блок единой сборки выше) — здесь только метка.
+              # Раньше каждый инстанс собирал СВОЙ тег из того же коммита: 27 одинаковых сборок,
+              # и именно они клали машину (CPU-голодание, 6 ядер на 240 контейнеров, 2026-08-25).
+              # Имя тега берём ИЗ .env, а не из -p: compose подставляет в image именно
+              # ${COMPOSE_PROJECT_NAME:-claude-ios}. Если эти два источника разойдутся, compose
+              # будет искать тег, которого нет, и молча полезет собирать — то есть вернёт ровно ту
+              # нагрузку, которую мы убираем. Расхождение источников уже случалось (2026-08-25).
+              img_proj=$(grep -m1 "^COMPOSE_PROJECT_NAME=" .env | cut -d= -f2-)
+              [ -z "$img_proj" ] && img_proj="claude-ios"
+              if ! docker tag "$BASE_IMAGE" "${img_proj}-backend:prod"; then
+                echo "::error title=tag failed ($proj)::docker tag $BASE_IMAGE -> ${img_proj}-backend:prod returned non-zero"; FAILED="$FAILED $proj"; continue
               fi
               # (2) Migrate explicitly BEFORE api (REAL migration failure => fail this instance).
               echo "[deploy:$proj] migrate (alembic upgrade head)"
-              if ! docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env run --rm migrate; then
+              if ! docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env run --rm --no-build migrate; then
                 echo "::error title=migrate failed ($proj)::alembic upgrade head returned non-zero"; FAILED="$FAILED $proj"; continue
               fi
               # (3) Start only (no build here — already built in step 1). The one-shot `migrate`
