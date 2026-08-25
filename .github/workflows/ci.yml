@@ -365,7 +365,11 @@ jobs:
               fi
               # (2) Migrate explicitly BEFORE api (REAL migration failure => fail this instance).
               echo "[deploy:$proj] migrate (alembic upgrade head)"
-              if ! docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env run --rm --no-build migrate; then
+              # Без --build compose НЕ собирает: у `run` сборка опциональна и включается флагом
+              # --build, а флага --no-build у неё нет вовсе (проверено: `docker compose run --help`
+              # на сервере). Попытка передать его роняла миграцию на каждом инстансе — прогон
+              # 32857631288, все 27 в FAILED за доли секунды.
+              if ! docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env run --rm migrate; then
                 echo "::error title=migrate failed ($proj)::alembic upgrade head returned non-zero"; FAILED="$FAILED $proj"; continue
               fi
               # (3) Start only (no build here — already built in step 1). The one-shot `migrate`
