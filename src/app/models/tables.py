@@ -506,7 +506,7 @@ class UserPreferences(Base):
         JSONB, nullable=False, server_default=sa_text("'{}'::jsonb")
     )
     memory_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=sa_text("false")
+        Boolean, nullable=False, server_default=sa_text("true")
     )
     memory_search_scope: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=sa_text("'global'")

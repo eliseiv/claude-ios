@@ -33,7 +33,12 @@ def _defaults() -> PreferencesView:
         default_assistant_mode=DEFAULT_ASSISTANT_MODE,
         notifications_enabled=False,
         code_defaults={},
-        memory_enabled=False,
+        # Кросс-чатовая память включена по умолчанию (решение владельца 2026-08-25). Прежний
+        # дефолт `False` давал худшую комбинацию: чанки и факты писались КАЖДОМУ пользователю,
+        # а читать их модель не могла — данные собирались, польза не наступала, и пользователь
+        # не имел способа узнать, что фича существует и выключена (репорт iOS: «в одном чате
+        # сказал имя, в другом ответил, что не знает»).
+        memory_enabled=True,
         memory_search_scope="global",
     )
 

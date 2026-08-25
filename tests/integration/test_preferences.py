@@ -36,7 +36,9 @@ async def test_get_without_row_returns_defaults_and_does_not_write(
         "defaultAssistantMode": "chat",
         "notificationsEnabled": False,
         "codeDefaults": {},
-        "memoryEnabled": False,
+        # Кросс-чатовая память включена по умолчанию (миграция 0028): чанки и факты писались
+        # всем пользователям и раньше, а прежний дефолт false запрещал модели их читать.
+        "memoryEnabled": True,
         "memorySearchScope": "global",
     }
     # GET must NOT create a row (lazy defaults only).
@@ -62,7 +64,7 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "defaultAssistantMode": "code",
         "notificationsEnabled": False,
         "codeDefaults": {},
-        "memoryEnabled": False,
+        "memoryEnabled": True,
         "memorySearchScope": "global",
     }
     assert await _row_count(db_sessionmaker, str(uid)) == 1
@@ -82,7 +84,7 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "defaultAssistantMode": "code",
         "notificationsEnabled": False,
         "codeDefaults": {},
-        "memoryEnabled": False,
+        "memoryEnabled": True,
         "memorySearchScope": "global",
     }
 
