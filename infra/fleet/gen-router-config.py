@@ -9,6 +9,7 @@
 резервный переключается ТОЛЬКО когда проверка здоровья основного перестала проходить.
 Обычная балансировка здесь недопустима — у резервного инстанса база работает на чтение.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,7 +51,7 @@ def main() -> int:
     for name, domain, _port, _primary in live:
         out += [
             f"    {name}:",
-            f"      rule: \"Host(`{domain}`)\"",
+            f'      rule: "Host(`{domain}`)"',
             f"      entryPoints: [{'websecure' if args.tls else 'web'}]",
             f"      service: {name}",
         ]
@@ -71,7 +72,7 @@ def main() -> int:
                 f"    {name}-{role}:",
                 "      loadBalancer:",
                 "        servers:",
-                f"          - url: \"http://{WG[srv]}:{port}\"",
+                f'          - url: "http://{WG[srv]}:{port}"',
                 "        healthCheck:",
                 "          path: /ready",
                 "          interval: 10s",
@@ -80,7 +81,8 @@ def main() -> int:
 
     dest = HERE / "dynamic.yml"
     dest.write_text("\n".join(out) + "\n", encoding="utf-8")
-    print(f"инстансов в конфиге: {len(live)}  TLS: {'да' if args.tls else 'нет (до переключения DNS)'}")
+    tls_state = "да" if args.tls else "нет (до переключения DNS)"
+    print(f"инстансов в конфиге: {len(live)}  TLS: {tls_state}")
     if skipped:
         print(f"ПРОПУЩЕНО (домен не подтверждён): {', '.join(skipped)}", file=sys.stderr)
     return 0
