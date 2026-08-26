@@ -16,12 +16,17 @@ set -uo pipefail
 MODE="${1:-freeze}"
 LIST="${FLEET_LIST:-/opt/claude-ios/infra/fleet/ports.txt}"
 
+# Реестр НАШИХ инстансов, зашитый в скрипт. На прежней машине живут ещё и чужие проекты —
+# их там большинство, — и «все каталоги в /opt с docker-compose.prod.yml» задело бы их тоже.
+# Остановка чужого продукта не наше решение, поэтому список явный, а не выведенный.
+KNOWN="claude-ios avelyra orvianix elvarixa corvionet modavira artolixo lunexoro ravionet vireluma taluneri webmoria velunixa ravelumi qorimelo zenquelo novirell selquro marqelio livonexa lumirexa qoravena benovalo appbackend stackstores codecarts devsupplyr"
+
 instances() {
   if [ -f "$LIST" ]; then
     awk '!/^#/ && NF {print $1}' "$LIST"
   else
-    # Запасной путь: список из каталогов с нашим compose-файлом.
-    for d in /opt/*/; do [ -f "$d/docker-compose.prod.yml" ] && basename "$d"; done
+    echo $KNOWN | tr ' ' '
+'
   fi
 }
 
