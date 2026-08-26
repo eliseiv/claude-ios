@@ -246,7 +246,18 @@ async def test_media_completed_sends_push_once(
         payload = kwargs["payload"]
         assert payload["jobId"] == job_id
         assert payload["kind"] == "image"
-        assert payload["mediaUrl"].startswith("https://")
+        # ADR-085 переписал `mediaUrl`: это уже не прямая ссылка fal, а signed URL на
+        # `SERVICE_DOMAIN`, причём при ПУСТОМ домене нормой объявлен ОТНОСИТЕЛЬНЫЙ путь
+        # (ADR-085 §2: «пустой домен — относительный путь, как cover»). Прежний ассерт
+        # `startswith("https://")` осиротел на этой правке — он проверял схему URL, которую
+        # контракт больше не обещает. Нормативное утверждение другое: `mediaUrl` — ТОТ ЖЕ URL,
+        # что `assets[0].url` в `GET /v1/media/jobs/{jobId}`
+        # (docs/modules/notifications/02-api-contracts.md §APNs payload), и он signed, а не
+        # сырой fal (docs/modules/media-generation/09-testing.md §ADR-085). Это и ассертим:
+        # такая проверка не зависит от того, задан ли домен в окружении теста.
+        assert payload["mediaUrl"] == poll.json()["assets"][0]["url"]
+        assert f"/v1/media/jobs/{job_id}/assets/0/" in payload["mediaUrl"]
+        assert "fal.media" not in payload["mediaUrl"]
         assert payload["aps"]["mutable-content"] == 1
 
         poll2 = await client.get(f"/v1/media/jobs/{job_id}", headers=headers)

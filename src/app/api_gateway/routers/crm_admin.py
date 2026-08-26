@@ -7,6 +7,7 @@ X-Admin-Token) via the shared ``require_admin`` dependency on the parent admin r
 from __future__ import annotations
 
 import datetime
+import re
 import uuid
 from typing import Annotated
 
@@ -17,6 +18,7 @@ from app.api_gateway.rate_limit import enforce_admin_limits
 from app.deps import client_ip, get_crm_admin_service
 from app.errors import RateLimitedError, UserNotFoundError
 from app.schemas.crm_admin import (
+    CrmDailyCostListResponse,
     CrmPaymentListResponse,
     CrmProductListResponse,
     CrmRequestListResponse,
@@ -48,6 +50,38 @@ def _parse_dt(value: str | None) -> datetime.datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.UTC)
     return dt.astimezone(datetime.UTC)
+
+
+# Верхний пресет страницы «Расход API» — 90 дней; 92 — он же плюс запас на границы месяцев и
+# часовые пояса. Предел задан контрактом v1.3: открытый период превратил бы запрос в
+# неограниченный скан, а именно неограниченная нагрузка на источник и была причиной инцидента,
+# ради которого разбивка вводилась.
+_MAX_COSTS_PERIOD_DAYS = 92
+
+
+# `strptime` со `%Y-%m-%d` НЕ проверяет ширину компонент: `%m`/`%d` принимают запись без ведущих
+# нулей, поэтому `2026-8-1` разбирается молча и период уезжает мимо контракта. Форму проверяем
+# отдельно — ровно 4/2/2 ASCII-цифры; `[0-9]` вместо `\d` намеренно (`\d` матчит и не-ASCII цифры,
+# которые `strptime` тоже принимает).
+_ISO_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _parse_date(value: str, *, field: str) -> datetime.date:
+    """`YYYY-MM-DD` строго по контракту; иначе — `400`, а не `404`.
+
+    `404` на этом пути означает ровно одно — «расширение v1.3 не реализовано», — и отдать его в
+    ответ на кривой параметр значило бы сообщить CRM, что эндпоинта нет; она перестала бы
+    опрашивать этот бэк вовсе (`daily_costs_supported = false`).
+    """
+    raw = value.strip()
+    if _ISO_DATE_RE.fullmatch(raw) is None:
+        raise HTTPException(status_code=400, detail=f"invalid {field}, expected YYYY-MM-DD")
+    try:
+        return datetime.datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"invalid {field}, expected YYYY-MM-DD"
+        ) from exc
 
 
 @router.get(
@@ -147,6 +181,39 @@ async def crm_stats(
         date_from=_parse_dt(date_from),
         date_to=_parse_dt(date_to),
     )
+
+
+@router.get(
+    "/costs/daily",
+    response_model=CrmDailyCostListResponse,
+    summary="CRM: расходы на провайдеров по дням",
+    description=(
+        "Периодная разбивка расходов на AI-провайдеров — день × провайдер (расширение "
+        "контракта CRM v1.3). Период `date_from`/`date_to` — `YYYY-MM-DD`, UTC, включительно "
+        "с обеих сторон, не длиннее 92 дней; иначе `400`. Порядок — `date ASC, provider ASC`. "
+        "Ключ провайдера отдаётся СЫРЫМ, нормализует его потребитель. Отсутствие строки за "
+        "(день, провайдер) означает «расхода не было»; `null` в поле — «величина не измерена», "
+        "и это не ноль."
+    ),
+)
+async def crm_daily_costs(
+    request: Request,
+    service: Annotated[CrmAdminService, Depends(get_crm_admin_service)],
+    date_from: Annotated[str, Query()],
+    date_to: Annotated[str, Query()],
+    limit: int = Query(default=1000, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> CrmDailyCostListResponse:
+    await _enforce_admin_rate_limit(request)
+    start = _parse_date(date_from, field="date_from")
+    end = _parse_date(date_to, field="date_to")
+    if start > end:
+        raise HTTPException(status_code=400, detail="date_from is after date_to")
+    if (end - start).days + 1 > _MAX_COSTS_PERIOD_DAYS:
+        raise HTTPException(
+            status_code=400, detail=f"period longer than {_MAX_COSTS_PERIOD_DAYS} days"
+        )
+    return await service.daily_costs(date_from=start, date_to=end, limit=limit, offset=offset)
 
 
 @router.get(

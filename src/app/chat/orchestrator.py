@@ -116,6 +116,7 @@ from app.policy.engine import (
 )
 from app.policy.loader import load_policy_state
 from app.preferences.service import PreferencesService
+from app.pricing import report_chat_step_pricing
 from app.schemas.chat import AttachmentIn, GenerationMode
 from app.wallet.service import WalletService
 from app.website.tools import SiteToolHandlers, ToolExecution
@@ -526,10 +527,16 @@ def _credits_llm(*, provider: str, use_generation_v2: bool) -> LLMClient:
 def _provider_state_for_attempt(
     attempt: Attempt, stored: dict[str, Any] | None
 ) -> dict[str, Any] | None:
-    """Pass Responses ``previous_response_id`` only to an OpenAI candidate of the same account path.
+    """Forward stored Responses state only to an OpenAI candidate — matched by PROVIDER, not key.
 
     A crossover to Anthropic must not send an OpenAI response id. A stored state from another
     provider is dropped rather than forwarded.
+
+    The match is the provider NAME only: the key slot (service key vs ``OPENAI_API_KEY_BACKUP``,
+    ADR-074) that minted the handle is not compared, so a handle from one OpenAI account would be
+    forwarded to a candidate on another. That gap is one of the reasons provider-side continuation
+    is off, and closing it is part of the work TD-032 describes. Today the forwarded state is
+    inert: ``_usable_previous_response_id`` returns ``None`` regardless of what it receives.
     """
     if stored is None or attempt.provider != "openai":
         return None
@@ -1883,9 +1890,11 @@ class ChatOrchestrator:
 
         `chat_sessions.generation_backend` is nullable because existing sessions predate v2; NULL is
         treated as `legacy`. A normal v2 `/run` may upgrade such a session because the caller
-        explicitly opted into the new contract and a missing `previous_response_id` simply triggers
-        full local replay. `/tool-result` does not upgrade: it must continue the same in-flight turn
-        through the backend that created the tool call.
+        explicitly opted into the new contract and the upgraded session loses nothing by having no
+        provider-side state: v2 replays the full local history on EVERY turn while continuation is
+        off (`_CONTINUATION_ENABLED`, TD-032), so an absent `previous_response_id` is the normal
+        condition, not a degraded one. `/tool-result` does not upgrade: it must continue the same
+        in-flight turn through the backend that created the tool call.
         """
         actual_backend: GenerationBackend = "v2" if session.generation_backend == "v2" else "legacy"
         if actual_backend == requested_backend:
@@ -2322,6 +2331,12 @@ class ChatOrchestrator:
             token_usage_total.labels(direction="output", model=result.usage.model).inc(
                 result.usage.output_tokens
             )
+            # ADR-079 §1: this dict is the step's usage — the ONE place per LLM call where the
+            # model of the turn is known as it happens. If it carries no purchase price, the
+            # whole turn's cost reads `None` in CRM, which looks exactly like "no traffic";
+            # report it here so the gap surfaces without anyone opening CRM. Costing itself
+            # stays on the read path.
+            report_chat_step_pricing(usage)
             if use_generation_v2:
                 await self._maybe_update_provider_state(
                     session_id=session_id,
@@ -2446,12 +2461,18 @@ class ChatOrchestrator:
     ) -> None:
         """Persist provider-side continuation handles after a successful model response.
 
+        Nothing consumes these handles today: continuation is switched off
+        (``_CONTINUATION_ENABLED`` in ``app.chat.openai_responses_client``, TD-032) and every v2
+        turn replays the full local history. This write keeps the stored handle in step with the
+        session so the switch has something valid to start from; the rules below are the ones that
+        apply once it IS on.
+
         Only credit-mode OpenAI calls store Responses API ids. BYOK is intentionally excluded
         because a user can rotate the key between turns; a stored response id may belong to a
-        different provider account. A max_tokens-truncated OpenAI turn clears the state instead of
-        chaining from a partial remote response; the next turn will rebuild from local history.
-        Anthropic Messages API does not have the same ``previous_response_id`` contract in this
-        integration, so Anthropic continues through local history replay plus prompt caching.
+        different provider account. A max_tokens-truncated OpenAI turn clears the state rather than
+        leaving a handle that names a partial remote response. Anthropic Messages API does not have
+        the same ``previous_response_id`` contract in this integration, so Anthropic relies on
+        local history replay plus prompt caching — which is, for now, exactly what OpenAI does too.
         """
         if mode is Mode.byok or provider != "openai":
             return

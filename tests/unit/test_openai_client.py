@@ -361,7 +361,14 @@ async def test_legacy_openai_client_uses_chat_completions_even_when_responses_ex
 
 # ============================ Responses API state + generation modes ============================
 @pytest.mark.asyncio
-async def test_responses_api_uses_previous_response_id_and_delta_input() -> None:
+async def test_responses_api_replays_full_history_and_never_chains_stored_response_id() -> None:
+    """A VALID stored handle is still not chained: continuation is off (TD-032).
+
+    This test used to assert the opposite — `previous_response_id` sent, input trimmed to the
+    delta after the last assistant turn. That contract was retired deliberately: the handle
+    belongs to ONE OpenAI account while the credits key chain (ADR-074) may reach another, so
+    `_CONTINUATION_ENABLED` switches the path off and full local replay is the only path.
+    """
     client, fake = _client_with_responses_fake()
     fake.responses.next_response = _response(response_id="resp_next", text="new answer")
     messages = [
@@ -383,15 +390,21 @@ async def test_responses_api_uses_previous_response_id_and_delta_input() -> None
     assert fake.completions.calls == []  # the Responses API path bypasses Chat Completions
     sent = fake.responses.calls[0]
     assert sent["instructions"] == "SYSTEM"
-    assert sent["previous_response_id"] == "resp_prev"
+    assert sent["previous_response_id"] is openai.NOT_GIVEN
     assert sent["store"] is True
-    # With previous_response_id, only the new user delta is sent.
+    # No chaining => the WHOLE local history travels, not just the new user delta.
     assert sent["input"] == [
         {
             "type": "message",
             "role": "user",
+            "content": [{"type": "input_text", "text": "old user"}],
+        },
+        {"type": "message", "role": "assistant", "content": "old answer"},
+        {
+            "type": "message",
+            "role": "user",
             "content": [{"type": "input_text", "text": "new user"}],
-        }
+        },
     ]
 
 
@@ -502,7 +515,12 @@ async def test_responses_reasoning_sends_effort_and_parses_reasoning_tokens() ->
 
 
 @pytest.mark.asyncio
-async def test_responses_reasoning_keeps_gpt5_and_reuses_matching_state() -> None:
+async def test_responses_reasoning_keeps_gpt5_and_still_drops_matching_state() -> None:
+    """Reasoning mode keeps a gpt-5 model as-is, and the matching stored state is STILL dropped.
+
+    Model binding is no longer what decides: `_CONTINUATION_ENABLED` is off (TD-032), so even a
+    state whose model equals the effective model yields no `previous_response_id`.
+    """
     client, fake = _client_with_responses_fake()
     fake.responses.next_response = _response(response_id="resp_next", text="ok")
 
@@ -519,7 +537,10 @@ async def test_responses_reasoning_keeps_gpt5_and_reuses_matching_state() -> Non
     sent = fake.responses.calls[0]
     assert sent["model"] == "gpt-5"
     assert sent["reasoning"] == {"effort": "medium"}
-    assert sent["previous_response_id"] == "resp_prev"
+    assert sent["previous_response_id"] is openai.NOT_GIVEN
+    assert sent["input"] == [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q"}]}
+    ]
 
 
 @pytest.mark.asyncio

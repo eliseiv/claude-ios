@@ -1,8 +1,10 @@
 """OpenAI client — an LLMClient implementation (ADR-033).
 
 Real integration with the OpenAI Python SDK (``AsyncOpenAI``). This legacy client uses Chat
-Completions only. The newer stateful Responses API integration is intentionally isolated in
-``OpenAIResponsesClient`` so `/v1/chat/run` keeps its original full-history replay behavior.
+Completions only. The newer Responses API integration is intentionally isolated in
+``OpenAIResponsesClient`` so `/v1/chat/run` keeps its original full-history replay behavior. The
+split is about the wire format, not about who replays: that client sends a full history too while
+its provider-side chain stays off (``_CONTINUATION_ENABLED``, TD-032).
 
 All OpenAI-specific (de)serialization of the wire format lives INSIDE this client (ADR-033 §3):
 - builds OpenAI Chat Completions ``messages`` from the neutral history (system message, assistant

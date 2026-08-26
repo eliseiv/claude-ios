@@ -170,9 +170,11 @@ class LLMClient(Protocol):
         # optional capabilities: ``general`` → no extra knobs, ``research`` → hosted web search,
         # ``reasoning`` → reasoning/thinking controls. It is deliberately not a session attribute.
         generation_mode: str = "general",
-        # Provider-specific state owned by chat_sessions.provider_state. OpenAI uses this for the
-        # Responses API chain (previous_response_id); Anthropic currently receives it only for
-        # future compatibility because the normal Messages API is stateless.
+        # Provider-specific state owned by chat_sessions.provider_state. It is the plumbing for the
+        # OpenAI Responses API chain (previous_response_id), which is switched off
+        # (_CONTINUATION_ENABLED in app.chat.openai_responses_client, TD-032) — so today EVERY
+        # client ignores the value it receives here. Anthropic ignores it in any case: the normal
+        # Messages API is stateless.
         provider_state: dict[str, Any] | None = None,
     ) -> LLMResult: ...
 

@@ -30,6 +30,8 @@
 
 **Индекс** `ix_media_jobs_user_created (user_id, created_at)` — под owner-scoped листинг newest-first.
 
+> **Ведущего индекса по `created_at` у таблицы НЕТ.** `GET /v1/admin/costs/daily` ([ADR-092](../../adr/ADR-092-crm-daily-costs-endpoint.md)) отбирает media-строки единственным предикатом `created_at >= :from AND created_at < :to`, и ни `ix_media_jobs_user_created` (начинается с `user_id`), ни частичный `ix_media_jobs_non_terminal` (по статусу) этот отбор не обслуживают ⇒ **seq scan**. Chat-половина того же запроса индекс получила (`ix_steps_created_at`, миграция `0029`), media-половина оставлена незакрытой осознанно: эффект на порядки меньше — строка за генерацию, а не за каждый вызов LLM. Долг — [TD-033](../../100-known-tech-debt.md).
+
 ## Почему так
 
 **`status` — `TEXT` + `CHECK`, а не PostgreSQL enum.** Набор значений повторяет lifecycle очереди провайдера, то есть внешний контракт; его расширение не должно требовать `CREATE TYPE`/`ALTER TYPE` на каждом инстансе. Остальные enum'ы схемы ([03-data-model.md](../../03-data-model.md)) описывают наши собственные домены и остаются enum'ами.

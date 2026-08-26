@@ -122,6 +122,33 @@ class CrmStatsResponse(StrictModel):
     payments_sum_usd: float
 
 
+class CrmDailyCostItem(StrictModel):
+    """Одна клетка (день × провайдер) периодной разбивки расходов — расширение контракта v1.3.
+
+    Имена полей ЗАМОРОЖЕНЫ контрактом: расхождение даёт у оператора CRM молча пустой экран, а не
+    ошибку. Три случая отсутствия — РАЗНЫЕ, и подменять один другим нельзя:
+
+    * `404` на пути — бэк расширения не реализует (здесь неприменимо: реализует);
+    * строки за (день, провайдер) НЕТ — расхода в этот день по этому провайдеру не было,
+      измеренный ноль;
+    * поле = `null` — величина НЕ измерена (например, ни один вызов дня не удалось оценить по
+      прайсу). Ноль вместо `null` объявил бы «бесплатно» измерением — запрет ADR-079 §1.
+    """
+
+    date: str
+    provider: str
+    spend_usd: float | None = None
+    requests: int | None = None
+    tokens: float | None = None
+
+
+class CrmDailyCostListResponse(StrictModel):
+    # `total` — число клеток (день × провайдер) за ВЕСЬ период, а не размер страницы: обходчик
+    # CRM листает до `len(items) < limit` и сверяет полноту обхода именно по нему.
+    total: int
+    items: list[CrmDailyCostItem]
+
+
 class CrmProductItem(StrictModel):
     product_id: str
     name: str

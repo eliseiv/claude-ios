@@ -160,7 +160,10 @@ class ChatRepository:
         """Persist opaque provider continuation state for a chat session.
 
         The payload is intentionally provider-owned JSON. Today OpenAI stores the latest
-        Responses API ``response.id`` here so the next turn can use ``previous_response_id``.
+        Responses API ``response.id`` here, but NO turn reads it back: provider-side continuation
+        is switched off (``_CONTINUATION_ENABLED`` in ``app.chat.openai_responses_client``,
+        TD-032), and every v2 turn replays the full local history instead. The write keeps the
+        handle current for the day that switch is flipped; it does not shorten a later request.
         Anthropic Messages API calls are still stateless, so they normally leave this unchanged or
         empty. The repository remains the single writer for ``chat_sessions``.
         """
@@ -177,8 +180,13 @@ class ChatRepository:
         """Drop provider continuation state when local history is rewritten.
 
         edit+regenerate truncates ``chat_steps`` locally; any remote chain id that points to the
-        old suffix is no longer a faithful representation of the chat. Clearing the state forces
-        the next provider call to rebuild from local history and establish a fresh continuation id.
+        old suffix is no longer a faithful representation of the chat, so it is dropped rather
+        than left to name a history that no longer exists.
+
+        This does not change what the next call sends while continuation is off
+        (``_CONTINUATION_ENABLED``, TD-032): that call rebuilds from local history either way,
+        because it never reads the stored handle. Clearing matters for the stored value itself —
+        and for the moment the switch makes it live again.
         """
         await self.set_provider_state(session_id, None)
 

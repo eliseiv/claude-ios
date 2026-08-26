@@ -1,24 +1,24 @@
 """OpenAI Responses API client for `/v1/chat/v2/*`.
 
 This client is intentionally separate from `OpenAIClient`, which remains the legacy
-Chat Completions implementation for `/v1/chat/*`. The v2 client uses the Responses API and may
-reuse provider-side conversation state through `previous_response_id`:
+Chat Completions implementation for `/v1/chat/*`. The v2 client converts the FULL local history
+to Responses input items on every call.
 
-- when `provider_state.responseId` matches the active OpenAI model, only the delta after the last
-  assistant turn is sent to OpenAI;
-- when no valid provider state exists, the full local history is converted to Responses input
-  items as a migration/fallback path;
-- after a successful credit-mode call, the orchestrator persists the returned response id.
+The Responses API also offers provider-side conversation state through `previous_response_id`, and
+the plumbing for it exists end to end: the orchestrator persists the returned response id into
+`chat_sessions.provider_state`, and this client would send it and trim the input to the delta after
+the last assistant turn. That path is deliberately **switched off** — see `_CONTINUATION_ENABLED`
+and TD-032. Full local replay is therefore not a fallback here; it is the only path taken.
 
-The provider state is never used for BYOK calls: a user can rotate their key between turns, so a
-stored response id could point at another OpenAI account.
+The provider state is never used for BYOK calls either: a user can rotate their key between turns,
+so a stored response id could point at another OpenAI account.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Final
 
 import openai
 
@@ -47,12 +47,43 @@ from app.errors import UpstreamError, ValidationFailedError
 # or session model is gpt-4o — remap to a catalog model that accepts the knob.
 _DEFAULT_OPENAI_REASONING_MODEL = "gpt-5-mini"
 
+#: Send `previous_response_id` to the Responses API instead of replaying local history? **No** —
+#: TD-032. Kept as an explicit switch rather than as an emergent property of a name comparison,
+#: because that is exactly how the chain used to be off: `provider_state.model` held the DATED
+#: SNAPSHOT the provider answers with (`gpt-5.1-2025-11-13`), the caller asks for the ALIAS
+#: (`gpt-5.1`), so `_usable_previous_response_id` dropped the handle on EVERY turn. Nobody chose
+#: that; it was a side effect. Storing the requested alias in `usage.model` (needed for costing —
+#: the purchase-price table is keyed by alias, ADR-079) would have silently flipped the chain ON,
+#: which is a change of product behaviour, not a costing fix.
+#:
+#: Why it must not simply be flipped on, in the order a turn would break:
+#:
+#: 1. A response id belongs to ONE OpenAI ACCOUNT. The credits key chain (ADR-074,
+#:    `Settings.openai_api_key_chain`) puts `OPENAI_API_KEY_BACKUP` — a SECOND account — behind
+#:    the primary key.
+#: 2. `_provider_state_for_attempt` (`app.chat.orchestrator`) hands the stored state to ANY OpenAI
+#:    candidate; it compares the provider name, not the key slot that produced the handle.
+#: 3. Every `/chat/run` restarts the chain at the primary key, so a handle minted by the backup
+#:    account is replayed to the primary one on the next turn.
+#: 4. The resulting rejection is not a credential failure, so `next_attempt_index` returns `None`
+#:    and the failover chain stops instead of rotating: the turn fails.
+#: 5. There is no recovery: `clear_provider_state` is called only on truncation and on explicit
+#:    resets, never on an upstream error — so one poisoned handle breaks the session for good.
+#:
+#: Turning this on therefore means: a key slot inside `provider_state` + a slot match in
+#: `_provider_state_for_attempt` + an "invalid previous_response_id" detector that clears the state
+#: and retries once with full local replay. That is a new failure-handling contour and belongs to
+#: its own change, with its own ADR — see TD-032 for the closing trigger.
+_CONTINUATION_ENABLED: Final = False
+
 
 class OpenAIResponsesClient(OpenAIClient):
     """OpenAI LLMClient implementation backed only by the Responses API.
 
     The class inherits the common OpenAI serializers/parsers from `OpenAIClient`, but it overrides
-    the history-to-Responses conversion so full-history fallback emits valid Responses input items.
+    the history-to-Responses conversion so full-history replay emits valid Responses input items.
+    That replay is not a fallback: it is the only path this client takes while
+    `_CONTINUATION_ENABLED` is off (TD-032), so the conversion runs on every turn.
     In particular, assistant text replay is encoded as an easy assistant message with string
     content instead of `output_text` content parts, which are output-only and should not be used as
     ordinary input message content.
@@ -165,12 +196,13 @@ class OpenAIResponsesClient(OpenAIClient):
     ) -> list[dict[str, Any]]:
         """Convert persisted assistant blocks into Responses input items for full replay.
 
-        Full replay is only used when `previous_response_id` is absent or invalid. The goal is to
-        rebuild enough local conversation state for the next turn without depending on provider
-        storage. Text is replayed as an assistant message; tool calls are replayed as
-        `function_call` items with their original provider `call_id`; reasoning summaries are kept
-        only when they already carry provider ids. Hosted web-search call metadata is intentionally
-        skipped during fallback replay because it is diagnostic output rather than user-visible
+        Full replay is the only path this client takes while `_CONTINUATION_ENABLED` is off
+        (TD-032), so this conversion runs on every turn, not just when `previous_response_id` is
+        missing. The goal is to rebuild enough local conversation state for the next turn without
+        depending on provider storage. Text is replayed as an assistant message; tool calls are
+        replayed as `function_call` items with their original provider `call_id`; reasoning
+        summaries are kept only when they already carry provider ids. Hosted web-search call
+        metadata is intentionally skipped because it is diagnostic output rather than user-visible
         context.
         """
 
@@ -272,7 +304,12 @@ class OpenAIResponsesClient(OpenAIClient):
     def _messages_after_last_assistant(
         cls, messages: list[NeutralMessage] | list[dict[str, Any]]
     ) -> list[NeutralMessage] | list[dict[str, Any]]:
-        """Return only the local delta that should follow `previous_response_id`."""
+        """Return only the local delta that should follow `previous_response_id`.
+
+        Unreachable while `_CONTINUATION_ENABLED` is off (TD-032): the only caller trims to the
+        delta when it holds a `previous_response_id`, and today it never does. Kept as the shape
+        the switch would restore.
+        """
         last_assistant = -1
         for i, msg in enumerate(messages):
             role = cls._obj_get(msg, "role")
@@ -287,11 +324,16 @@ class OpenAIResponsesClient(OpenAIClient):
         *,
         previous_response_id: str | None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        """Build Responses input and optionally reduce it to the delta after previous_response_id.
+        """Build Responses input, trimming to the delta after `previous_response_id` when set.
 
-        When the session has a valid OpenAI response id, only messages after the latest assistant
-        turn are sent: either the new user turn or function-call outputs for a closed tool barrier.
-        Without state, v2 falls back to a full local replay converted from `chat_steps`.
+        `previous_response_id` is always `None` here while `_CONTINUATION_ENABLED` is off (TD-032):
+        the sole producer, `_usable_previous_response_id`, returns `None` on every turn. So the
+        trimming branch below is currently dead and every call builds the FULL local replay
+        converted from `chat_steps` — that is v2's normal path, not a fallback from a lost handle.
+
+        The branch is kept because it is the request shape flipping the constant back on would
+        restore: with a usable id only messages after the latest assistant turn are sent — either
+        the new user turn or function-call outputs for a closed tool barrier.
         """
         source = cls._messages_after_last_assistant(messages) if previous_response_id else messages
         if previous_response_id and not source:
@@ -366,11 +408,15 @@ class OpenAIResponsesClient(OpenAIClient):
     ) -> str | None:
         """Return a usable `previous_response_id` for this OpenAI model, if one exists.
 
-        The stored state is model-bound. Reusing a response id with a different model can make the
-        provider reject the request or silently continue a chain with the wrong assumptions, so v2
-        falls back to full local replay when the stored model differs from the current effective
-        model.
+        Always `None` while `_CONTINUATION_ENABLED` is off (TD-032): the stored handle is bound to
+        one OpenAI ACCOUNT, and nothing on the call path guarantees the next turn reaches that same
+        account — see the constant for the full chain and for what turning it on would require.
+        The checks below are the model binding that applies once it IS on: a response id used with
+        a different model can make the provider reject the request or silently continue a chain
+        with the wrong assumptions, so v2 falls back to full local replay in that case.
         """
+        if not _CONTINUATION_ENABLED:
+            return None
         if not isinstance(provider_state, dict):
             return None
         if provider_state.get("provider") != _PROVIDER:
@@ -382,7 +428,19 @@ class OpenAIResponsesClient(OpenAIClient):
         return response_id if isinstance(response_id, str) and response_id else None
 
     def _parse_responses_usage(self, response: Any, model: str) -> LLMUsage:
-        """Parse Responses API token accounting into the provider-neutral usage object."""
+        """Parse Responses API token accounting into the provider-neutral usage object.
+
+        ``model`` is the name we ASKED for, and it is the name that lands in
+        ``chat_steps.usage.model`` — the same convention the Anthropic and Chat Completions clients
+        follow, so one stored field means one thing across providers. The Responses API answers
+        with a DATED SNAPSHOT of that name (``gpt-5.1-2025-11-13`` for ``gpt-5.1``); storing the
+        snapshot instead made the whole turn unpriceable, because the purchase-price table is keyed
+        by the alias, and the CRM «Себестоимость» column went empty (ADR-079).
+
+        ``chat_sessions.provider_state.model`` is written from this same field. It is NOT the reason
+        this returns the alias, and it does not gate anything today: continuation is off by an
+        explicit switch (``_CONTINUATION_ENABLED``, TD-032), not by whether these two names match.
+        """
         usage = getattr(response, "usage", None)
         if usage is None:
             return LLMUsage(0, 0, model, 0, 0)
@@ -395,7 +453,7 @@ class OpenAIResponsesClient(OpenAIClient):
         return LLMUsage(
             input_tokens=self._obj_get(usage, "input_tokens", 0) or 0,
             output_tokens=self._obj_get(usage, "output_tokens", 0) or 0,
-            model=self._obj_get(response, "model") or model,
+            model=model,
             cache_read_tokens=self._obj_get(input_details, "cached_tokens", 0) or 0,
             cache_write_tokens=0,
             reasoning_tokens=self._obj_get(output_details, "reasoning_tokens", 0) or 0,
@@ -407,8 +465,9 @@ class OpenAIResponsesClient(OpenAIClient):
 
         Function calls are exposed to the orchestrator as the same domain-shaped `tool_uses` as the
         legacy Chat Completions client. Text, reasoning and hosted-search output items are persisted
-        as compact blocks so local history remains replayable when `previous_response_id` is missing
-        or invalid.
+        as compact blocks because local history is what every next turn replays: continuation via
+        `previous_response_id` is switched off by `_CONTINUATION_ENABLED` (TD-032), so these blocks
+        are the only conversation state the client has.
         """
         content_blocks: list[dict[str, Any]] = []
         text_parts: list[str] = []
@@ -519,10 +578,12 @@ class OpenAIResponsesClient(OpenAIClient):
         """Create one v2 OpenAI response via the Responses API.
 
         `generation_mode=general` uses normal Responses API generation. `research` appends the
-        hosted OpenAI web-search tool. `reasoning` sends the configured reasoning effort. When a
-        valid OpenAI `provider_state.responseId` is present, the request uses
-        `previous_response_id` and sends only the new user/tool delta; otherwise it sends a
-        full-history Responses input reconstructed from local `chat_steps`.
+        hosted OpenAI web-search tool. `reasoning` sends the configured reasoning effort. The
+        request always carries a full-history Responses input reconstructed from local
+        `chat_steps`: provider-side continuation is switched off by `_CONTINUATION_ENABLED`
+        (TD-032), so `_usable_previous_response_id` returns `None` on every turn and no
+        `previous_response_id` is sent. Flipping that constant back on — under the conditions
+        listed there — is what restores the delta-only request.
         """
         model = model if model is not None else self._default_model
         # The whitelist DECLARES the modes this client supports and must list all four (ADR-064).

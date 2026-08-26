@@ -6,12 +6,25 @@
 Главная идея: legacy API оставлен изолированным, а новая логика вынесена в отдельный контракт
 `/v1/chat/v2/*`.
 
+> ⛔ **Provider-side continuation (`previous_response_id`) ВЫКЛЮЧЕНА — [TD-032](../../100-known-tech-debt.md).**
+> `_CONTINUATION_ENABLED: Final = False` (`src/app/chat/openai_responses_client.py:77`), поэтому
+> `_usable_previous_response_id` (`:406`) возвращает `None` на **каждом** ходе и **каждый** v2-ход
+> отправляет провайдеру **полный локальный реплей истории** — так же, как legacy. Полный реплей
+> здесь **не фолбэк, а единственный путь**. `chat_sessions.provider_state` продолжает **писаться**
+> (`set_provider_state`), но **не читается ни одним ходом**: колонка поддерживается актуальной на
+> случай, когда выключатель будет переведён, и **не делает следующий ход дешевле**. Причины, почему
+> цепочку нельзя просто включить, и триггер закрытия — [TD-032](../../100-known-tech-debt.md).
+> Ниже по документу разделы, описывающие механику цепочки, читаются как описание **выключенного**
+> пути: они верны как устройство, но ни один ход по ним сегодня не идёт.
+
 ## Коротко
 
 - `POST /v1/chat/run` - legacy: полный локальный replay истории, фиксированная цена 1 кредит,
   без `generationMode`, без OpenAI Responses API, без `previous_response_id`.
 - `POST /v1/chat/v2/run` - новый режимный чат: `generationMode` на каждый ход, mode-specific
-  стоимость, OpenAI Responses API с `previous_response_id`, Anthropic web search/thinking.
+  стоимость, OpenAI **Responses API**, Anthropic web search/thinking. Цепочка `previous_response_id`
+  **выключена** ([TD-032](../../100-known-tech-debt.md)) — история реплеится локально, как в legacy;
+  отличие v2 от legacy сегодня в режимах, цене и knobs, а не в способе подачи контекста.
 - `POST /v1/chat/tool-result` - legacy continuation.
 - `POST /v1/chat/v2/tool-result` - v2 continuation; режим берется из исходного user-step.
 - `GET /v1/chat/v2/capabilities` - список режимов и их цена для UI.
@@ -84,7 +97,10 @@ orchestrator.run(
 )
 ```
 
-Зачем: все режимы, новая цена и provider continuation включаются только здесь.
+Зачем: все режимы, новая цена и — когда [TD-032](../../100-known-tech-debt.md) будет закрыт —
+provider continuation включаются только здесь. Сегодня из этого списка работают режимы и цена;
+цепочка `previous_response_id` выключена, и `generation_backend="v2"` на способ подачи контекста не
+влияет.
 
 ### `chat_tool_result` и `chat_v2_tool_result`
 
@@ -168,7 +184,7 @@ Legacy `/v1/chat/run` эти цены не использует и всегда 
 provider_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 ```
 
-Хранит provider-owned continuation handle. Сейчас используется для OpenAI Responses API:
+Хранит provider-owned continuation handle OpenAI Responses API:
 
 ```json
 {
@@ -180,6 +196,12 @@ provider_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=Tr
 
 Это не история сообщений и не пользовательский контекст. Это только ссылка на remote-состояние
 провайдера.
+
+⛔ **Колонка ПИШЕТСЯ, но НЕ ЧИТАЕТСЯ ни одним ходом** ([TD-032](../../100-known-tech-debt.md)):
+`_CONTINUATION_ENABLED` выключен, поэтому handle не уходит провайдеру и **экономии не даёт** —
+следующий ход стоит столько же, сколько без него (полный локальный реплей). Значение поддерживается
+актуальным на случай, когда выключатель будет переведён. Утверждать, что `provider_state` «делает
+следующий ход дешевле», **нельзя**, пока TD-032 открыт.
 
 ### `ChatSession.generation_backend`
 
@@ -225,6 +247,11 @@ generation_backend: Mapped[str | None] = mapped_column(Text, nullable=True)
 Единая точка записи и сброса `chat_sessions.provider_state`.
 
 Сброс нужен при edit/regenerate, max_tokens truncation и при апгрейде legacy-сессии в v2.
+
+⚠️ `clear_provider_state` (`src/app/chat/repository.py:179`) зовётся **только** из этих трёх мест
+(`orchestrator.py:1002`, `:1907`, `:2480`) и **никогда** на upstream-ошибке. Recovery от битого
+handle сегодня нет — это одна из четырёх причин, по которым цепочка выключена, и часть работы,
+которую описывает [TD-032](../../100-known-tech-debt.md).
 
 ### `generation_mode_for_message_step`
 
@@ -297,10 +324,15 @@ client.responses.create(...)
 
 Что делает:
 
-1. Проверяет `provider_state.responseId`.
-2. Если state валиден и модель совпадает, отправляет `previous_response_id` и только delta после
-   последнего assistant-хода.
-3. Если state отсутствует/модель не совпала, собирает full replay из локального `chat_steps`.
+1. ⛔ **Выключено ([TD-032](../../100-known-tech-debt.md)).** По устройству — проверяет
+   `provider_state.responseId` и, если state валиден и модель совпадает, отправляет
+   `previous_response_id` и только delta после последнего assistant-хода. Фактически
+   `_usable_previous_response_id` (`src/app/chat/openai_responses_client.py:406`) возвращает `None`
+   на каждом ходе, потому что `_CONTINUATION_ENABLED: Final = False` (`:77`), — так что п. 1-2
+   сегодня недостижимы.
+2. См. п. 1.
+3. **Единственный действующий путь:** собирает full replay из локального `chat_steps`. Это **не
+   фолбэк** «когда state не подошёл», а то, как идёт **каждый** v2-ход, пока TD-032 открыт.
 4. Для `research` добавляет OpenAI hosted `web_search`. Системный суффикс режима
    (обязать модель искать по теме, а не dummy-запросом) собирает orchestrator, не этот клиент
    ([ADR-084](../../adr/ADR-084-research-system-prompt-suffix.md)).
@@ -400,10 +432,19 @@ Legacy `/v1/chat/*` не ломается, потому что orchestrator на
 BYOK не сохраняет `provider_state`, потому что пользователь может сменить ключ между ходами, а
 remote response id привязан к аккаунту/ключу у провайдера.
 
+⚠️ **`_provider_state_for_attempt` (`src/app/chat/orchestrator.py:527-545`) сверяет только ИМЯ
+провайдера, а не слот ключа.** State, выпущенный резервным аккаунтом (`OPENAI_API_KEY_BACKUP`,
+[ADR-074](../../adr/ADR-074-provider-key-failover.md)), был бы передан кандидату **другого**
+аккаунта. Сегодня передаваемый state **инертен** (`_usable_previous_response_id` возвращает `None`
+в любом случае); сверка слота — часть работы [TD-032](../../100-known-tech-debt.md). Утверждения
+вида «сверяется тот же account path» **неверны** — такой сверки в коде нет.
+
 ### `_maybe_update_provider_state`
 
 Сохраняет latest OpenAI `response.id` после успешного v2 credit-mode ответа. При `max_tokens`
-сбрасывает state, чтобы следующий ход rebuild-ился из локальной истории.
+сбрасывает state, чтобы следующий ход rebuild-ился из локальной истории. Пока
+[TD-032](../../100-known-tech-debt.md) открыт, из локальной истории строится **каждый** ход, и
+записанное значение ни на что не влияет.
 
 ## Billing
 
@@ -504,8 +545,16 @@ wire-контракт запроса/ответа/инструмента — [02
 
 - `ChatRunRequest` rejects `generationMode`; `ChatV2RunRequest` accepts it.
 - Legacy OpenAI client не использует `.responses`, даже если fake SDK его имеет.
-- `OpenAIResponsesClient` отправляет `previous_response_id` и delta input.
-- `OpenAIResponsesClient` при mismatch модели делает full replay валидной Responses input-shape.
+- `OpenAIResponsesClient` **никогда** не отправляет `previous_response_id` и реплеит историю целиком
+  валидной Responses input-shape — **включая** случай ВАЛИДНОГО сохранённого state с совпадающей
+  моделью ([TD-032](../../100-known-tech-debt.md); regression-guard'ы:
+  `tests/unit/test_openai_client.py::test_responses_api_replays_full_history_and_never_chains_stored_response_id`,
+  `::test_responses_reasoning_keeps_gpt5_and_still_drops_matching_state`,
+  `tests/unit/test_responses_usage_model_adr079.py::test_continuation_switch_is_off`,
+  `::test_usable_previous_response_id_is_none_even_for_a_valid_state`,
+  `::test_valid_state_does_not_reach_the_wire_and_history_is_replayed_in_full`,
+  `::test_streaming_valid_state_does_not_reach_the_wire_either`). Совпадение модели **больше не
+  является** тем, что решает: решает явный выключатель.
 - `AnthropicClient` добавляет web-search/thinking параметры только при `research/reasoning`.
 - `research` ([ADR-084](../../adr/ADR-084-research-system-prompt-suffix.md)): system-prompt хода содержит статичный суффикс только при эффективном `research` (v2 и legacy opt-in); dummy-поиск в промте запрещён; `tool_choice` не форсируется.
 - `AnthropicClient` в `general` делает обычный Messages call без v2 knobs.

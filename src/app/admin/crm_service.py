@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin.crm_costs import daily_cost_items
 from app.admin.service import AdminService
 from app.audit.service import EVENT_CRM_SUBSCRIPTION_GRANT, AuditEvent, AuditService
 from app.config import Settings, get_settings
@@ -30,6 +31,7 @@ from app.pricing.provider_prices import (
     round_usd,
 )
 from app.schemas.crm_admin import (
+    CrmDailyCostListResponse,
     CrmMediaAvgSec,
     CrmMediaBucket,
     CrmMediaStats,
@@ -828,6 +830,48 @@ class CrmAdminService:
             )
         stored = row["provider_cost_usd"]
         return ProviderCost(None if stored is None else float(stored))
+
+    def _recovered_media_usd(
+        self, model_id: str, credits: int, asset_count: int | None
+    ) -> float | None:
+        """Себестоимость исторической media-строки — тем же путём, что колонка «Себестоимость».
+
+        Именно вызовом `_provider_cost`, а не повторением его ветки: два восстановления цены из
+        кредитов разошлись бы при первой же правке таблицы ADR-061, и страница «Расход API»
+        начала бы противоречить карточке пользователя.
+        """
+        return self._provider_cost(
+            {
+                "source": "media",
+                "provider_cost_usd": None,
+                "model_id": model_id,
+                "credits": credits,
+                "asset_count": asset_count,
+            }
+        ).usd
+
+    async def daily_costs(
+        self,
+        *,
+        date_from: datetime.date,
+        date_to: datetime.date,
+        limit: int,
+        offset: int,
+    ) -> CrmDailyCostListResponse:
+        """Расходы на провайдеров по дням периода — расширение контракта CRM v1.3.
+
+        Страница режется в памяти, а не `LIMIT/OFFSET`-ом в SQL: клеток (день × провайдер) не
+        больше, чем длина периода на число вендоров продукта (≤ 92 × 4), то есть весь ответ на
+        порядки меньше страницы контракта. Отдельный `COUNT(*)`-запрос ради `total` был бы вторым
+        проходом по тем же данным ради числа, которое уже известно.
+        """
+        items = await daily_cost_items(
+            self._session,
+            date_from=date_from,
+            date_to=date_to,
+            recovered_media_usd=self._recovered_media_usd,
+        )
+        return CrmDailyCostListResponse(total=len(items), items=items[offset : offset + limit])
 
     async def stats(
         self,

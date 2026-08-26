@@ -21,6 +21,7 @@ from app.errors import (
     ValidationFailedError,
 )
 from app.media_generation.service import MediaGenerationService
+from app.observability.logging import log_event
 
 logger = logging.getLogger("app.chat.attachment_refs")
 
@@ -94,9 +95,18 @@ async def upload_turn_attachment_refs(
             ValidationFailedError,
             UpstreamError,
         ) as exc:
-            logger.warning(
-                "chat attachment fal upload skipped",
-                extra={"error": type(exc).__name__, "filename": img.filename},
+            # Через `log_event`, а не `logger.warning(extra=...)`: сырой `extra` кладёт ключи
+            # ПРЯМО в `LogRecord`, и ключ, совпавший с его собственным атрибутом (`filename` —
+            # именно такой), заставляет `makeRecord` поднять `KeyError`. То есть ветка,
+            # написанная ради МЯГКОГО пропуска неудачной загрузки, роняла весь ход в `500` при
+            # каждом сбое fal. `log_event` кладёт поля в `extra_fields`, где зарезервированных
+            # имён нет по построению, и заодно даёт формату JSON-редакцию и `requestId`.
+            log_event(
+                logger,
+                logging.WARNING,
+                "chat_attachment_fal_upload_skipped",
+                error=type(exc).__name__,
+                fileName=img.filename,
             )
             continue
         refs.append(

@@ -3,6 +3,17 @@
 - **Статус:** Accepted
 - **Дата:** 2026-08-13
 - **Связано:** [ADR-033](ADR-033-llm-provider-abstraction.md), [ADR-073](ADR-073-dual-credits-llm-providers.md); эталон — 232-claude-backend ADR-047
+- **Пометка 2026-08-26 ([TD-032](../100-known-tech-debt.md)), тело ADR не переписано (immutability):**
+  фраза §3 «`provider_state` (Responses `previous_response_id`) передаётся только OpenAI-кандидату»
+  описывает **устройство**, а не действующий путь. Provider-side continuation **выключена**
+  (`_CONTINUATION_ENABLED: Final = False`, `src/app/chat/openai_responses_client.py:77`), поэтому
+  переданный state **инертен**: `_usable_previous_response_id` (`:406`) возвращает `None` на каждом
+  ходе. Более того, отбор кандидата (`_provider_state_for_attempt`,
+  `src/app/chat/orchestrator.py:527-545`) сверяет **только имя провайдера**, а не **слот ключа**, —
+  handle, выпущенный `OPENAI_API_KEY_BACKUP` (второй аккаунт этой же цепочки), ушёл бы кандидату
+  основного аккаунта. Именно это, вместе с отсутствием recovery (`clear_provider_state` не зовётся
+  на upstream-ошибке), и есть причина, по которой цепочку нельзя просто включить. Сама схема
+  failover'а ADR-074 **не изменена**.
 
 ## Контекст
 

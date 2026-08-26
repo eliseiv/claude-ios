@@ -5,12 +5,14 @@ from app.pricing.provider_prices import (
     PROVIDER_ANTHROPIC,
     PROVIDER_FAL,
     PROVIDER_OPENAI,
+    PROVIDER_UNKNOWN,
     ProviderCost,
     chat_cost_usd,
     chat_cost_usd_by_provider,
     media_cost_usd_from_credits,
     media_cost_usd_of_run,
     provider_of_chat_model,
+    report_chat_step_pricing,
     round_usd,
 )
 
@@ -19,11 +21,13 @@ __all__ = [
     "PROVIDER_ANTHROPIC",
     "PROVIDER_FAL",
     "PROVIDER_OPENAI",
+    "PROVIDER_UNKNOWN",
     "ProviderCost",
     "chat_cost_usd",
     "chat_cost_usd_by_provider",
     "media_cost_usd_from_credits",
     "media_cost_usd_of_run",
     "provider_of_chat_model",
+    "report_chat_step_pricing",
     "round_usd",
 ]

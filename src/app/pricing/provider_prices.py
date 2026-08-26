@@ -27,13 +27,19 @@ fal bills per second inside a whole credit pack (Kling v3, Veo).
 
 from __future__ import annotations
 
+import logging
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
 from app.media_generation.catalog import KIND_IMAGE, FalModel, image_unit_credits
+from app.observability.logging import get_logger, log_event
+from app.observability.metrics import chat_unpriced_steps_total
+
+_logger = get_logger("app.pricing.provider_prices")
 
 # --- chat ---------------------------------------------------------------------------------
 
@@ -116,11 +122,137 @@ def _has_token_counts(usage: Mapping[str, Any]) -> bool:
 PROVIDER_OPENAI = "OpenAI"
 PROVIDER_ANTHROPIC = "Anthropic"
 PROVIDER_FAL = "Fal"
+# A paid call whose vendor cannot be named: token counters are there, the model name is not.
+# NOT a vendor — a place that keeps such traffic visible instead of dropping it (ADR-092 §6).
+# Naming a real vendor here would invent a bill and spoil an already correct cell; a consumer
+# that does not recognise the key folds it into "other" and does not lose it.
+PROVIDER_UNKNOWN = "Unknown"
 
 
 def provider_of_chat_model(model: str) -> str:
     """Which vendor's bill this model lands on. Only two chat providers exist here (ADR-033)."""
     return PROVIDER_ANTHROPIC if model.strip().lower().startswith("claude") else PROVIDER_OPENAI
+
+
+# A dated snapshot suffix, in both shapes the two providers use: `-2025-11-13` (OpenAI) and
+# `-20251001` (Anthropic). Nothing else counts as a snapshot — see `resolve_chat_price_model`.
+_SNAPSHOT_SUFFIX = re.compile(r"^-(?:\d{4}-\d{2}-\d{2}|\d{8})$")
+
+
+def resolve_chat_price_model(model: str) -> str | None:
+    """Which row of :data:`CHAT_TOKEN_PRICES` prices this model name, if any.
+
+    The table is keyed by the ALIAS a caller asks for (``gpt-5.1``), while a provider may answer,
+    and history may therefore hold, a DATED SNAPSHOT of that alias (``gpt-5.1-2025-11-13``). The
+    provider bills the snapshot at its alias's list price, so mapping one onto the other reads the
+    price we have — it does not invent one. This also prices history written before the clients
+    agreed to store the requested alias, without a migration: the cost is computed at read time.
+
+    Longest alias wins: ``gpt-5-mini-2025-08-07`` belongs to ``gpt-5-mini``, not to ``gpt-5``.
+
+    ONLY a date suffix resolves. Any other suffix marks a DIFFERENT model with its own price
+    (``gpt-5-pro``, ``…-chat-latest``), and charging it the base model's rate would publish a
+    number we do not have as a measurement — precisely what the ``None`` rule of this module
+    forbids. Such a model stays unpriced and becomes visible through
+    ``chat_unpriced_steps_total``, which is how it gets a price: an operator adds the row.
+    """
+    if model in CHAT_TOKEN_PRICES:
+        return model
+    best: str | None = None
+    for alias in CHAT_TOKEN_PRICES:
+        if not model.startswith(alias) or not _SNAPSHOT_SUFFIX.match(model[len(alias) :]):
+            continue
+        if best is None or len(alias) > len(best):
+            best = alias
+    return best
+
+
+def _prices_of(model: str) -> ChatTokenPrices | None:
+    """The price row that bills this model name, or ``None`` when we have none for it."""
+    priced = resolve_chat_price_model(model)
+    return None if priced is None else CHAT_TOKEN_PRICES.get(priced)
+
+
+_REASON_UNKNOWN_MODEL = "unknown_model"
+_REASON_NO_MODEL = "no_model"
+_REASON_NO_TOKEN_COUNTS = "no_token_counts"
+
+# One log line per (model, reason) per process: the counter carries the RATE, the log carries the
+# name once. Bounded, so a stream of distinct junk names cannot grow the set without limit.
+#
+# PAST the cap the log goes SILENT — it does not fall back to logging every occurrence. The cap
+# exists precisely because names may arrive unboundedly; a cap that stops REMEMBERING but keeps
+# EMITTING would turn its own worst case into a WARNING flood. One `chat_step_unpriced_log_capped`
+# event marks the boundary, and from there the counter is the only reporter — which is its job:
+# it carries the rate, per model and reason, without a line per occurrence.
+_LOGGED_UNPRICED: set[tuple[str, str]] = set()
+_LOGGED_UNPRICED_CAP = 256
+_LOGGED_UNPRICED_CAP_ANNOUNCED = False
+
+
+def _report_unpriced_step(model: str | None, reason: str) -> None:
+    """Make an unpriceable step audible (ADR-079 §1).
+
+    An unpriceable step nulls the cost of its whole turn, and the operator sees only an empty
+    «Себестоимость» cell — which looks exactly like "no traffic". Nothing else signals it: the
+    call succeeded and was paid for. Silence here is what let a model-name drift run unnoticed.
+    """
+    global _LOGGED_UNPRICED_CAP_ANNOUNCED
+    label = model if model else "none"
+    chat_unpriced_steps_total.labels(model=label, reason=reason).inc()
+    key = (label, reason)
+    if key in _LOGGED_UNPRICED:
+        return
+    if len(_LOGGED_UNPRICED) >= _LOGGED_UNPRICED_CAP:
+        if _LOGGED_UNPRICED_CAP_ANNOUNCED:
+            return
+        _LOGGED_UNPRICED_CAP_ANNOUNCED = True
+        log_event(
+            _logger,
+            logging.WARNING,
+            "chat_step_unpriced_log_capped",
+            distinct_names=_LOGGED_UNPRICED_CAP,
+        )
+        return
+    _LOGGED_UNPRICED.add(key)
+    log_event(
+        _logger,
+        logging.WARNING,
+        "chat_step_unpriced",
+        model=label,
+        reason=reason,
+    )
+
+
+def _unpriced_reason(usage: Mapping[str, Any]) -> str | None:
+    """Why this ONE step cannot be priced, or ``None`` when it can."""
+    model = usage.get("model")
+    if not isinstance(model, str) or not model:
+        return _REASON_NO_MODEL
+    if resolve_chat_price_model(model) is None:
+        return _REASON_UNKNOWN_MODEL
+    if not _has_token_counts(usage):
+        return _REASON_NO_TOKEN_COUNTS
+    return None
+
+
+def report_chat_step_pricing(usage: Mapping[str, Any]) -> None:
+    """Report one just-generated chat step to ``chat_unpriced_steps_total`` if it has no price.
+
+    Called from the WRITE path — once per LLM call, where the step is created — and nowhere else.
+    That is what makes the series count STEPS, as its HELP says. Costing itself runs on the CRM
+    read path over the whole stored history: reporting from there would count RENDERS, inflating
+    one step into several (a single card render prices the same step twice, once for the revenue
+    roll-up and once for the row) and — worse — would report NOTHING at all until an operator
+    happens to open CRM, which is exactly the blind spot this series exists to remove.
+
+    Silent for a priceable step: the series is a fault signal, not a traffic counter.
+    """
+    reason = _unpriced_reason(usage)
+    if reason is None:
+        return
+    model = usage.get("model")
+    _report_unpriced_step(model if isinstance(model, str) and model else None, reason)
 
 
 def chat_cost_usd_by_provider(usages: Sequence[Mapping[str, Any]]) -> dict[str, float] | None:
@@ -134,12 +266,19 @@ def chat_cost_usd_by_provider(usages: Sequence[Mapping[str, Any]]) -> dict[str, 
     Returns ``None`` when the turn holds no usage at all, or when ANY of its calls is
     unpriceable — an unknown model, or a step with no token counts to price. A partial sum
     would understate the cost while looking like a full one.
+
+    Pure and silent: this is a READ path, run once per rendered row and again for the revenue
+    roll-up, so anything reported here would count renders rather than steps. The gap is made
+    audible where the step is created — :func:`report_chat_step_pricing`.
     """
     per_provider: dict[str, float] = {}
     for usage in usages:
         model = usage.get("model")
-        prices = CHAT_TOKEN_PRICES.get(model) if isinstance(model, str) else None
-        if prices is None or not isinstance(model, str) or not _has_token_counts(usage):
+        if not isinstance(model, str) or not model:
+            return None
+        priced_model = resolve_chat_price_model(model)
+        prices = CHAT_TOKEN_PRICES.get(priced_model) if priced_model is not None else None
+        if prices is None or not _has_token_counts(usage):
             return None
         cache_read = _tokens(usage, "cacheReadTokens")
         input_tokens = _tokens(usage, "inputTokens")
@@ -162,6 +301,79 @@ def chat_cost_usd(usages: Sequence[Mapping[str, Any]]) -> float | None:
     """Cost of one chat TURN — the sum of :func:`chat_cost_usd_by_provider`."""
     per_provider = chat_cost_usd_by_provider(usages)
     return None if per_provider is None else sum(per_provider.values())
+
+
+@dataclass(frozen=True, slots=True)
+class ChatUsageTotals:
+    """Token counters of MANY calls of ONE model, already summed.
+
+    The period report the CRM reads (`GET /v1/admin/costs/daily`) cannot price call by call: a
+    92-day window holds hundreds of thousands of steps, and shipping their ``usage`` blobs to
+    Python would cost more than the answer is worth. It sums the counters per (day, model) in
+    SQL and prices the sums HERE — so the price table stays the one home of the numbers instead
+    of being re-expressed as a SQL CASE, where the two copies would drift apart silently.
+
+    Summing before pricing is exact, not an approximation: every term of the per-call formula is
+    linear in its own counter. The one term that is NOT — the OpenAI subtraction of the cached
+    prefix, which floors at zero — is therefore summed per call upstream and arrives ready as
+    ``input_excl_cache_read_tokens``. Subtracting the two totals here instead would differ from
+    the per-call answer for any call that reported more cached tokens than input tokens.
+
+    Only calls that actually carry counters may be summed into these fields; a call whose usage
+    has no counters at all has nothing to price (``_has_token_counts``), and folding its implicit
+    zeros in would report "this call was free" as a measurement.
+    """
+
+    input_tokens: int
+    input_excl_cache_read_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    web_search_requests: int
+
+
+def chat_cost_usd_of_totals(model: str, totals: ChatUsageTotals) -> float | None:
+    """USD of the calls behind ``totals``; ``None`` when this model has no price on file.
+
+    Same formula, same table and same cache convention as :func:`chat_cost_usd_by_provider` —
+    only the granularity differs (a period of one model instead of one turn).
+    """
+    prices = _prices_of(model)
+    if prices is None:
+        return None
+    billed_input = (
+        totals.input_excl_cache_read_tokens if prices.cache_read_in_input else totals.input_tokens
+    )
+    cost = (
+        billed_input * prices.input_usd
+        + totals.output_tokens * prices.output_usd
+        + totals.cache_read_tokens * prices.cache_read_usd
+        + totals.cache_write_tokens * prices.cache_write_usd
+    ) / _PER_MILLION
+    return cost + totals.web_search_requests * prices.web_search_usd_per_request
+
+
+def chat_billed_tokens(model: str, totals: ChatUsageTotals) -> int | None:
+    """How many tokens the provider billed for those calls — the cached prefix counted ONCE.
+
+    The two providers report the prefix differently (``cache_read_in_input``), so a single
+    ``input + output + cache`` sum would count OpenAI's cached tokens twice — the same defect the
+    price columns exist to prevent, in the counter the CRM shows as «Токенов».
+
+    ``None`` for a model with no price row: without its row we do not know WHICH convention its
+    usage follows, and guessing would publish a count we cannot stand behind.
+    """
+    prices = _prices_of(model)
+    if prices is None:
+        return None
+    if prices.cache_read_in_input:
+        return totals.input_tokens + totals.output_tokens
+    return (
+        totals.input_tokens
+        + totals.cache_read_tokens
+        + totals.cache_write_tokens
+        + totals.output_tokens
+    )
 
 
 # --- media --------------------------------------------------------------------------------

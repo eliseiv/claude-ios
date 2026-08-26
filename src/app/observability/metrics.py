@@ -86,6 +86,29 @@ llm_upstream_errors_total = Counter(
     "Count of LLM upstream errors by provider, status_code and error_type.",
     ["provider", "status_code", "error_type"],
 )
+# Unpriceable chat step (ADR-079 §1, rule `None ≠ 0`): producer — `report_chat_step_pricing`
+# (`app.pricing.provider_prices`), called from the chat WRITE path once per LLM call, next to
+# `token_usage_total`; consumer — GET /metrics.
+#
+# The write path is the point of the placement, not an implementation detail: it is where a STEP
+# happens, which is what the series counts. The CRM read path prices the same stored step on every
+# render (and twice per card — row plus revenue roll-up), and reports nothing at all while no
+# operator has CRM open — a fault signal that only fires when someone is already looking is not one.
+#
+# Required rather than nice-to-have: an unpriceable step makes the WHOLE turn's cost `None`, and
+# the operator sees that as an empty «Себестоимость» cell — indistinguishable from "this instance
+# has no chat traffic". Nothing else moves: the call succeeded, no credit was refused, no upstream
+# error was raised. Without this series a model drifting out of the price table (a provider
+# renaming its snapshot, an allowlist naming a model the table never heard of) is silent.
+#
+# `model` is the name as stored in `chat_steps.usage.model` — a provider model id, the same
+# bounded set `token_usage_total` already labels by; "none" when the step carries no model name.
+# `reason` ∈ {unknown_model | no_model | no_token_counts}.
+chat_unpriced_steps_total = Counter(
+    "chat_unpriced_steps_total",
+    "Count of chat usage steps that have no purchase price, by model and reason (ADR-079).",
+    ["model", "reason"],
+)
 
 
 def render_metrics() -> tuple[bytes, str]:

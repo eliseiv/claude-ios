@@ -191,13 +191,17 @@ class ChatSession(Base):
         ForeignKey("workspace_projects.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Turn generation modes are stored on chat_steps, while this session-level provider state keeps
-    # opaque continuation handles that make a later turn cheaper/simpler to send to the provider.
-    # OpenAI stores the latest Responses API response id here; Anthropic Messages stays stateless.
+    # Turn generation modes are stored on chat_steps, while this session-level provider state holds
+    # opaque provider continuation handles. OpenAI writes the latest Responses API response id here;
+    # Anthropic Messages stays stateless. No turn READS the handle today: provider-side continuation
+    # is switched off (_CONTINUATION_ENABLED in app.chat.openai_responses_client, TD-032) and every
+    # v2 turn replays the full local history, so this column is kept current for the day that switch
+    # is flipped — it does not make a later turn cheaper.
     provider_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # Nullable for existing rows. NULL and "legacy" both mean the original /v1/chat/run backend;
-    # "v2" means the session is owned by /v1/chat/v2/* and can use provider-side continuation
-    # state such as OpenAI Responses API previous_response_id.
+    # "v2" means the session is owned by /v1/chat/v2/*, the only backend that would use
+    # provider-side continuation state (OpenAI Responses API previous_response_id) if TD-032 ever
+    # turns it back on; v2 replays local history like legacy while it stays off.
     generation_backend: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_pinned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa_text("false")
@@ -265,6 +269,10 @@ class ChatStep(Base):
         # ADR-021: reconstruction / next-step lookup order by seq (NOT created_at).
         Index("ix_steps_session_seq", "session_id", "seq"),
         Index("ix_steps_message_step", "message_step_id"),
+        # Migration 0029: the CRM period cost breakdown (GET /v1/admin/costs/daily) selects steps
+        # by calendar day alone; neither index above leads with `created_at`, so without this one
+        # a 30-day window scans the whole chat history — the fastest-growing table of the product.
+        Index("ix_steps_created_at", "created_at"),
     )
 
 

@@ -623,9 +623,9 @@ async def chat_run(
         "сессии. `temporary: true` при создании сессии (без `sessionId`) делает чат временным: "
         "он не попадает в `GET /v1/chats`, но доступен по `sessionId` для multi-turn; клиент "
         "удаляет через `DELETE /v1/chats/{id}`. На resume поле игнорируется. OpenAI-ветка "
-        "использует Responses API и `previous_response_id` там, где он сохранён; Anthropic-ветка "
-        "использует Messages API с hosted web search или extended thinking для соответствующих "
-        "режимов. В режиме `study_learn` ответ несёт пул вопросов в поле `quiz`, а "
+        "использует Responses API с hosted web search или reasoning effort для соответствующих "
+        "режимов; Anthropic-ветка использует Messages API с hosted web search или extended "
+        "thinking. В режиме `study_learn` ответ несёт пул вопросов в поле `quiz`, а "
         "`assistantMessage` = `null`. Стоимость в credits зависит от режима. "
         "Tool-loop продолжается через `/v1/chat/v2/tool-result`."
     ),

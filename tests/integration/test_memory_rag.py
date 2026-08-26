@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
+from app.db import dispose_engine
 from app.memory.embedding import get_embedding_client
 from app.memory.indexer import MemoryIndexer
 from app.preferences.service import PreferencesService
@@ -16,9 +19,34 @@ from tests.conftest import auth_headers, seed_user
 
 
 @pytest.fixture(autouse=True)
-def _enable_memory_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+async def _enable_memory_for_tests(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    """Память включена ТОЛЬКО на время этих тестов — и не оставляет за собой ничего живого.
+
+    Оба следа приходится убирать руками, иначе полный прогон ВИСНЕТ на следующем тесте:
+
+    * **Флаг.** `memory_enabled` живёт в `lru_cache` `get_settings`: `monkeypatch` вернёт
+      переменную окружения, но закэшированные `Settings` не пересоберёт.
+    * **Фоновые задачи.** Ход чата планирует индексацию через `asyncio.create_task`
+      (`schedule_index_turn`) на СОБСТВЕННОМ `get_sessionmaker()`, а не на сессии теста. Не
+      доработав до закрытия петли, задача оставляет соединение брошенным с открытой
+      транзакцией — и `TRUNCATE` фикстуры следующего теста встаёт в блокировку НАВСЕГДА
+      (`chat_steps` держит даже `ACCESS SHARE` от `SELECT`), то есть полный прогон висит без
+      единого падения. Поэтому задачи дожидаются, а глобальный движок утилизируется:
+      следующий тест получает чистый пул на своей петле.
+    """
     monkeypatch.setenv("MEMORY_ENABLED", "true")
     get_settings.cache_clear()
+    get_embedding_client.cache_clear()
+
+    yield
+
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    if pending:
+        await asyncio.wait(pending, timeout=10)
+    await dispose_engine()
+    monkeypatch.undo()
+    get_settings.cache_clear()
+    get_embedding_client.cache_clear()
 
 
 @pytest.mark.asyncio
