@@ -120,7 +120,7 @@ cat > /etc/systemd/system/fleet-role-guard.timer <<'EOF'
 Description=Периодическая сверка ролей с маршрутизатором
 
 [Timer]
-OnBootSec=45s
+OnBootSec=15s
 OnUnitActiveSec=5min
 AccuracySec=15s
 
