@@ -1,0 +1,74 @@
+ДОМЕНЫ ИНСТАНСОВ
+============================================================
+
+Всего инстансов в реестре: 27
+Домен подтверждён по DNS:  26
+Требует уточнения:         1
+
+Все A-записи ниже должны быть переключены на маршрутизатор 2.29.30.63
+
+------------------------------------------------------------
+ДОМЕН                   ИНСТАНС       ОСНОВНОЙ СЕРВЕР
+------------------------------------------------------------
+appbackend.shop         appbackend    B
+artolixo.shop           artolixo      A
+benovalo.shop           benovalo      B
+broadnova.shop          claude-ios    A
+codecarts.shop          codecarts     B
+corvionet.shop          corvionet     A
+devsupplyr.shop         devsupplyr    B
+elvarixa.shop           elvarixa      A
+livonexa.shop           livonexa      B
+lumirexa.shop           lumirexa      B
+lunexoro.shop           lunexoro      A
+marqelio.shop           marqelio      B
+modavira.shop           modavira      A
+novirell.shop           novirell      B
+orvianix.shop           orvianix      A
+qoravena.shop           qoravena      B
+qorimelo.shop           qorimelo      B
+ravelumi.shop           ravelumi      A
+ravionet.shop           ravionet      A
+selquro.shop            selquro       B
+stackstores.shop        stackstores   B
+taluneri.shop           taluneri      A
+velunixa.shop           velunixa      A
+vireluma.shop           vireluma      A
+webmoria.shop           webmoria      A
+zenquelo.shop           zenquelo      B
+------------------------------------------------------------
+
+ТРЕБУЮТ УТОЧНЕНИЯ:
+  avelyra: домен avelyra.shop указывает на чужой хостинг (23.227.38.72).
+     Настоящее значение — в /opt/avelyra/.env упавшего сервера, поле SERVICE_DOMAIN.
+
+Только домены. Список составлен из реестра INSTANCES обоих workflow
+и проверен разрешением имён: 26 из 27 указывали на 87.239.135.154.
+
+ПРОСТОЙ СПИСОК:
+appbackend.shop
+artolixo.shop
+benovalo.shop
+broadnova.shop
+codecarts.shop
+corvionet.shop
+devsupplyr.shop
+elvarixa.shop
+livonexa.shop
+lumirexa.shop
+lunexoro.shop
+marqelio.shop
+modavira.shop
+novirell.shop
+orvianix.shop
+qoravena.shop
+qorimelo.shop
+ravelumi.shop
+ravionet.shop
+selquro.shop
+stackstores.shop
+taluneri.shop
+velunixa.shop
+vireluma.shop
+webmoria.shop
+zenquelo.shop

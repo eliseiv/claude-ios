@@ -213,6 +213,11 @@ jobs:
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
+          # ДВА прикладных сервера (docs/MIGRATION-3-SERVERS.md §Топология). appleboy/ssh-action
+          # принимает список хостов через запятую и выполняет скрипт на КАЖДОМ по очереди — так
+          # обновление доезжает и до основного экземпляра инстанса, и до резервного.
+          # КАКОЙ из двух основной — решает файл /opt/<dir>/.role НА САМОМ СЕРВЕРЕ, а не этот
+          # workflow: при переключении роли меняется маркер на машине, а CI остаётся прежним.
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -342,7 +347,22 @@ jobs:
               # ravionet (2026-08-24) уехал коммит, чей CI УПАЛ: гейт needs: не пускает свою джобу
               # деплоя, но уже идущий цикл он не останавливает. Detached HEAD — то же состояние,
               # что и в rollback-процедуре, возврат к ветке: git checkout main && git pull.
-              echo "[deploy:$proj] checkout $DEPLOY_SHA"
+              # Инстанс сюда ещё не переехал: каталог есть, наполнения нет. Во время переезда это
+              # штатное состояние, а не отказ — иначе весь прогон краснеет из-за инстансов,
+              # которых на этом сервере пока просто нет.
+              if [ ! -f .env ]; then
+                echo "::notice title=skip ($proj)::/opt/$dir/.env отсутствует — инстанс здесь не развёрнут"
+                continue
+              fi
+              # Роль ЭТОГО экземпляра на ЭТОМ сервере. У резервного база работает на чтение:
+              # миграцию там выполнить невозможно, и не нужно — схема приезжает потоком
+              # репликации вместе с данными. Запускать его api тоже нельзя: он писал бы в реплику.
+              ROLE="$(cat .role 2>/dev/null || echo primary)"
+              # Оверлей публикует порт инстанса на адрес туннеля — он нужен только там, где
+              # маршрутизатор вынесен на отдельную машину. Признак — наличие API_HOST_PORT в .env.
+              CF="-f docker-compose.prod.yml"
+              if grep -q "^API_HOST_PORT=" .env; then CF="$CF -f docker-compose.fleet.yml"; fi
+              echo "[deploy:$proj] роль=$ROLE checkout $DEPLOY_SHA"
               if ! git fetch --quiet origin "$DEPLOY_SHA" && ! git fetch --quiet origin; then
                 echo "::error title=git fetch failed ($proj)::cannot fetch $DEPLOY_SHA in /opt/$dir"; FAILED="$FAILED $proj"; continue
               fi
@@ -369,8 +389,12 @@ jobs:
               # --build, а флага --no-build у неё нет вовсе (проверено: `docker compose run --help`
               # на сервере). Попытка передать его роняла миграцию на каждом инстансе — прогон
               # 32857631288, все 27 в FAILED за доли секунды.
-              if ! docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env run --rm migrate; then
-                echo "::error title=migrate failed ($proj)::alembic upgrade head returned non-zero"; FAILED="$FAILED $proj"; continue
+              if [ "$ROLE" = "primary" ]; then
+                if ! docker compose -p "$proj" $CF --env-file .env run --rm migrate; then
+                  echo "::error title=migrate failed ($proj)::alembic upgrade head returned non-zero"; FAILED="$FAILED $proj"; continue
+                fi
+              else
+                echo "[deploy:$proj] резерв — миграция пропущена (реплика доступна только на чтение)"
               fi
               # (3) Start only (no build here — already built in step 1). The one-shot `migrate`
               #     service runs again as an api dependency and EXITS; `up`'s rc can be non-zero
@@ -378,10 +402,21 @@ jobs:
               #     trust it — the readiness gate (4) is the source of truth.
               echo "[deploy:$proj] up -d --no-build (rc recorded, not trusted; readiness gate decides)"
               up_rc=0
-              docker compose -p "$proj" -f docker-compose.prod.yml --env-file .env up -d --no-build || up_rc=$?
+              if [ "$ROLE" = "primary" ]; then
+                docker compose -p "$proj" $CF --env-file .env up -d --no-build || up_rc=$?
+              else
+                # На резерве поднимаем только хранилища: postgres работает репликой и принимает
+                # поток изменений, api остаётся выключенным до повышения роли.
+                docker compose -p "$proj" $CF --env-file .env up -d --no-build postgres redis || up_rc=$?
+                docker compose -p "$proj" $CF --env-file .env stop api >/dev/null 2>&1 || true
+              fi
               echo "[deploy:$proj] up rc=$up_rc (informational)"
               # (4) Deterministic readiness gate: api MUST become healthy (compose healthcheck =
               #     GET /ready: db+redis). If it does not within ~60s, this is a REAL failure.
+              if [ "$ROLE" != "primary" ]; then
+                echo "[deploy:$proj] резерв — гейт готовности и smoke пропущены (api намеренно выключен)"
+                continue
+              fi
               echo "[deploy:$proj] readiness gate: api container health"
               ready=0
               for i in $(seq 1 30); do

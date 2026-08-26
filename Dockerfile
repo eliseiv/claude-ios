@@ -76,9 +76,13 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
 
 # Prod process manager: Gunicorn + UvicornWorker (02-tech-stack.md).
 # Graceful shutdown: gunicorn handles SIGTERM, drains workers within --graceful-timeout.
+# Число воркеров НЕ зашито: gunicorn читает WEB_CONCURRENCY, когда -w не передан.
+# Значение приходит из compose (GUNICORN_WORKERS, дефолт 2). Причина: инстансов на машине
+# много, и "-w 4" на каждом означало 27 x 4 = 108 рабочих процессов на 6 ядрах —
+# двадцатикратная переподписка. При старте каждый грузит приложение целиком, что и даёт
+# трёхзначный load после перезагрузки хоста (26 авг: 33.96 за 15 минут при 6 ядрах).
 CMD ["gunicorn", "app.main:app", \
      "-k", "uvicorn.workers.UvicornWorker", \
-     "-w", "4", \
      "-b", "0.0.0.0:8000", \
      "--graceful-timeout", "30", \
      "--timeout", "90", \

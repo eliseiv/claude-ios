@@ -133,6 +133,11 @@ services:
     # .env.prod.example.
     environment:
       APPSTORE_ROOT_CERT_DIR: /etc/appstore-certs
+      # Воркеры gunicorn на ЭТОТ инстанс. Дефолт 2, а не прежние зашитые 4: инстансов на
+      # хосте много, и 27 x 4 = 108 процессов на 6 ядрах — двадцатикратная переподписка,
+      # каждый процесс грузит приложение целиком при старте. Оператор поднимает значение
+      # точечно тому инстансу, которому реально нужна пропускная способность.
+      WEB_CONCURRENCY: ${GUNICORN_WORKERS:-2}
     # Embedded auth-issuer (ADR-018 §7) signs/verifies RS256 JWTs and reads its key PEMs
     # from FILE PATHS (prod-recommended over `\n`-escaped env strings):
     #   JWT_PRIVATE_KEY_PATH=/app/.secrets/jwt_private.pem  (SECRET — never in the image)

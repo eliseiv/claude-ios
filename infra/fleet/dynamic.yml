@@ -1,0 +1,654 @@
+# СГЕНЕРИРОВАНО gen-router-config.py — не править руками.
+http:
+  routers:
+    claude-ios:
+      rule: "Host(`broadnova.shop`)"
+      entryPoints: [web]
+      service: claude-ios
+    orvianix:
+      rule: "Host(`orvianix.shop`)"
+      entryPoints: [web]
+      service: orvianix
+    elvarixa:
+      rule: "Host(`elvarixa.shop`)"
+      entryPoints: [web]
+      service: elvarixa
+    corvionet:
+      rule: "Host(`corvionet.shop`)"
+      entryPoints: [web]
+      service: corvionet
+    modavira:
+      rule: "Host(`modavira.shop`)"
+      entryPoints: [web]
+      service: modavira
+    artolixo:
+      rule: "Host(`artolixo.shop`)"
+      entryPoints: [web]
+      service: artolixo
+    lunexoro:
+      rule: "Host(`lunexoro.shop`)"
+      entryPoints: [web]
+      service: lunexoro
+    ravionet:
+      rule: "Host(`ravionet.shop`)"
+      entryPoints: [web]
+      service: ravionet
+    vireluma:
+      rule: "Host(`vireluma.shop`)"
+      entryPoints: [web]
+      service: vireluma
+    taluneri:
+      rule: "Host(`taluneri.shop`)"
+      entryPoints: [web]
+      service: taluneri
+    webmoria:
+      rule: "Host(`webmoria.shop`)"
+      entryPoints: [web]
+      service: webmoria
+    velunixa:
+      rule: "Host(`velunixa.shop`)"
+      entryPoints: [web]
+      service: velunixa
+    ravelumi:
+      rule: "Host(`ravelumi.shop`)"
+      entryPoints: [web]
+      service: ravelumi
+    qorimelo:
+      rule: "Host(`qorimelo.shop`)"
+      entryPoints: [web]
+      service: qorimelo
+    zenquelo:
+      rule: "Host(`zenquelo.shop`)"
+      entryPoints: [web]
+      service: zenquelo
+    novirell:
+      rule: "Host(`novirell.shop`)"
+      entryPoints: [web]
+      service: novirell
+    selquro:
+      rule: "Host(`selquro.shop`)"
+      entryPoints: [web]
+      service: selquro
+    marqelio:
+      rule: "Host(`marqelio.shop`)"
+      entryPoints: [web]
+      service: marqelio
+    livonexa:
+      rule: "Host(`livonexa.shop`)"
+      entryPoints: [web]
+      service: livonexa
+    lumirexa:
+      rule: "Host(`lumirexa.shop`)"
+      entryPoints: [web]
+      service: lumirexa
+    qoravena:
+      rule: "Host(`qoravena.shop`)"
+      entryPoints: [web]
+      service: qoravena
+    benovalo:
+      rule: "Host(`benovalo.shop`)"
+      entryPoints: [web]
+      service: benovalo
+    appbackend:
+      rule: "Host(`appbackend.shop`)"
+      entryPoints: [web]
+      service: appbackend
+    stackstores:
+      rule: "Host(`stackstores.shop`)"
+      entryPoints: [web]
+      service: stackstores
+    codecarts:
+      rule: "Host(`codecarts.shop`)"
+      entryPoints: [web]
+      service: codecarts
+    devsupplyr:
+      rule: "Host(`devsupplyr.shop`)"
+      entryPoints: [web]
+      service: devsupplyr
+  services:
+    claude-ios:
+      failover:
+        service: claude-ios-primary
+        fallback: claude-ios-standby
+        healthCheck: {}
+    claude-ios-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18001"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    claude-ios-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18001"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    orvianix:
+      failover:
+        service: orvianix-primary
+        fallback: orvianix-standby
+        healthCheck: {}
+    orvianix-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18003"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    orvianix-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18003"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    elvarixa:
+      failover:
+        service: elvarixa-primary
+        fallback: elvarixa-standby
+        healthCheck: {}
+    elvarixa-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18004"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    elvarixa-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18004"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    corvionet:
+      failover:
+        service: corvionet-primary
+        fallback: corvionet-standby
+        healthCheck: {}
+    corvionet-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18005"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    corvionet-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18005"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    modavira:
+      failover:
+        service: modavira-primary
+        fallback: modavira-standby
+        healthCheck: {}
+    modavira-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18006"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    modavira-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18006"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    artolixo:
+      failover:
+        service: artolixo-primary
+        fallback: artolixo-standby
+        healthCheck: {}
+    artolixo-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18007"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    artolixo-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18007"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    lunexoro:
+      failover:
+        service: lunexoro-primary
+        fallback: lunexoro-standby
+        healthCheck: {}
+    lunexoro-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18008"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    lunexoro-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18008"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    ravionet:
+      failover:
+        service: ravionet-primary
+        fallback: ravionet-standby
+        healthCheck: {}
+    ravionet-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18009"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    ravionet-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18009"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    vireluma:
+      failover:
+        service: vireluma-primary
+        fallback: vireluma-standby
+        healthCheck: {}
+    vireluma-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18010"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    vireluma-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18010"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    taluneri:
+      failover:
+        service: taluneri-primary
+        fallback: taluneri-standby
+        healthCheck: {}
+    taluneri-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18011"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    taluneri-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18011"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    webmoria:
+      failover:
+        service: webmoria-primary
+        fallback: webmoria-standby
+        healthCheck: {}
+    webmoria-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18012"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    webmoria-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18012"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    velunixa:
+      failover:
+        service: velunixa-primary
+        fallback: velunixa-standby
+        healthCheck: {}
+    velunixa-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18013"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    velunixa-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18013"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    ravelumi:
+      failover:
+        service: ravelumi-primary
+        fallback: ravelumi-standby
+        healthCheck: {}
+    ravelumi-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18014"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    ravelumi-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18014"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    qorimelo:
+      failover:
+        service: qorimelo-primary
+        fallback: qorimelo-standby
+        healthCheck: {}
+    qorimelo-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18015"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    qorimelo-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18015"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    zenquelo:
+      failover:
+        service: zenquelo-primary
+        fallback: zenquelo-standby
+        healthCheck: {}
+    zenquelo-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18016"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    zenquelo-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18016"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    novirell:
+      failover:
+        service: novirell-primary
+        fallback: novirell-standby
+        healthCheck: {}
+    novirell-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18017"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    novirell-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18017"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    selquro:
+      failover:
+        service: selquro-primary
+        fallback: selquro-standby
+        healthCheck: {}
+    selquro-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18018"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    selquro-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18018"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    marqelio:
+      failover:
+        service: marqelio-primary
+        fallback: marqelio-standby
+        healthCheck: {}
+    marqelio-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18019"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    marqelio-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18019"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    livonexa:
+      failover:
+        service: livonexa-primary
+        fallback: livonexa-standby
+        healthCheck: {}
+    livonexa-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18020"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    livonexa-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18020"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    lumirexa:
+      failover:
+        service: lumirexa-primary
+        fallback: lumirexa-standby
+        healthCheck: {}
+    lumirexa-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18021"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    lumirexa-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18021"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    qoravena:
+      failover:
+        service: qoravena-primary
+        fallback: qoravena-standby
+        healthCheck: {}
+    qoravena-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18022"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    qoravena-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18022"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    benovalo:
+      failover:
+        service: benovalo-primary
+        fallback: benovalo-standby
+        healthCheck: {}
+    benovalo-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18023"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    benovalo-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18023"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    appbackend:
+      failover:
+        service: appbackend-primary
+        fallback: appbackend-standby
+        healthCheck: {}
+    appbackend-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18024"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    appbackend-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18024"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    stackstores:
+      failover:
+        service: stackstores-primary
+        fallback: stackstores-standby
+        healthCheck: {}
+    stackstores-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18025"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    stackstores-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18025"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    codecarts:
+      failover:
+        service: codecarts-primary
+        fallback: codecarts-standby
+        healthCheck: {}
+    codecarts-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18026"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    codecarts-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18026"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    devsupplyr:
+      failover:
+        service: devsupplyr-primary
+        fallback: devsupplyr-standby
+        healthCheck: {}
+    devsupplyr-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18027"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    devsupplyr-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18027"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
