@@ -1,0 +1,41 @@
+# Статическая конфигурация маршрутизатора (docs/MIGRATION-3-SERVERS.md).
+# Динамическая часть — роутеры и сервисы инстансов — генерируется скриптом
+# infra/fleet/gen-router-config.py из instances.tsv и лежит в ./dynamic. Руками не правится:
+# тот же файл разворачивается на запасных входах A и B, и расхождение обесценивает их.
+entryPoints:
+  web:
+    address: ":80"
+    # ВНИМАНИЕ: перенаправление на HTTPS включается ВМЕСТЕ с сертификатами, после
+    # переключения A-записей (см. /opt/router/enable-tls.sh). До этого момента маршрутизатор
+    # обслуживает обычный HTTP, иначе проверка ACME уходит на старый адрес и проваливается.
+  websecure:
+    address: ":443"
+    transport:
+      respondingTimeouts:
+        # Ход чата держит соединение долго: ответ модели идёт потоком.
+        # Таймаут короче рвал бы живые ответы на середине.
+        readTimeout: 300s
+        writeTimeout: 300s
+        idleTimeout: 180s
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+certificatesResolvers:
+  le:
+    acme:
+      email: admin@webmoria.shop
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web
+
+log:
+  level: INFO
+accessLog:
+  filters:
+    statusCodes: ["400-599"]
+
+ping:
+  entryPoint: web
