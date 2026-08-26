@@ -21,6 +21,10 @@ from tests.conftest import auth_headers, make_jwt, seed_user
 _TOKEN_URL = "/v1/notifications/device-token"
 _FAL_KEY = "fal-test-key-push"  # noqa: S105
 _QUEUE_BASE = "https://queue.fal.run"
+# ADR-085 §5: the media-asset token is HMAC-SHA256 over PREVIEW_URL_SECRET. Any non-empty value
+# works — what matters is that it is non-empty, which is what selects §2 (signed URL) over §6
+# (stored fal URL fallback).
+_PREVIEW_SECRET = "push-preview-secret-0123456789abcdef0123456789ab"  # noqa: S105
 _REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
@@ -179,6 +183,13 @@ async def test_media_completed_sends_push_once(
     fal = _Fal()
     monkeypatch.setenv("FAL_API_KEY", _FAL_KEY)
     monkeypatch.setenv("FAL_QUEUE_BASE", _QUEUE_BASE)
+    # ADR-085 §2 (rewrite to a signed URL) is the branch asserted below, and it is reachable ONLY
+    # with a secret: §6 makes an EMPTY `PREVIEW_URL_SECRET` fall back to the stored fal URL with a
+    # `media_asset_url_secret_missing` WARNING. Without pinning it the test asserts whatever the
+    # environment happens to configure — green on a developer machine whose .env carries a secret,
+    # red in CI, which has no .env (the exact local↔CI split this test hit). Same pattern as
+    # tests/integration/test_media_asset_proxy_adr085.py.
+    monkeypatch.setenv("PREVIEW_URL_SECRET", _PREVIEW_SECRET)
     get_settings.cache_clear()
     monkeypatch.setattr(fal_client_mod, "httpx", _make_fake_httpx(fal))
 

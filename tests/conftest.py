@@ -68,6 +68,16 @@ os.environ["APNS_KEY_ID"] = ""
 os.environ["APNS_TEAM_ID"] = ""
 os.environ["APNS_AUTH_KEY"] = ""
 os.environ["APNS_TOPIC"] = ""
+# ADR-085 §2/§6: these two decide WHICH branch every asset URL takes — signed URL on
+# SERVICE_DOMAIN when the secret is set, bare stored fal URL (+ a WARNING) when it is not, and a
+# relative path in between when the domain is empty. A developer .env that carries either value
+# therefore makes the whole suite exercise a DIFFERENT branch than CI, which has no .env at all:
+# test_notifications_adr067::test_media_completed_sends_push_once was green locally on the signed
+# branch and red in CI on the fallback one. Pin the CI posture (both empty) so local == CI; every
+# test that needs the signed branch already sets these explicitly via monkeypatch.setenv (see
+# test_media_asset_proxy_adr085.py) and keeps working.
+os.environ["PREVIEW_URL_SECRET"] = ""
+os.environ["SERVICE_DOMAIN"] = ""
 
 # JWT: tokens are signed below with an ephemeral RSA key (_PRIVATE_PEM); the service must
 # verify with the matching JWT_PUBLIC_KEY and the iss/aud baked into make_jwt(). Force a
@@ -147,13 +157,53 @@ def pg_url() -> Iterator[str]:
 
 @pytest.fixture(scope="session")
 def _migrated(pg_url: str) -> Iterator[str]:
-    """Run alembic migrations once against the container."""
+    """Run alembic migrations once against the container.
+
+    `command.upgrade` imports `migrations/env.py`, which calls
+    `logging.config.fileConfig("alembic.ini")` (migrations/env.py:18). `fileConfig` defaults to
+    `disable_existing_loggers=True`: every logger that already exists and is NOT named in
+    alembic.ini (`root` / `sqlalchemy.engine` / `alembic`) gets `disabled = True` — permanently,
+    for the whole process. Pytest imports all test modules (and through them all of `app.*`) at
+    COLLECTION time, so by the time this fixture runs, every `logging.getLogger("app...")` in the
+    codebase already exists and is wiped out here.
+
+    That is invisible when a directory is run on its own (`pytest tests/unit` never reaches this
+    fixture), and fatal in CI, which runs unit+integration+e2e in ONE process with `tests/e2e` and
+    `tests/integration` collected BEFORE `tests/unit`: the migration disables `app.*` loggers, and
+    every later `caplog` assertion silently sees an empty record list. It is the same class of
+    order-dependent leak the module docstrings of test_anthropic_upstream_error_logging.py and
+    test_chat_unpriced_metric_adr079.py describe (they each work around it per-logger); this
+    restores the flags at the source instead, so the leak cannot reach any test.
+
+    `fileConfig` also replaces the root handlers, which drops pytest's own capture handler; that
+    one is re-installed by the logging plugin on the next test phase, but it is restored here too
+    so the test that happens to trigger the migration keeps its own capture intact.
+    """
+    import logging
+
     from alembic import command
     from alembic.config import Config
 
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    saved_disabled = {
+        name: obj.disabled
+        for name, obj in logging.Logger.manager.loggerDict.items()
+        if isinstance(obj, logging.Logger)
+    }
+
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", pg_url)
-    command.upgrade(cfg, "head")
+    try:
+        command.upgrade(cfg, "head")
+    finally:
+        for name, was_disabled in saved_disabled.items():
+            obj = logging.Logger.manager.loggerDict.get(name)
+            if isinstance(obj, logging.Logger):
+                obj.disabled = was_disabled
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
     yield pg_url
 
 

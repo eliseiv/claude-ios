@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
@@ -32,6 +33,28 @@ _LOGGER_NAME = "app.chat.attachment_refs"
 
 def _image(filename: str = "selfie.png") -> ImageAttachmentRef:
     return ImageAttachmentRef(media_type="image/png", filename=filename, data="AAAA")
+
+
+@pytest.fixture(autouse=True)
+def _logger_enabled() -> Iterator[None]:
+    """Force-enable the module logger — `caplog` here must not depend on test order.
+
+    Anything in the session that reconfigures logging through `logging.config.fileConfig` /
+    `dictConfig` leaves `disabled = True` on every logger it does not name. The suite's alembic
+    migration did exactly that (`migrations/env.py` -> `fileConfig`), which is why these tests were
+    green when `tests/unit` ran on its own and red in the single-process CI run, where the
+    integration/e2e migration runs first. A disabled logger drops records silently, so the
+    assertions below failed on an empty `caplog.records` instead of on a real regression. The
+    leak itself is fixed at the source (tests/conftest.py::_migrated); this keeps the file
+    hermetic against any other logging reconfiguration too.
+    """
+    logger = logging.getLogger(_LOGGER_NAME)
+    prev_disabled = logger.disabled
+    logger.disabled = False
+    try:
+        yield
+    finally:
+        logger.disabled = prev_disabled
 
 
 @pytest.mark.parametrize(
