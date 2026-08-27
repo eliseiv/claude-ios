@@ -191,7 +191,9 @@ class CloudPaymentsWebhookService:
         await self._session.commit()
 
         # --- Stage 4: verification (outgoing GET; transient failure -> 500 retriable) ---
-        payments_data = await self._verify.list_payments(device_id=device_id)
+        # Спрашиваем по НАШЕМУ userId (под ним создаётся оплата) и по присланному X, если он
+        # другой — см. _list_payments_both, инцидент 2026-08-27.
+        payments_data = await self._list_payments_both(user_id=resolved_user_id, other=device_id)
         statuses = verify.payment_statuses(payments_data)
 
         # --- Stage 5: reconciliation (pure) ---
@@ -241,6 +243,40 @@ class CloudPaymentsWebhookService:
             payment_statuses=statuses,
         )
 
+    async def _list_payments_both(
+        self, *, user_id: uuid.UUID, other: uuid.UUID | None
+    ) -> list[dict[str, object]]:
+        """Спросить провайдера об оплатах по ОБОИМ идентификаторам и объединить ответы.
+
+        **Инцидент 2026-08-27.** Создание оплаты отправляет провайдеру наш ВНУТРЕННИЙ ``userId``
+        (``checkout.create_payment_link``), а проверка спрашивала по идентификатору УСТРОЙСТВА.
+        Это разные значения, поэтому ни один платёж, созданный нашей же ручкой, не находился:
+        за двенадцать часов десять созданных оплат и ноль начислений. Проверено на живом
+        платеже — по внутреннему идентификатору провайдер отдаёт ``count: 1`` (1990 ₽,
+        ``succeeded``), по устройству ``count: 0``.
+
+        Спрашиваем оба, а не только правильный: в прежнем сервисе оба конца сходились на
+        ``apphud_id`` (= deviceId), и платежи той поры лежат у провайдера под ним. Запрос по
+        одному ключу потерял бы одну из двух эпох. Дубликаты безвредны — начисление идемпотентно
+        по идентификатору платежа.
+        """
+        merged = list(await self._verify.list_payments(device_id=user_id))
+        if other is not None and other != user_id:
+            merged.extend(await self._verify.list_payments(device_id=other))
+        # Один и тот же платёж может вернуться по обоим идентификаторам. Начисление от этого не
+        # пострадает (идемпотентно по payment_id), но в сводку и в журнал он попал бы дважды и
+        # выглядел бы как два платежа. Отсеиваем, сохраняя порядок.
+        seen: set[object] = set()
+        unique: list[dict[str, object]] = []
+        for item in merged:
+            key = item.get("payment_id") if isinstance(item, dict) else None
+            if key is not None and key in seen:
+                continue
+            if key is not None:
+                seen.add(key)
+            unique.append(item)
+        return unique
+
     async def reconcile_device(self, *, device_id: uuid.UUID, user_id: uuid.UUID) -> int:
         """Дозачислить оплаты, пришедшие ДО того, как пользователь появился в базе.
 
@@ -259,7 +295,7 @@ class CloudPaymentsWebhookService:
         поэтому повторный вызов ничего не задваивает. Окно свежести то же, что у колбэка:
         оплата старше него не начисляется, чтобы первый вызов не выдал разом всю прошлую историю.
         """
-        payments_data = await self._verify.list_payments(device_id=device_id)
+        payments_data = await self._list_payments_both(user_id=user_id, other=device_id)
         creditable = verify.select_creditable_payments(
             payments_data,
             paid_statuses=self._settings.cloudpayments_paid_statuses(),

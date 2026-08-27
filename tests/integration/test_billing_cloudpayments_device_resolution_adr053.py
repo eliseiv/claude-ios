@@ -184,7 +184,9 @@ async def test_device_resolve_subscription_credits_the_linked_user(
     )
     outcome = await _service(db_session, verify).handle(_body(account_id=str(_D)))
     assert outcome.result == "applied"
-    assert verify.calls == [_D]  # verified the deviceId, not the resolved userId
+    # Инцидент 2026-08-27: спрашиваем по обоим идентификаторам — сначала userId,
+    # затем присланный, если он другой.
+    assert verify.calls == [_U, _D]
 
     assert await _subscription(db_sessionmaker, _U) == ("active", _SUB_CODE)
     assert await _balance(db_sessionmaker, _U) == _SUB_TOKENS
@@ -237,7 +239,9 @@ async def test_device_resolve_uppercase_account_id_normalised_and_matched(
     outcome = await _service(db_session, verify).handle(_body(account_id=str(_D).upper()))
     assert outcome.result == "applied"
     # verify is queried on the NORMALISED (lower) canonical deviceId.
-    assert verify.calls == [_D]
+    # Инцидент 2026-08-27: спрашиваем по обоим идентификаторам — сначала userId,
+    # затем присланный, если он другой.
+    assert verify.calls == [_U, _D]
     assert await _balance(db_sessionmaker, _U) == _SUB_TOKENS
     assert _rendered(_outcomes(caplog)[0])["resolvedVia"] == "device_id"
 

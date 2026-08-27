@@ -181,7 +181,10 @@ async def test_uppercase_stored_device_credits_linked_user(
     outcome = await _service(db_session, verify).handle(_body(account_id=str(_D)))
     assert outcome.result == "applied", "uppercase-stored device must resolve+credit (ADR-055 fix)"
     # verify is queried on the canonical (lowercase) deviceId, never the resolved userId.
-    assert verify.calls == [_D]
+    # Инцидент 2026-08-27: оплата создаётся под НАШИМ userId, а проверка спрашивала по
+    # устройству — платёж не находился никогда. Теперь спрашиваем по обоим: сначала userId,
+    # затем присланный идентификатор, если он другой.
+    assert verify.calls == [_U, _D]
 
     assert await _subscription(db_sessionmaker, _U) == ("active", _SUB_CODE)
     assert await _balance(db_sessionmaker, _U) == _SUB_TOKENS
@@ -214,5 +217,8 @@ async def test_uppercase_wire_and_uppercase_store_both_normalise(
     )
     outcome = await _service(db_session, verify).handle(_body(account_id=str(_D).upper()))
     assert outcome.result == "applied"
-    assert verify.calls == [_D]  # normalised to the canonical lowercase deviceId
+    # Инцидент 2026-08-27: оплата создаётся под НАШИМ userId, а проверка спрашивала по
+    # устройству — платёж не находился никогда. Теперь спрашиваем по обоим: сначала userId,
+    # затем присланный идентификатор, если он другой.
+    assert verify.calls == [_U, _D]  # userId, затем канонизированный deviceId
     assert await _balance(db_sessionmaker, _U) == _SUB_TOKENS

@@ -23,6 +23,10 @@ OPENAI_PRODUCT_MODELS: MappingProxyType[str, str] = MappingProxyType(
 ANTHROPIC_PRODUCT_MODELS: MappingProxyType[str, str] = MappingProxyType(
     {
         "claude-opus-5": "Claude Opus 5",
+        # Модель была ЗАТАРИФИЦИРОВАНА (pricing/provider_prices.py), но в каталог не попала —
+        # то есть сервер умел считать за неё деньги, а клиенту её не показывал. Приложение
+        # держит её моделью по умолчанию, и её отсутствие в /v1/models выглядело как пропажа.
+        "claude-sonnet-5": "Claude Sonnet 5",
         "claude-fable-5": "Claude Fable 5",
         "claude-opus-4-7": "Claude Opus 4.7",
         "claude-sonnet-4-6": "Claude Sonnet 4.6",

@@ -261,8 +261,10 @@ async def test_fresh_succeeded_one_time_payment_is_applied_and_credits_resolved_
     outcome = await svc.handle(_body(account_id=str(_D)))
     assert outcome.result == "applied"
 
-    # verify queried the deviceId D (canonical UUID); credit is on U (resolved), NOT D.
-    assert verify.calls == [_D]
+    # Инцидент 2026-08-27: оплата создаётся под НАШИМ userId, а проверка спрашивала по
+    # устройству — платёж не находился никогда. Теперь спрашиваем по обоим: сначала userId,
+    # затем присланный идентификатор, если он другой.
+    assert verify.calls == [_U, _D]
     assert await _balance(db_sessionmaker, _U) == _TOKEN_CREDITS
     assert await _ledger_keys(db_sessionmaker, _U) == ["cp-txn:pay-1"]
     assert await _balance(db_sessionmaker, _D) is None
