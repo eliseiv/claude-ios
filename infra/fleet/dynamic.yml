@@ -105,6 +105,10 @@ http:
       rule: "Host(`devsupplyr.shop`)"
       entryPoints: [web]
       service: devsupplyr
+    avelyra:
+      rule: "Host(`avelyraweb.shop`)"
+      entryPoints: [web]
+      service: avelyra
   services:
     claude-ios:
       failover:
@@ -648,6 +652,27 @@ http:
       loadBalancer:
         servers:
           - url: "http://10.10.0.1:18027"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    avelyra:
+      failover:
+        service: avelyra-primary
+        fallback: avelyra-standby
+        healthCheck: {}
+    avelyra-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18002"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    avelyra-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18002"
         healthCheck:
           path: /ready
           interval: 10s
