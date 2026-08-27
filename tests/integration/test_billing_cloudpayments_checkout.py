@@ -8,8 +8,9 @@ network to broadapps/YooKassa; the LLM is never touched (RU path). The three CLO
 configs are injected via env + ``get_settings.cache_clear()`` and restored afterwards.
 
 Covers ADR-051: §3 outgoing multipart contract (user_id from JWT, app_id/token server-held),
-§2 StrictModel (extra=forbid + productId allowlist + EmailStr), §3 upstream error mapping to a
-leak-free 502, §5 config-gate 503, §1 auth 401 / rate-limit 429, §6 PII/secret log allowlist.
+§2 StrictModel (extra=forbid + productId allowlist; формат email НЕ проверяется — см. тесты
+ниже), §3 upstream error mapping to a leak-free 502, §5 config-gate 503, §1 auth 401 /
+rate-limit 429, §6 PII/secret log allowlist.
 """
 
 from __future__ import annotations
@@ -320,28 +321,43 @@ async def test_checkout_tokens_pattern_not_in_map_returns_422(
 # ------------------------------ customerEmail validation (§2) ------------------------------
 
 
-async def test_checkout_invalid_email_returns_422(
+async def test_checkout_accepts_any_email_string(
     checkout_client: AsyncClient, broadapps: _Broadapps
 ) -> None:
+    """Адрес НЕ проверяется на формат — это осознанный откат прежней строгости.
+
+    Прежний сервис (veltriohub) принимал здесь любую строку, и приложение написано под тот
+    контракт. Строгая проверка отвергала то, что клиент реально присылает: 2026-08-27, в первые
+    часы после релиза, 50 из 73 попыток покупки получили 422 и показали пользователю
+    «Не удалось создать URL оплаты».
+
+    Достаточность данных решает платёжная форма провайдера, а не мы: отвергать запрос ДО
+    провайдера значит ломать покупку там, где провайдер принял бы её.
+    """
+    broadapps.respond(201, _OK_BODY)
+
     resp = await checkout_client.post(
         _URL,
         json={"productId": "week_6.99_nottrial", "customerEmail": "not-an-email"},
         headers=auth_headers(uuid.uuid4()),
     )
-    assert resp.status_code == 422, resp.text
-    assert broadapps.calls == 0
+    assert resp.status_code == 200, resp.text
+    assert broadapps.calls == 1
 
 
-async def test_checkout_missing_email_returns_422(
+async def test_checkout_without_email_still_creates_payment(
     checkout_client: AsyncClient, broadapps: _Broadapps
 ) -> None:
+    """Отсутствие адреса — не повод отказать в покупке (тот же инцидент)."""
+    broadapps.respond(201, _OK_BODY)
+
     resp = await checkout_client.post(
         _URL,
         json={"productId": "week_6.99_nottrial"},
         headers=auth_headers(uuid.uuid4()),
     )
-    assert resp.status_code == 422, resp.text
-    assert broadapps.calls == 0
+    assert resp.status_code == 200, resp.text
+    assert broadapps.calls == 1
 
 
 # ------------------------- upstream errors -> leak-free 502 (§3) -------------------------

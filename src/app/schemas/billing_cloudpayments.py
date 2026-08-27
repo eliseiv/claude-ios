@@ -8,7 +8,7 @@ link (``CloudPaymentsCheckoutResponse``).
 
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 from app.schemas.common import StrictModel
 
@@ -29,8 +29,20 @@ class CloudPaymentsCheckoutRequest(StrictModel):
         description="Код продукта (подписка или пакет токенов). Неизвестный/некредитуемый — `422`.",
         examples=["week_6.99_nottrial"],
     )
-    customerEmail: EmailStr = Field(
-        description="Email покупателя для платёжной формы.",
+    # Тип — `str`, а НЕ `EmailStr`, и это осознанно. Прежний сервис (veltriohub) принимал здесь
+    # любую строку, и приложение написано под тот контракт. Строгая проверка отвергала то, что
+    # клиент реально присылает: 2026-08-27, в первые часы после релиза, 50 из 73 попыток покупки
+    # получили 422 и показали пользователю «Не удалось создать URL оплаты».
+    #
+    # Значение всё равно не наше: оно уходит в платёжную форму broadapps, и требования к нему
+    # предъявляет провайдер, а не мы. Отвергать запрос до провайдера значит ломать покупку там,
+    # где провайдер её принял бы.
+    # Поле НЕОБЯЗАТЕЛЬНО: отсутствие адреса — не повод отказать в покупке. Прежний сервис
+    # требовал его, но отказ здесь виден пользователю как «Не удалось создать URL оплаты»,
+    # а решение о достаточности данных принимает платёжная форма провайдера, не мы.
+    customerEmail: str = Field(
+        default="",
+        description="Email покупателя для платёжной формы. Необязателен.",
         examples=["user@example.com"],
     )
 
