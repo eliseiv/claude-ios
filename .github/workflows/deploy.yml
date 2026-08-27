@@ -125,7 +125,7 @@ jobs:
             # veltrio (veltriohub.shop) was decommissioned 2026-07-18: the domain was handed over to
             # a different service on the same server. It MUST stay out of this loop — redeploying it
             # would re-create its Traefik router and take the domain back.
-            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo appbackend:appbackend stackstores:stackstores codecarts:codecarts devsupplyr:devsupplyr"
+            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo appbackend:appbackend stackstores:stackstores codecarts:codecarts devsupplyr:devsupplyr favorappbek:favorappbek"
             # ---- Единая сборка образа (инцидент 2026-08-25) ------------------------------------
             # ВСЕ инстансы выкатываются на ОДИН коммит ($DEPLOY_SHA) из одного Dockerfile, поэтому
             # образ у них побайтово одинаковый — различаются только .env и имя проекта. Раньше цикл

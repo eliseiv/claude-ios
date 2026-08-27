@@ -3,112 +3,172 @@ http:
   routers:
     claude-ios:
       rule: "Host(`broadnova.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: claude-ios
+      tls:
+        certResolver: le
     orvianix:
       rule: "Host(`orvianix.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: orvianix
+      tls:
+        certResolver: le
     elvarixa:
       rule: "Host(`elvarixa.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: elvarixa
+      tls:
+        certResolver: le
     corvionet:
       rule: "Host(`corvionet.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: corvionet
+      tls:
+        certResolver: le
     modavira:
       rule: "Host(`modavira.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: modavira
+      tls:
+        certResolver: le
     artolixo:
       rule: "Host(`artolixo.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: artolixo
+      tls:
+        certResolver: le
     lunexoro:
       rule: "Host(`lunexoro.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: lunexoro
+      tls:
+        certResolver: le
     ravionet:
       rule: "Host(`ravionet.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: ravionet
+      tls:
+        certResolver: le
     vireluma:
       rule: "Host(`vireluma.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: vireluma
+      tls:
+        certResolver: le
     taluneri:
       rule: "Host(`taluneri.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: taluneri
+      tls:
+        certResolver: le
     webmoria:
       rule: "Host(`webmoria.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: webmoria
+      tls:
+        certResolver: le
     velunixa:
       rule: "Host(`velunixa.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: velunixa
+      tls:
+        certResolver: le
     ravelumi:
       rule: "Host(`ravelumi.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: ravelumi
+      tls:
+        certResolver: le
     qorimelo:
       rule: "Host(`qorimelo.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: qorimelo
+      tls:
+        certResolver: le
     zenquelo:
       rule: "Host(`zenquelo.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: zenquelo
+      tls:
+        certResolver: le
     novirell:
       rule: "Host(`novirell.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: novirell
+      tls:
+        certResolver: le
     selquro:
       rule: "Host(`selquro.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: selquro
+      tls:
+        certResolver: le
     marqelio:
       rule: "Host(`marqelio.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: marqelio
+      tls:
+        certResolver: le
     livonexa:
       rule: "Host(`livonexa.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: livonexa
+      tls:
+        certResolver: le
     lumirexa:
       rule: "Host(`lumirexa.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: lumirexa
+      tls:
+        certResolver: le
     qoravena:
       rule: "Host(`qoravena.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: qoravena
+      tls:
+        certResolver: le
     benovalo:
       rule: "Host(`benovalo.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: benovalo
+      tls:
+        certResolver: le
     appbackend:
       rule: "Host(`appbackend.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: appbackend
+      tls:
+        certResolver: le
     stackstores:
       rule: "Host(`stackstores.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: stackstores
+      tls:
+        certResolver: le
     codecarts:
       rule: "Host(`codecarts.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: codecarts
+      tls:
+        certResolver: le
     devsupplyr:
       rule: "Host(`devsupplyr.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: devsupplyr
+      tls:
+        certResolver: le
     avelyra:
       rule: "Host(`avelyraweb.shop`)"
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: avelyra
+      tls:
+        certResolver: le
+    favorappbek:
+      rule: "Host(`favorappbek.shop`)"
+      entryPoints: [websecure]
+      service: favorappbek
+      tls:
+        certResolver: le
   services:
     claude-ios:
       failover:
@@ -673,6 +733,27 @@ http:
       loadBalancer:
         servers:
           - url: "http://10.10.0.1:18002"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    favorappbek:
+      failover:
+        service: favorappbek-primary
+        fallback: favorappbek-standby
+        healthCheck: {}
+    favorappbek-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18028"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    favorappbek-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18028"
         healthCheck:
           path: /ready
           interval: 10s

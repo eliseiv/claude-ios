@@ -26,3 +26,4 @@ appbackend 18024 15024
 stackstores 18025 15025
 codecarts 18026 15026
 devsupplyr 18027 15027
+favorappbek 18028 15028
