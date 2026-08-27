@@ -34,6 +34,7 @@ from app.errors import (
     JobNotTerminalError,
     NotFoundError,
     PayloadTooLargeError,
+    UpstreamJobGoneError,
     ValidationFailedError,
 )
 from app.media_generation.catalog import (
@@ -500,6 +501,11 @@ class MediaGenerationService:
         try:
             status = await self._fal.status(status_url=job.status_url, endpoint=job.fal_endpoint)
         except ValidationFailedError as exc:
+            return await self._fail(job, error=exc.message)
+        except UpstreamJobGoneError as exc:
+            # 404 — задача исчезла у провайдера навсегда. Это отказ с точки зрения
+            # пользователя: он заплатил и не получит результата, значит кредиты возвращаются.
+            # Повторять нечего, иначе задача остаётся незавершённой вечно.
             return await self._fail(job, error=exc.message)
 
         if status.status == FAL_COMPLETED:

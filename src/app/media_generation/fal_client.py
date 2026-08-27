@@ -25,6 +25,7 @@ from app.errors import (
     MediaGenerationNotConfiguredError,
     RateLimitedError,
     UpstreamError,
+    UpstreamJobGoneError,
     ValidationFailedError,
 )
 from app.media_generation.asset_hosts import fal_asset_host_allowed
@@ -347,6 +348,20 @@ class FalClient:
                 falEndpoint=endpoint,
             )
             raise RateLimitedError("generation provider rate limit exceeded")
+        if code == 404:
+            # Задачи у провайдера больше нет и не будет: fal убирает истёкшие из очереди.
+            # Отдельный класс нужен, чтобы согласователь закрыл задачу и вернул кредиты, а не
+            # опрашивал её вечно (см. UpstreamJobGoneError — инцидент selquro 2026-08-27).
+            log_event(
+                logger,
+                logging.WARNING,
+                "fal_call_outcome",
+                result="error",
+                reason="upstream_job_gone",
+                falEndpoint=endpoint,
+                upstreamStatus=code,
+            )
+            raise UpstreamJobGoneError("generation job no longer exists upstream")
         reason = "upstream_payment_required" if code == 402 else "upstream_status"
         raise self._upstream_error(reason, endpoint=endpoint, upstream_status=code)
 
