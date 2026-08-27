@@ -6,6 +6,8 @@ endpoints return 503 when no private signing key is configured. Tokens are never
 
 from __future__ import annotations
 
+import logging
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -13,9 +15,11 @@ from fastapi import APIRouter, Depends, Request
 from app.api_gateway.rate_limit import enforce_auth_limits
 from app.auth.issuer import build_jwks
 from app.auth.service import AuthService, IssuedTokens
+from app.billing_cloudpayments.service import CloudPaymentsWebhookService
 from app.config import get_settings
-from app.deps import client_ip, get_auth_service
+from app.deps import client_ip, get_auth_service, get_cloudpayments_webhook_service
 from app.errors import NotFoundError, RateLimitedError
+from app.observability.logging import log_event
 from app.schemas.auth import (
     AppleSignInRequest,
     JwksResponse,
@@ -32,6 +36,43 @@ router = APIRouter(prefix="/v1/auth", tags=["Auth"])
 async def _rate_limit(request: Request) -> None:
     if not await enforce_auth_limits(ip=client_ip(request)):
         raise RateLimitedError("rate limit exceeded")
+
+
+async def _reconcile_ru_payments(
+    cloudpayments: CloudPaymentsWebhookService, tokens: IssuedTokens
+) -> None:
+    """Дозачислить РФ-оплаты, пришедшие до появления этого устройства в базе.
+
+    **Дыра, которую это закрывает.** Колбэк с неизвестным устройством отбрасывается как
+    ``user_not_found`` и отвечает провайдеру кодом 200 — тот больше не повторяет. Деньги
+    списаны, начисления нет. Реальный случай (veltriohub, 2026-08-23): две завершённые оплаты
+    на 47.89 ₽ пропали именно так; всего таких пользователей 18 из 2 864 плативших.
+
+    Вызывается ТОЛЬКО на ``/register`` — при первом открытии приложения или переустановке.
+    На ``/token`` не вызывается: он идёт при каждом обновлении сессии, и лишний исходящий
+    запрос к провайдеру на этом пути был бы платой за то, что уже сделано.
+
+    **Никогда не роняет вход.** Провайдер недоступен, медленный или ответил ерундой — человек
+    всё равно должен войти в приложение. Ошибка уходит в журнал предупреждением, а не наружу.
+    """
+    if not get_settings().cloudpayments_api_token:
+        return
+    # Провайдер адресует устройство UUID'ом. `deviceId` у нас — свободная строка, и не всякая
+    # ею является: у такого устройства оплат в broadapps быть не может, спрашивать не о чем.
+    try:
+        device_uuid = uuid.UUID(tokens.device_id)
+    except (ValueError, AttributeError, TypeError):
+        return
+    try:
+        await cloudpayments.reconcile_device(device_id=device_uuid, user_id=tokens.user_id)
+    except Exception:  # noqa: BLE001 — вход важнее сверки; причина уходит в журнал
+        log_event(
+            logging.getLogger("app.api_gateway.auth"),
+            logging.WARNING,
+            "cloudpayments_reconcile_on_register_failed",
+            event="cloudpayments_reconcile_on_register_failed",
+            userId=str(tokens.user_id),
+        )
 
 
 def _to_response(tokens: IssuedTokens) -> TokenResponse:
@@ -59,10 +100,14 @@ def _to_response(tokens: IssuedTokens) -> TokenResponse:
 async def auth_register(
     request: Request,
     auth: Annotated[AuthService, Depends(get_auth_service)],
+    cloudpayments: Annotated[
+        CloudPaymentsWebhookService, Depends(get_cloudpayments_webhook_service)
+    ],
     body: RegisterRequest,
 ) -> TokenResponse:
     await _rate_limit(request)
     tokens = await auth.register_or_token(body.deviceId)
+    await _reconcile_ru_payments(cloudpayments, tokens)
     return _to_response(tokens)
 
 

@@ -241,6 +241,46 @@ class CloudPaymentsWebhookService:
             payment_statuses=statuses,
         )
 
+    async def reconcile_device(self, *, device_id: uuid.UUID, user_id: uuid.UUID) -> int:
+        """Дозачислить оплаты, пришедшие ДО того, как пользователь появился в базе.
+
+        **Зачем это существует.** Колбэк с неизвестным устройством отбрасывается как
+        ``user_not_found`` и отвечает провайдеру кодом 200 — тот больше не повторяет. Деньги
+        списаны, начисления нет, и никакого следа, кроме предупреждения в журнале. Реальный
+        случай (veltriohub, 2026-08-23): две завершённые оплаты на 47.89 ₽ пропали именно так,
+        и всего таких пользователей нашлось 18 из 2 864 плативших.
+
+        Обработчик колбэка намеренно не заводит пользователя (Stage 3, «never provision here»):
+        публичная ручка не должна создавать учётные записи. Поэтому дыра закрывается с другой
+        стороны — при первом появлении устройства мы сами спрашиваем провайдера, не платило ли
+        оно раньше.
+
+        Возвращает число начисленных оплат. Начисление идемпотентно по идентификатору платежа,
+        поэтому повторный вызов ничего не задваивает. Окно свежести то же, что у колбэка:
+        оплата старше него не начисляется, чтобы первый вызов не выдал разом всю прошлую историю.
+        """
+        payments_data = await self._verify.list_payments(device_id=device_id)
+        creditable = verify.select_creditable_payments(
+            payments_data,
+            paid_statuses=self._settings.cloudpayments_paid_statuses(),
+            now=_now(),
+            freshness_hours=self._settings.cloudpayments_payment_freshness_hours,
+        )
+        credited = 0
+        for payment in creditable:
+            if await self._apply_payment(payment, user_id) == "credited":
+                credited += 1
+        if credited:
+            log_event(
+                logger,
+                logging.INFO,
+                "cloudpayments_reconciled_on_login",
+                event="cloudpayments_reconciled_on_login",
+                userId=str(user_id),
+                creditedCount=credited,
+            )
+        return credited
+
     async def _apply_payment(
         self, payment: CreditablePayment, user_id: uuid.UUID
     ) -> Literal["credited", "duplicate", "skipped"]:
