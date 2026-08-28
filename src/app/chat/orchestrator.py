@@ -990,7 +990,8 @@ class ChatOrchestrator:
         # commit happens only on success). Truncation is scoped by `sess.id` — the resumed, owned
         # session — so a foreign chat can never be truncated. The new turn then proceeds normally:
         # the freshly generated message_step_id (above) yields a new debit (CO-7); on resume
-        # (is_new=False) workspace files are NOT re-injected (turn-0-only, ADR-040 §4а).
+        # Состояние провайдера здесь сбрасывается, поэтому ниже файлы проекта подмешиваются
+        # заново: без этого правка навсегда лишала бы беседу файлов.
         if edit_message_step_id is not None:
             if ctx.is_new:
                 raise MessageNotFoundError("message_not_found")
@@ -1025,7 +1026,26 @@ class ChatOrchestrator:
             else get_settings().credits_provider_for_model(sess.model)
         )
         if sess.workspace_project_id is not None:
-            if ctx.is_new:
+            # Файлы проекта подмешиваются, когда беседа будет собрана ИЗ НАШЕЙ ИСТОРИИ — а в ней
+            # их нет: они уходят провайдеру блоками и НИКОГДА не сохраняются (см. ниже, сборка
+            # first_turn). Пока провайдер держит состояние беседы у себя, файлы живут там и
+            # повторять их незачем. Как только состояния нет, история восстанавливается из базы,
+            # и без повторной вставки модель теряет файлы БЕЗВОЗВРАТНО.
+            #
+            # Прежнее условие `ctx.is_new` покрывало только первый ход и давало два отказа:
+            #   * правка сообщения (ADR-040) сбрасывает состояние провайдера — воспроизведено
+            #     2026-08-28 на lunexoro: до правки модель отвечала «ALPHA111» из файла, после —
+            #     выдумывала ответ, потому что файла у неё больше не было;
+            #   * провайдер без серверного состояния (Anthropic) не хранит ничего, поэтому там
+            #     файлы пропадали уже со ВТОРОГО хода любой беседы.
+            # ВАЖНО: `not sess.provider_state` сюда НЕ добавлено намеренно. Оно чинило бы и
+            # беседы на провайдере без серверного состояния (Anthropic), но заодно отменяло бы
+            # осознанное решение Q-038-1 — чат, ПЕРЕНЕСЁННЫЙ в проект позже, файлы задним числом
+            # не получает. Отличить перенесённый чат от потерявшего состояние по самому состоянию
+            # нельзя, поэтому здесь чинится только бесспорный случай (правка), а провайдер без
+            # состояния вынесен в отдельный вопрос к владельцу.
+            needs_files = ctx.is_new or edit_message_step_id is not None
+            if needs_files:
                 ws_context = await self._deps.workspaces.context_for_session(
                     sess.workspace_project_id, user_id, provider=session_provider
                 )

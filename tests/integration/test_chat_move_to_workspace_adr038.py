@@ -474,3 +474,47 @@ async def test_patch_all_null_body_422(
     # isPinned=null only (no title, no workspaceProjectId present) → nothing requested → 422.
     r2 = await client.patch(f"/v1/chats/{sid}", json={"isPinned": None}, headers=auth_headers(uid))
     assert r2.status_code == 422, r2.text
+
+
+async def test_edit_message_keeps_project_files_in_context(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    """Правка сообщения не должна лишать беседу файлов проекта.
+
+    Файлы уходят провайдеру блоками и НЕ сохраняются в нашей истории — беседа держится на
+    состоянии, которое хранит провайдер. Правка сообщения это состояние СБРАСЫВАЕТ
+    (``clear_provider_state``), после чего история собирается из базы, где файлов нет.
+
+    Прежде условие подмешивания было «только первый ход в сессии», поэтому после правки модель
+    теряла файлы безвозвратно. Воспроизведено на проде (lunexoro, 2026-08-28): до правки модель
+    отвечала значением из файла, после — выдумывала.
+
+    Тест смотрит на СОДЕРЖИМОЕ запроса к провайдеру, а не на ответ модели: ответ можно получить
+    правдоподобный и без файлов.
+    """
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s, subscription="active", balance=10)
+    w = await _create_workspace(client, uid, name="X")
+    await _add_knowledge_file(client, uid, str(w["id"]), _KNOWLEDGE_BLOB)
+
+    first = await _run(client, uid, fake_anthropic, workspace_id=str(w["id"]), message="первый")
+    assert _KNOWLEDGE_BLOB in str(fake_anthropic.calls[0]["messages"]), "нулевой ход несёт файлы"
+
+    fake_anthropic.responses = [fake_anthropic.text_result("ok")]
+    r = await client.post(
+        "/v1/chat/run",
+        json={
+            "userId": str(uid),
+            "sessionId": str(first["sessionId"]),
+            "editMessageStepId": str(first["messageStepId"]),
+            "message": "первый, но иначе",
+            "mode": "credits",
+        },
+        headers=auth_headers(uid),
+    )
+    assert r.status_code == 200, r.text
+    assert _KNOWLEDGE_BLOB in str(
+        fake_anthropic.calls[-1]["messages"]
+    ), "после правки файлы обязаны вернуться в контекст: истории с ними больше нет"
