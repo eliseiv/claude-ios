@@ -461,3 +461,56 @@ def test_document_tool_args_are_all_optional() -> None:
     assert DocumentCreateArgs(filename="a").content is None
     assert DocumentReadArgs().documentId is None
     assert DocumentUpdateArgs().content is None
+
+
+# --- ограничение провайдера: одно изображение на вызов ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_image_goes_in_its_own_call() -> None:
+    """omni-moderation принимает РОВНО ОДНО изображение за вызов.
+
+    Прежде все части уходили одним запросом, и провайдер отвечал
+    ``400 Number of images (2) exceeds maximum of 1``. Политика fail-closed превращала это в
+    ``503 moderation_unavailable``, то есть модерация ломалась на ЛЮБОМ сообщении с двумя и более
+    фото — с момента выпуска. Найдено по жалобе iOS-разработчика (lunexoro, 2026-08-27).
+
+    Тест смотрит на ЧИСЛО вызовов и на состав каждого, а не только на итоговый вердикт: вердикт
+    сходился и на одном вызове, потому дефект и не был пойман.
+    """
+    svc, fake = _service(_response({"violence": False}))
+    await svc.check(
+        surface=SURFACE_MEDIA_SUBMIT,
+        stage=STAGE_INPUT,
+        text="подпись",
+        image_urls=["https://a/1.png", "https://a/2.png", "https://a/3.png"],
+    )
+
+    assert len(fake.calls) == 3, "по вызову на изображение"
+    for call in fake.calls:
+        images = [p for p in call["input"] if p.get("type") == "image_url"]
+        assert len(images) == 1, "в одном вызове больше одного изображения провайдер отвергнет"
+    # Текст едет с первым изображением, а не отдельным вызовом: иначе самый частый случай
+    # «фото с подписью» стоил бы лишнего обращения.
+    texts = [p for call in fake.calls for p in call["input"] if p.get("type") == "text"]
+    assert len(texts) == 1
+
+
+@pytest.mark.asyncio
+async def test_text_without_images_is_one_call() -> None:
+    svc, fake = _service(_response({"violence": False}))
+    await svc.check(surface=SURFACE_MEDIA_SUBMIT, stage=STAGE_INPUT, text="только текст")
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_worst_verdict_wins_across_separate_image_calls() -> None:
+    """Худший вердикт побеждает и тогда, когда части проверены РАЗНЫМИ вызовами."""
+    svc, fake = _service(_response({"violence": True}))
+    verdict = await svc.check(
+        surface=SURFACE_MEDIA_SUBMIT,
+        stage=STAGE_INPUT,
+        image_urls=["https://a/1.png", "https://a/2.png"],
+    )
+    assert len(fake.calls) == 2
+    assert verdict.status in (STATUS_FLAGGED, STATUS_BLOCKED)

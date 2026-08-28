@@ -14,6 +14,7 @@ Fail-closed (§7): любой сбой провайдера — таймаут, 
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 from dataclasses import dataclass, field
@@ -115,7 +116,7 @@ def _merge(verdicts: list[ModerationVerdict], *, stage: str) -> ModerationVerdic
 
 @dataclass
 class ModerationService:
-    """Клиент модерации. Один вызов на набор частей (текст + изображения)."""
+    """Клиент модерации. Вызовов столько, сколько изображений: провайдер берёт по одному."""
 
     settings: Settings
     _client: openai.AsyncOpenAI | None = field(default=None, init=False, repr=False)
@@ -147,7 +148,7 @@ class ModerationService:
         text: str | None = None,
         image_urls: list[str] | None = None,
     ) -> ModerationVerdict:
-        """Проверить набор частей одним вызовом. Возвращает агрегированный вердикт.
+        """Проверить набор частей. Возвращает агрегированный вердикт по всем.
 
         ``image_urls`` принимает и https-URL, и data-URI — omni-moderation ест оба.
         Ничего не проверяем ⇒ ``unchecked``: врать «passed» о непроверенном нельзя (§8).
@@ -167,10 +168,13 @@ class ModerationService:
         client = self._ensure_client()
         started = datetime.datetime.now(datetime.UTC)
         try:
-            response = await client.moderations.create(
-                model=self.settings.moderation_model, input=cast(Any, parts)
+            verdicts = await asyncio.gather(
+                *(
+                    self._check_group(client, group, stage=stage, checked_at=started)
+                    for group in _split_for_provider(parts)
+                )
             )
-            verdict = self._verdict_from(response, stage=stage, checked_at=started)
+            verdict = _merge(list(verdicts), stage=stage)
         except Exception as exc:  # noqa: BLE001 — любой сбой провайдера = единая политика §7
             return self._on_failure(exc, surface=surface, stage=stage)
 
@@ -190,6 +194,20 @@ class ModerationService:
             latencyMs=int((datetime.datetime.now(datetime.UTC) - started).total_seconds() * 1000),
         )
         return verdict
+
+    async def _check_group(
+        self,
+        client: Any,
+        group: list[Any],
+        *,
+        stage: str,
+        checked_at: datetime.datetime,
+    ) -> ModerationVerdict:
+        """Один вызов провайдера на одну группу частей."""
+        response = await client.moderations.create(
+            model=self.settings.moderation_model, input=cast(Any, group)
+        )
+        return self._verdict_from(response, stage=stage, checked_at=checked_at)
 
     def _verdict_from(
         self, response: Any, *, stage: str, checked_at: datetime.datetime
@@ -241,6 +259,26 @@ class ModerationService:
             error=type(exc).__name__,
         )
         raise ModerationUnavailableError("moderation provider is unavailable") from exc
+
+
+def _split_for_provider(parts: list[Any]) -> list[list[Any]]:
+    """Разбить части на группы, по одному изображению в каждой.
+
+    **Ограничение провайдера, а не наше решение.** omni-moderation принимает РОВНО ОДНО
+    изображение за вызов и на два отвечает ``400 Number of images (2) exceeds maximum of 1``.
+    Прежде все части уходили одним запросом, поэтому проверка падала на ЛЮБОМ сообщении с двумя
+    и более фото — а политика fail-closed превращала это в ``503 moderation_unavailable`` для
+    пользователя. Найдено по жалобе iOS-разработчика (lunexoro, 2026-08-27: десять фото), но
+    ломалось начиная с двух, то есть с момента выпуска.
+
+    Текст уходит вместе с первым изображением: отдельный вызов ради него удвоил бы задержку на
+    самом частом случае «фото с подписью». Сообщение без изображений даёт одну группу.
+    """
+    images = [p for p in parts if isinstance(p, dict) and p.get("type") == "image_url"]
+    non_images = [p for p in parts if not (isinstance(p, dict) and p.get("type") == "image_url")]
+    if not images:
+        return [non_images]
+    return [[*non_images, images[0]], *([img] for img in images[1:])]
 
 
 def _flagged_categories(result: Any) -> set[str]:
