@@ -1,46 +1,48 @@
 ДОМЕНЫ ИНСТАНСОВ
 ============================================================
-
-Всего инстансов: 27
-
-Все A-записи ниже переключаются на маршрутизатор 2.29.30.63
-
+Всего инстансов: 33
+Все A-записи указывают на маршрутизатор 2.29.30.63
 ------------------------------------------------------------
 ДОМЕН                   ИНСТАНС       ОСНОВНОЙ СЕРВЕР
 ------------------------------------------------------------
 appbackend.shop         appbackend    B
-artolixo.shop           artolixo      A
+artolixo.shop           artolixo      B
 avelyraweb.shop         avelyra       B
 benovalo.shop           benovalo      B
-broadnova.shop          claude-ios    A
+broadnova.shop          claude-ios    B
 codecarts.shop          codecarts     B
-corvionet.shop          corvionet     A
+corvionet.shop          corvionet     B
 devsupplyr.shop         devsupplyr    B
-elvarixa.shop           elvarixa      A
+elvarixa.shop           elvarixa      B
+fanappsnew.shop         fanappsnew    A
+favorappbek.shop        favorappbek   B
 livonexa.shop           livonexa      B
 lumirexa.shop           lumirexa      B
-lunexoro.shop           lunexoro      A
+lunexoro.shop           lunexoro      B
 marqelio.shop           marqelio      B
-modavira.shop           modavira      A
+modavira.shop           modavira      B
+newnewappps.shop        newnewappps   A
+newweraar.shop          newweraar     A
 novirell.shop           novirell      B
-orvianix.shop           orvianix      A
+orvianix.shop           orvianix      B
+probotappbek.shop       probotappbek  A
+probotit.shop           probotit      A
 qoravena.shop           qoravena      B
 qorimelo.shop           qorimelo      B
-ravelumi.shop           ravelumi      A
-ravionet.shop           ravionet      A
+ravelumi.shop           ravelumi      B
+ravionet.shop           ravionet      B
 selquro.shop            selquro       B
 stackstores.shop        stackstores   B
-taluneri.shop           taluneri      A
-velunixa.shop           velunixa      A
-vireluma.shop           vireluma      A
-webmoria.shop           webmoria      A
+taluneri.shop           taluneri      B
+velunixa.shop           velunixa      B
+vireluma.shop           vireluma      B
+webmoria.shop           webmoria      B
 zenquelo.shop           zenquelo      B
 ------------------------------------------------------------
-
-Список проверен разрешением имён; домен avelyra взят из его .env
-(avelyraweb.shop — avelyra.shop принадлежит чужому хостингу).
+Домен avelyra взят из его .env: avelyra.shop принадлежит чужому хостингу.
 
 ПРОСТОЙ СПИСОК:
+
 appbackend.shop
 artolixo.shop
 avelyraweb.shop
@@ -50,13 +52,19 @@ codecarts.shop
 corvionet.shop
 devsupplyr.shop
 elvarixa.shop
+fanappsnew.shop
+favorappbek.shop
 livonexa.shop
 lumirexa.shop
 lunexoro.shop
 marqelio.shop
 modavira.shop
+newnewappps.shop
+newweraar.shop
 novirell.shop
 orvianix.shop
+probotappbek.shop
+probotit.shop
 qoravena.shop
 qorimelo.shop
 ravelumi.shop
