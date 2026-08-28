@@ -344,18 +344,29 @@ async def test_native_workspace_chat_has_instructions_and_files(
 
 
 @pytest.mark.asyncio
-async def test_moved_chat_gets_instructions_but_not_files_retroactively(
+async def test_moved_chat_gets_instructions_and_files(
     client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     fake_anthropic: FakeAnthropicClient,
 ) -> None:
-    """A moved chat gets instructions on the next turn, but NOT the files (variant a)."""
+    """Перенесённый в проект чат получает и инструкции, и файлы — отмена Q-038-1.
+
+    Прежде файлы задним числом не подавались (вариант «а»): решение принималось ради экономии
+    токенов. Оно оказалось неотличимо от дефекта — человек переносит чат в проект именно чтобы
+    работать с его файлами, а получал проект без файлов.
+
+    Отменено вместе с починкой более широкого случая: на провайдере БЕЗ серверного состояния
+    беседы (Anthropic — как этот тест и есть) история пересобирается каждый ход, и условие
+    «только первый ход» теряло файлы со ВТОРОГО хода ЛЮБОЙ беседы, не только перенесённой.
+    Отличить перенесённый чат от потерявшего состояние по самому состоянию нельзя, поэтому
+    оба случая закрываются одним правилом: файлы подаются, когда история их не несёт.
+    """
     async with db_sessionmaker() as s:
         uid = await seed_user(s, subscription="active", balance=5)
     w = await _create_workspace(client, uid, name="X", instructions=_INSTRUCTIONS)
     await _add_knowledge_file(client, uid, str(w["id"]), _KNOWLEDGE_BLOB)
 
-    # plain chat turn 0 (no workspace): no instructions, no files.
+    # Обычный чат, ход 0 (вне проекта): ни инструкций, ни файлов.
     run0 = await _run(client, uid, fake_anthropic, message="first")
     sid = str(run0["sessionId"])
     assert _KNOWLEDGE_BLOB not in str(fake_anthropic.calls[0]["messages"])
@@ -363,10 +374,10 @@ async def test_moved_chat_gets_instructions_but_not_files_retroactively(
     code, _ = await _patch(client, uid, sid, workspaceProjectId=str(w["id"]))
     assert code == 200
 
-    # next turn: instructions injected (system), but knowledge files are NOT re-assembled (Q-038-1).
+    # Следующий ход: инструкции в system, файлы — в содержимом хода.
     await _run(client, uid, fake_anthropic, message="second", session_id=sid)
     assert _INSTRUCTIONS in _last_system(fake_anthropic)
-    assert _KNOWLEDGE_BLOB not in str(fake_anthropic.calls[-1]["messages"])
+    assert _KNOWLEDGE_BLOB in str(fake_anthropic.calls[-1]["messages"])
 
 
 # --------------------------------------------------------------------------------------------------
