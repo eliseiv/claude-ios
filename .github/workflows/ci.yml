@@ -175,7 +175,11 @@ jobs:
   # service on the same server; it MUST stay out of $INSTANCES.
   #
   # GitHub Secrets (Settings -> Secrets and variables -> Actions): NEVER hardcode these.
-  #   SSH_HOST=87.239.135.154 / SSH_USER=root / SSH_PRIVATE_KEY (public half in server authorized_keys)
+  #   SSH_HOST=<адрес сервера A>,<адрес сервера B> — ОБА прикладных сервера через запятую
+  #     (appleboy/ssh-action выполняет скрипт на каждом по очереди). Один адрес = половина
+  #     флота остаётся на старом коммите при зелёном прогоне; форма секрета проверяется
+  #     шагом «Проверить, что SSH_HOST называет оба прикладных сервера» ниже.
+  #   SSH_USER=root / SSH_PRIVATE_KEY (public half in authorized_keys ОБОИХ серверов)
   #
   # PER-INSTANCE SMOKE (docs/07-deployment.md §CI/CD INSTANCES-loop: "Smoke-gate выполняется на
   # каждый инстанс по его SERVICE_DOMAIN"): the smoke check runs INSIDE the SSH loop, once per
@@ -221,6 +225,29 @@ jobs:
       group: deploy-production
       cancel-in-progress: false
     steps:
+      # Флот живёт на ДВУХ прикладных серверах, и какой инстанс основной на каком — решают файлы
+      # .role на самих машинах. Если SSH_HOST называет только одну машину, прогон честно зеленеет,
+      # выкатив ровно её инстансы, а основные на второй машине молча остаются на прежнем коммите.
+      # Именно так и случилось 2026-08-28: секрет содержал один адрес, деплой обновил 28 инстансов
+      # сервера B, а пять инстансов, основных на сервере A, остались на коммите недельной давности
+      # — при полностью зелёном CI. Проверка стоит ДО выкатки и валит прогон на конфигурации, а не
+      # оставляет расщеплённый флот. Значение секрета не печатается: сравнивается только его форма.
+      - name: Проверить, что SSH_HOST называет оба прикладных сервера
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -u
+          if [ -z "${SSH_HOST}" ]; then
+            echo "::error title=SSH_HOST пуст::секрет не задан — выкатывать некуда"
+            exit 1
+          fi
+          hosts=$(printf '%s' "${SSH_HOST}" | awk -F, '{n=0; for (i=1; i<=NF; i++) if ($i ~ /[^[:space:]]/) n++; print n}')
+          if [ "$hosts" -lt 2 ]; then
+            echo "::error title=SSH_HOST называет $hosts сервер::Флот развёрнут на двух прикладных серверах. Задайте оба адреса через запятую, иначе инстансы второго сервера останутся на старом коммите при зелёном прогоне."
+            exit 1
+          fi
+          echo "SSH_HOST называет серверов: $hosts"
+
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -293,7 +320,7 @@ jobs:
             # veltrio (veltriohub.shop) was decommissioned 2026-07-18: the domain was handed over to
             # a different service on the same server. It MUST stay out of this loop — redeploying it
             # would re-create its Traefik router and take the domain back.
-            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo appbackend:appbackend stackstores:stackstores codecarts:codecarts devsupplyr:devsupplyr favorappbek:favorappbek"
+            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi qorimelo:qorimelo zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo appbackend:appbackend stackstores:stackstores codecarts:codecarts devsupplyr:devsupplyr favorappbek:favorappbek probotit:probotit probotappbek:probotappbek newweraar:newweraar fanappsnew:fanappsnew newnewappps:newnewappps"
             # ---- Единая сборка образа (инцидент 2026-08-25) ------------------------------------
             # ВСЕ инстансы выкатываются на ОДИН коммит ($DEPLOY_SHA) из одного Dockerfile, поэтому
             # образ у них побайтово одинаковый — различаются только .env и имя проекта. Раньше цикл

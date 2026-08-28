@@ -272,7 +272,9 @@ docker image prune -f || true
 [ -n "$FAILED" ] && { echo "::error::instance(s) failed:$FAILED"; exit 1; }
 ```
 
-GitHub Secrets (обязательны для workflow): `SSH_HOST=87.239.135.154`, `SSH_USER=root`, `SSH_PRIVATE_KEY` (приватный ключ для SSH; публичный — в `~/.ssh/authorized_keys` на сервере).
+GitHub Secrets (обязательны для workflow): `SSH_HOST` — адреса **ОБОИХ** прикладных серверов через запятую (`appleboy/ssh-action` выполняет скрипт на каждом по очереди), `SSH_USER=root`, `SSH_PRIVATE_KEY` (приватный ключ для SSH; публичный — в `~/.ssh/authorized_keys` на **каждом** сервере).
+
+> **Один адрес в `SSH_HOST` расщепляет флот при зелёном прогоне.** Какой инстанс основной на какой машине, решают файлы `.role` на самих серверах; деплой role-aware и на «чужие» инстансы не заходит. Поэтому при одном адресе выкатываются только инстансы этой машины, а основные на второй молча остаются на прежнем коммите — прогон при этом честно зелёный. Так и произошло 2026-08-28: обновились 28 инстансов сервера B, а пять инстансов, основных на сервере A, остались на старом коммите. Форма секрета проверяется шагом «Проверить, что SSH_HOST называет оба прикладных сервера» в `ci.yml` — он валит прогон ДО выкатки.
 
 **Почему `set -uo pipefail` БЕЗ `-e` + `script_stop: false` (намеренно, не баг).** `-e` оборвал бы loop на первой ненулевой команде первого инстанса — и второй инстанс (avelyra) никогда бы не задеплоился. Вместо обрыва deploy-скрипт:
 - пропускает `-e` и ловит **реальные** ошибки явными rc-проверками (`cd`/`git pull --ff-only`/`build`/`migrate`) — на ошибке инстанс заносится в `$FAILED` и loop делает `continue` к следующему (один сбойный инстанс **не** обрывает остальные);
@@ -642,7 +644,7 @@ GitHub Secrets для деплоя: `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`. �
 - [ ] Traefik-labels на `api` (`traefik.enable=true`, `Host(${SERVICE_DOMAIN})` = `<домен>`, `entrypoints=websecure`, `tls.certresolver=${TRAEFIK_CERTRESOLVER}` = `le` (опционален — default на `websecure`), `loadbalancer.server.port=8000`) + сеть `web` (`external: true`) подключена; внешняя сеть `web` создана на сервере (`docker network create web`).
 - [ ] **НЕ публикуются порты 80/443** в нашем `docker-compose` (конфликт с Traefik); `api` — только `expose: 8000`; `postgres`/`redis` — без публикации портов, только сеть `default`.
 - [ ] `GET /healthz` → `200` через публичный домен (`https://<домен>/healthz`) — Traefik роутит, TLS выпущен.
-- [ ] GitHub Secrets заведены: `SSH_HOST=87.239.135.154`, `SSH_USER=root`, `SSH_PRIVATE_KEY`.
+- [ ] GitHub Secrets заведены: `SSH_HOST` = адреса обоих прикладных серверов через запятую, `SSH_USER=root`, `SSH_PRIVATE_KEY` (публичная половина — в `authorized_keys` обоих серверов).
 
 **Секреты (только через secret manager / `.env` в `/opt/<dir>` на сервере, не в образе):**
 - [ ] **Сервисный ключ LLM-провайдера этого инстанса** — реальный, **с положительным балансом**: `ANTHROPIC_API_KEY` при `LLM_PROVIDER=anthropic`, `OPENAI_API_KEY` при `openai` (колонка «провайдер» реестра). Единственный секрет, который **общий** с соседями того же провайдера, а не свежий, — осознанный размен, см. [clone `.env`-контракт](#clone-env-контракт-ключи-claude-ios).
