@@ -464,7 +464,7 @@ async def test_edit_message_step_with_no_user_step_404(
 #              (is_new=False), workspace files NOT re-injected, instructions injected as usual.
 # ==================================================================================================
 @pytest.mark.asyncio
-async def test_edit_first_message_truncates_all_no_file_reinjection(
+async def test_edit_first_message_truncates_all_and_reinjects_files(
     client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     fake_anthropic: FakeAnthropicClient,
@@ -501,11 +501,13 @@ async def test_edit_first_message_truncates_all_no_file_reinjection(
     after = await _steps(db_sessionmaker, sid)
     assert after == [("user", new_msid), ("assistant", new_msid)], after
 
-    # instructions injected as usual (decoupled from is_new), but workspace FILES NOT re-injected
-    # (turn-0-only, variant a) on the edited (resume) turn.
+    # Инструкции подмешиваются как обычно, и файлы проекта ТОЖЕ — правка обрезала историю и
+    # сбросила состояние провайдера, поэтому без повторной подачи модель осталась бы без файлов
+    # навсегда. Прежде здесь стояло `not in` (вариант «а», только нулевой ход): воспроизведено на
+    # проде 2026-08-28 — после правки модель выдумывала ответ вместо чтения файла.
     last_call = fake_anthropic.calls[-1]
     assert _INSTRUCTIONS in last_call["system_prompt"]
-    assert _KNOWLEDGE_BLOB not in str(last_call["messages"])
+    assert _KNOWLEDGE_BLOB in str(last_call["messages"])
 
 
 # ==================================================================================================
