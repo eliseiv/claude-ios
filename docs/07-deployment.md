@@ -122,7 +122,7 @@ Reverse-proxy / LB (в нашей схеме — **внешний Traefik**) **�
 | `PREVIEW_URL_SECRET` | секрет HMAC для preview signed URL (`/v1/preview/*`). Высокоэнтропийный, secret manager, отдельный от прочих. Под redaction. См. [ADR-010](adr/ADR-010-backend-hosted-preview.md). |
 | `PREVIEW_URL_TTL_SECONDS` | TTL preview signed URL, дефолт `900` (15 мин). |
 | `PREVIEW_MAX_FILE_BYTES` | лимит размера одного файла сайта, дефолт `1048576` (1 MB). |
-| `PREVIEW_MAX_PROJECT_BYTES` | лимит суммарного размера проекта, дефолт `10485760` (10 MB). |
+| `PREVIEW_MAX_PROJECT_BYTES` | лимит суммарного размера проекта, дефолт `62914560` (60 MiB). |
 | `PREVIEW_MAX_FILES` | лимит числа файлов в проекте, дефолт `200`. |
 | `MAX_SERVER_TOOL_ROUNDS` | guard числа последовательных server-side (`site.*`) tool-раундов на message-шаг, дефолт `16` ([ADR-011](adr/ADR-011-server-side-tools.md)). |
 | `TOKEN_PRODUCTS` | маппинг consumable-продуктов `productId→credits` (JSON), напр. `{"tokens_1500":1500,"tokens_600":600,"tokens_250":250,"tokens_100":100}`. Источник числа кредитов на покупку токенов (server-side, [ADR-015](adr/ADR-015-consumable-token-iap.md)). |
@@ -150,12 +150,12 @@ Reverse-proxy / LB (в нашей схеме — **внешний Traefik**) **�
 | `MEDIA_UPLOAD_MAX_BYTES` | **(генерация, [ADR-062 §3](adr/ADR-062-media-upload-via-fal-storage.md))** предел размера файла в `POST /v1/media/uploads` после декодирования base64, дефолт `10485760` (10 МБ). Превышение → `413`. |
 | `MEDIA_UPLOAD_REQUEST_BODY_LIMIT` | **(генерация, [ADR-062 §3](adr/ADR-062-media-upload-via-fal-storage.md))** транспортный лимит тела **только** для `POST /v1/media/uploads`, дефолт `16777216` (16 МБ). Инвариант: `>= ceil(MEDIA_UPLOAD_MAX_BYTES * 4/3) + запас на JSON-обвязку` — base64 раздувает файл в ⁴⁄₃ раза. Общий `SIZE_LIMIT_BODY` при этом не поднимается. |
 | `BYOK_DEFAULT_MODEL` | активная модель (`activeModel`) и модель byok-генерации для **Anthropic BYOK-ключа** при `keyStatus=valid`, напр. `claude-sonnet-4-6` ([ADR-016](adr/ADR-016-extended-byok-statuses.md)/[ADR-044](adr/ADR-044-multi-provider-byok.md)). **Применяется к Anthropic-ключу на ЛЮБОМ инстансе** (мульти-провайдерный BYOK), поэтому имеет смысл задавать и на OpenAI-инстансах, где клиенты приносят Anthropic-ключи. |
-| `ATTACHMENT_MAX_BYTES_IMAGE` | лимит размера одного image-вложения inline base64, дефолт `5242880` (5 MB) ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). |
+| `ATTACHMENT_MAX_BYTES_IMAGE` | лимит размера одного image-вложения inline base64, дефолт `20971520` (20 MiB) ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). |
 | `ATTACHMENT_MAX_BYTES_DOCUMENT` | лимит размера одного document-вложения inline base64, дефолт `8388608` (8 MB) ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). |
-| `ATTACHMENT_TOTAL_BYTES` | суммарный лимит размера вложений в одном запросе, дефолт `10485760` (10 MB) ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). |
+| `ATTACHMENT_TOTAL_BYTES` | суммарный лимит размера вложений в одном запросе, дефолт `62914560` (60 MiB) ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). |
 | `ATTACHMENT_MAX_COUNT` | макс. число вложений на сообщение, дефолт `10` ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). |
 | `ATTACHMENT_PDF_MAX_PAGES` | guard числа страниц PDF (анти-decompression-bomb, `pypdf`), дефолт `100` ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)). |
-| `ATTACHMENT_REQUEST_BODY_LIMIT` | повышенный transport-лимит тела для роутов `/v1/chat/run` **и `/v1/chat/v2/run`** под inline base64, дефолт `12582912` (12 MB) ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md), [05-security.md](05-security.md#повышенный-transport-лимит-для-upload-роутов-inline-base64)). |
+| `ATTACHMENT_REQUEST_BODY_LIMIT` | повышенный transport-лимит тела для роутов `/v1/chat/run` **и `/v1/chat/v2/run`** под inline base64, дефолт `83886080` (80 MiB) ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md), [05-security.md](05-security.md#повышенный-transport-лимит-для-upload-роутов-inline-base64)). |
 | `ATTACHMENT_EXTRACT_MAX_CHARS`, `ATTACHMENT_ORPHAN_TTL` | **не задаются на MVP** — относятся к отложенной двухшаговой upload-модели attachments ([TD-015](100-known-tech-debt.md), транспорт [ADR-014](adr/ADR-014-multimodal-attachments.md) Superseded). Orphan-очистка — [TD-010](100-known-tech-debt.md). |
 | `WORKSPACE_CONTEXT_MAX_CHARS` | лимит суммарного контекста workspace-файлов, инжектируемого в prompt, дефолт `200000` ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md), [Q-013-1](99-open-questions.md)). |
 | `CHAT_TITLE_MAX_CHARS` | макс. длина автогенерируемого заголовка чата, дефолт `60` (модуль chats). |

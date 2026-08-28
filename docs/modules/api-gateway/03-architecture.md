@@ -28,7 +28,7 @@ flowchart LR
 
 | Правило сопоставления пути | Лимит (конфиг) | Дефолт | Роут | ADR |
 |---|---|---|---|---|
-| `path in {"/v1/chat/run", "/v1/chat/v2/run", "/v1/chat/v2/run/stream"}` (точное) | `attachment_request_body_limit` (`ATTACHMENT_REQUEST_BODY_LIMIT`) | 12 MB | все роуты генерации, принимающие `attachments[]` | [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md), [ADR-089 §1](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md) |
+| `path in {"/v1/chat/run", "/v1/chat/v2/run", "/v1/chat/v2/run/stream"}` (точное) | `attachment_request_body_limit` (`ATTACHMENT_REQUEST_BODY_LIMIT`) | 80 MiB | все роуты генерации, принимающие `attachments[]` | [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md), [ADR-089 §1](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md) |
 | `path == "/v1/media/uploads"` (точное) | `media_upload_request_body_limit` (`MEDIA_UPLOAD_REQUEST_BODY_LIMIT`) | 16 MB | `POST /v1/media/uploads` | [ADR-062](../../adr/ADR-062-media-upload-via-fal-storage.md) |
 | `path == "/v1/admin/media/templates"` (точное) | `media_template_cover_request_body_limit` (`MEDIA_TEMPLATE_COVER_REQUEST_BODY_LIMIT`) | 4 MB | `POST /v1/admin/media/templates` | [ADR-066](../../adr/ADR-066-media-templates-catalog.md) |
 | `path.startswith("/v1/workspaces/") and path.endswith("/files")` | `workspace_request_body_limit` (`WORKSPACE_REQUEST_BODY_LIMIT`) | 12 MB | `POST /v1/workspaces/{id}/files` | [ADR-045](../../adr/ADR-045-per-path-body-limit-workspace-files.md) |

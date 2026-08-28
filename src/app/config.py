@@ -462,19 +462,27 @@ class Settings(BaseSettings):
     attachment_max_count: int = Field(default=10, alias="ATTACHMENT_MAX_COUNT")
     # Per-attachment decoded-byte ceiling, split by class: image vs document (PDF).
     attachment_max_bytes_image: int = Field(
-        default=5 * 1024 * 1024, alias="ATTACHMENT_MAX_BYTES_IMAGE"
+        default=20 * 1024 * 1024, alias="ATTACHMENT_MAX_BYTES_IMAGE"
     )
     attachment_max_bytes_document: int = Field(
         default=8 * 1024 * 1024, alias="ATTACHMENT_MAX_BYTES_DOCUMENT"
     )
     # Combined decoded-byte ceiling across all attachments in a request.
-    attachment_total_bytes: int = Field(default=10 * 1024 * 1024, alias="ATTACHMENT_TOTAL_BYTES")
+    attachment_total_bytes: int = Field(default=60 * 1024 * 1024, alias="ATTACHMENT_TOTAL_BYTES")
     # PDF page-count guard (anti decompression/structure bomb) via pypdf.
     attachment_pdf_max_pages: int = Field(default=100, alias="ATTACHMENT_PDF_MAX_PAGES")
     # Raised transport body limit applied ONLY to the /v1/chat/run route (other routes keep
     # size_limit_body). Inline base64 of large files exceeds the general ≤512KB cap.
+    #
+    # ИНВАРИАНТ (симметричен паре WORKSPACE_FILE_MAX_BYTES <-> WORKSPACE_REQUEST_BODY_LIMIT):
+    #   attachment_request_body_limit >= ceil(attachment_total_bytes * 4/3) + JSON_OVERHEAD
+    # Вложения едут в JSON как base64, который раздувает объём на треть, поэтому транспортный
+    # лимит ограничивает сумму вложений РАНЬШЕ, чем attachment_total_bytes: при теле 12 MiB
+    # заявленная сумма в 10 MiB была недостижима (10 MiB -> 13.3 MiB base64 -> 413), и клиент
+    # получал 413 вместо внятного 422 attachments_total_too_large. Держать соотношение при
+    # любой калибровке оператором.
     attachment_request_body_limit: int = Field(
-        default=12 * 1024 * 1024, alias="ATTACHMENT_REQUEST_BODY_LIMIT"
+        default=80 * 1024 * 1024, alias="ATTACHMENT_REQUEST_BODY_LIMIT"
     )
 
     # --- Workspaces (рабочие пространства) knowledge files (ADR-036 §4/§6) ---

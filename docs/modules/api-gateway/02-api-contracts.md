@@ -41,7 +41,7 @@ Gateway не добавляет собственных бизнес-endpoint, к
 | POST DELETE | /v1/notifications/device-token | notifications | [link](../notifications/02-api-contracts.md) |
 
 > Расширение Figma-gap (2026-06-02): новые роуты модулей 10–17 (см. [figma-gap-analysis.md](../../figma-gap-analysis.md)). Все — под пользовательским JWT, изоляция по `sub`.
-> **Вложения (2026-06-03, [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)):** на MVP мультимодальный ввод — **inline base64 в `POST /v1/chat/run`** (`application/json`), отдельного `/v1/attachments`-роута **нет**. У `/v1/chat/run` повышенный transport size-лимит (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB) — **только** у этого роута; остальные сохраняют JSON `≤512KB` ([05-security.md](../../05-security.md)). Двухшаговый `POST /v1/attachments` (`multipart/form-data`) отложен ([ADR-014](../../adr/ADR-014-multimodal-attachments.md) → [TD-015](../../100-known-tech-debt.md)).
+> **Вложения (2026-06-03, [ADR-020](../../adr/ADR-020-inline-base64-attachments-mvp.md)):** на MVP мультимодальный ввод — **inline base64 в `POST /v1/chat/run`** (`application/json`), отдельного `/v1/attachments`-роута **нет**. У `/v1/chat/run` повышенный transport size-лимит (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 80 MiB) — **только** у этого роута; остальные сохраняют JSON `≤512KB` ([05-security.md](../../05-security.md)). Двухшаговый `POST /v1/attachments` (`multipart/form-data`) отложен ([ADR-014](../../adr/ADR-014-multimodal-attachments.md) → [TD-015](../../100-known-tech-debt.md)).
 
 ## Служебные endpoint
 | Метод | Путь | Auth | Ответ |

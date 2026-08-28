@@ -111,15 +111,24 @@
   | `message` | `SIZE_LIMIT_MESSAGE` | 32 KB | `422 validation_error` |
   | `context` (сериализованный JSON) | `SIZE_LIMIT_CONTEXT` | 64 KB | `422 validation_error` |
   | число вложений в ходе | `ATTACHMENT_MAX_COUNT` | 10 | `422 too_many_attachments` |
-  | одно вложение класса `image`/`text` | `ATTACHMENT_MAX_BYTES_IMAGE` | 5 MB | `422 attachment_too_large` |
+  | одно вложение класса `image`/`text` | `ATTACHMENT_MAX_BYTES_IMAGE` | 20 MiB | `422 attachment_too_large` |
   | одно вложение класса `document` (PDF) | `ATTACHMENT_MAX_BYTES_DOCUMENT` | 8 MB | `422 attachment_too_large` |
-  | сумма всех вложений хода | `ATTACHMENT_TOTAL_BYTES` | 10 MB | `422 attachments_total_too_large` |
+  | сумма всех вложений хода | `ATTACHMENT_TOTAL_BYTES` | 60 MiB | `422 attachments_total_too_large` |
   | страниц в PDF | `ATTACHMENT_PDF_MAX_PAGES` | 100 | `422 pdf_too_many_pages` |
-  | тело запроса роутов с вложениями | `ATTACHMENT_REQUEST_BODY_LIMIT` | 12 MB | `413 payload_too_large` |
+  | тело запроса роутов с вложениями | `ATTACHMENT_REQUEST_BODY_LIMIT` | 80 MiB | `413 payload_too_large` |
   | тело прочих роутов `/v1/*` | `SIZE_LIMIT_BODY` | 512 KB | `413 payload_too_large` |
   | `result` в `/chat/tool-result` (поэлементно) | `SIZE_LIMIT_TOOL_RESULT` | 256 KB | `422 validation_error` |
 
   Размер вложения считается **после** декодирования base64, но проверяется **до** него (по длине base64-строки) — anti memory-DoS.
+
+  **Инвариант `ATTACHMENT_TOTAL_BYTES` ↔ `ATTACHMENT_REQUEST_BODY_LIMIT`.** Вложения передаются
+  внутри JSON как base64, который увеличивает объём на треть. Поэтому транспортный лимит обязан
+  удовлетворять `ATTACHMENT_REQUEST_BODY_LIMIT >= ceil(ATTACHMENT_TOTAL_BYTES * 4/3) + запас на
+  JSON-обёртку`; иначе сумма вложений упирается в `413` раньше, чем сработает `422
+  attachments_total_too_large`, и клиент получает транспортную ошибку вместо предметной. Дефолты
+  соотношение соблюдают: 60 MiB × 4/3 = 80 MiB. Запас на обёртку (имена полей, экранирование)
+  не заложен, поэтому практический потолок суммы — доли мегабайта ниже 60 MiB; оператору,
+  которому нужен ровно круглый потолок, следует поднимать тело с запасом.
 
   **Повышенный transport-лимит применяется по инварианту, а не по списку путей ([ADR-089 §1](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)):** он действует на **каждом** роуте, тело которого может содержать `attachments[]` — сегодня это `POST /v1/chat/run`, `POST /v1/chat/v2/run` и `POST /v1/chat/v2/run/stream`. Остальные роуты (включая обе версии `tool-result` и `capabilities`) остаются на общем `SIZE_LIMIT_BODY`. Превышение отдаётся **как HTTP-ответ `413`**, а не разрывом соединения ([ADR-089 §2](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)); `message` ошибки содержит действующий лимит роута в байтах.
 - При старте нового пользовательского message-шага Orchestrator генерирует `messageStepId` (UUID), персистирует его в `chat_steps.message_step_id` и `tool_calls.message_step_id`. Он един для всех tool-раундов шага (включая re-entry через `/chat/tool-result`) и используется как ключ идемпотентности credits-debit ([ADR-005](../../adr/ADR-005-idempotency-ledger.md), [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). `messageStepId` — внутренняя величина биллинга, не путать с gateway correlation `requestId` (`X-Request-Id`).
