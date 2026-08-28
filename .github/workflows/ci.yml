@@ -15,12 +15,21 @@ on:
     branches: [main]
   pull_request:
 
-# NOTE: this `concurrency` only applies to the CI jobs (quality/test/build-image). The deploy
-# job below sets its OWN job-level concurrency (`deploy-production`, no cancel) so an in-flight
-# deploy is never cancelled even though superseded CI runs are.
+# ВНИМАНИЕ: прежняя редакция утверждала, что эта группа «касается только CI-джоб, а деплой
+# защищён своей группой deploy-production с cancel-in-progress: false». ЭТО НЕВЕРНО. Отмена на
+# уровне ПРОГОНА убивает и джобу деплоя — её собственная группа от этого не спасает.
+#
+# Инцидент 2026-08-28: пуш во время выкатки отменил прогон ровно в тот момент, когда цикл дошёл
+# до marqelio. Между `up -d` и убийством процесса прошло ТРИ СЕКУНДЫ: контейнер успел
+# создаться и не успел стартовать, инстанс пролежал полчаса и обнаружился по жалобе. Хуже
+# одного инстанса другое — обрыв посреди цикла оставляет флот РАЗДЕЛЁННЫМ между двумя
+# коммитами: часть уже на новом, часть на старом.
+#
+# Поэтому отмена выключена. Плата — вытесненный прогон досматривает свои тесты вместо того,
+# чтобы умереть сразу; несколько минут раннера против разъехавшегося прода.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -205,7 +214,9 @@ jobs:
     permissions:
       contents: read
     # Single in-flight deploy; do NOT cancel one mid-run (avoid half-applied state). This is a
-    # JOB-level concurrency, independent of the workflow-level `ci-*` group above.
+    # Группа джобы: две выкатки не идут одновременно и не отменяют друг друга. Она НЕ защищает
+    # от отмены всего прогона — от неё защищает `cancel-in-progress: false` на уровне workflow
+    # (см. врезку про инцидент 2026-08-28 в шапке файла).
     concurrency:
       group: deploy-production
       cancel-in-progress: false
