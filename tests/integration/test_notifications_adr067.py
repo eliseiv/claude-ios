@@ -179,6 +179,7 @@ async def test_media_completed_sends_push_once(
     from app.api_gateway.routers import preferences as preferences_router
     from app.main import create_app
     from app.media_generation import fal_client as fal_client_mod
+    from app.media_generation import signed_url as signed_url_mod
 
     fal = _Fal()
     monkeypatch.setenv("FAL_API_KEY", _FAL_KEY)
@@ -192,6 +193,15 @@ async def test_media_completed_sends_push_once(
     monkeypatch.setenv("PREVIEW_URL_SECRET", _PREVIEW_SECRET)
     get_settings.cache_clear()
     monkeypatch.setattr(fal_client_mod, "httpx", _make_fake_httpx(fal))
+    # Время подписи фиксируем. Токен ссылки включает `exp = now + TTL`, а сравниваемые ниже
+    # `mediaUrl` из push и `assets[0].url` из ответа на опрос подписываются в РАЗНЫЕ моменты.
+    # Пока оба вызова попадают в одну секунду, строки совпадают; стоит границе секунды лечь между
+    # ними — расходятся подписи, и тест краснеет на ровном месте (так и случилось в CI прогона
+    # ea81307, при том что содержательно ссылки указывают на один и тот же ассет). Фиксация
+    # сохраняет строгое равенство как утверждение контракта и убирает гонку.
+    # Подменяем ссылку на модуль ВНУТРИ signed_url, а не функцию в самом `time`: патч самого
+    # stdlib-модуля остановил бы часы всему процессу на время теста.
+    monkeypatch.setattr(signed_url_mod, "time", SimpleNamespace(time=lambda: 1_700_000_000.0))
 
     async def _allow(*, user_id: uuid.UUID) -> bool:
         return True
