@@ -169,6 +169,36 @@ http:
       service: favorappbek
       tls:
         certResolver: le
+    probotit:
+      rule: "Host(`probotit.shop`)"
+      entryPoints: [websecure]
+      service: probotit
+      tls:
+        certResolver: le
+    probotappbek:
+      rule: "Host(`probotappbek.shop`)"
+      entryPoints: [websecure]
+      service: probotappbek
+      tls:
+        certResolver: le
+    newweraar:
+      rule: "Host(`newweraar.shop`)"
+      entryPoints: [websecure]
+      service: newweraar
+      tls:
+        certResolver: le
+    fanappsnew:
+      rule: "Host(`fanappsnew.shop`)"
+      entryPoints: [websecure]
+      service: fanappsnew
+      tls:
+        certResolver: le
+    newnewappps:
+      rule: "Host(`newnewappps.shop`)"
+      entryPoints: [websecure]
+      service: newnewappps
+      tls:
+        certResolver: le
   services:
     claude-ios:
       failover:
@@ -178,7 +208,7 @@ http:
     claude-ios-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18001"
+          - url: "http://10.10.0.2:18001"
         healthCheck:
           path: /ready
           interval: 10s
@@ -186,7 +216,7 @@ http:
     claude-ios-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18001"
+          - url: "http://10.10.0.1:18001"
         healthCheck:
           path: /ready
           interval: 10s
@@ -199,7 +229,7 @@ http:
     orvianix-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18003"
+          - url: "http://10.10.0.2:18003"
         healthCheck:
           path: /ready
           interval: 10s
@@ -207,7 +237,7 @@ http:
     orvianix-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18003"
+          - url: "http://10.10.0.1:18003"
         healthCheck:
           path: /ready
           interval: 10s
@@ -220,7 +250,7 @@ http:
     elvarixa-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18004"
+          - url: "http://10.10.0.2:18004"
         healthCheck:
           path: /ready
           interval: 10s
@@ -228,7 +258,7 @@ http:
     elvarixa-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18004"
+          - url: "http://10.10.0.1:18004"
         healthCheck:
           path: /ready
           interval: 10s
@@ -241,7 +271,7 @@ http:
     corvionet-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18005"
+          - url: "http://10.10.0.2:18005"
         healthCheck:
           path: /ready
           interval: 10s
@@ -249,7 +279,7 @@ http:
     corvionet-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18005"
+          - url: "http://10.10.0.1:18005"
         healthCheck:
           path: /ready
           interval: 10s
@@ -262,7 +292,7 @@ http:
     modavira-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18006"
+          - url: "http://10.10.0.2:18006"
         healthCheck:
           path: /ready
           interval: 10s
@@ -270,7 +300,7 @@ http:
     modavira-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18006"
+          - url: "http://10.10.0.1:18006"
         healthCheck:
           path: /ready
           interval: 10s
@@ -283,7 +313,7 @@ http:
     artolixo-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18007"
+          - url: "http://10.10.0.2:18007"
         healthCheck:
           path: /ready
           interval: 10s
@@ -291,7 +321,7 @@ http:
     artolixo-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18007"
+          - url: "http://10.10.0.1:18007"
         healthCheck:
           path: /ready
           interval: 10s
@@ -304,7 +334,7 @@ http:
     lunexoro-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18008"
+          - url: "http://10.10.0.2:18008"
         healthCheck:
           path: /ready
           interval: 10s
@@ -312,7 +342,7 @@ http:
     lunexoro-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18008"
+          - url: "http://10.10.0.1:18008"
         healthCheck:
           path: /ready
           interval: 10s
@@ -325,7 +355,7 @@ http:
     ravionet-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18009"
+          - url: "http://10.10.0.2:18009"
         healthCheck:
           path: /ready
           interval: 10s
@@ -333,7 +363,7 @@ http:
     ravionet-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18009"
+          - url: "http://10.10.0.1:18009"
         healthCheck:
           path: /ready
           interval: 10s
@@ -346,7 +376,7 @@ http:
     vireluma-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18010"
+          - url: "http://10.10.0.2:18010"
         healthCheck:
           path: /ready
           interval: 10s
@@ -354,7 +384,7 @@ http:
     vireluma-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18010"
+          - url: "http://10.10.0.1:18010"
         healthCheck:
           path: /ready
           interval: 10s
@@ -367,7 +397,7 @@ http:
     taluneri-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18011"
+          - url: "http://10.10.0.2:18011"
         healthCheck:
           path: /ready
           interval: 10s
@@ -375,7 +405,7 @@ http:
     taluneri-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18011"
+          - url: "http://10.10.0.1:18011"
         healthCheck:
           path: /ready
           interval: 10s
@@ -388,7 +418,7 @@ http:
     webmoria-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18012"
+          - url: "http://10.10.0.2:18012"
         healthCheck:
           path: /ready
           interval: 10s
@@ -396,7 +426,7 @@ http:
     webmoria-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18012"
+          - url: "http://10.10.0.1:18012"
         healthCheck:
           path: /ready
           interval: 10s
@@ -409,7 +439,7 @@ http:
     velunixa-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18013"
+          - url: "http://10.10.0.2:18013"
         healthCheck:
           path: /ready
           interval: 10s
@@ -417,7 +447,7 @@ http:
     velunixa-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18013"
+          - url: "http://10.10.0.1:18013"
         healthCheck:
           path: /ready
           interval: 10s
@@ -430,7 +460,7 @@ http:
     ravelumi-primary:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.1:18014"
+          - url: "http://10.10.0.2:18014"
         healthCheck:
           path: /ready
           interval: 10s
@@ -438,7 +468,7 @@ http:
     ravelumi-standby:
       loadBalancer:
         servers:
-          - url: "http://10.10.0.2:18014"
+          - url: "http://10.10.0.1:18014"
         healthCheck:
           path: /ready
           interval: 10s
@@ -754,6 +784,111 @@ http:
       loadBalancer:
         servers:
           - url: "http://10.10.0.1:18028"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    probotit:
+      failover:
+        service: probotit-primary
+        fallback: probotit-standby
+        healthCheck: {}
+    probotit-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18029"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    probotit-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18029"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    probotappbek:
+      failover:
+        service: probotappbek-primary
+        fallback: probotappbek-standby
+        healthCheck: {}
+    probotappbek-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18030"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    probotappbek-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18030"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    newweraar:
+      failover:
+        service: newweraar-primary
+        fallback: newweraar-standby
+        healthCheck: {}
+    newweraar-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18031"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    newweraar-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18031"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    fanappsnew:
+      failover:
+        service: fanappsnew-primary
+        fallback: fanappsnew-standby
+        healthCheck: {}
+    fanappsnew-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18032"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    fanappsnew-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18032"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    newnewappps:
+      failover:
+        service: newnewappps-primary
+        fallback: newnewappps-standby
+        healthCheck: {}
+    newnewappps-primary:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.1:18033"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    newnewappps-standby:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.0.2:18033"
         healthCheck:
           path: /ready
           interval: 10s
