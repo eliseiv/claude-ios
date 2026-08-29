@@ -216,13 +216,25 @@ _SITE_BUILDER_INSTRUCTION = (
 
 
 _SYSTEM_PROMPT_CODE = (
-    "You are a coding assistant integrated into the user's app. Favor precise, technical answers: "
+    "You are a coding assistant integrated into an iOS app. Favor precise, technical answers: "
     "produce correct, idiomatic code with brief explanations. You can call tools that the "
     "user's device executes locally (files, calendar, reminders) and server-side site tools. "
     "Use tools when needed and respond concisely. "
-    # ADR-094: работа с кодом. Указания намеренно предписывают ПОРЯДОК, а не только перечисляют
-    # инструменты: модель, не посмотревшая на файл перед правкой, переписывает его по памяти и
-    # молча теряет чужие изменения — самый дорогой отказ в этом наборе.
+    + _SITE_BUILDER_INSTRUCTION
+    + " "
+    + _CONVERSATION_MEMORY_INSTRUCTION
+    + " "
+    + _TIME_NOW_INSTRUCTION
+)
+
+
+# ADR-094: указания по работе с кодом. Живут ОТДЕЛЬНО от `_SYSTEM_PROMPT_CODE` и добавляются
+# только там, где инструменты кода реально предложены (ось D). Иначе на инстансе с выключенным
+# флагом модель в режиме `code` получала бы предписание звать files.search / git.*, которых у неё
+# нет, — и обещала бы пользователю действия, выполнить которые не может.
+# Указания задают ПОРЯДОК, а не перечисляют инструменты: модель, не посмотревшая на файл перед
+# правкой, переписывает его по памяти и молча теряет чужие изменения — самый дорогой отказ здесь.
+_CODE_TOOLS_INSTRUCTION = (
     "When working on code: locate files with files.search before assuming paths, read a file "
     "before changing it, and prefer files.patch over files.write so you change only the lines "
     "you addressed and never discard edits made elsewhere. "
@@ -231,12 +243,7 @@ _SYSTEM_PROMPT_CODE = (
     "Push only when the user asked, and set force only when they explicitly asked to overwrite "
     "remote history. "
     "Changes to files and to the repository are confirmed by the user before they run, so "
-    "propose the action rather than asking for permission in prose. "
-    + _SITE_BUILDER_INSTRUCTION
-    + " "
-    + _CONVERSATION_MEMORY_INSTRUCTION
-    + " "
-    + _TIME_NOW_INSTRUCTION
+    "propose the action rather than asking for permission in prose."
 )
 
 
@@ -361,8 +368,15 @@ def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") ->
     (ADR-036 §3).
     ADR-072: media-generate instruction is appended only when ``CHAT_MEDIA_TOOLS_ENABLED``.
     ADR-081: families in ``CHAT_DISABLED_TOOL_FAMILIES`` are omitted from the tool sentence.
+    ADR-094: the code-work instruction is appended under the SAME condition that offers the code
+    tools (``CODE_TOOLS_ENABLED`` and ``assistant_mode == "code"``) — never one without the other.
     """
     base = _compose_system_prompt(assistant_mode, get_settings().disabled_tool_families())
+    # ADR-094 ось D: указания по работе с кодом добавляются ровно по тому же условию, по которому
+    # предлагаются сами инструменты. Разойдись эти два условия — модель на инстансе без флага
+    # получала бы предписание звать files.search / git.*, которых ей не дали.
+    if get_settings().code_tools_enabled and assistant_mode == "code":
+        base = f"{base} {_CODE_TOOLS_INSTRUCTION}"
     if get_settings().chat_media_tools_enabled:
         base = f"{base} {_MEDIA_GENERATE_INSTRUCTION}"
     if generation_mode == "study_learn":

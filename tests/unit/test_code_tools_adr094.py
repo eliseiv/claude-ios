@@ -120,3 +120,30 @@ def test_axis_d_reaches_every_provider_serializer(enabled: bool) -> None:
     assert neutral == openai == anthropic, "сериализаторы расходятся по составу"
     present = neutral & CODE_TOOLS
     assert present == (CODE_TOOLS if enabled else set())
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_prompt_and_offer_never_disagree(flag: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Указания по работе с кодом и сами инструменты включаются ОДНИМ условием.
+
+    Разойдись они — на инстансе без флага модель в режиме `code` получала бы предписание звать
+    `files.search` и `git.*`, которых ей не дали: она пообещала бы пользователю действие и не
+    смогла его выполнить. Обратное расхождение не лучше: инструменты без указаний означают, что
+    модель правит файл, не прочитав его, и переписывает по памяти чужие изменения.
+    """
+    from app.chat import orchestrator
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("CODE_TOOLS_ENABLED", "true" if flag else "false")
+    try:
+        prompt = orchestrator._system_prompt_for("code")
+        offered = {d["name"] for d in neutral_tool_definitions(code_tools_enabled=flag)}
+        has_instruction = "files.patch" in prompt
+        has_tools = bool(offered & CODE_TOOLS)
+        assert has_instruction is has_tools is flag
+        # В обычном чате указаний нет даже при поднятом флаге: правка файлов на машине человека
+        # не должна возникать в разговоре, который он не начинал как работу над кодом.
+        assert "files.patch" not in orchestrator._system_prompt_for("chat")
+    finally:
+        get_settings.cache_clear()
