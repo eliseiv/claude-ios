@@ -6,6 +6,7 @@ import pytest
 
 from app.chat.tools import (
     ALL_TOOL_NAMES,
+    CODE_TOOLS,
     MUTATING_TOOLS,
     TOOL_QUIZ_GENERATE,
     anthropic_tool_definitions,
@@ -38,8 +39,10 @@ def test_validate_rejects_backslash_traversal() -> None:
 
 
 def test_validate_rejects_unknown_tool() -> None:
+    # Имя заведомо несуществующее. Раньше здесь стоял `files.delete` — ADR-094 сделал его
+    # настоящим инструментом, и тест стал проверять обратное тому, что заявляет.
     with pytest.raises(ValueError, match="unknown tool"):
-        validate_tool_args("files.delete", {"path": "x"})
+        validate_tool_args("files.teleport", {"path": "x"})
 
 
 def test_validate_rejects_extra_fields() -> None:
@@ -72,7 +75,9 @@ def test_anthropic_definitions_cover_all_tools() -> None:
     # contract (toolCall.name, DB, audit) stays dotted; only the transport boundary maps.
     # ADR-064 axis C: the mode-gated quiz.generate is offered ONLY in `study_learn`, so the set
     # covered by the default (`general`) call is ALL_TOOL_NAMES minus that one tool.
-    expected_domain = set(ALL_TOOL_NAMES) - {TOOL_QUIZ_GENERATE}
+    # ADR-094 ось D: инструменты кода выключены по умолчанию, поэтому в набор по умолчанию
+    # они не входят — как и mode-gated quiz.generate.
+    expected_domain = set(ALL_TOOL_NAMES) - {TOOL_QUIZ_GENERATE} - set(CODE_TOOLS)
     defs = anthropic_tool_definitions()
     names = {d["name"] for d in defs}
     # The emitted names are the underscore wire names (no dots), one per domain tool.
@@ -83,6 +88,9 @@ def test_anthropic_definitions_cover_all_tools() -> None:
     for d in defs:
         assert "input_schema" in d
         assert d["description"]
-    # In its own mode the full registry is covered (nothing else was dropped along the way).
-    study_names = {d["name"] for d in anthropic_tool_definitions(generation_mode="study_learn")}
+    # При поднятых обеих осях покрыт весь реестр (по дороге больше ничего не потерялось).
+    study_names = {
+        d["name"]
+        for d in anthropic_tool_definitions(generation_mode="study_learn", code_tools_enabled=True)
+    }
     assert {to_domain_tool_name(n) for n in study_names} == set(ALL_TOOL_NAMES)

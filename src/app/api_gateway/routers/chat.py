@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api_gateway.rate_limit import enforce_chat_limits
 from app.chat.orchestrator import ChatOrchestrator, ChatRunOut, ChatStreamEvent, ToolResultIn
+from app.chat.tools import CONFIRM_TOOLS
 from app.config import get_settings
 from app.deps import (
     CurrentUser,
@@ -436,18 +437,26 @@ _CHAT_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
+def _tool_call_schema(call: Any) -> ToolCallSchema:
+    """Один вызов инструмента для клиента; признак подтверждения проставляет СЕРВЕР (ADR-094).
+
+    Клиент не должен выводить опасность из имени: добавится инструмент — и приложение молча
+    разойдётся с бэкендом, исполнив без спроса то, что спрашивать полагалось.
+    """
+    return ToolCallSchema(
+        id=call.id,
+        name=call.name,
+        args=call.args,
+        requiresConfirmation=call.name in CONFIRM_TOOLS,
+    )
+
+
 def _to_response(out: ChatRunOut) -> ChatResponse:
     set_session_id(str(out.session_id))
-    tool_call = (
-        ToolCallSchema(id=out.tool_call.id, name=out.tool_call.name, args=out.tool_call.args)
-        if out.tool_call is not None
-        else None
-    )
+    tool_call = _tool_call_schema(out.tool_call) if out.tool_call is not None else None
     # ADR-025: surface ALL client-side tool calls of the turn; toolCall (deprecated) = toolCalls[0].
     tool_calls = (
-        [ToolCallSchema(id=tc.id, name=tc.name, args=tc.args) for tc in out.tool_calls]
-        if out.tool_calls is not None
-        else None
+        [_tool_call_schema(tc) for tc in out.tool_calls] if out.tool_calls is not None else None
     )
     # ADR-028: server-side tools executed by the backend in this call (compact name/status/summary).
     # ADR-030: toolCallId = domain tool_calls.id (uuid → str), correlates with /v1/chats/{id} steps.

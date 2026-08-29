@@ -216,10 +216,22 @@ _SITE_BUILDER_INSTRUCTION = (
 
 
 _SYSTEM_PROMPT_CODE = (
-    "You are a coding assistant integrated into an iOS app. Favor precise, technical answers: "
+    "You are a coding assistant integrated into the user's app. Favor precise, technical answers: "
     "produce correct, idiomatic code with brief explanations. You can call tools that the "
     "user's device executes locally (files, calendar, reminders) and server-side site tools. "
     "Use tools when needed and respond concisely. "
+    # ADR-094: работа с кодом. Указания намеренно предписывают ПОРЯДОК, а не только перечисляют
+    # инструменты: модель, не посмотревшая на файл перед правкой, переписывает его по памяти и
+    # молча теряет чужие изменения — самый дорогой отказ в этом наборе.
+    "When working on code: locate files with files.search before assuming paths, read a file "
+    "before changing it, and prefer files.patch over files.write so you change only the lines "
+    "you addressed and never discard edits made elsewhere. "
+    "Inspect the repository with git.status and git.diff before committing, and write commit "
+    "messages that say WHY the change was made, not what the diff already shows. "
+    "Push only when the user asked, and set force only when they explicitly asked to overwrite "
+    "remote history. "
+    "Changes to files and to the repository are confirmed by the user before they run, so "
+    "propose the action rather than asking for permission in prose. "
     + _SITE_BUILDER_INSTRUCTION
     + " "
     + _CONVERSATION_MEMORY_INSTRUCTION
@@ -2311,6 +2323,14 @@ class ChatOrchestrator:
                     generation_mode=effective_generation_mode,
                     include_media_chat_tools=get_settings().chat_media_tools_enabled,
                     disabled_families=get_settings().disabled_tool_families(),
+                    # ADR-094 ось D: инструменты кода предлагаются только при флаге инстанса И
+                    # только в режиме `code`. Режим — не косметика: в обычном чате модель не
+                    # должна даже рассматривать правку файлов на машине человека.
+                    code_tools_enabled=(
+                        get_settings().code_tools_enabled
+                        and sess is not None
+                        and sess.assistant_mode == "code"
+                    ),
                 ),
                 "attachments": turn0_attachments,
                 "generation_mode": effective_generation_mode,

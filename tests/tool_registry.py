@@ -19,7 +19,12 @@ sets: set equality alone cannot see a DUPLICATED definition (the set collapses i
 
 from __future__ import annotations
 
-from app.chat.tools import ALL_TOOL_NAMES, SERVER_SIDE_TOOLS, TOOL_GENERATION_MODES
+from app.chat.tools import (
+    ALL_TOOL_NAMES,
+    CODE_TOOLS,
+    SERVER_SIDE_TOOLS,
+    TOOL_GENERATION_MODES,
+)
 
 # Tools gated by axis C (generation mode) — today only `quiz.generate` (ADR-064 §3).
 MODE_GATED_TOOL_NAMES: frozenset[str] = frozenset(TOOL_GENERATION_MODES)
@@ -30,7 +35,14 @@ MODE_GATED_TOOL_NAMES: frozenset[str] = frozenset(TOOL_GENERATION_MODES)
 # INCLUDES a mode used here (e.g. {"general", "study_learn"}) makes this derivation wrong, and the
 # tests using it will fail — deliberately: the expectation must then be reworked consciously,
 # not silently widened.
-TOOLS_OFFERED_IN_EVERY_MODE: frozenset[str] = frozenset(ALL_TOOL_NAMES) - MODE_GATED_TOOL_NAMES
+# Инструменты, закрытые осью D (ADR-094, `CODE_TOOLS_ENABLED`). Они правят файлы и git на машине
+# человека, поэтому на инстансе, где клиент их не исполняет, модели они не предлагаются вовсе:
+# иначе модель звала бы их впустую и ход оставался бы незавершённым.
+CODE_GATED_TOOL_NAMES: frozenset[str] = frozenset(CODE_TOOLS)
+
+TOOLS_OFFERED_IN_EVERY_MODE: frozenset[str] = (
+    frozenset(ALL_TOOL_NAMES) - MODE_GATED_TOOL_NAMES - CODE_GATED_TOOL_NAMES
+)
 
 # The same set under axis A «no project» (ADR-022): project-scoped `site.*` drop out; global
 # server-side tools (`time.now`) stay — «global» means «needs no project» (ADR-026 §3).

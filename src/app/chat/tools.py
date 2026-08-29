@@ -23,6 +23,20 @@ TOOL_FILES_READ = "files.read"
 TOOL_FILES_WRITE = "files.write"
 TOOL_FILES_LIST = "files.list"
 TOOL_FILES_MKDIR = "files.mkdir"
+# --- Инструменты работы с кодом (ADR-094) ---------------------------------------------------
+# Клиентские: бэкенд только ИНИЦИИРУЕТ вызов, исполняет его приложение на машине человека и
+# возвращает результат через POST /v1/chat/tool-result — тот же класс, что files.*/calendar.*.
+# Включаются флагом инстанса CODE_TOOLS_ENABLED и только в режиме `code`.
+TOOL_FILES_DELETE = "files.delete"
+TOOL_FILES_MOVE = "files.move"
+TOOL_FILES_SEARCH = "files.search"
+TOOL_FILES_PATCH = "files.patch"
+TOOL_GIT_STATUS = "git.status"
+TOOL_GIT_DIFF = "git.diff"
+TOOL_GIT_LOG = "git.log"
+TOOL_GIT_COMMIT = "git.commit"
+TOOL_GIT_BRANCH = "git.branch"
+TOOL_GIT_PUSH = "git.push"
 TOOL_CALENDAR_READ = "calendar.read"
 TOOL_CALENDAR_CREATE = "calendar.create_events"
 TOOL_REMINDERS_READ = "reminders.read"
@@ -149,6 +163,42 @@ ARGS_DEGRADE_TOOLS = frozenset(
     }
 )
 
+# Инструменты работы с кодом (ADR-094). Все клиентские.
+CODE_TOOLS = frozenset(
+    {
+        TOOL_FILES_DELETE,
+        TOOL_FILES_MOVE,
+        TOOL_FILES_SEARCH,
+        TOOL_FILES_PATCH,
+        TOOL_GIT_STATUS,
+        TOOL_GIT_DIFF,
+        TOOL_GIT_LOG,
+        TOOL_GIT_COMMIT,
+        TOOL_GIT_BRANCH,
+        TOOL_GIT_PUSH,
+    }
+)
+
+# Вызовы, которые приложение обязано ПОДТВЕРДИТЬ у человека перед исполнением. Признак уходит
+# клиенту полем `requiresConfirmation` в toolCall: список задаёт СЕРВЕР, чтобы приложение не
+# угадывало опасность по имени инструмента и не разошлось с бэкендом при добавлении нового.
+#
+# Чтение (files.search, git.status/diff/log) в набор НЕ входит: оно ничего не меняет, а диалог
+# на каждый просмотр файла сделал бы работу невыносимой и приучил бы нажимать «да» не глядя —
+# то есть обесценил бы подтверждение там, где оно действительно нужно.
+CONFIRM_TOOLS = frozenset(
+    {
+        TOOL_FILES_WRITE,
+        TOOL_FILES_MKDIR,
+        TOOL_FILES_DELETE,
+        TOOL_FILES_MOVE,
+        TOOL_FILES_PATCH,
+        TOOL_GIT_COMMIT,
+        TOOL_GIT_BRANCH,
+        TOOL_GIT_PUSH,
+    }
+)
+
 ALL_TOOL_NAMES = frozenset(
     {
         TOOL_FILES_READ,
@@ -159,6 +209,7 @@ ALL_TOOL_NAMES = frozenset(
         TOOL_CALENDAR_CREATE,
         TOOL_REMINDERS_READ,
         TOOL_REMINDERS_CREATE,
+        *CODE_TOOLS,
         *SERVER_SIDE_TOOLS,
         *GLOBAL_SERVER_SIDE_TOOLS,
     }
@@ -177,6 +228,18 @@ _DOMAIN_TO_ANTHROPIC: dict[str, str] = {
     TOOL_FILES_WRITE: "files_write",
     TOOL_FILES_LIST: "files_list",
     TOOL_FILES_MKDIR: "files_mkdir",
+    # ADR-094: тот же перевод точки в подчёркивание. Пропущенная здесь строка — молчаливый
+    # отказ: Anthropic отвергает точку в имени инструмента и отвечает 400, то есть 502 наружу.
+    TOOL_FILES_DELETE: "files_delete",
+    TOOL_FILES_MOVE: "files_move",
+    TOOL_FILES_SEARCH: "files_search",
+    TOOL_FILES_PATCH: "files_patch",
+    TOOL_GIT_STATUS: "git_status",
+    TOOL_GIT_DIFF: "git_diff",
+    TOOL_GIT_LOG: "git_log",
+    TOOL_GIT_COMMIT: "git_commit",
+    TOOL_GIT_BRANCH: "git_branch",
+    TOOL_GIT_PUSH: "git_push",
     TOOL_CALENDAR_READ: "calendar_read",
     TOOL_CALENDAR_CREATE: "calendar_create_events",
     TOOL_REMINDERS_READ: "reminders_read",
@@ -243,6 +306,13 @@ MUTATING_TOOLS = frozenset(
         # что у site.write_file. document.list/read только читают.
         TOOL_DOCUMENT_CREATE,
         TOOL_DOCUMENT_UPDATE,
+        # ADR-094: инструменты кода, меняющие машину человека или репозиторий.
+        TOOL_FILES_DELETE,
+        TOOL_FILES_MOVE,
+        TOOL_FILES_PATCH,
+        TOOL_GIT_COMMIT,
+        TOOL_GIT_BRANCH,
+        TOOL_GIT_PUSH,
     }
 )
 
@@ -287,6 +357,86 @@ class FilesListArgs(_PathModel):
 
 class FilesMkdirArgs(_PathModel):
     createIntermediates: bool
+
+
+# --- инструменты работы с кодом (ADR-094) ---
+class _CodePathModel(_StrictModel):
+    """Путь для инструментов кода: абсолютный и с `..` — допустимы.
+
+    ``files.read/write/list/mkdir`` наследуют ``_PathModel``, который запрещает `..`: они
+    работают в песочнице приложения. Инструменты кода живут по другому правилу — ограничение
+    каталогом снято владельцем осознанно (2026-08-28), потому что помощник по коду обязан
+    ходить по всему проекту. Ограждением здесь служит подтверждение человеком, а не проверка
+    строки: путь всё равно исполняет приложение, и оно спрашивает согласия перед изменением.
+    """
+
+    path: str = Field(min_length=1)
+
+
+class FilesDeleteArgs(_CodePathModel):
+    recursive: bool = False
+
+
+class FilesMoveArgs(_StrictModel):
+    source: str = Field(min_length=1)
+    destination: str = Field(min_length=1)
+    overwrite: bool = False
+
+
+class FilesSearchArgs(_CodePathModel):
+    query: str = Field(min_length=1)
+    isRegex: bool = False
+    caseSensitive: bool = False
+    maxResults: int = Field(default=50, ge=1, le=500)
+
+
+class FilesPatchArgs(_CodePathModel):
+    """Правка куском, а не перезаписью файла целиком.
+
+    Перезапись через ``files.write`` требует от модели точного знания всего файла и при
+    расхождении молча теряет чужие правки — тот же изъян, из-за которого документы чата
+    (ADR-090) сознательно не получили патч-семантику. Здесь наоборот: файл на машине человека
+    правят и другие руки, поэтому адресная заплатка безопаснее полной перезаписи.
+    """
+
+    patch: str = Field(min_length=1)
+
+
+class GitStatusArgs(_CodePathModel):
+    pass
+
+
+class GitDiffArgs(_CodePathModel):
+    staged: bool = False
+    pathspec: str | None = None
+
+
+class GitLogArgs(_CodePathModel):
+    limit: int = Field(default=20, ge=1, le=200)
+
+
+class GitCommitArgs(_CodePathModel):
+    message: str = Field(min_length=1)
+    addAll: bool = False
+
+
+class GitBranchArgs(_CodePathModel):
+    name: str = Field(min_length=1)
+    create: bool = False
+    checkout: bool = True
+
+
+class GitPushArgs(_CodePathModel):
+    """``force`` разрешён по решению владельца (2026-08-28).
+
+    Вынесен ОТДЕЛЬНЫМ булевым полем, а не флагом внутри строки, именно затем, чтобы приложение
+    могло показать его человеку в диалоге подтверждения: «отправить с перезаписью» и «отправить»
+    — разные по последствиям действия, и человек должен видеть, какое из них подтверждает.
+    """
+
+    remote: str = Field(default="origin", min_length=1)
+    branch: str | None = None
+    force: bool = False
 
 
 # --- calendar ---
@@ -589,6 +739,17 @@ _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_FILES_WRITE: FilesWriteArgs,
     TOOL_FILES_LIST: FilesListArgs,
     TOOL_FILES_MKDIR: FilesMkdirArgs,
+    # ADR-094
+    TOOL_FILES_DELETE: FilesDeleteArgs,
+    TOOL_FILES_MOVE: FilesMoveArgs,
+    TOOL_FILES_SEARCH: FilesSearchArgs,
+    TOOL_FILES_PATCH: FilesPatchArgs,
+    TOOL_GIT_STATUS: GitStatusArgs,
+    TOOL_GIT_DIFF: GitDiffArgs,
+    TOOL_GIT_LOG: GitLogArgs,
+    TOOL_GIT_COMMIT: GitCommitArgs,
+    TOOL_GIT_BRANCH: GitBranchArgs,
+    TOOL_GIT_PUSH: GitPushArgs,
     TOOL_CALENDAR_READ: CalendarReadArgs,
     TOOL_CALENDAR_CREATE: CalendarCreateArgs,
     TOOL_REMINDERS_READ: RemindersReadArgs,
@@ -617,6 +778,25 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     TOOL_FILES_WRITE: "Write a file on the user's device.",
     TOOL_FILES_LIST: "List files/directories on the user's device.",
     TOOL_FILES_MKDIR: "Create a directory on the user's device.",
+    TOOL_FILES_DELETE: "Delete a file or directory on the user's machine.",
+    TOOL_FILES_MOVE: "Move or rename a file or directory on the user's machine.",
+    TOOL_FILES_SEARCH: (
+        "Search file contents under a directory. Use this to locate code before reading it, "
+        "instead of guessing file paths."
+    ),
+    TOOL_FILES_PATCH: (
+        "Apply a unified diff to a file. Prefer this over rewriting a whole file: it changes "
+        "only the addressed lines and cannot silently drop edits made elsewhere."
+    ),
+    TOOL_GIT_STATUS: "Show git working-tree status of a repository.",
+    TOOL_GIT_DIFF: "Show a git diff (optionally staged, optionally scoped to a pathspec).",
+    TOOL_GIT_LOG: "Show recent git commits of a repository.",
+    TOOL_GIT_COMMIT: "Create a git commit in a repository.",
+    TOOL_GIT_BRANCH: "Create, switch, or inspect a git branch.",
+    TOOL_GIT_PUSH: (
+        "Push commits to a remote. Set force only when the user explicitly asked to overwrite "
+        "remote history."
+    ),
     TOOL_CALENDAR_READ: (
         "Read calendar events within a time range. 'start' and 'end' are ISO8601 datetime "
         "strings in local time without timezone offset, e.g. '2026-06-11T09:00:00'. For a "
@@ -810,6 +990,17 @@ def offered_tool_family(tool_name: str, *, disabled_families: frozenset[str]) ->
     return tool_family(tool_name) not in disabled_families
 
 
+def offered_code_tool(tool_name: str, *, code_tools_enabled: bool) -> bool:
+    """ADR-094: инструменты кода предлагаются модели только там, где оператор их включил.
+
+    Выключены по умолчанию НАМЕРЕННО. Они правят и удаляют файлы на машине человека и пишут в
+    его репозиторий — это уместно в помощнике по коду и неуместно в остальных двадцати семи
+    инстансах, где приложение таких вызовов не умеет исполнять и молча оставило бы ход
+    незавершённым.
+    """
+    return code_tools_enabled or tool_name not in CODE_TOOLS
+
+
 def offered_in_generation_mode(tool_name: str, generation_mode: str) -> bool:
     """Axis C predicate (ADR-064 §3): may ``tool_name`` be offered in ``generation_mode``?
 
@@ -909,7 +1100,8 @@ def tool_catalog(*, disabled_families: frozenset[str] = frozenset()) -> list[dic
     Single source of truth: iterates ``_ARGS_BY_TOOL`` (deterministic order). Each entry carries
     the dotted domain ``name`` (NOT the anthropic-underscore transport name), description,
     ``mutating`` (name in MUTATING_TOOLS), ``execution`` ("server" for SERVER_SIDE_TOOLS ∪
-    GLOBAL_SERVER_SIDE_TOOLS else "client", ADR-026 §2) and ``inputSchema`` (the args JSON Schema).
+    GLOBAL_SERVER_SIDE_TOOLS else "client", ADR-026 §2), ``inputSchema`` (the args JSON Schema)
+    and ``requiresConfirmation`` (name in CONFIRM_TOOLS, ADR-094).
     ``disabled_families`` (ADR-081) drops whole families on one instance; default empty = full
     registry (axes A/B/C still do not filter this catalog).
     """
@@ -928,6 +1120,11 @@ def tool_catalog(*, disabled_families: frozenset[str] = frozenset()) -> list[dic
                     else "client"
                 ),
                 "inputSchema": tool_input_schema(name),
+                # ADR-094: список опасных вызовов задаёт сервер. Клиент показывает диалог и
+                # «Всегда доверять» по этому признаку; вывести его из имени он не может — на
+                # следующем добавленном инструменте вывод разойдётся с бэкендом, и приложение
+                # исполнит без спроса то, что спрашивать полагалось.
+                "requiresConfirmation": name in CONFIRM_TOOLS,
             }
         )
     return catalog
@@ -940,8 +1137,11 @@ def _offered_to_model(
     generation_mode: str,
     include_media_chat_tools: bool,
     disabled_families: frozenset[str],
+    code_tools_enabled: bool = False,
 ) -> bool:
     if not include_server_side and name in SERVER_SIDE_TOOLS:
+        return False
+    if not offered_code_tool(name, code_tools_enabled=code_tools_enabled):
         return False
     if not offered_in_generation_mode(name, generation_mode):
         return False
@@ -956,6 +1156,7 @@ def anthropic_tool_definitions(
     generation_mode: str = "general",
     include_media_chat_tools: bool = True,
     disabled_families: frozenset[str] = frozenset(),
+    code_tools_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     """Tool definitions for the Anthropic messages API (input_schema per tool).
 
@@ -988,6 +1189,7 @@ def anthropic_tool_definitions(
             generation_mode=generation_mode,
             include_media_chat_tools=include_media_chat_tools,
             disabled_families=disabled_families,
+            code_tools_enabled=code_tools_enabled,
         ):
             continue
         definitions.append(
@@ -1008,6 +1210,7 @@ def neutral_tool_definitions(
     generation_mode: str = "general",
     include_media_chat_tools: bool = True,
     disabled_families: frozenset[str] = frozenset(),
+    code_tools_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     """Provider-neutral tool definitions (ADR-033 §4): ``{name(domain dotted), description,
     input_schema}``.
@@ -1029,6 +1232,7 @@ def neutral_tool_definitions(
             generation_mode=generation_mode,
             include_media_chat_tools=include_media_chat_tools,
             disabled_families=disabled_families,
+            code_tools_enabled=code_tools_enabled,
         ):
             continue
         definitions.append(
@@ -1078,6 +1282,7 @@ def openai_tool_definitions(
     generation_mode: str = "general",
     include_media_chat_tools: bool = True,
     disabled_families: frozenset[str] = frozenset(),
+    code_tools_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     """Tool definitions for the OpenAI Chat Completions API (ADR-033 §4).
 
@@ -1085,7 +1290,8 @@ def openai_tool_definitions(
     serializes each via ``openai_tool_function`` (the one OpenAI-wire wrapper). The
     ``include_server_side`` gate is identical to ``anthropic_tool_definitions`` (ADR-022 §A;
     ``GLOBAL_SERVER_SIDE_TOOLS`` never gated — ADR-026 §3), and so is the ``generation_mode``
-    axis-C gate (ADR-064 §3). ADR-072: ``include_media_chat_tools`` mirrors neutral defs.
+    axis-C gate (ADR-064 §3) and the ``code_tools_enabled`` axis-D gate (ADR-094 §3). ADR-072:
+    ``include_media_chat_tools`` mirrors neutral defs.
     """
     return [
         openai_tool_function(d)
@@ -1094,5 +1300,6 @@ def openai_tool_definitions(
             generation_mode=generation_mode,
             include_media_chat_tools=include_media_chat_tools,
             disabled_families=disabled_families,
+            code_tools_enabled=code_tools_enabled,
         )
     ]

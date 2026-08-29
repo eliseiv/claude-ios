@@ -456,6 +456,16 @@ class ToolCallSchema(StrictModel):
         description="Имя инструмента для исполнения на устройстве (например, `files.read`)."
     )
     args: dict[str, Any] = Field(description="Аргументы вызова инструмента.")
+    requiresConfirmation: bool = Field(
+        default=False,
+        description=(
+            "Нужно ли спросить подтверждение у пользователя ПЕРЕД исполнением. `true` для "
+            "вызовов, меняющих файлы или репозиторий (`files.write/mkdir/delete/move/patch`, "
+            "`git.commit/branch/push`). Список задаёт сервер: клиент не должен решать это сам "
+            "по имени инструмента, иначе при добавлении нового вызова он разойдётся с бэкендом. "
+            "Чтение (`files.read/list/search`, `git.status/diff/log`) — `false`."
+        ),
+    )
 
 
 class GenerationModeCapability(StrictModel):

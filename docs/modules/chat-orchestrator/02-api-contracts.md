@@ -393,6 +393,7 @@ Backend-level объявление режимов для UI-переключат
   server-side раундов — `MAX_SERVER_TOOL_ROUNDS` (дефолт 16) — общий для project-scoped и global server-side раундов.
 - **Гейтинг по наличию проекта ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)):** `site.*` (`SERVER_SIDE_TOOLS`) предлагаются Claude **только** когда у сессии есть `project_id` (создана с `projectId`). В «чистом чате» (`chat_sessions.project_id IS NULL`) `site.*` в tool-набор **не включаются** — Claude их не видит и не вызывает. **`time.now` (`GLOBAL_SERVER_SIDE_TOOLS`) под этот гейт НЕ подпадает** — предлагается всегда ([ADR-026 §3](../../adr/ADR-026-global-server-side-tools-and-time-now.md)). См. [03-architecture.md §Гейтинг tools](03-architecture.md#гейтинг-site-tools-по-наличию-проекта-adr-022).
 - **Гейтинг по режиму генерации (ось C, [ADR-064 §3](../../adr/ADR-064-study-learn-quiz-generation-mode.md)):** инструмент из `TOOL_GENERATION_MODES` предлагается **только** в перечисленных режимах. Гейт считается по **эффективному** режиму хода — тому же значению, которое уходит провайдеру и в биллинг. Legacy по умолчанию `general`; при `CHAT_LEGACY_WEB_SEARCH_ENABLED` — `research` ([ADR-082](../../adr/ADR-082-legacy-web-search.md)). `quiz.generate` только `study_learn`, поэтому на `/v1/chat/run` не предлагается. Оси A/B/C складываются по И — таблица «инструмент × оси» в [03-architecture.md §Оси гейтинга tool-набора](03-architecture.md#оси-гейтинга-tool-набора-adr-022--adr-026--adr-064).
+- **Гейтинг инструментов кода (ось D, [ADR-094 §3](../../adr/ADR-094-code-assistant-tools.md)):** инструменты из `CODE_TOOLS` (`files.search`/`patch`/`delete`/`move`, `git.*`) предлагаются модели, только когда флаг инстанса `CODE_TOOLS_ENABLED=true` **и** сессия в режиме `assistant_mode=code`. Дефолт — **выключено**. Причина не в осторожности, а в контракте tool-loop: инструмент, который модель позвала, а клиент исполнить не умеет, оставляет ход незавершённым — бэкенд ждёт `tool-result`, которого не будет. Поэтому флаг снимается инстанс за инстансом по мере готовности клиента ([Q-094-2](../../99-open-questions.md)). На каталог `GET /v1/tools` ось D, как и A/B/C, **не** влияет.
 
 ## `time.now` — server-side global tool ([ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md))
 Инструмент текущей даты/времени. Исполняет **backend** в tool-loop (без round-trip к iOS, как `site.*`), но **БЕЗ проекта** — доступен в любом ходе, включая основной flow чат-агрегатора ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)). Решает репорт «модель отвечает 2024 год»: системный промт статичен и не несёт даты, модель получает время только из результата `time.now`. Не мутирующий (нет `tool_mutation` audit). В `toolCalls[]` наружу не отдаётся (исполнен на бэке).
@@ -551,7 +552,7 @@ Backend только инициирует tool-call; исполняет клие
 ---
 
 ## GET /v1/tools — каталог инструментов ([ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md))
-Машиночитаемый каталог всех поддерживаемых backend tools (**17**, включая `time.now` [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md), `quiz.generate` [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md), media generate/ask_params [ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)/[ADR-070](../../adr/ADR-070-media-choices-wizard.md)). Источник — `src/app/chat/tools.py` (single source of truth: `_ARGS_BY_TOOL`, `MUTATING_TOOLS`, `SERVER_SIDE_TOOLS`, `GLOBAL_SERVER_SIDE_TOOLS`, `TOOL_GENERATION_MODES`, `anthropic_tool_definitions()`). Эндпоинт **не** параметризуется ни `assistantMode`, ни наличием проекта, ни `generationMode`. Оси A/B/C каталог не режут: `quiz.generate` в каталоге **всегда**, хотя модели предлагается только в `study_learn`. Исключение — per-instance denylist [ADR-081](../../adr/ADR-081-disabled-tool-families.md) (`CHAT_DISABLED_TOOL_FAMILIES`): на инстансе с заданным списком семейства (`files`/`calendar`/`reminders`/`site`) **отсутствуют** и в `GET /v1/tools`, и в offer-set модели. Пустой дефолт = полный реестр (все инстансы кроме явно настроенных).
+Машиночитаемый каталог всех поддерживаемых backend tools (**32**, включая `time.now` [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md), `quiz.generate` [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md), media generate/ask_params [ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)/[ADR-070](../../adr/ADR-070-media-choices-wizard.md)). Источник — `src/app/chat/tools.py` (single source of truth: `_ARGS_BY_TOOL`, `MUTATING_TOOLS`, `SERVER_SIDE_TOOLS`, `GLOBAL_SERVER_SIDE_TOOLS`, `TOOL_GENERATION_MODES`, `anthropic_tool_definitions()`). Эндпоинт **не** параметризуется ни `assistantMode`, ни наличием проекта, ни `generationMode`. Оси A/B/C каталог не режут: `quiz.generate` в каталоге **всегда**, хотя модели предлагается только в `study_learn`. Исключение — per-instance denylist [ADR-081](../../adr/ADR-081-disabled-tool-families.md) (`CHAT_DISABLED_TOOL_FAMILIES`): на инстансе с заданным списком семейства (`files`/`calendar`/`reminders`/`site`) **отсутствуют** и в `GET /v1/tools`, и в offer-set модели. Пустой дефолт = полный реестр (все инстансы кроме явно настроенных).
 
 ### Auth
 - **JWT-protected** (как все `/v1/*`, кроме `/v1/preview/*`): `Authorization: Bearer <JWT>` обязателен. Каталог не секретен, но единообразие gateway-auth и снижение анонимного API-surface — обоснование в [ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md). Клиент к этому моменту уже имеет JWT (получен через `/v1/auth/register`, [ADR-018](../../adr/ADR-018-embedded-auth-issuer.md)).
@@ -566,21 +567,26 @@ Backend только инициирует tool-call; исполняет клие
       "description": "Read a file from the user's device.",
       "mutating": false,
       "execution": "client",
-      "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }
+      "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] },
+      "requiresConfirmation": false
     },
     {
       "name": "site.write_file",
       "description": "Write or overwrite a file in the website project...",
       "mutating": true,
       "execution": "server",
-      "inputSchema": { "type": "object", "properties": { "...": {} } }
+      "inputSchema": { "type": "object", "properties": { "...": {} } },
+      "requiresConfirmation": true
     }
   ]
 }
 ```
 - `name` — **доменное** имя с точкой (как в публичном iOS-контракте), НЕ anthropic-underscore (`files_read` — деталь Anthropic-транспорта, BUG-3).
 - `description` — из `descriptions` в `anthropic_tool_definitions()`.
-- `mutating` — `name ∈ MUTATING_TOOLS` (требует audit при исполнении).
+- `mutating` — `name ∈ MUTATING_TOOLS` (требует audit при исполнении). **Не признак подтверждения** — для этого есть отдельное поле ниже.
+- **`requiresConfirmation` — спрашивать ли пользователя перед исполнением вызова (нормативно, [ADR-094 §4](../../adr/ADR-094-code-assistant-tools.md)).** `name ∈ CONFIRM_TOOLS`. Признак задаёт **бэкенд**, и клиенту запрещено выводить его из имени инструмента: вывод ломается сразу (`files.search` только читает, `git.branch` меняет состояние, оба начинаются с «безопасного» префикса), и приложение исполнило бы без диалога то, что спрашивать полагалось. То же поле дублируется в каждом `toolCall` ответа `/v1/chat/run` — каталог нужен, чтобы отрисовать «Всегда доверять» **до** первого вызова.
+  - **Читающие инструменты подтверждения не требуют намеренно** (`requiresConfirmation=false` при `mutating=false`): диалог на каждый просмотр файла приучает нажимать «да» не глядя и обесценивает единственный диалог, который важен — перед `git.push` с перезаписью истории.
+  - Множества `mutating` и `requiresConfirmation` **не совпадают**: `document.create`/`document.update` меняют данные на **бэкенде** (подтверждать нечего — пользователь уже попросил), а подтверждения требуют только вызовы, исполняемые на машине пользователя.
 - `execution` — `"server"` если `name ∈ SERVER_SIDE_TOOLS ∪ GLOBAL_SERVER_SIDE_TOOLS` (`site.*` — [ADR-011](../../adr/ADR-011-server-side-tools.md); `time.now` — [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md); исполняет backend); иначе `"client"` (исполняет iOS).
 <a id="inputschema--нормативный-формат"></a>
 - **`inputSchema` — JSON Schema аргументов инструмента (нормативно).** Строится из `model_json_schema()` модели args, из которой **вырезана модельная метаинформация**: корневые `title` (= имя Python-класса) и `description` (= docstring класса), а у инструментов с self-contained-схемой ([§`quiz.generate`](#quizgenerate--server-side-global-tool-режимный-adr-064)) — те же два ключа и у **инлайненных** определений вложенных моделей. **Сохраняются:** пофилдовые `title`/`description` (из `Field(...)`), `type`/`properties`/`items`/`required`/`enum`/`additionalProperties` и ограничивающие ключи (`minItems`/`maxItems`/`maxLength`/…). Формат **не** определяется как «сырой вывод `model_json_schema()`»: равенство сырому выводу нарушало бы инвариант ниже.
@@ -589,24 +595,41 @@ Backend только инициирует tool-call; исполняет клие
   - **Покрытие — тест-детектор, а не ревью глазами:** скан **всех** записей каталога и **всех** определений, уходящих провайдеру, регуляркой на перечисленные классы идентификаторов → ноль совпадений; плюс проверка, что пофилдовые описания при этом **не** пусты (вырезание не должно выкосить полезную часть). См. [09-testing.md](09-testing.md#unit--каталог-инструментов-и-утечка-внутренних-идентификаторов).
 - Порядок — детерминированный (по `_ARGS_BY_TOOL`).
 
-### Полный список (15)
-| name | execution | mutating |
-|---|---|---|
-| files.read | client | нет |
-| files.write | client | **да** |
-| files.list | client | нет |
-| files.mkdir | client | **да** |
-| calendar.read | client | нет |
-| calendar.create_events | client | **да** |
-| reminders.read | client | нет |
-| reminders.create | client | **да** |
-| site.write_file | **server** | **да** |
-| site.preview | **server** | нет |
-| site.list | **server** | нет |
-| site.read | **server** | нет |
-| site.delete | **server** | **да** |
-| time.now | **server** (global, [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)) | нет |
-| quiz.generate | **server** (global, режимный, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) | нет |
+### Полный список (32)
+| name | execution | mutating | confirm |
+|---|---|---|---|
+| files.read | client | нет | нет |
+| files.write | client | **да** | **да** |
+| files.list | client | нет | нет |
+| files.mkdir | client | **да** | **да** |
+| files.delete | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | **да** | **да** |
+| files.move | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | **да** | **да** |
+| files.search | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | нет | нет |
+| files.patch | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | **да** | **да** |
+| git.status | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | нет | нет |
+| git.diff | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | нет | нет |
+| git.log | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | нет | нет |
+| git.commit | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | **да** | **да** |
+| git.branch | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | **да** | **да** |
+| git.push | client ([ADR-094](../../adr/ADR-094-code-assistant-tools.md), ось D) | **да** | **да** |
+| calendar.read | client | нет | нет |
+| calendar.create_events | client | **да** | нет |
+| reminders.read | client | нет | нет |
+| reminders.create | client | **да** | нет |
+| site.write_file | **server** | **да** | нет |
+| site.preview | **server** | нет | нет |
+| site.list | **server** | нет | нет |
+| site.read | **server** | нет | нет |
+| site.delete | **server** | **да** | нет |
+| time.now | **server** (global, [ADR-026](../../adr/ADR-026-global-server-side-tools-and-time-now.md)) | нет | нет |
+| quiz.generate | **server** (global, режимный, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) | нет | нет |
+| media.generate_image | **server** (global, [ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)) | нет | нет |
+| media.generate_video | **server** (global, [ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)) | нет | нет |
+| media.ask_params | **server** (global, [ADR-068](../../adr/ADR-068-media-generate-chat-tools.md)) | нет | нет |
+| document.create | **server** (global, [ADR-090](../../adr/ADR-090-chat-documents.md)) | **да** | нет |
+| document.list | **server** (global, [ADR-090](../../adr/ADR-090-chat-documents.md)) | нет | нет |
+| document.read | **server** (global, [ADR-090](../../adr/ADR-090-chat-documents.md)) | нет | нет |
+| document.update | **server** (global, [ADR-090](../../adr/ADR-090-chat-documents.md)) | **да** | нет |
 
 > **Global server-side tools** (`time.now`, `quiz.generate`): `execution=server`, но в отличие от `site.*` **не требуют проекта**. Предложение модели внутри класса различается: `time.now` — всегда; `quiz.generate` — только при `generationMode=study_learn` (ось C). domain↔anthropic: `time.now ↔ time_now`, `quiz.generate ↔ quiz_generate`.
 

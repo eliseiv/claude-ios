@@ -188,6 +188,17 @@ def test_other_tools_unchanged_by_adr027() -> None:
         "document.list",
         "document.read",
         "document.update",
+        # ADR-094: инструменты кода — правки файлов и git, ось D `CODE_TOOLS_ENABLED`.
+        "files.delete",
+        "files.move",
+        "files.search",
+        "files.patch",
+        "git.status",
+        "git.diff",
+        "git.log",
+        "git.commit",
+        "git.branch",
+        "git.push",
     }
 
 

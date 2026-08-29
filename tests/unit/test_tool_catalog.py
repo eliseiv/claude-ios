@@ -19,6 +19,7 @@ from __future__ import annotations
 from app.chat.tools import (
     _ARGS_BY_TOOL,
     ALL_TOOL_NAMES,
+    CONFIRM_TOOLS,
     GLOBAL_SERVER_SIDE_TOOLS,
     MUTATING_TOOLS,
     SERVER_SIDE_TOOLS,
@@ -52,6 +53,17 @@ _EXPECTED_NAMES = {
     "document.list",
     "document.read",
     "document.update",
+    # ADR-094: инструменты кода — правки файлов и git, ось D `CODE_TOOLS_ENABLED`.
+    "files.delete",
+    "files.move",
+    "files.search",
+    "files.patch",
+    "git.status",
+    "git.diff",
+    "git.log",
+    "git.commit",
+    "git.branch",
+    "git.push",
 }
 
 
@@ -87,6 +99,13 @@ def test_mutating_flag_matches_mutating_tools() -> None:
         # ADR-090: create/update пишут на сервере; list/read — нет.
         "document.create",
         "document.update",
+        # ADR-094: правят файлы и историю git на машине человека.
+        "files.delete",
+        "files.move",
+        "files.patch",
+        "git.commit",
+        "git.branch",
+        "git.push",
     }
     assert expected_mutating == set(MUTATING_TOOLS)
     by_name = {t["name"]: t for t in tool_catalog()}
@@ -121,3 +140,19 @@ def test_every_tool_has_input_schema_and_description() -> None:
         # JSON Schema object shape (Pydantic emits type=object with properties for arg models).
         assert tool["inputSchema"].get("type") == "object"
         assert isinstance(tool["description"], str) and tool["description"]
+
+
+def test_confirmation_flag_matches_confirm_tools() -> None:
+    """Признак подтверждения задаёт сервер — клиент не выводит его из имени.
+
+    Если бы приложение решало «спрашивать ли» по префиксу имени, то первый же инструмент,
+    нарушающий догадку (`files.search` только читает, `git.branch` — меняет), исполнился бы
+    без диалога. Поэтому флаг едет в каталоге и сверяется здесь с реестром.
+    """
+    by_name = {t["name"]: t for t in tool_catalog()}
+    for name, tool in by_name.items():
+        assert isinstance(tool["requiresConfirmation"], bool)
+        assert tool["requiresConfirmation"] is (name in CONFIRM_TOOLS), name
+    # Читающие инструменты не должны приучать нажимать «да» не глядя.
+    assert by_name["files.search"]["requiresConfirmation"] is False
+    assert by_name["git.status"]["requiresConfirmation"] is False

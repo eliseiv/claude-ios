@@ -45,6 +45,17 @@ _EXPECTED_NAMES = {
     "document.list",
     "document.read",
     "document.update",
+    # ADR-094: инструменты кода — правки файлов и git, ось D `CODE_TOOLS_ENABLED`.
+    "files.delete",
+    "files.move",
+    "files.search",
+    "files.patch",
+    "git.status",
+    "git.diff",
+    "git.log",
+    "git.commit",
+    "git.branch",
+    "git.push",
 }
 _MUTATING = {
     "files.write",
@@ -55,6 +66,13 @@ _MUTATING = {
     "site.delete",
     "document.create",
     "document.update",
+    # ADR-094: правят файлы и историю git на машине человека.
+    "files.delete",
+    "files.move",
+    "files.patch",
+    "git.commit",
+    "git.branch",
+    "git.push",
 }
 
 
@@ -97,7 +115,16 @@ async def test_tools_descriptor_contract(
     for name, tool in by_name.items():
         # Domain dotted name, never the anthropic underscore wire form (BUG-3).
         assert "." in name and "_" not in name.split(".")[0]
-        assert set(tool.keys()) == {"name", "description", "mutating", "execution", "inputSchema"}
+        assert set(tool.keys()) == {
+            "name",
+            "description",
+            "mutating",
+            "execution",
+            "inputSchema",
+            # ADR-094: признак подтверждения приходит из каталога, чтобы клиент мог
+            # показать «Всегда доверять» до первого вызова.
+            "requiresConfirmation",
+        }
         assert tool["mutating"] is (name in _MUTATING), name
         # ADR-026/ADR-064: server-side == site.* (project-scoped) OR the global time.now /
         # quiz.generate; else client.

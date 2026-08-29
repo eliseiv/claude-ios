@@ -316,6 +316,12 @@ class Settings(BaseSettings):
     # (`files`, `calendar`, `reminders`, `site`). Empty (default) = offer the full set —
     # other instances keep files/calendar/reminders/site. Unknown tokens are ignored + WARNING.
     chat_disabled_tool_families_raw: str = Field(default="", alias="CHAT_DISABLED_TOOL_FAMILIES")
+    # ADR-094: инструменты работы с кодом (files.delete/move/search/patch, git.*) — помощник по
+    # коду в духе Codex. Выключены по умолчанию НАМЕРЕННО: они правят и удаляют файлы на машине
+    # человека и пишут в его репозиторий, а исполняет их КЛИЕНТ. На инстансе, чьё приложение
+    # таких вызовов не умеет, модель звала бы их впустую и ход оставался бы незавершённым.
+    # Включать только там, где клиент их реализовал.
+    code_tools_enabled: bool = Field(default=False, alias="CODE_TOOLS_ENABLED")
     # ADR-082: when True, legacy `/v1/chat/run` (and `/tool-result`) attach hosted web search
     # by treating the turn as `research` (price = CHAT_CREDIT_COST_RESEARCH). Default False —
     # every other instance keeps 1-credit general chat. Per-instance (orvianix / ravionet).
