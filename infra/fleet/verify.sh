@@ -47,3 +47,36 @@ while IFS=$'\t' read -r inst domain port primary; do
 done < instances.tsv
 printf '%.0s-' {1..82}; echo
 echo "основных отвечает: $ok, не отвечает: $bad"
+
+# --- Адрес клиента (инцидент 2026-08-30) --------------------------------------------------
+# Приложение доверяет X-Forwarded-For только от известного прокси. Пока маршрутизатора не было
+# в списке доверия, за клиента принимался ОН САМ: все пользователи инстанса схлопывались в один
+# адрес и делили лимиты «на IP». Наружу это выглядело как «сервис не работает» — velunixa отдавал
+# 429 на регистрацию всем подряд, потому что 74 тысячи человек делили порог в 10 запросов.
+#
+# Проверяются ДВЕ вещи, потому что порознь каждая врёт:
+#   конфигурация — доверяет ли инстанс туннельной сети (решает всегда, но это лишь настройка);
+#   поведение    — есть ли ЖИВОЙ ключ лимита на адресе маршрутизатора (прямая улика, но под
+#                  нулевым трафиком ключа нет и молчание ничего не доказывает).
+echo
+echo "АДРЕС КЛИЕНТА:"
+collapsed=0
+while IFS=$'	' read -r inst domain port primary; do
+  case "$inst" in ""|\#*) continue;; esac
+  [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
+  res="$(ssh -o BatchMode=yes -o ConnectTimeout=6 "app${primary}" "
+        cd /opt/$inst 2>/dev/null || exit 1
+        proj=\$(grep -m1 '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2-); proj=\${proj:-$inst}
+        trusted=\$(docker exec \${proj}-api-1 printenv TRUSTED_PROXY_IPS 2>/dev/null)
+        live=\$(docker exec \${proj}-redis-1 redis-cli --scan --pattern 'rl:*:10.10.0.3' 2>/dev/null | head -1)
+        case \"\$trusted\" in *10.10.0.*) cfg=ок;; *) cfg=НЕ_ДОВЕРЯЕТ;; esac
+        [ -n \"\$live\" ] && echo \"\$cfg СХЛОПНУТ\" || echo \"\$cfg —\"
+      " 2>/dev/null | tr -d '')"
+  cfg="${res%% *}"; live="${res##* }"
+  if [ "$cfg" != "ок" ] || [ "$live" = "СХЛОПНУТ" ]; then
+    collapsed=$((collapsed+1))
+    printf "  %-14s доверие: %-12s живой ключ маршрутизатора: %s
+" "$inst" "${cfg:-нет данных}" "$live"
+  fi
+done < instances.tsv
+[ "$collapsed" = "0" ] && echo "  все инстансы видят реальные адреса клиентов"
