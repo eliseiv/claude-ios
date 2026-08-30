@@ -48,7 +48,7 @@ from app.db import dispose_engine
 from app.errors import AppError
 from app.media_generation.reconciler import reconciler_loop
 from app.observability.context import get_request_id
-from app.observability.logging import configure_logging
+from app.observability.logging import configure_logging, log_event
 
 logger = logging.getLogger("app.main")
 
@@ -270,6 +270,23 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Ответ клиенту НЕ меняется: он намеренно безлик, чтобы не раскрывать форму схемы.
+        # Но раньше подробности не попадали и в лог — `exc.errors()` выбрасывался целиком, и
+        # какое поле не прошло, не видел НИКТО. Отсюда тупик поддержки: разработчик получает
+        # «request validation failed» и не может двинуться дальше, а сервер знает ответ и молчит.
+        #
+        # Логируются ТОЛЬКО путь до поля (`loc`) и тип ошибки (`type`). Значения (`input`) и
+        # текст (`msg`, он цитирует значение) отброшены намеренно: сюда приходят подписанные
+        # StoreKit-транзакции и тела с вложениями, попадание которых в лог недопустимо.
+        log_event(
+            logger,
+            logging.WARNING,
+            "request_validation_failed",
+            fields=[
+                {"loc": ".".join(str(x) for x in e.get("loc", ())), "type": e.get("type")}
+                for e in exc.errors()[:20]
+            ],
+        )
         return _error_response(422, "validation_error", "request validation failed")
 
     @app.exception_handler(Exception)
