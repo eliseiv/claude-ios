@@ -243,8 +243,10 @@ _CODE_TOOLS_INSTRUCTION = (
     "you addressed and never discard edits made elsewhere. "
     # ADR-094: набросок вместо заплатки — не редкость, а то, что модель выдаёт ПО УМОЛЧАНИЮ,
     # если формат не потребовать явно. Прод 2026-08-31: 8 вызовов из 8 отвергнуты `patch(1)`.
-    "A files.patch diff is applied by patch(1): count the lines and write real hunk headers like "
-    "'@@ -12,7 +12,8 @@' with at least three unchanged context lines around each change. "
+    "A files.patch diff is applied by patch(1): write real hunk headers like '@@ -12,7 +12,8 @@' "
+    "and quote at least three unchanged context lines around each change, copied verbatim from "
+    "the file you just read. The line numbers need not be exact — the hunk is located by its "
+    "context — so never skip the header, and never spend the turn counting lines. "
     "Inspect the repository with git.status and git.diff before committing, and write commit "
     "messages that say WHY the change was made, not what the diff already shows. "
     "Push only when the user asked, and set force only when they explicitly asked to overwrite "

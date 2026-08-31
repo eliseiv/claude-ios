@@ -67,3 +67,15 @@ def test_bad_patch_does_not_kill_the_turn() -> None:
     а модель — без возможности переслать заплатку. Здесь она получает отказ в том же ходе.
     """
     assert TOOL_FILES_PATCH in ARGS_DEGRADE_TOOLS
+
+
+def test_hint_does_not_send_the_model_counting_lines() -> None:
+    """Точность номеров не требуется — и подсказка обязана это сказать.
+
+    Проверено на GNU patch: кусок с заголовком `@@ -40,3 +40,3 @@` применился к строке 5
+    («Hunk #1 succeeded at 5, offset -35 lines») — место находится по КОНТЕКСТУ. Если не сказать
+    этого прямо, модель тратит ход на пересчёт строк и всё равно ошибается; при этом ровно те
+    усилия нужны в другом месте — в дословном цитировании соседних строк.
+    """
+    assert "need NOT be exact" in PATCH_FORMAT_HINT
+    assert "context" in PATCH_FORMAT_HINT.lower()

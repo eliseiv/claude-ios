@@ -408,7 +408,9 @@ _HUNK_HEADER_RE = re.compile(r"(?m)^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
 PATCH_FORMAT_HINT = (
     "patch must be a unified diff with a real hunk header carrying line numbers, "
     "for example '@@ -12,7 +12,8 @@'. A bare '@@' is rejected by patch(1). "
-    "Include at least three unchanged context lines around every change, "
+    "The numbers need NOT be exact: patch(1) locates the hunk by its CONTEXT lines and reports "
+    "an offset, so spend your effort on quoting the surrounding lines verbatim rather than on "
+    "counting. Include at least three unchanged context lines around every change, "
     "prefix unchanged lines with a space, removals with '-' and additions with '+'."
 )
 
@@ -834,9 +836,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Apply a unified diff to a file. Prefer this over rewriting a whole file: it changes "
         "only the addressed lines and cannot silently drop edits made elsewhere. "
         "The diff is fed to patch(1), so EVERY hunk header must carry line numbers, as in "
-        "'@@ -12,7 +12,8 @@'. A bare '@@' is rejected and the edit does not happen. "
-        "Keep at least three unchanged context lines around each change and prefix them with a "
-        "space; '---'/'+++' file headers are optional because the path is a separate argument."
+        "'@@ -12,7 +12,8 @@'. A bare '@@' is rejected and the edit does not happen. The numbers "
+        "need not be exact — patch(1) finds the hunk by its context lines — so quote at least "
+        "three unchanged lines around each change verbatim and prefix them with a space. "
+        "'---'/'+++' file headers are optional because the path is a separate argument."
     ),
     TOOL_GIT_STATUS: "Show git working-tree status of a repository.",
     TOOL_GIT_DIFF: "Show a git diff (optionally staged, optionally scoped to a pathspec).",
