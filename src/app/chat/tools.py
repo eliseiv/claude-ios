@@ -14,6 +14,7 @@ site.write_file, site.delete) require an audit record. Args/result are strictly 
 from __future__ import annotations
 
 import copy
+import re
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -160,6 +161,13 @@ ARGS_DEGRADE_TOOLS = frozenset(
         TOOL_DOCUMENT_LIST,
         TOOL_DOCUMENT_READ,
         TOOL_DOCUMENT_UPDATE,
+        # ADR-094: форму unified diff не гарантирует ни один провайдер — это ровно тот случай,
+        # для которого ветка и заведена. Прод 2026-08-31 (`fanappsnew`): 8 вызовов из 8 дошли до
+        # клиента с наброском вместо заплатки, `patch(1)` их отверг, и модель, увидев отказ
+        # ИСПОЛНЕНИЯ, переставала пытаться и диктовала правку словами. Отбраковка на сервере
+        # возвращает модели подсказку о формате в ТОМ ЖЕ ходе — она переписывает заплатку сама,
+        # и до машины человека негодный diff не доезжает вовсе.
+        TOOL_FILES_PATCH,
     }
 )
 
@@ -390,6 +398,21 @@ class FilesSearchArgs(_CodePathModel):
     maxResults: int = Field(default=50, ge=1, le=500)
 
 
+# Заголовок куска unified diff: `@@ -12,7 +12,8 @@` (счётчик строк необязателен: `@@ -12 +12 @@`
+# — валидный кусок в одну строку). Проверено на GNU patch: без диапазонов вход отвергается
+# целиком, с ними — принимается даже без заголовков файла.
+_HUNK_HEADER_RE = re.compile(r"(?m)^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
+
+# Подсказка уходит МОДЕЛИ в ошибке инструмента, поэтому написана как указание к действию, а не
+# как диагноз: получив её, модель обязана переслать заплатку заново в том же ходе.
+PATCH_FORMAT_HINT = (
+    "patch must be a unified diff with a real hunk header carrying line numbers, "
+    "for example '@@ -12,7 +12,8 @@'. A bare '@@' is rejected by patch(1). "
+    "Include at least three unchanged context lines around every change, "
+    "prefix unchanged lines with a space, removals with '-' and additions with '+'."
+)
+
+
 class FilesPatchArgs(_CodePathModel):
     """Правка куском, а не перезаписью файла целиком.
 
@@ -400,6 +423,26 @@ class FilesPatchArgs(_CodePathModel):
     """
 
     patch: str = Field(min_length=1)
+
+    @field_validator("patch")
+    @classmethod
+    def _must_be_a_real_unified_diff(cls, v: str) -> str:
+        """Заплатка обязана нести заголовок куска с ЧИСЛОВЫМИ диапазонами.
+
+        Прод 2026-08-31, `fanappsnew`: восемь вызовов из восьми провалились. Модель выдавала
+        человекочитаемый набросок — `@@` без диапазонов и без строк контекста, — а клиент
+        отдаёт аргумент системному `patch(1)`, который на таком входе отвечает «I can't seem to
+        find a patch in there anywhere». Пользователь видел «техническая ошибка при применении
+        патча», после чего модель сдавалась и диктовала правку словами.
+
+        Требование выведено ИЗ ПОВЕДЕНИЯ утилиты, а не из общего описания формата: проверено,
+        что `patch` принимает кусок БЕЗ заголовков `---`/`+++` (путь клиент передаёт отдельным
+        аргументом), но отвергает заголовок куска без диапазонов. Поэтому обязателен ровно
+        минимум, который работает, — иначе запрет отсекал бы годные заплатки.
+        """
+        if not _HUNK_HEADER_RE.search(v):
+            raise ValueError(PATCH_FORMAT_HINT)
+        return v
 
 
 class GitStatusArgs(_CodePathModel):
@@ -571,6 +614,9 @@ QUIZ_EXPLANATION_MAX_LENGTH = 2000
 # §5). All-or-nothing: ONE code for the whole pool — partial acceptance (dropping the bad question)
 # is forbidden, it would silently shrink the pool and deprive the model of feedback.
 QUIZ_INVALID_ERROR_CODE = "invalid_quiz"
+# ADR-094: свой код, а не общий media-шный. Модель по нему понимает, ЧТО именно переделать —
+# переслать заплатку в правильном формате, а не переспрашивать пользователя.
+PATCH_INVALID_ERROR_CODE = "invalid_patch"
 # Content-FREE constraint reminder appended to the degrade message so the model can fix the pool
 # without the message ever carrying quiz text (ADR-064 §5).
 QUIZ_CONSTRAINTS_HINT = (
@@ -786,7 +832,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     TOOL_FILES_PATCH: (
         "Apply a unified diff to a file. Prefer this over rewriting a whole file: it changes "
-        "only the addressed lines and cannot silently drop edits made elsewhere."
+        "only the addressed lines and cannot silently drop edits made elsewhere. "
+        "The diff is fed to patch(1), so EVERY hunk header must carry line numbers, as in "
+        "'@@ -12,7 +12,8 @@'. A bare '@@' is rejected and the edit does not happen. "
+        "Keep at least three unchanged context lines around each change and prefix them with a "
+        "space; '---'/'+++' file headers are optional because the path is a separate argument."
     ),
     TOOL_GIT_STATUS: "Show git working-tree status of a repository.",
     TOOL_GIT_DIFF: "Show a git diff (optionally staged, optionally scoped to a pathspec).",

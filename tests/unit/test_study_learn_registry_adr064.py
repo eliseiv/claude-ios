@@ -35,6 +35,7 @@ from app.chat.tools import (
     TOOL_DOCUMENT_LIST,
     TOOL_DOCUMENT_READ,
     TOOL_DOCUMENT_UPDATE,
+    TOOL_FILES_PATCH,
     TOOL_GENERATION_MODES,
     TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
@@ -214,6 +215,9 @@ def test_registries_are_disjoint_and_within_the_tool_namespace() -> None:
         TOOL_DOCUMENT_LIST,
         TOOL_DOCUMENT_READ,
         TOOL_DOCUMENT_UPDATE,
+        # ADR-094: форму unified diff не гарантирует ни один провайдер. Прод 2026-08-31: 8 из 8
+        # заплаток ушли клиенту наброском, `patch(1)` их отверг, и модель бросала правку.
+        TOOL_FILES_PATCH,
     }
 
 

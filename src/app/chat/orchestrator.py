@@ -63,6 +63,8 @@ from app.chat.tools import (
     GLOBAL_SERVER_SIDE_TOOLS,
     MEDIA_CHAT_TOOLS,
     MUTATING_TOOLS,
+    PATCH_FORMAT_HINT,
+    PATCH_INVALID_ERROR_CODE,
     QUIZ_CONSTRAINTS_HINT,
     QUIZ_INVALID_ERROR_CODE,
     SERVER_SIDE_TOOLS,
@@ -70,6 +72,7 @@ from app.chat.tools import (
     TOOL_DOCUMENT_LIST,
     TOOL_DOCUMENT_READ,
     TOOL_DOCUMENT_UPDATE,
+    TOOL_FILES_PATCH,
     TOOL_GENERATION_MODES,
     TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
@@ -238,6 +241,10 @@ _CODE_TOOLS_INSTRUCTION = (
     "When working on code: locate files with files.search before assuming paths, read a file "
     "before changing it, and prefer files.patch over files.write so you change only the lines "
     "you addressed and never discard edits made elsewhere. "
+    # ADR-094: набросок вместо заплатки — не редкость, а то, что модель выдаёт ПО УМОЛЧАНИЮ,
+    # если формат не потребовать явно. Прод 2026-08-31: 8 вызовов из 8 отвергнуты `patch(1)`.
+    "A files.patch diff is applied by patch(1): count the lines and write real hunk headers like "
+    "'@@ -12,7 +12,8 @@' with at least three unchanged context lines around each change. "
     "Inspect the repository with git.status and git.diff before committing, and write commit "
     "messages that say WHY the change was made, not what the diff already shows. "
     "Push only when the user asked, and set force only when they explicitly asked to overwrite "
@@ -2873,6 +2880,12 @@ class ChatOrchestrator:
                 if tool_name == TOOL_QUIZ_GENERATE:
                     degrade_code = QUIZ_INVALID_ERROR_CODE
                     degrade_msg = f"{content_free_args_error(exc)}; {QUIZ_CONSTRAINTS_HINT}"
+                elif tool_name == TOOL_FILES_PATCH:
+                    # ADR-094: подсказка о формате — часть отказа, иначе модель видит «неверные
+                    # аргументы» и не знает, чем они неверны. Сообщение content-free: str(exc)
+                    # у pydantic цитирует САМ diff, то есть код с машины пользователя.
+                    degrade_code = PATCH_INVALID_ERROR_CODE
+                    degrade_msg = f"{content_free_args_error(exc)}; {PATCH_FORMAT_HINT}"
                 elif tool_name in _DOCUMENT_TOOL_NAMES:
                     # Свой код, а не media-шный: модель по нему понимает, ЧТО переспросить.
                     degrade_code = DOCUMENT_INVALID_ERROR_CODE
