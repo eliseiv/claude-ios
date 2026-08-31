@@ -40,12 +40,11 @@ webmoria.shop           webmoria      B
 zenquelo.shop           zenquelo      B
 ------------------------------------------------------------
 Домен avelyra взят из его .env: avelyra.shop принадлежит чужому хостингу.
-
 ПРОСТОЙ СПИСОК:
-
 appbackend.shop
 artolixo.shop
 avelyraweb.shop
+belunexa.shop
 benovalo.shop
 broadnova.shop
 codecarts.shop
@@ -54,6 +53,7 @@ devsupplyr.shop
 elvarixa.shop
 fanappsnew.shop
 favorappbek.shop
+joraliqo.shop
 livonexa.shop
 lumirexa.shop
 lunexoro.shop
@@ -69,6 +69,7 @@ qoravena.shop
 qorimelo.shop
 ravelumi.shop
 ravionet.shop
+reluniqo.shop
 selquro.shop
 stackstores.shop
 taluneri.shop
