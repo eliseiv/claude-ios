@@ -79,7 +79,12 @@ async def list_token_products(
     data = await client.list_products()
     if data:
         token_products = settings.token_products()
-        live = [p for p in (_from_broadapps(x, token_products) for x in data) if p is not None]
+        minor = settings.token_products_price_minor_units
+        live = [
+            p
+            for p in (_from_broadapps(x, token_products, minor_units=minor) for x in data)
+            if p is not None
+        ]
         if live:
             return TokenProductsResponse(products=live)
     # 2) Fallback: static PRODUCTS_CATALOG (skip items that fail schema validation).
@@ -102,11 +107,20 @@ async def list_token_products(
     )
 
 
-def _from_broadapps(item: Any, token_products: dict[str, int]) -> TokenProduct | None:
+def _from_broadapps(
+    item: Any, token_products: dict[str, int], *, minor_units: bool = False
+) -> TokenProduct | None:
     """Map one broadapps product dict to a TokenProduct; skip inactive / malformed items.
 
-    price = price_amount with kopecks dropped, whole rubles ("699.00" -> 699). credits come from
-    the operator TOKEN_PRODUCTS map for token packs; subscriptions carry null credits.
+    ``minor_units=False`` (историческое поведение): price = price_amount с ОТБРОШЕННЫМИ копейками,
+    целые рубли ("699.00" -> 699). ``minor_units=True`` — копейки, как и заявляет схема поля
+    ("напр. 699 = 6.99"): "699.00" -> 69900, "599.50" -> 59950.
+
+    Почему это флаг, а не безусловное исправление: поле годами отдавало рубли, и приложения,
+    которые НЕ делят на 100, показывают верную цену именно на текущем поведении. Включение флага
+    у них сделало бы цену стократной. Переход поинстансный, по мере готовности клиента.
+
+    credits приходят из операторской карты TOKEN_PRODUCTS для пакетов; у подписок — null.
     """
     if not isinstance(item, dict):
         return None
@@ -120,7 +134,9 @@ def _from_broadapps(item: Any, token_products: dict[str, int]) -> TokenProduct |
     amount = item.get("price_amount")
     if isinstance(amount, str | int | float):
         try:
-            price = int(float(amount))  # drop kopecks: "699.00" -> 699
+            # round(), а не int(): int(6.9899999 * 100) = 698 — двоичное представление
+            # десятичной дроби чуть меньше точного значения, и цена молча теряет копейку.
+            price = round(float(amount) * 100) if minor_units else int(float(amount))
         except (TypeError, ValueError):
             price = None
     period = item.get("subscription_interval_unit")

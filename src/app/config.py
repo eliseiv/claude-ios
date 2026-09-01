@@ -303,6 +303,19 @@ class Settings(BaseSettings):
     # TOKEN_PRODUCTS-derived {productId, credits} list. Not a secret.
     products_catalog_raw: str = Field(default="[]", alias="PRODUCTS_CATALOG")
 
+    # Отдавать ли `price` в GET /v1/tokens/products в МИНОРНЫХ единицах (копейках), как заявляет
+    # схема поля («напр. 699 = 6.99»). Ветка broadapps исторически кладёт туда ЦЕЛЫЕ РУБЛИ,
+    # отбрасывая копейки, — то есть нарушает собственный контракт. Приложение, которое делит на
+    # 100 по контракту, показывает цену в сто раз меньше: недельная подписка за 599 ₽ выглядит
+    # как 5,99 ₽ (прод qoravena, 2026-09-01).
+    #
+    # Дефолт False НАМЕРЕННО: на остальных инстансах цены исторически брались из StoreKit, а это
+    # поле было справочным, и их приложения на 100 не делят. Включи флаг там — и они покажут
+    # цену в сто раз больше. Поэтому переход поинстансный, по мере готовности клиента.
+    token_products_price_minor_units: bool = Field(
+        default=False, alias="TOKEN_PRODUCTS_PRICE_MINOR_UNITS"
+    )
+
     # --- Image/video generation via fal.ai (ADR-060, media-generation/03) ---
     # SECRET: the fal API key, presented upstream as `Authorization: Key <value>`. Empty (default)
     # => the whole /v1/media/* surface answers 503 media_generation_not_configured, so the feature

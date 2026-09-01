@@ -41,7 +41,13 @@ class TokenProduct(StrictModel):
         default=None, description="Период подписки (`week`/`year`/…); `null` для токенов."
     )
     price: int | None = Field(
-        default=None, description="Цена в минорных единицах (напр. `699` = 6.99), статична."
+        default=None,
+        description=(
+            "Цена, статична. Единицы зависят от настройки инстанса "
+            "`TOKEN_PRODUCTS_PRICE_MINOR_UNITS`: при `true` — минорные (`69900` = 699.00), "
+            "при `false` (по умолчанию) — целые единицы валюты с отброшенными копейками (`699`). "
+            "Клиенту следует брать единицы из документации своего инстанса, а не предполагать."
+        ),
     )
     currency: str | None = Field(default=None, description="Валюта цены (напр. `RUB`).")
     credits: int | None = Field(
