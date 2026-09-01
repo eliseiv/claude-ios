@@ -72,6 +72,22 @@ new)
   setvar API_HOST_PORT "$API_PORT"
   setvar PG_HOST_PORT "$PG_PORT"
   setvar GUNICORN_WORKERS 2
+  # --- Эксплуатационная база флота -------------------------------------------------------
+  # `.env.prod.example` описывает ПРОИЗВОДСТВЕННУЮ конфигурацию, и правильно делает: в ней
+  # StoreKit боевой, документация закрыта. Флот же пока живёт в другом режиме — приложения на
+  # ревью, поэтому песочница и открытая документация. Раньше эта разница нигде не была записана,
+  # и каждый новый инстанс рождался с умолчаниями шаблона, молча отличаясь от всех живых.
+  # Так и вышло 2026-09-01: три новых инстанса отдавали 404 на /docs, потому что DOCS_ENABLED
+  # остался false. Инстанс при этом «работал» — health отвечал, — и расхождение было не видно,
+  # пока в него не ткнулись руками.
+  # Значения ниже — то, что ФАКТИЧЕСКИ работает на флоте. Возвращать к производственным нужно
+  # осознанно и вместе с корневым сертификатом Apple (07-deployment.md §Prod-readiness).
+  setvar DOCS_ENABLED true
+  setvar APPSTORE_ENVIRONMENT sandbox
+  setvar APPSTORE_ROOT_CERT_DIR /run/secrets/appstore_root_certs
+  setvar STOREKIT_TEST_MODE true
+  setvar STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION true
+  setvar PRESETS_DEFAULT_LOCALE en
   mkdir -p .secrets && chmod 700 .secrets
   if [ ! -f .secrets/jwt_private.pem ]; then
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out .secrets/jwt_private.pem 2>/dev/null
