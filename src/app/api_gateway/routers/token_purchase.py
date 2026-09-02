@@ -121,6 +121,7 @@ def _from_broadapps(
     у них сделало бы цену стократной. Переход поинстансный, по мере готовности клиента.
 
     credits приходят из операторской карты TOKEN_PRODUCTS для пакетов; у подписок — null.
+    ``isSpecialOffer`` — флаг `is_special_offer` поставщика; отсутствует или не булево => False.
     """
     if not isinstance(item, dict):
         return None
@@ -139,6 +140,10 @@ def _from_broadapps(
             price = round(float(amount) * 100) if minor_units else int(float(amount))
         except (TypeError, ValueError):
             price = None
+    # Флаг спецпредложения. Читается СТРОГО как булево: у поставщика это `true`/`false`, и
+    # трактовать «непустую строку» как истину нельзя — тогда, например, "false" из ошибочно
+    # сериализованного ответа включило бы предложение вместо того, чтобы его выключить.
+    special = item.get("is_special_offer")
     period = item.get("subscription_interval_unit")
     currency = item.get("price_currency")
     name = item.get("name")
@@ -150,4 +155,5 @@ def _from_broadapps(
         price=price,
         currency=currency if isinstance(currency, str) else None,
         credits=None if is_sub else token_products.get(code),
+        isSpecialOffer=special is True,
     )

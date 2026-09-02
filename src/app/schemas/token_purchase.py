@@ -53,6 +53,14 @@ class TokenProduct(StrictModel):
     credits: int | None = Field(
         default=None, description="Кредиты за пакет токенов; `null` для подписки."
     )
+    isSpecialOffer: bool = Field(
+        default=False,
+        description=(
+            "Помечен ли продукт как специальное предложение. Источник — флаг `is_special_offer` "
+            "рублёвого каталога; там, где такого каталога нет, всегда `false`. Значение "
+            "отображательное: на начисление кредитов и на цену оно не влияет."
+        ),
+    )
 
 
 class TokenProductsResponse(StrictModel):

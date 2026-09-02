@@ -842,18 +842,47 @@ Steps-view — агрегированные шаги одного message-шаг
 **Коды:** `200`; `401` (нет/невалидный JWT); `403` — два случая: `code=subscription_required` (**нет активной подписки**, [Q-015-1](99-open-questions.md) вариант B) или `code=forbidden` (`userId ≠ sub`); `422` (невалидная/поддельная транзакция — кредиты не начисляются; либо неизвестный `productId` вне `TOKEN_PRODUCTS`); `429` (rate limit); `502/5xx` (ошибка App Store API / внутренняя). Примечание: `403 subscription_required` — это error-ответ операции пополнения, **не** `200+blocked` (правило [ADR-004](adr/ADR-004-blocked-http-200.md) действует только для эндпоинтов генерации/политики).
 
 ### GET /v1/tokens/products
-Каталог доступных пакетов токенов (`productId → credits`). Цены отображает клиент из StoreKit; backend отдаёт только число кредитов на пакет.
+Каталог продуктов: пакеты токенов и подписки.
 
-**Response (200):**
+**Источник ответа выбирается в таком порядке:**
+
+1. **Живой каталог рублёвой оплаты** (broadapps), если на инстансе заданы `CLOUDPAYMENTS_APP_ID`
+   и `CLOUDPAYMENTS_API_TOKEN`. Отсюда приходят `title`, `price`, `currency`, `kind`, `period` и
+   `isSpecialOffer`; `credits` подставляются из нашей карты `TOKEN_PRODUCTS` (поставщик про
+   кредиты не знает), у подписок — `null`.
+2. **Статический `PRODUCTS_CATALOG`**, если задан.
+3. **Карта `TOKEN_PRODUCTS`** — только `productId` и `credits`, без цен.
+
+То есть на инстансе без рублёвой оплаты цен в ответе нет, и это не отказ: там цены берёт клиент
+из StoreKit.
+
+**Response (200) — вариант с рублёвым каталогом:**
 ```json
 { "products": [
-    { "productId": "tokens_1500", "credits": 1500 },
-    { "productId": "tokens_600",  "credits": 600 },
-    { "productId": "tokens_250",  "credits": 250 },
-    { "productId": "tokens_100",  "credits": 100 }
+    { "productId": "week_6.99_nottrial", "title": "Неделя", "kind": "subscription",
+      "period": "week", "price": 599, "currency": "RUB", "credits": null,
+      "isSpecialOffer": false },
+    { "productId": "1000_Tokens_59.99", "title": "1000 токенов", "kind": "tokens",
+      "period": null, "price": 5990, "currency": "RUB", "credits": 1000,
+      "isSpecialOffer": true }
 ] }
 ```
-Источник — server-side `TOKEN_PRODUCTS` (env/config, [07-deployment.md](07-deployment.md)). Состав/числа конфигурируемы и должны совпадать с заведёнными в App Store Connect IAP.
+
+**Response (200) — вариант без рублёвого каталога:**
+```json
+{ "products": [ { "productId": "100_tokens_9.99", "credits": 100, "isSpecialOffer": false } ] }
+```
+
+- **`isSpecialOffer`** — помечен ли продукт как специальное предложение (флаг `is_special_offer`
+  рублёвого каталога). Поле присутствует **всегда**: там, где такого каталога нет, оно `false`,
+  поэтому клиенту не нужно отличать «нет поля» от «не предложение». Значение отображательное —
+  ни на цену, ни на начисление кредитов оно не влияет.
+- **`credits`** — сколько кредитов даёт пакет. Источник — только server-side `TOKEN_PRODUCTS`
+  ([07-deployment.md](07-deployment.md)); из тела запроса величина не берётся никогда.
+  `credits: null` у пакета означает, что продукт есть у поставщика, но **не заведён у нас**, и
+  покупка будет отвергнута как `unknown token product`.
+- **`price`** — единицы зависят от `TOKEN_PRODUCTS_PRICE_MINOR_UNITS`: при `true` минорные
+  (`59900` = 599.00), при `false` (по умолчанию) целые единицы валюты с отброшенными копейками.
 
 **Коды:** `200`; `401`; `429`; `5xx`.
 
