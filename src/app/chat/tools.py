@@ -921,8 +921,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     TOOL_MEDIA_ASK_PARAMS: (
         "Present tappable choices so the user picks image/video parameters (model, resolution, "
-        "duration, …) before generation. Call this when the user wants a photo or video and has "
-        "not already chosen those parameters. Pass kind ('image'|'video') and the prompt to use "
+        "duration, …) before generation. Call this when the user asks you to CREATE a photo or "
+        "video (generate, draw, make, edit) and has not already chosen those parameters. A "
+        "request to SHOW, FIND or look at existing media is NOT such a request: answer it in "
+        "plain text and ask first, because this tool opens a PAID flow. "
+        "Pass kind ('image'|'video') and the prompt to use "
         "(never repeat that prompt in your visible reply). "
         "If the user attached a photo on THIS message, the server uses it as the image-to-image "
         "reference automatically — do not invent URLs. "

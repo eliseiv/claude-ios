@@ -156,10 +156,16 @@ _TIME_NOW_INSTRUCTION = (
 # ADR-068 / ADR-070: prefer media.ask_params (catalog-backed taps) when model/quality unclear;
 # media.generate_* only when parameters are already known. STATIC — no catalog dump.
 _MEDIA_GENERATE_INSTRUCTION = (
-    "When the user asks you to generate a photo or video and has not already chosen the model "
-    "and quality (and duration for video), call media.ask_params once with kind and prompt, then "
-    "wait — the app shows tappable choices. Do not invent model ids or resolutions. Only call "
-    "media.generate_image or media.generate_video when those parameters are already known. "
+    "When the user asks you to CREATE a photo or video — generate, draw, make, imagine, "
+    "redraw, edit an image — and has not already chosen the model and quality (and duration "
+    "for video), call media.ask_params once with kind and prompt, then wait — the app shows "
+    "tappable choices. Do not invent model ids or resolutions. Only call media.generate_image "
+    "or media.generate_video when those parameters are already known. "
+    "Asking to SHOW, FIND, look at or search for existing images or videos is NOT a request to "
+    "create one. You cannot browse or search the internet for media. Say so in one short "
+    "sentence and ASK, in plain text, whether they want you to generate something instead — do "
+    "NOT call media.ask_params or media.generate_* until they say yes. Opening the model picker "
+    "starts a PAID action, so it must never be the answer to a request the user did not make. "
     "Generate tools only queue a job and return a jobId — tell the user generation has started; "
     "do not claim the media is ready until the app reports it. "
     "Never repeat the generation prompt (the text you pass to media tools) in your visible reply "
@@ -490,6 +496,33 @@ def _render_context_block(context: dict[str, Any] | None) -> str | None:
     if not parts:
         return None
     return f"[Conversation settings for this message: {'; '.join(parts)}]"
+
+
+# ADR-070 / прод 2026-09-02: шаг мастера генерации отвечает БЕЗ обращения к модели — тексты
+# собирает сам сервер. Поэтому `locale` из context, который на обычном ходе доносит язык до
+# модели, здесь не действовал вовсе, и ответ приходил по-английски, что бы клиент ни передал.
+# Таблица маленькая намеренно: локализуются ровно две фразы этого пути, а не весь сервис.
+_MEDIA_WIZARD_TEXTS: dict[str, dict[str, str]] = {
+    "en": {
+        "next": "Please choose the next option.",
+        "started": "Generation started ({credits} cr.). I will let you know when it is ready.",
+    },
+    "ru": {
+        "next": "Выберите следующий вариант.",
+        "started": "Генерация запущена ({credits} кр.). Сообщу, когда будет готово.",
+    },
+}
+
+
+def _media_wizard_text(key: str, locale: str | None, **fmt: object) -> str:
+    """Фраза мастера генерации на языке клиента; неизвестный язык — английский.
+
+    Сопоставление по ПРЕФИКСУ до разделителя: клиент присылает BCP-47-подобное значение
+    (`ru`, `ru-RU`, `ru_RU`), и точное сравнение промахнулось бы на двух формах из трёх.
+    """
+    lang = (locale or "").split("-")[0].split("_")[0].strip().lower()
+    table = _MEDIA_WIZARD_TEXTS.get(lang) or _MEDIA_WIZARD_TEXTS["en"]
+    return table[key].format(**fmt)
 
 
 def _compose_turn0_text(block: str | None, msg: str) -> str:
@@ -1104,6 +1137,8 @@ class ChatOrchestrator:
                     "media chat tools are disabled on this instance "
                     "(use /v1/media/* for generation)"
                 )
+            # Локаль берётся из того же `context`, что и на обычном ходе, — иначе клиент
+            # передаёт язык, а мастер отвечает мимо него.
             return await self._handle_media_selection(
                 user_id=user_id,
                 session_id=sess.id,
@@ -1111,6 +1146,7 @@ class ChatOrchestrator:
                 media_selection=media_selection,
                 message=message,
                 generation_mode=effective_generation_mode,
+                locale=_validated_context_value("locale", (context or {}).get("locale")),
             )
 
         # ADR-040 §2,§3: edit+regenerate. Truncate the session history from the edited turn (its
@@ -1441,6 +1477,7 @@ class ChatOrchestrator:
         media_selection: dict[str, Any],
         message: str,
         generation_mode: str,
+        locale: str | None = None,
     ) -> ChatRunOut:
         """Continue or complete a mediaChoices wizard without calling the LLM (ADR-070).
 
@@ -1530,7 +1567,7 @@ class ChatOrchestrator:
             return ChatRunOut(
                 status="assistant_message",
                 session_id=session_id,
-                assistant_message="Please choose the next option.",
+                assistant_message=_media_wizard_text("next", locale),
                 message_step_id=patched.message_step_id,
                 step_id=patched.id,
                 media_choices=media_choices_response(next_state),
@@ -1611,10 +1648,7 @@ class ChatOrchestrator:
                 },
             },
         )
-        assistant_text = (
-            f"Generation started ({job.credits_charged} cr.). "
-            "I will let you know when it is ready."
-        )
+        assistant_text = _media_wizard_text("started", locale, credits=job.credits_charged)
         assistant_step = await self._deps.repo.add_step(
             session_id=session_id,
             message_step_id=message_step_id,
