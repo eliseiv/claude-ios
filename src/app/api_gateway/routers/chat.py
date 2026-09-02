@@ -501,6 +501,7 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
         messageStepId=out.message_step_id,
         stepId=out.step_id,
         assistantMessage=assistant_message,
+        transcript=out.transcript,
         toolCalls=tool_calls,
         toolCall=tool_call,
         blockReason=out.block_reason,

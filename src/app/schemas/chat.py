@@ -23,6 +23,15 @@ AttachmentMediaType = Literal[
     "text/markdown",
     "text/csv",
     "application/json",
+    # ADR-095: голосовые сообщения. Типы — то, во что пишут диктофоны Apple и веб: m4a/aac
+    # (`audio/mp4`, `audio/m4a`), запись из браузера (`audio/webm`, `audio/ogg`), а также
+    # общеупотребительные `audio/mpeg` и `audio/wav`.
+    "audio/mp4",
+    "audio/m4a",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/webm",
+    "audio/ogg",
 ]
 
 
@@ -54,8 +63,12 @@ def _attachment_limits_text() -> str:
 class AttachmentIn(StrictModel):
     """Вложение в base64. Только inline base64 — ссылки (URL) не принимаются."""
 
-    type: Literal["image", "document", "text"] = Field(
-        description="Класс вложения: `image` (фото), `document` (PDF) или `text` (текстовый файл)."
+    type: Literal["image", "document", "text", "audio"] = Field(
+        description=(
+            "Класс вложения: `image` (фото), `document` (PDF), `text` (текстовый файл) или "
+            "`audio` (голосовое сообщение). Аудио распознаётся на сервере и попадает к модели "
+            "текстом; сама запись модели не передаётся."
+        )
     )
     mediaType: AttachmentMediaType = Field(
         description=(
@@ -686,6 +699,15 @@ class ChatResponse(StrictModel):
             "`blockReason=max_tokens`, где приходит частичный текст оборванного хода). "
             "**Исключение:** если поле `quiz` непусто, `assistantMessage` = `null` при ЛЮБОМ "
             "статусе — весь контент такого хода несёт `quiz.questions[]` (см. описание `quiz`)."
+        ),
+    )
+    transcript: str | None = Field(
+        default=None,
+        description=(
+            "Распознанный текст голосового сообщения этого хода; `null`, если голоса не "
+            "было. Приложению нужен, чтобы заменить локальный пузырёк «голосовое» на "
+            "расшифровку сразу: иначе человек не видит, что именно услышал сервис, и не "
+            "может поймать ошибку распознавания."
         ),
     )
     toolCalls: list[ToolCallSchema] | None = Field(

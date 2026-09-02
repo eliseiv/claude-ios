@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -85,6 +86,7 @@ from app.chat.tools import (
     offered_tool_family,
     validate_tool_args,
 )
+from app.chat.transcription import TranscriptionClient
 from app.config import get_settings
 from app.documents import DocumentsService
 from app.errors import (
@@ -704,6 +706,10 @@ class ChatRunOut:
     tool_calls: list[ToolCallOut] | None = None
     tool_call: ToolCallOut | None = None
     block_reason: str | None = None
+    # ADR-095: что распознано из голосового сообщения этого хода. Возвращается, чтобы приложение
+    # заменило свой локальный пузырёк «голосовое» на расшифровку СРАЗУ, не перезагружая историю:
+    # иначе человек не видит, что именно услышал сервис, и не может поймать ошибку распознавания.
+    transcript: str | None = None
     usage: dict[str, Any] | None = None
     # ADR-023: sync ids for chat history. message_step_id = the turn (one per user message-step,
     # reused across tool-rounds/re-entry); step_id = the id of the persisted assistant/tool step
@@ -854,6 +860,9 @@ class _Deps:
     moderation: ModerationService | None = None
     # ADR-090: None ⇒ document.* недоступны, строка о документах в промт не добавляется.
     documents: DocumentsService | None = None
+    # ADR-095: создаётся лениво и только там, где голос включён — конструктор клиента читает
+    # ключ OpenAI, и на инстансе без голоса эта зависимость не нужна вовсе.
+    transcription: TranscriptionClient | None = None
 
 
 class ChatOrchestrator:
@@ -904,7 +913,96 @@ class ChatOrchestrator:
 
     # ---- public entrypoints ----
 
+    async def _transcribe_voice(
+        self, message: str, attachments: list[AttachmentIn] | None
+    ) -> tuple[str, list[AttachmentIn] | None, str | None]:
+        """Заменить голосовые вложения расшифровкой (ADR-095).
+
+        Вызывается ПЕРВЫМ делом в ходе — до модерации, сохранения шага и обращения к модели.
+        После этой замены голосовой ход неотличим от набранного руками, и ни одна из
+        нижележащих частей о голосе не знает: модерация проверяет тот же текст, история хранит
+        тот же текст, реплей воспроизводит тот же текст.
+        """
+        if not attachments:
+            return message, attachments, None
+        voice = [a for a in attachments if a.type == "audio"]
+        if not voice:
+            return message, attachments, None
+        if not get_settings().voice_input_enabled:
+            # Отдельная причина, а не «неподдерживаемый тип»: класс объявлен в контракте, и
+            # приложению нужно отличить «инстанс не умеет» от «формат не тот».
+            raise ValidationFailedError("voice input is not enabled on this instance")
+
+        client = self._deps.transcription or TranscriptionClient()
+        parts: list[str] = []
+        for att in voice:
+            audio = base64.b64decode(att.data, validate=True)
+            text = await client.transcribe(audio, att.mediaType)
+            if text:
+                parts.append(text)
+        transcript = "\n".join(parts)
+
+        rest = [a for a in attachments if a.type != "audio"]
+        if not transcript and not message.strip() and not rest:
+            # Пустая запись без текста и без других вложений: отправлять модели нечего. Молчание
+            # в ответ выглядело бы зависанием, поэтому говорим прямо.
+            raise ValidationFailedError("voice message contains no recognizable speech")
+        combined = f"{message}\n{transcript}".strip() if message.strip() else transcript
+        return combined, (rest or None), (transcript or None)
+
     async def run(
+        self,
+        *,
+        user_id: uuid.UUID,
+        project_id: str | None,
+        session_id: uuid.UUID | None,
+        message: str,
+        mode: str,
+        assistant_mode: str | None = None,
+        attachments: list[AttachmentIn] | None = None,
+        model: str | None = None,
+        workspace_project_id: uuid.UUID | None = None,
+        context: dict[str, Any] | None = None,
+        edit_message_step_id: uuid.UUID | None = None,
+        generation_mode: GenerationMode = "general",
+        generation_backend: GenerationBackend = "legacy",
+        temporary: bool = False,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        media_selection: dict[str, Any] | None = None,
+        memory_search: bool | None = None,
+    ) -> ChatRunOut:
+        """Ход чата. Голос распознаётся ЗДЕСЬ, до самого хода (ADR-095).
+
+        Распознавание вынесено в обёртку, а не в тело, ровно по двум причинам. Первая: после
+        замены аудио текстом ход не отличает голосовое сообщение от набранного — модерация,
+        история, реплей и тарификация работают с одним и тем же текстом, и ни одна из них о
+        голосе не знает. Вторая: тело возвращает ответ из НЕСКОЛЬКИХ мест, и проставлять
+        расшифровку в каждом значило бы терять её на следующей добавленной ветке — здесь же
+        точка одна.
+        """
+        message, attachments, transcript = await self._transcribe_voice(message, attachments)
+        out = await self._run_turn(
+            user_id=user_id,
+            project_id=project_id,
+            session_id=session_id,
+            message=message,
+            mode=mode,
+            assistant_mode=assistant_mode,
+            attachments=attachments,
+            model=model,
+            workspace_project_id=workspace_project_id,
+            context=context,
+            edit_message_step_id=edit_message_step_id,
+            generation_mode=generation_mode,
+            generation_backend=generation_backend,
+            temporary=temporary,
+            on_text_delta=on_text_delta,
+            media_selection=media_selection,
+            memory_search=memory_search,
+        )
+        return out if transcript is None else dataclasses.replace(out, transcript=transcript)
+
+    async def _run_turn(
         self,
         *,
         user_id: uuid.UUID,

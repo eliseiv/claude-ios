@@ -60,10 +60,17 @@ _IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 _DOCUMENT_TYPES = frozenset({"application/pdf"})
 _TEXT_TYPES = frozenset({"text/plain", "text/markdown", "text/csv", "application/json"})
 
+# ADR-095: голосовые сообщения. Класс отдельный от `document`, потому что обрабатывается иначе —
+# запись не доходит до языковой модели вовсе, её заменяет распознанный текст.
+_AUDIO_TYPES = frozenset(
+    {"audio/mp4", "audio/m4a", "audio/mpeg", "audio/wav", "audio/webm", "audio/ogg"}
+)
+
 _ALLOWLIST: dict[str, frozenset[str]] = {
     "image": _IMAGE_TYPES,
     "document": _DOCUMENT_TYPES,
     "text": _TEXT_TYPES,
+    "audio": _AUDIO_TYPES,
 }
 
 # Magic-byte signatures for image/PDF classes. WEBP is "RIFF"...."WEBP" (offset 8).
@@ -114,6 +121,10 @@ class PreparedAttachments:
 def _max_bytes_for(attachment_type: str, settings: Settings) -> int:
     if attachment_type == "document":
         return settings.attachment_max_bytes_document
+    if attachment_type == "audio":
+        # ADR-095: свой потолок. Минута речи в m4a — около мегабайта, и картиночные 20 МиБ
+        # пропустили бы получасовую запись: распознавание молотило бы её дольше, чем живёт ход.
+        return settings.attachment_max_bytes_audio
     # image and text share the image ceiling; text files are small inline inputs.
     return settings.attachment_max_bytes_image
 
@@ -319,6 +330,12 @@ def prepare_attachments(
 
         decoded = _decode_base64(att.data)
         text: str | None = None
+        if att.type == "audio":
+            # ADR-095: сюда аудио доходить не должно — его распознают и заменяют текстом ДО
+            # сборки блоков. Явный отказ вместо падения ниже: без него запись попала бы в
+            # текстовую ветку и умерла на декодировании UTF-8, а сообщение указывало бы на
+            # «битый текстовый файл» — то есть увело бы разбор в сторону от настоящей причины.
+            raise UnsupportedMediaTypeError("audio must be transcribed before block assembly")
         if att.type == "image":
             _check_magic_bytes(att.mediaType, decoded)
         elif att.type == "document":

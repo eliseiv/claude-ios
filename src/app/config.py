@@ -316,6 +316,23 @@ class Settings(BaseSettings):
         default=False, alias="TOKEN_PRODUCTS_PRICE_MINOR_UNITS"
     )
 
+    # --- Голосовые сообщения (ADR-095) ---------------------------------------------------
+    # Приём аудио от пользователя. Выключено по умолчанию: включать там, где приложение умеет
+    # записывать и слать голос, иначе класс вложения объявлен, а прислать его некому.
+    voice_input_enabled: bool = Field(default=False, alias="VOICE_INPUT_ENABLED")
+    # Потолок на ОДНО аудиовложение. Отдельный от картиночного: минута речи в m4a — около 1 МБ,
+    # и потолок картинки (20 МиБ) разрешил бы получасовую запись, которую распознавание будет
+    # молоть минутами при таймауте хода в разы меньше.
+    attachment_max_bytes_audio: int = Field(
+        default=10 * 1024 * 1024, alias="ATTACHMENT_MAX_BYTES_AUDIO"
+    )
+    # Модель распознавания и её таймаут. Провайдер — OpenAI: его ключ есть на каждом инстансе,
+    # отдельной интеграции не заводим.
+    transcription_model: str = Field(default="whisper-1", alias="TRANSCRIPTION_MODEL")
+    transcription_timeout_seconds: float = Field(
+        default=60.0, alias="TRANSCRIPTION_TIMEOUT_SECONDS"
+    )
+
     # --- Image/video generation via fal.ai (ADR-060, media-generation/03) ---
     # SECRET: the fal API key, presented upstream as `Authorization: Key <value>`. Empty (default)
     # => the whole /v1/media/* surface answers 503 media_generation_not_configured, so the feature
