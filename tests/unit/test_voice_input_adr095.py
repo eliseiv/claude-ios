@@ -70,9 +70,11 @@ class _FakeTranscriber:
     def __init__(self, text: str) -> None:
         self.text = text
         self.calls: list[str] = []
+        self.languages: list[str | None] = []
 
-    async def transcribe(self, audio: bytes, media_type: str) -> str:
+    async def transcribe(self, audio: bytes, media_type: str, language: str | None = None) -> str:
         self.calls.append(media_type)
+        self.languages.append(language)
         return self.text
 
 
@@ -159,5 +161,60 @@ async def test_typed_text_and_voice_both_survive(monkeypatch: pytest.MonkeyPatch
         msg, atts, _ = await orch._transcribe_voice("написанное", [_audio()])
         assert "написанное" in msg and "наговорённое" in msg
         assert atts is None
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [("ru-RU", "ru"), ("ru_RU", "ru"), ("RU", "ru"), ("ru", "ru"), ("en-US", "en")],
+)
+def test_language_hint_derived_from_client_locale(locale: str, expected: str) -> None:
+    """Язык распознавания берётся из локали, которую клиент и так присылает.
+
+    Без подсказки распознаватель определяет язык сам и на коротких или шумных записях
+    ошибается: прод 2026-09-02 — русское голосовое распозналось как ИСПАНСКОЕ, и модель,
+    получив испанский текст, ответила по-испански. Отказ молчаливый вдвойне: и расшифровка, и
+    ответ выглядят осмысленными, просто не на том языке.
+    """
+    from app.chat.orchestrator import _language_of
+
+    assert _language_of(locale) == expected
+
+
+@pytest.mark.parametrize("locale", [None, "", "x", "zzz", "123"])
+def test_unknown_locale_leaves_autodetect_alone(locale: str | None) -> None:
+    """Нераспознанная локаль даёт None, а не догадку.
+
+    Неверная подсказка ХУЖЕ автоопределения: она заставляет распознаватель слышать язык,
+    которого в записи нет. Поэтому подсказка только из явных двух букв.
+    """
+    from app.chat.orchestrator import _language_of
+
+    assert _language_of(locale) is None
+
+
+@pytest.mark.asyncio
+async def test_locale_reaches_the_transcriber(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Проверяется не наличие параметра, а что он ДОХОДИТ до распознавателя.
+
+    Между локалью и вызовом три передачи; обрыв на любой из них не виден ни в одном тесте,
+    проверяющем звенья по отдельности.
+    """
+    from app.config import get_settings
+
+    captured: dict[str, object] = {}
+
+    class _Recorder:
+        async def transcribe(self, audio: bytes, media_type: str, language: str | None = None):
+            captured["language"] = language
+            return "привет"
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("VOICE_INPUT_ENABLED", "true")
+    try:
+        orch = _orchestrator(_Recorder())  # type: ignore[arg-type]
+        await orch._transcribe_voice("", [_audio()], locale="ru-RU")
+        assert captured["language"] == "ru"
     finally:
         get_settings.cache_clear()

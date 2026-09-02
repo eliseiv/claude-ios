@@ -514,6 +514,18 @@ _MEDIA_WIZARD_TEXTS: dict[str, dict[str, str]] = {
 }
 
 
+def _language_of(locale: str | None) -> str | None:
+    """ISO-639-1 из локали клиента: `ru-RU` → `ru`. Неизвестное → None (автоопределение).
+
+    Отдаётся распознавателю как подсказка. Без неё он определяет язык сам и на коротких или
+    шумных записях ошибается — русское голосовое распозналось как испанское (прод 2026-09-02).
+    Возвращать что-то наугад нельзя: неверная подсказка ХУЖЕ автоопределения, она заставляет
+    распознаватель слышать несуществующий язык. Поэтому только явные две буквы.
+    """
+    code = (locale or "").split("-")[0].split("_")[0].strip().lower()
+    return code if len(code) == 2 and code.isalpha() else None
+
+
 def _media_wizard_text(key: str, locale: str | None, **fmt: object) -> str:
     """Фраза мастера генерации на языке клиента; неизвестный язык — английский.
 
@@ -947,7 +959,10 @@ class ChatOrchestrator:
     # ---- public entrypoints ----
 
     async def _transcribe_voice(
-        self, message: str, attachments: list[AttachmentIn] | None
+        self,
+        message: str,
+        attachments: list[AttachmentIn] | None,
+        locale: str | None = None,
     ) -> tuple[str, list[AttachmentIn] | None, str | None]:
         """Заменить голосовые вложения расшифровкой (ADR-095).
 
@@ -970,7 +985,7 @@ class ChatOrchestrator:
         parts: list[str] = []
         for att in voice:
             audio = base64.b64decode(att.data, validate=True)
-            text = await client.transcribe(audio, att.mediaType)
+            text = await client.transcribe(audio, att.mediaType, language=_language_of(locale))
             if text:
                 parts.append(text)
         transcript = "\n".join(parts)
@@ -1013,7 +1028,12 @@ class ChatOrchestrator:
         расшифровку в каждом значило бы терять её на следующей добавленной ветке — здесь же
         точка одна.
         """
-        message, attachments, transcript = await self._transcribe_voice(message, attachments)
+        message, attachments, transcript = await self._transcribe_voice(
+            message,
+            attachments,
+            # Язык распознавания — из той же локали, что клиент шлёт для модели.
+            locale=_validated_context_value("locale", (context or {}).get("locale")),
+        )
         out = await self._run_turn(
             user_id=user_id,
             project_id=project_id,
