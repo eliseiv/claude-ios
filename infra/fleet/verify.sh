@@ -117,3 +117,28 @@ while IFS=$'	' read -r inst domain port primary; do
   fi
 done < instances.tsv
 [ "$docs_bad" = "0" ] && echo "  документация открыта на всех инстансах"
+
+# --- Заглушки шаблона в боевом инстансе (инцидент 2026-09-02) ------------------------------
+# `APPSTORE_BUNDLE_ID=<com.example.app>` не безобиден: проверка bundle активна, пока значение
+# НЕПУСТОЕ, поэтому сервер сравнивает транзакцию с литералом-пустышкой и отвергает КАЖДУЮ
+# покупку. Наружу это выглядит как «bundleId mismatch», и разбор уходит в сторону подписи.
+# Вымышленные продукты (`tokens_1500`, `weekly_xxx`) отвергают покупку настоящего как
+# «unknown token product». Ни то, ни другое не видно ни по health, ни по документации.
+echo
+echo "ЗАГЛУШКИ ШАБЛОНА:"
+stub_bad=0
+while IFS=$'	' read -r inst domain port primary; do
+  case "$inst" in ""|\#*) continue;; esac
+  [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
+  out="$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "app${primary}"       "grep -hE '^(APPSTORE_BUNDLE_ID|TOKEN_PRODUCTS|ADAPTY_PRODUCT_TOKENS)=' /opt/$inst/.env"       2>/dev/null | tr -d '')"
+  probs=""
+  case "$out" in *"<"*) probs="$probs bundle-заглушка";; esac
+  case "$out" in *tokens_1500*) probs="$probs продукты-заглушки";; esac
+  case "$out" in *_xxx*|*_yyy*) probs="$probs подписки-заглушки";; esac
+  if [ -n "$probs" ]; then
+    stub_bad=$((stub_bad+1))
+    printf "  %-14s%s
+" "$inst" "$probs"
+  fi
+done < instances.tsv
+[ "$stub_bad" = "0" ] && echo "  заглушек шаблона нет"

@@ -88,6 +88,24 @@ new)
   setvar STOREKIT_TEST_MODE true
   setvar STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION true
   setvar PRESETS_DEFAULT_LOCALE en
+  # --- Заглушки шаблона, которые ЛОМАЮТ покупки, если их оставить ------------------------
+  # `.env.prod.example` — образец для заполнения человеком, и в нём стоят наглядные пустышки.
+  # Провижининг же создаёт РАБОЧИЙ инстанс, и пустышка в нём не безобидна:
+  #
+  #   APPSTORE_BUNDLE_ID=<com.example.app> — проверка bundle активна, пока значение НЕПУСТОЕ.
+  #   Сервер честно сравнивает идентификатор из транзакции с литералом «<com.example.app>» и
+  #   отвергает КАЖДУЮ покупку с «bundleId mismatch». Прод 2026-09-02, joraliqo: разработчик не
+  #   мог купить ничего, а по тексту ошибки казалось, что дело в подписи.
+  #   Пусто — проверка отключена; это рабочее состояние для песочницы. Реальный bundle
+  #   выставляется ПЕРЕД выходом в производство (07-deployment.md §Prod-readiness).
+  #
+  #   TOKEN_PRODUCTS / ADAPTY_PRODUCT_TOKENS — вымышленные продукты (`tokens_1500`, `weekly_xxx`).
+  #   С ними покупка настоящего продукта отвергается как «unknown token product», а подписка
+  #   начисляет резервную величину. Пустая карта честнее: отказ тот же, но видно, что продукты
+  #   просто не заведены, а не «заведены неправильно».
+  setvar APPSTORE_BUNDLE_ID ""
+  setvar TOKEN_PRODUCTS "{}"
+  setvar ADAPTY_PRODUCT_TOKENS "{}"
   mkdir -p .secrets && chmod 700 .secrets
   if [ ! -f .secrets/jwt_private.pem ]; then
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out .secrets/jwt_private.pem 2>/dev/null
