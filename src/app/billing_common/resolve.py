@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 RESOLVED_VIA_USER_ID = "user_id"
 RESOLVED_VIA_DEVICE_ID = "device_id"
+RESOLVED_VIA_LEGACY_ID = "legacy_user_id"
 
 
 async def resolve_user(session: AsyncSession, x: uuid.UUID) -> tuple[uuid.UUID, str] | None:
@@ -29,7 +30,9 @@ async def resolve_user(session: AsyncSession, x: uuid.UUID) -> tuple[uuid.UUID, 
     - (a) ``X`` in ``users`` -> ``X`` already IS our userId; ``resolved_via = "user_id"``.
     - (b) else ``lower(X)`` matches ``lower(auth_devices.device_id)`` -> take the linked ``user_id``
       (deviceId -> userId); ``resolved_via = "device_id"``. This is the incident fix.
-    - (c) else -> ``None`` (=> ``user_not_found``; we never provision users/devices, ADR-007).
+    - (c) else ``X`` in ``legacy_user_ids`` -> идентификатор прежнего сервиса; берём связанный
+      ``user_id``; ``resolved_via = "legacy_user_id"`` (ADR-096).
+    - (d) else -> ``None`` (=> ``user_not_found``; we never provision users/devices, ADR-007).
 
     The deviceId->userId mapping is taken ONLY from our ``auth_devices`` (never from the webhook
     body). ``auth_devices.device_id`` is a ``TEXT`` PK that stores the deviceId verbatim in the
@@ -61,5 +64,19 @@ async def resolve_user(session: AsyncSession, x: uuid.UUID) -> tuple[uuid.UUID, 
     )
     if device_user_id is not None:
         return uuid.UUID(str(device_user_id)), RESOLVED_VIA_DEVICE_ID
+
+    # (c) ADR-096: идентификатор ПРЕЖНЕГО сервиса. Перенос с 232 выдал людям новые внутренние
+    # идентификаторы, а поставщик продолжает присылать старые — старое приложение живо, платежи
+    # создаются им, а вебхук настроен уже на новый сервис. Прод 2026-09-03: платёж есть у
+    # поставщика, у нас `user_not_found`, деньги списаны, начисления нет.
+    #
+    # Ветвь ПОСЛЕДНЯЯ намеренно: живые данные (`users`, `auth_devices`) всегда важнее исторической
+    # таблицы, и порядок гарантирует, что она вступает в дело, только когда обе не сработали.
+    legacy_user_id = await session.scalar(
+        text("SELECT user_id FROM legacy_user_ids WHERE legacy_user_id = :x"),
+        {"x": str(x)},
+    )
+    if legacy_user_id is not None:
+        return uuid.UUID(str(legacy_user_id)), RESOLVED_VIA_LEGACY_ID
 
     return None
