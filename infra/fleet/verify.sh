@@ -142,3 +142,28 @@ while IFS=$'	' read -r inst domain port primary; do
   fi
 done < instances.tsv
 [ "$stub_bad" = "0" ] && echo "  заглушек шаблона нет"
+
+# --- Самоподписанный сертификат вместо выпущенного (инцидент 2026-09-04) --------------------
+# Traefik пытается выпустить сертификат в момент, когда роутер домена появляется в конфигурации.
+# Если A-записи в тот момент ещё нет, Let's Encrypt отвечает NXDOMAIN, попытка проваливается —
+# и БОЛЬШЕ НЕ ПОВТОРЯЕТСЯ сама: нужно перечитывание конфигурации. Инстанс при этом выглядит
+# полностью рабочим — маршрутизация есть, /ready и /docs открываются, — потому что Traefik
+# отдаёт собственный самоподписанный «TRAEFIK DEFAULT CERT». Браузер ругается, а проверка по
+# коду ответа этого не видит: curl без -k просто не соединяется, а с -k соединяется молча.
+# Поэтому проверяем ИМЕННО издателя, а не доступность.
+echo
+echo "СЕРТИФИКАТЫ:"
+tls_bad=0
+while IFS=$'	' read -r inst domain port primary; do
+  case "$inst" in ""|\#*) continue;; esac
+  [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
+  issuer="$(echo | openssl s_client -connect "$domain:443" -servername "$domain" 2>/dev/null       | openssl x509 -noout -issuer 2>/dev/null)"
+  case "$issuer" in
+    *"Let's Encrypt"*) ;;
+    "") tls_bad=$((tls_bad+1)); printf "  %-14s сертификат не получен (соединение не установлено)
+" "$inst";;
+    *)  tls_bad=$((tls_bad+1)); printf "  %-14s НЕ выпущен: %s
+" "$inst" "${issuer#issuer=}";;
+  esac
+done < instances.tsv
+[ "$tls_bad" = "0" ] && echo "  у всех инстансов сертификат Let's Encrypt"
