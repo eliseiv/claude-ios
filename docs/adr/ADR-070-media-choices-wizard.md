@@ -44,6 +44,12 @@
 Global server-side, не mode-gated. Args: `{ kind: image|video, prompt, sourceJobId? }`.  
 Execution: создать `selectionId`, первый шаг (`model`), persist как tool-result. Soft degrade при невалидных args.
 
+`sourceJobId` проверяется **на существование** (owner-scoped, `MediaGenerationService.job_exists`,
+без обращения к провайдеру), а не только на форму UUID. Несуществующий → `invalid_media_request`
+как tool-result: модель ещё в ходе и повторяет вызов без `sourceJobId`. Проверять на submit
+формы поздно — там модели уже нет, и человек получает 422 после нажатия (прод `lunexoro`,
+2026-09-04: модель выдумала идентификатор целиком).
+
 `media.generate_*` остаются, когда параметры уже известны. System prompt: при неясной модели/качестве — сначала `media.ask_params`.
 
 ### 3. Тело `/v1/chat/v2/run`: `mediaSelection`

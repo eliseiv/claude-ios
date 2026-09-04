@@ -337,6 +337,15 @@ class MediaGenerationService:
             )
         return verdict
 
+    async def job_exists(self, *, user_id: uuid.UUID, job_id: uuid.UUID) -> bool:
+        """Есть ли такая задача у этого владельца — без обращения к провайдеру.
+
+        `get_job` у незавершённой задачи опрашивает провайдера и может упасть на его аварии.
+        Для ответа на вопрос «идентификатор выдуман или нет» внешний вызов не нужен: хватает
+        строки в нашей базе. Owner-scoped, поэтому чужая задача неотличима от отсутствующей.
+        """
+        return await self._repo.get(job_id=job_id, user_id=user_id) is not None
+
     async def _assets_of_source(
         self, *, user_id: uuid.UUID, source_job_id: uuid.UUID, limit: int
     ) -> list[str]:

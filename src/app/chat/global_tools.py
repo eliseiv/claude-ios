@@ -159,6 +159,7 @@ class GlobalToolHandlers:
         if tool_name == TOOL_MEDIA_ASK_PARAMS:
             return await self._media_ask_params(
                 args,
+                user_id=user_id,
                 turn_images=turn_images,
                 recent_image_urls=recent_image_urls,
                 last_image_job_id=last_image_job_id,
@@ -236,6 +237,7 @@ class GlobalToolHandlers:
         self,
         args: dict[str, Any],
         *,
+        user_id: uuid.UUID | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
         last_image_job_id: str | None = None,
@@ -250,6 +252,27 @@ class GlobalToolHandlers:
                 source_job_id = str(uuid.UUID(str(source_raw)))
             except ValueError:
                 return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, "sourceJobId must be a UUID")
+            # Прод 2026-09-04 (lunexoro): модель ВЫДУМАЛА идентификатор — присланный 6059eea5-…
+            # не совпадал ни с одной задачей и не был похож ни на одну (лучшее сходство 0.417,
+            # уровень случайного). Разбор UUID это пропускал: он проверяет форму, а не
+            # существование. Выдумка доезжала до карточки выбора и взрывалась ПОЗЖЕ, при отправке
+            # формы, — то есть 422 прилетал человеку уже ПОСЛЕ нажатия, когда исправить его
+            # некому: модели в том шаге уже нет.
+            #
+            # Сверяем здесь, пока модель ещё в ходе и может исправиться сама, — так же, как это
+            # давно делает прямой путь media.generate_*.
+            if (
+                self._media is not None
+                and user_id is not None
+                and not await self._media.job_exists(
+                    user_id=user_id, job_id=uuid.UUID(source_job_id)
+                )
+            ):
+                return ToolExecution.error(
+                    MEDIA_INVALID_ERROR_CODE,
+                    "sourceJobId not found: pass a jobId that actually appears in this "
+                    "chat's history, or omit it and generate a new image",
+                )
 
         image_urls: list[str] = []
         use_recent = bool(args.get("useRecentImage"))

@@ -181,7 +181,13 @@ _MEDIA_GENERATE_INSTRUCTION = (
     "proceed without it (text-to-*). "
     "If the user asks to edit, change, redraw, add to, or refine a previously generated image or "
     "video in this chat, you MUST pass sourceJobId set to that job's jobId from history "
-    "(tool results or assistant mediaJobs). Without sourceJobId (and with no attachment) the "
+    "(tool results or assistant mediaJobs). "
+    # Прод 2026-09-04 (lunexoro): «MUST pass sourceJobId» без указания, что делать при его
+    # отсутствии, толкает модель ВЫДУМАТЬ идентификатор — присланный не совпадал ни с одной
+    # задачей и не был на них похож. Требование обязано называть и выход.
+    "NEVER invent or guess a jobId: copy it verbatim from the history, and if no jobId is "
+    "visible there, omit sourceJobId entirely rather than making one up. "
+    "Without sourceJobId (and with no attachment) the "
     "provider starts a NEW unrelated generation. Prefer media.ask_params with sourceJobId for "
     "edits when quality is unclear. "
     "Exception — video after a previously GENERATED photo in this chat (not a user attachment): "
