@@ -157,7 +157,14 @@ tls_bad=0
 while IFS=$'	' read -r inst domain port primary; do
   case "$inst" in ""|\#*) continue;; esac
   [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
-  issuer="$(echo | openssl s_client -connect "$domain:443" -servername "$domain" 2>/dev/null       | openssl x509 -noout -issuer 2>/dev/null)"
+  # Одна неудачная попытка соединения — не приговор: при обходе четырёх десятков доменов
+  # подряд случайный обрыв даёт ложную тревогу (2026-09-07, terunavo: проверка объявила
+  # сертификат отсутствующим, три повтора подряд показали живой Let's Encrypt).
+  issuer=""
+  for _try in 1 2; do
+    issuer="$(echo | openssl s_client -connect "$domain:443" -servername "$domain" 2>/dev/null         | openssl x509 -noout -issuer 2>/dev/null)"
+    [ -n "$issuer" ] && break
+  done
   case "$issuer" in
     *"Let's Encrypt"*) ;;
     "") tls_bad=$((tls_bad+1)); printf "  %-14s сертификат не получен (соединение не установлено)

@@ -37,3 +37,6 @@ joraliqo 18035 15035
 reluniqo 18036 15036
 boraveli 18037 15037
 firunavo 18038 15038
+solariqo 18039 15039
+terunavo 18040 15040
+ulaviqor 18041 15041
