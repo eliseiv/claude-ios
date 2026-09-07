@@ -8,7 +8,7 @@
 
 ## ledger_transactions
 - `type` ∈ {credit, debit}; `amount > 0`, **целые кредиты** (BIGINT, без дробей).
-- `debit` для `mode=credits`: `amount=1` (1 кредит = 1 сообщение, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)).
+- `debit` **хода** при `mode=credits`: `amount=1` (1 кредит = 1 сообщение, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Прочие источники `debit` — генерация медиа и озвучка ответа — имеют свои `amount` и свои ключи (см. инвариант ниже).
 - `credit` при подписке: `amount=SUBSCRIPTION_CREDITS_PER_PERIOD` (дефолт 1000) на период (ADR-006).
 - Идемпотентность: `ux_ledger_idempotency (user_id, idempotency_key)`.
 - История: `ix_ledger_user_created (user_id, created_at DESC)`.
@@ -16,4 +16,5 @@
 
 ## Инварианты
 - Append-only по смыслу: транзакции не редактируются/удаляются (баланс — производное состояние).
-- `idempotency_key` для credits-debit (`consume`) = `messageStepId` (единый на пользовательский message-шаг, включая все tool-раунды и re-entry; передаётся Orchestrator в публичное поле `requestId` контракта `/wallet/consume`). **Не** gateway correlation `requestId`. Для grant = `transactionId` периода подписки.
+- `idempotency_key` для credits-debit **хода** (`consume`) = `messageStepId` (единый на пользовательский message-шаг, включая все tool-раунды и re-entry; передаётся Orchestrator в публичное поле `requestId` контракта `/wallet/consume`). **Не** gateway correlation `requestId`. Для grant = `transactionId` периода подписки.
+- **Ход чата — не единственный источник `debit`.** Их три, с разными namespace'ами ключа: ход — `messageStepId`; генерация медиа — `media-gen:{jobId}` ([ADR-060 §4](../../adr/ADR-060-media-generation-fal.md)); **озвучка ответа — `tts:{stepId}:{voiceId}`** ([ADR-100 §9](../../adr/ADR-100-assistant-speech-output.md)). Полный инвариант с обоснованием формы ключей и контрастом порядка «списание до/после работы» — [03-data-model.md §Инварианты](../../03-data-model.md#инварианты). Формулировку «1 кредит = 1 сообщение» на озвучку и медиа **не переносить**: она описывает только ход.

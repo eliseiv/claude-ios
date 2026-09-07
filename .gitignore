@@ -55,3 +55,7 @@ screenshot/
 # ── Agent tooling (multi-agent orchestration kitchen, not the service) ──
 CLAUDE.md
 .claude
+
+# Пробные аудиодорожки для прослушивания — не часть кода; лежат локально.
+# Без этой строки очередной `git add -A` утащил бы в историю почти мегабайт mp3.
+voice-samples/
