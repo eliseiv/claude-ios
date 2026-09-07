@@ -170,6 +170,33 @@ async def enforce_experiment_limits(*, user_id: uuid.UUID) -> bool:
         return True
 
 
+async def enforce_speech_limits(*, user_id: uuid.UUID) -> bool:
+    """Dedicated bucket for POST /v1/chat/speech (ADR-100 §10, Q-100-2).
+
+    Its own key AND its own limit (``TTS_RATE_LIMIT_PER_MIN``, default 10/min per user), not the
+    shared ``rl:other:*`` bucket: a repeat of the pair ``(stepId, voiceId)`` is free for the user
+    FOREVER, so this limit is the ONLY thing standing between a free replay and an unbounded call
+    to a PAID provider. Admission predicate for a separate bucket: the cost of a call here is an
+    outgoing charge to us, while ``rl:other`` guards cheap reads — one number cannot be right for
+    both, and draining it on synthesis would 429 the user's ordinary catalog reads.
+
+    Residual risk is named and not masked (Q-100-2): within this limit an abusive user can still
+    burn our budget without paying. Fail-open on a Redis error, like every other limiter.
+    """
+    settings = get_settings()
+    client = get_redis()
+    try:
+        return await _allow(
+            client,
+            f"rl:speech:{user_id}",
+            settings.tts_rate_limit_per_min,
+            settings.rate_limit_window_seconds,
+        )
+    except redis.RedisError as exc:
+        log_event(logger, logging.WARNING, "rate_limit_redis_unavailable", error=str(exc))
+        return True
+
+
 async def redis_ping() -> bool:
     try:
         return bool(await get_redis().ping())

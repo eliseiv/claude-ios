@@ -230,6 +230,26 @@ class ChatRepository:
             )
         )
 
+    async def get_assistant_step(
+        self, session_id: uuid.UUID, step_id: uuid.UUID
+    ) -> ChatStep | None:
+        """One ``role='assistant'`` step of THIS session, or ``None`` (ADR-100, 06-rbac).
+
+        ``session_id`` is part of the predicate, never an afterthought: the caller has already
+        resolved the session by ``(id, user_id)``, so scoping the step to it means a ``stepId``
+        from someone else's chat is unreachable even when the UUID is known. ``role`` is matched
+        strictly — a user step or a tool step is «not an assistant answer», not «forbidden», and
+        both map to the same ``404 step_not_found``: nothing about a foreign row is revealed.
+        """
+        row: ChatStep | None = await self._session.scalar(
+            select(ChatStep).where(
+                ChatStep.id == step_id,
+                ChatStep.session_id == session_id,
+                ChatStep.role == "assistant",
+            )
+        )
+        return row
+
     async def generation_mode_for_message_step(
         self, session_id: uuid.UUID, message_step_id: uuid.UUID
     ) -> str:

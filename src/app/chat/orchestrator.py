@@ -343,6 +343,26 @@ _RESEARCH_INSTRUCTION = (
 )
 
 
+# ADR-100 §7 / 03-architecture §_SPEECH_INSTRUCTION: static EN layer added when this instance can
+# speak its answers. It is a REQUEST to the model, not a guarantee — no provider guarantees output
+# format (the same observation ADR-064 §5 derived the quiz degrade-branch from). The GUARANTEE is
+# the deterministic read-time cleanup + the hard cap on the synthesis path (`app.chat.speech`).
+# The two measures are not alternatives: the hint lowers how often text has to be cut and makes the
+# spoken result sound natural; the cap bounds our provider bill by a number known before the call.
+#
+# STATIC and identical for EVERY turn of the instance, so it creates NO new prompt-cache entry —
+# unlike the character layer, which gets one per character (ADR-097 §5). With
+# VOICE_OUTPUT_ENABLED off the string is absent entirely and `system` is byte-for-byte as before.
+_SPEECH_INSTRUCTION = (
+    "Your reply will be read aloud to the user by a speech synthesizer. Write prose meant for the "
+    "ear: plain sentences only, with no markdown, headings, bullet or numbered lists, tables, code "
+    "blocks or links. Keep the answer short — a few sentences, covering the essentials rather than "
+    "every detail. Do not use emoji or decorative symbols. Spell out anything that would not read "
+    "aloud sensibly. This governs only the wording of your reply; it never reduces the accuracy or "
+    "completeness of the facts you give, and it never applies to tool arguments."
+)
+
+
 def _effective_generation_mode(
     generation_mode: str,
     *,
@@ -406,6 +426,8 @@ def _system_prompt_for(
     afresh on EVERY provider call, so a character added anywhere else would vanish mid tool-loop.
     ``CHARACTERS_ENABLED=false`` means the layer is never assembled — including for sessions that
     already have a stored ``character_id`` (an instance where the flag was taken back down).
+    ADR-100: the speech hint sits AFTER the character and BEFORE the mode suffix, and only when
+    ``VOICE_OUTPUT_ENABLED`` is on and ``assistant_mode != "code"``.
     """
     base = _compose_system_prompt(assistant_mode, get_settings().disabled_tool_families())
     # ADR-094 ось D: указания по работе с кодом добавляются ровно по тому же условию, по которому
@@ -419,6 +441,15 @@ def _system_prompt_for(
         persona = character_prompt_layer(character_id)
         if persona is not None:
             base = f"{base}\n\n{persona}"
+    # ADR-100 §7: AFTER the character (so a verbose Fantasy Queen still answers briefly) and
+    # BEFORE the mode suffix (the task of the turn outweighs the form of delivery: `research`
+    # requires live web search WITH links, and a later "no links" hint would spoil the text the
+    # user READS). Links are removed from the AUDIO by the read-time cleanup, not by the prompt.
+    # `assistant_mode=code` is excluded: that answer is code by construction, and asking for "no
+    # code blocks" would ruin the readable reply — such a turn simply is not spoken
+    # (422 nothing_to_speak after cleanup), which is honester than a spoiled answer.
+    if get_settings().voice_output_enabled and assistant_mode != "code":
+        base = f"{base}\n\n{_SPEECH_INSTRUCTION}"
     if generation_mode == "study_learn":
         return f"{base}\n\n{_STUDY_LEARN_INSTRUCTION}"
     if generation_mode == "research":

@@ -19,6 +19,15 @@ _IpNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 # §Окно свежести). A non-positive CLOUDPAYMENTS_PAYMENT_FRESHNESS_HOURS falls back to this.
 _CLOUDPAYMENTS_DEFAULT_FRESHNESS_HOURS = 72
 
+# Supported speech-output container formats and the MIME each one is served as (ADR-100 §2/§8).
+# ONE table: `response_format` sent to the provider and `mediaType` returned to the client are
+# both derived from it, so the two can never disagree about what the bytes actually are.
+_TTS_MEDIA_TYPE_BY_FORMAT: dict[str, str] = {
+    "mp3": "audio/mpeg",
+    "aac": "audio/aac",
+}
+_TTS_DEFAULT_AUDIO_FORMAT = "mp3"
+
 
 def _dedup_nonempty(*values: str) -> tuple[str, ...]:
     """Non-empty values in listing order, without duplicates (ADR-074 key chain).
@@ -634,6 +643,45 @@ class Settings(BaseSettings):
     # общий PRESETS_DEFAULT_LOCALE (второй переменной под язык не заводится, TD-035).
     characters_enabled: bool = Field(default=False, alias="CHARACTERS_ENABLED")
 
+    # --- Озвучка ответа ассистента (ADR-100) ---------------------------------------------
+    # ОДНА ось гейтит каталог, ручку, настройку и слой промта. Дефолт false: на действующих
+    # инстансах не меняется ни один запрос, ни один ответ, ни один байт `system`. При false
+    # `GET /v1/voices` отдаёт `{enabled:false, voices:[], defaultVoiceId:null}` (не 404 и не 503),
+    # `POST /v1/chat/speech` → 422 voice_output_disabled, непустой `defaultVoiceId` в
+    # `PATCH /v1/preferences` → 422 voice_output_disabled, а `_SPEECH_INSTRUCTION` в системный
+    # промт не добавляется. Включать только там, где приложение умеет проиграть ответ.
+    voice_output_enabled: bool = Field(default=False, alias="VOICE_OUTPUT_ENABLED")
+    # Модель синтеза. Выбрана потому, что принимает ТЕКСТОВУЮ инструкцию по манере речи помимо
+    # выбора голоса, — это и есть носитель поля `instructions` реестра голосов; без него «голос
+    # персонажа» свёлся бы к выбору тембра из списка. Провайдер OpenAI и НЕ зависит от
+    # LLM_PROVIDER (как модерация и распознавание); ключ — существующий OPENAI_API_KEY,
+    # отдельной переменной не заводится (ADR-100 §8): пусто → 503 voice_output_not_configured.
+    tts_model: str = Field(default="gpt-4o-mini-tts", alias="TTS_MODEL")
+    # Голос инстанса для пользователя, ничего не выбравшего, — id `selectable`-записи реестра
+    # `app.chat.voices`. Явная переменная, а не константа: какая из двух записей звучит по
+    # умолчанию — продуктовое решение инстанса и должно быть видно в `.env`. Значение вне реестра
+    # тихо деградирует до первой `selectable`-записи + WARNING (нечем озвучить — не повод ронять
+    # запрос, на который есть чем).
+    tts_default_voice_id: str = Field(default="default_female", alias="TTS_DEFAULT_VOICE_ID")
+    # Жёсткий потолок длины ОЧИЩЕННОГО текста (≈ минута речи). Ограничивает ОДНОВРЕМЕННО счёт у
+    # поставщика и размер base64-ответа. Применяется ПОСЛЕ чистки — наоборот он отсчитал бы
+    # символы, которые всё равно будут удалены. Подсказка в промт потолком НЕ является: гарантий
+    # по формату не даёт ни один провайдер (ADR-100 §7). Калибровка — Q-100-1.
+    tts_max_chars: int = Field(default=700, alias="TTS_MAX_CHARS")
+    # Цена одного синтеза в кредитах. Идемпотентность — `tts:{stepId}:{voiceId}`: повтор той же
+    # пары бесплатен навсегда, смена голоса — новое списание. Списание идёт ПОСЛЕ успешного
+    # синтеза (в отличие от медиа-генерации, где оно предшествует сабмиту и требует возврата).
+    tts_credit_cost: int = Field(default=1, alias="TTS_CREDIT_COST")
+    # Отдельный бакет `POST /v1/chat/speech` на пользователя. ЕДИНСТВЕННАЯ защита бюджета от
+    # того, что бесплатный ДЛЯ ПОЛЬЗОВАТЕЛЯ повтор превращается в неограниченное обращение к
+    # платному поставщику; остаточный риск назван явно в Q-100-2.
+    tts_rate_limit_per_min: int = Field(default=10, alias="TTS_RATE_LIMIT_PER_MIN")
+    # Формат файла (`mp3` | `aac`) и таймаут одного вызова синтеза (исчерпан → 504). Формат —
+    # переменная инстанса, поэтому `mediaType` в ответе не константа: клиент выбирает декодер
+    # по нему. Значение вне набора деградирует до `mp3` + WARNING (см. resolved_tts_audio_format).
+    tts_audio_format: str = Field(default="mp3", alias="TTS_AUDIO_FORMAT")
+    tts_timeout_seconds: float = Field(default=60.0, alias="TTS_TIMEOUT_SECONDS")
+
     # --- Observability ---
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     otel_exporter_otlp_endpoint: str = Field(default="", alias="OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -833,6 +881,29 @@ class Settings(BaseSettings):
         defect as «declared but not wired»: the field exists, the guard is not applied to it.
         """
         return value if value > 0 else 1
+
+    @field_validator("tts_credit_cost")
+    @classmethod
+    def _positive_tts_credit_cost(cls, value: int) -> int:
+        """The synthesis price must stay positive so the wallet debit is always valid (ADR-100 §9).
+
+        Same guard, same reason as ``_positive_chat_credit_cost``: a ``0``/negative env raises no
+        start-up error, the balance gate passes and the debit takes zero — the feature quietly
+        becomes free on that instance while the operator keeps paying the provider.
+        """
+        return value if value > 0 else 1
+
+    @field_validator("tts_max_chars")
+    @classmethod
+    def _positive_tts_max_chars(cls, value: int) -> int:
+        """The speech cap must stay positive, or every answer would clean down to nothing.
+
+        A ``0``/negative env would make the cap cut the text to an empty string, and EVERY call
+        would answer ``422 nothing_to_speak`` — a total outage that looks like "the model never
+        says anything speakable". Degrade to the documented default instead of crashing, exactly
+        as the credit-cost guard above does.
+        """
+        return value if value > 0 else 700
 
     @field_validator("anthropic_thinking_budget_tokens")
     @classmethod
@@ -1266,6 +1337,34 @@ class Settings(BaseSettings):
             DEFAULT_PRESET_LOCALE,
         )
         return DEFAULT_PRESET_LOCALE
+
+    def resolved_tts_audio_format(self) -> str:
+        """Validated ``TTS_AUDIO_FORMAT`` (ADR-100 §8): ``mp3`` | ``aac``, else ``mp3`` + WARNING.
+
+        Graceful, never a start-up crash — same discipline as ``resolved_presets_default_locale``:
+        a typo in one instance's ``.env`` must not take the process down. Pure; the WARNING fires
+        once per process because ``get_settings()`` is cached.
+        """
+        from app.observability.logging import get_logger
+
+        normalized = self.tts_audio_format.strip().lower()
+        if normalized in _TTS_MEDIA_TYPE_BY_FORMAT:
+            return normalized
+        get_logger("app.config").warning(
+            "TTS_AUDIO_FORMAT=%r is not supported; falling back to %r",
+            self.tts_audio_format,
+            _TTS_DEFAULT_AUDIO_FORMAT,
+        )
+        return _TTS_DEFAULT_AUDIO_FORMAT
+
+    def tts_media_type(self) -> str:
+        """MIME of the synthesized file, derived from ``TTS_AUDIO_FORMAT`` (ADR-100 §2).
+
+        Single derivation point: the response field ``mediaType`` and the ``response_format`` sent
+        upstream both come from the SAME resolved format, so the client can never be told
+        ``audio/mpeg`` about a file the provider rendered as AAC.
+        """
+        return _TTS_MEDIA_TYPE_BY_FORMAT[self.resolved_tts_audio_format()]
 
     def trusted_proxy_networks(self) -> tuple[_IpNetwork, ...]:
         """Parse TRUSTED_PROXY_IPS (comma-separated IPs/CIDRs) into networks.

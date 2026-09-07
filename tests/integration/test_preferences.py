@@ -40,6 +40,7 @@ async def test_get_without_row_returns_defaults_and_does_not_write(
         # В герметичной сюите он выключен (conftest), поэтому здесь False — и это ровно то,
         # что должен видеть клиент: «на этом инстансе памяти нет».
         "memoryEnabled": False,
+        "defaultVoiceId": None,
         "memorySearchScope": "global",
     }
     # GET must NOT create a row (lazy defaults only).
@@ -66,6 +67,7 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "notificationsEnabled": False,
         "codeDefaults": {},
         "memoryEnabled": False,
+        "defaultVoiceId": None,
         "memorySearchScope": "global",
     }
     assert await _row_count(db_sessionmaker, str(uid)) == 1
@@ -86,6 +88,7 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "notificationsEnabled": False,
         "codeDefaults": {},
         "memoryEnabled": False,
+        "defaultVoiceId": None,
         "memorySearchScope": "global",
     }
 

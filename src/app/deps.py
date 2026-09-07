@@ -32,6 +32,7 @@ from app.chat.global_tools import GlobalToolHandlers, SystemClock
 from app.chat.llm_client import get_generation_llm_client, get_llm_client
 from app.chat.orchestrator import ChatOrchestrator
 from app.chat.repository import ChatRepository
+from app.chat.speech import SpeechClient, SpeechSynthesisService
 from app.chats.repository import ChatsRepository
 from app.chats.service import ChatsService
 from app.config import get_settings
@@ -331,6 +332,28 @@ def get_profile_service(session: DbSession) -> ProfileService:
 
 def get_preferences_service(session: DbSession) -> PreferencesService:
     return PreferencesService(session)
+
+
+@lru_cache(maxsize=1)
+def get_speech_client() -> SpeechClient:
+    """Process-wide synthesis client (ADR-100 §8), like the moderation client.
+
+    The HTTP pool and the settings do not depend on the request, and rebuilding the client per
+    call would cost a fresh connection on a path that already waits on an external provider.
+    """
+    return SpeechClient(get_settings())
+
+
+def get_speech_service(session: DbSession) -> SpeechSynthesisService:
+    # ADR-100 §9: the debit must land in the SAME transaction as the request, so the wallet is
+    # built on the same request-scoped session as the chat repository and preferences.
+    return SpeechSynthesisService(
+        repo=ChatRepository(session),
+        preferences=PreferencesService(session),
+        wallet=WalletService(session, AuditService(session)),
+        client=get_speech_client(),
+        settings=get_settings(),
+    )
 
 
 def get_workspaces_service(session: DbSession) -> WorkspacesService:

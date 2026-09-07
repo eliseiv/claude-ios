@@ -91,6 +91,26 @@ class WalletService:
         if uuid.UUID(str(owner)) != user_id:
             raise ForbiddenError("session does not belong to user")
 
+    async def current_balance(self, user_id: uuid.UUID) -> int:
+        """Read-only balance (0 when the wallet row does not exist yet).
+
+        Public because the pre-work balance gate of a PAID external call needs it: speech
+        synthesis must refuse (409) BEFORE it spends money at the provider (ADR-100 §9). Reading
+        does not provision the row — provisioning stays a side effect of writes.
+        """
+        return await self._current_balance(user_id)
+
+    async def has_idempotency_key(self, user_id: uuid.UUID, idempotency_key: str) -> bool:
+        """True when this user already has a ledger row under ``idempotency_key``.
+
+        The ledger IS the permanent record of «already paid for this» (ADR-005). Speech synthesis
+        reads it BEFORE the balance gate: a repeat of the pair ``(stepId, voiceId)`` is free
+        forever, so a user at zero balance must still get their audio back — refusing them 409
+        would break the cold-start / reinstall / second-device path the feature is built around
+        (ADR-100 §9). The debit itself stays idempotent regardless of what this read saw.
+        """
+        return await self._existing_tx(user_id, idempotency_key) is not None
+
     async def consume(
         self,
         *,

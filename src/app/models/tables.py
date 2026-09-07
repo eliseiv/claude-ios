@@ -526,6 +526,14 @@ class UserPreferences(Base):
     memory_search_scope: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=sa_text("'global'")
     )
+    # ADR-100 (migration 0032): default speech-output voice. nullable; NULL = «голос инстанса»
+    # (TTS_DEFAULT_VOICE_ID) — существующие строки и клиенты без поля ведут себя как прежде.
+    # Внешнего ключа НЕТ: реестр голосов живёт в коде (app.chat.voices), ровно как у `model`
+    # (ADR-034) и `character_id` (ADR-097) — ссылочная целостность держится валидацией на PATCH
+    # (422 unknown_voice / voice_output_disabled), а не БД. Индекса нет: по голосу не фильтруют и
+    # не сортируют, строка читается по PK. Читается на КАЖДОМ синтезе и на сессии НЕ фиксируется,
+    # иначе смена настройки не подействовала бы на уже начатые чаты (ADR-100 §5).
+    default_voice_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )

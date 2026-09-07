@@ -61,6 +61,7 @@ _TAG_ORDER = [
     "Models",
     "Presets",
     "Characters",
+    "Voices",
     "Media",
     "Notifications",
     "Policy",
@@ -95,6 +96,8 @@ _ENDPOINT_TAG = {
     ("/v1/models", "get"): "Models",
     ("/v1/presets", "get"): "Presets",
     ("/v1/characters", "get"): "Characters",
+    ("/v1/voices", "get"): "Voices",
+    ("/v1/chat/speech", "post"): "Voices",
     # Media generation (ADR-060): fal.ai image/video generation, all tag=Media.
     ("/v1/media/models", "get"): "Media",
     ("/v1/media/images", "post"): "Media",

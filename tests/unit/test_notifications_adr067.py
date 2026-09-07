@@ -91,6 +91,7 @@ async def test_push_skips_when_notifications_disabled() -> None:
             notifications_enabled=False,
             code_defaults={},
             memory_enabled=False,
+            default_voice_id=None,
             memory_search_scope="global",
         )
     )
@@ -147,6 +148,7 @@ async def test_push_sends_and_drops_unregistered_token() -> None:
             notifications_enabled=True,
             code_defaults={},
             memory_enabled=False,
+            default_voice_id=None,
             memory_search_scope="global",
         )
     )

@@ -15,6 +15,10 @@ Each entry carries:
   response (ADR-097 §3). Handing it to the client would freeze a text we expect to keep
   editing into the app's contract, and a cached copy in the app would become a second,
   unauthoritative source of truth about how the character speaks.
+- ``voice_id`` — slug of the voice-registry entry this character SPEAKS with (ADR-100 §3).
+  A REFERENCE, not a copy: the provider voice id and the speaking-manner instructions live in
+  ``app.chat.voices`` only, so there is exactly one source of truth about how the Vampire Lord
+  sounds. SERVER-SIDE ONLY, like ``persona`` — the catalog never carries it.
 
 Localization follows the presets rule (ADR-049 §1): ``en`` is the canon and the per-field
 fallback; ``zh-Hans`` is intentionally unfilled at launch and arrives via that fallback.
@@ -33,7 +37,8 @@ class Character(NamedTuple):
 
     ``id``/``icon`` are locale-independent; ``name``/``tagline`` are ``locale -> str`` maps
     whose ``"en"`` key is required. ``persona`` is a non-empty EN prompt fragment and never
-    leaves the process (ADR-097 §3).
+    leaves the process (ADR-097 §3). ``voice_id`` points at a ``app.chat.voices`` entry and
+    likewise never leaves the process (ADR-100 §3).
     """
 
     id: str
@@ -41,6 +46,7 @@ class Character(NamedTuple):
     name: dict[str, str]
     tagline: dict[str, str]
     persona: str
+    voice_id: str
 
 
 def _loc(en: str, ru: str) -> dict[str, str]:
@@ -94,6 +100,7 @@ _CHARACTERS: tuple[Character, ...] = (
             "catchphrases, no stage directions or emoted actions in asterisks. Enthusiasm never "
             "replaces substance — you are delighted to help, and then you actually help."
         ),
+        voice_id="char_anime_girl",
     ),
     Character(
         id="fantasy_queen",
@@ -108,6 +115,7 @@ _CHARACTERS: tuple[Character, ...] = (
             "archaism light enough to stay effortless to read, and let the ceremony fall away "
             "entirely when precision matters more than grace."
         ),
+        voice_id="char_fantasy_queen",
     ),
     Character(
         id="vampire_lord",
@@ -122,6 +130,7 @@ _CHARACTERS: tuple[Character, ...] = (
             "and any reference to blood, hunger or harm; the appeal is unhurried elegance, and "
             "beneath it you are simply and completely helpful."
         ),
+        voice_id="char_vampire_lord",
     ),
     Character(
         id="cyber_assassin",
@@ -136,6 +145,7 @@ _CHARACTERS: tuple[Character, ...] = (
             "user needs is still there, and violence, threats and weapon talk are outside your "
             "brief entirely."
         ),
+        voice_id="char_cyber_assassin",
     ),
     Character(
         id="virtual_friend",
@@ -149,6 +159,7 @@ _CHARACTERS: tuple[Character, ...] = (
             "flourishes, no performed emotion. You care about how the conversation goes for "
             "them, and you say so simply."
         ),
+        voice_id="char_virtual_friend",
     ),
 )
 
@@ -182,6 +193,24 @@ def character_catalog(locale: str) -> list[dict[str, Any]]:
         }
         for c in _CHARACTERS
     ]
+
+
+def character_voice_id(character_id: str | None) -> str | None:
+    """Voice-registry slug this character speaks with, or ``None`` (ADR-100 §4, step 1).
+
+    ``None`` for a session without a character AND for a stored id no longer in the registry —
+    the caller then falls through to the next resolution step rather than failing (a retired
+    character must not make the answer unspeakable). The instance flag ``CHARACTERS_ENABLED``
+    is NOT checked here: the gate lives in the single resolution function
+    (``app.chat.voices.resolve_voice``), exactly as the prompt-layer gate lives in
+    ``_system_prompt_for`` — one switch turns the character off whole, never half.
+    """
+    if not character_id:
+        return None
+    entry = _BY_ID.get(character_id)
+    if entry is None:
+        return None
+    return entry.voice_id
 
 
 def character_prompt_layer(character_id: str | None) -> str | None:

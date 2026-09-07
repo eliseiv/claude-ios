@@ -44,6 +44,14 @@ class PreferencesResponse(StrictModel):
     memorySearchScope: Literal["global", "workspace"] = Field(
         description="Область auto-retrieval: все чаты или только текущий workspace."
     )
+    defaultVoiceId: str | None = Field(
+        description=(
+            "Голос озвучки ответа по умолчанию — `id` из каталога `GET /v1/voices`. `null` "
+            "означает голос, выбранный на инстансе. Голос персонажа этой настройкой не "
+            "переопределяется. Ранее сохранённое значение возвращается и тогда, когда озвучка "
+            "на инстансе выключена."
+        )
+    )
 
 
 class PreferencesPatchRequest(StrictModel):
@@ -60,14 +68,28 @@ class PreferencesPatchRequest(StrictModel):
     memorySearchScope: Literal["global", "workspace"] | None = Field(
         default=None, description="Область auto-retrieval при генерации."
     )
+    defaultVoiceId: str | None = Field(
+        default=None,
+        description=(
+            "Новый голос озвучки по умолчанию — `id` из каталога `GET /v1/voices`. Явный `null` "
+            "сбрасывает выбор к голосу инстанса. Значение вне каталога — ошибка 422 "
+            "(`unknown_voice`); при выключенной на инстансе озвучке любое непустое значение — "
+            "422 (`voice_output_disabled`)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check(self) -> PreferencesPatchRequest:
+        # `defaultVoiceId` считается ПРИСЛАННЫМ по факту присутствия ключа, а не по non-None:
+        # явный `null` — значимое значение (сброс к голосу инстанса, ADR-100), и проверка «хотя бы
+        # одно поле» обязана его засчитывать, иначе `{"defaultVoiceId": null}` отвергался бы как
+        # пустое тело. У остальных полей `null` значения не имеет и семантика прежняя.
         if (
             self.defaultAssistantMode is None
             and self.notificationsEnabled is None
             and self.codeDefaults is None
             and self.memorySearchScope is None
+            and "defaultVoiceId" not in self.model_fields_set
         ):
             raise ValueError("at least one field is required")
         if self.codeDefaults is not None:
