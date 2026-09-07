@@ -18,7 +18,8 @@ ONE="${1:-}"
 printf "%-14s %-22s %-9s %-9s %-9s %s\n" ИНСТАНС ДОМЕН ОСНОВНОЙ РЕЗЕРВ ЧЕРЕЗ_ВХОД ОТСТАВАНИЕ
 printf '%.0s-' {1..82}; echo
 
-ok=0; bad=0
+ok=0
+repl_bad=0; repl_split=""; repl_nostream=""; repl_down=""; bad=0
 while IFS=$'\t' read -r inst domain port primary; do
   case "$inst" in ""|\#*) continue;; esac
   [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
@@ -41,10 +42,10 @@ while IFS=$'\t' read -r inst domain port primary; do
   # растёт бесконечно при совершенно здоровой репликации (наблюдалось 72890с на claude-ios), и
   # настоящий затор в этом шуме было бы не различить.
   case "$st" in
-    ""|*ERROR*)  s_state="нет"; lag="—";;
-    НЕ_РЕЗЕРВ)   s_state="ОСНОВНОЙ!"; lag="—";;
+    ""|*ERROR*)  s_state="нет"; lag="—"; repl_bad=$((repl_bad+1)); repl_down="$repl_down $inst";;
+    НЕ_РЕЗЕРВ)   s_state="ОСНОВНОЙ!"; lag="—"; repl_bad=$((repl_bad+1)); repl_split="$repl_split $inst";;
     streaming:*) s_state="ок"; lag="${st#streaming:}б";;
-    НЕТ_ПОТОКА*) s_state="БЕЗ ПОТОКА"; lag="—";;
+    НЕТ_ПОТОКА*) s_state="БЕЗ ПОТОКА"; lag="—"; repl_bad=$((repl_bad+1)); repl_nostream="$repl_nostream $inst";;
     *)           s_state="${st%%:*}"; lag="${st#*:}б";;
   esac
 
@@ -59,6 +60,19 @@ while IFS=$'\t' read -r inst domain port primary; do
 done < instances.tsv
 printf '%.0s-' {1..82}; echo
 echo "основных отвечает: $ok, не отвечает: $bad"
+# Состояние резерва печаталось только в своей строке таблицы. На четырёх десятках строк отметка
+# «ОСНОВНОЙ!» не читается — 2026-09-07 выяснилось, что пятнадцать инстансов месяцами живут БЕЗ
+# резерва (после переключения на другую машину поток в новую сторону не поднимался), и проверка
+# это честно показывала, но никто не смотрел. Итог обязан называть число, иначе проверка есть,
+# а знания нет.
+if [ "$repl_bad" = "0" ]; then
+  echo "репликация: резерв на потоке у всех инстансов"
+else
+  echo "РЕПЛИКАЦИЯ НАРУШЕНА у $repl_bad инстанс(ов):"
+  [ -n "$repl_split" ] && echo "  резерв стал самостоятельным основным (расхождение данных):$repl_split"
+  [ -n "$repl_nostream" ] && echo "  резерв не получает поток:$repl_nostream"
+  [ -n "$repl_down" ] && echo "  база резерва не отвечает:$repl_down"
+fi
 
 # --- Адрес клиента (инцидент 2026-08-30) --------------------------------------------------
 # Приложение доверяет X-Forwarded-For только от известного прокси. Пока маршрутизатора не было
