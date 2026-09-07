@@ -4,6 +4,8 @@
 - Дата: 2026-07-03
 - Связано: [ADR-050](ADR-050-cloudpayments-webhook.md) (**вход**ящий CloudPayments-вебхук — обратная половина того же RU-контура; это ADR — **исход**ящая половина), [ADR-015](ADR-015-consumable-token-iap.md) (`TOKEN_PRODUCTS`, anti-tamper BR-TP-1), [ADR-007](ADR-007-lazy-user-provisioning.md) (провижининг `users` из JWT `sub`), [ADR-017](ADR-017-shared-server-traefik-deploy.md) (per-instance секреты), [ADR-033](ADR-033-llm-provider-abstraction.md) (образец исходящего httpx-клиента к внешнему API), [ADR-004](ADR-004-blocked-http-200.md) (карта технических ошибок). Модуль [billing-cloudpayments](../modules/billing-cloudpayments/README.md).
 
+> **Расширено (не отменено) [ADR-098 §1](ADR-098-broadapps-paywall-experiments-and-default-product.md):** правило «`user_id` = JWT `sub`, не из тела» с этого решения действует на **весь** исходящий контур broadapps — `/payments/link`, отмену подписки и обе ручки экспериментов пейволла. Единственный вызов не по нашему `sub` — верификация `GET /users/{X}/payments` ([ADR-054](ADR-054-cloudpayments-webhook-payment-verification.md)), где `X` пришёл в колбэке.
+
 ## Context
 
 RU-путь оплаты ([ADR-050](ADR-050-cloudpayments-webhook.md)) состоит из двух половин:

@@ -136,7 +136,30 @@ def _level_for(result: str, reason: str | None) -> int:
 
 **Отменено [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md):** reason'ы `missing_transaction_id`/`missing_product_id`/`invalid_data`/`unknown_product`-по-паттерну из [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md) для пути начисления не применяются (тело колбэка больше не источник продукта/суммы; классификация — по `product.payment_type` из verify). Идемпотентность/дедуп — по broadapps `payment_id` (не `TransactionId`). **ЗАПРЕЩЕНО** дополнительно: `CLOUDPAYMENTS_API_TOKEN`/Bearer, полное тело ответа verify, `paid_at`-значения с PII (только `status` безопасен).
 
-## Тестовые ориентиры (для qa)
+## Эксперименты пейволла ([ADR-098 §8](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md))
+
+Ровно **один** структурный лог на вызов каждой ручки (образец — `cloudpayments_checkout_outcome`, [ADR-051 §6](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)). Персиста/audit нет: passthrough без долговременного состояния.
+
+| Событие | `result` | Level | Allowlist полей |
+|---|---|---|---|
+| `cloudpayments_experiment_assign_outcome` | `assigned` \| `error` | INFO \| **WARNING** на `error` | `result`, `reason` (на ошибке), `upstreamStatus` (при `upstream_status`), `userId` (наш UUID), `experimentCode`, `requestedSegmentCode`, `assignedSegmentCode`, `isControl`, `requestedSegmentMatches`, `created`, `placement`, `locale` |
+| `cloudpayments_paywall_shown_outcome` | `logged` \| `error` | INFO \| **WARNING** на `error` | `result`, `reason` (на ошибке), `upstreamStatus`, `userId`, `experimentCode`, `segmentCode`, `placement`, `locale` |
+
+**Предикат отнесения** (симметричен, вычисляется из наблюдаемых фактов вызова, не из суждения):
+`result = assigned|logged` ⟺ поставщик ответил 2xx **и** (для `assign`) в теле есть `assignment.segment.code`; иначе `result = error` с `reason ∈ {timeout, connect_error, upstream_status, malformed_response}`. Третьего исхода нет: `200 {"logged": false}` — это `result=error`, а не «успех с оговоркой» (иначе отказ поставщика был бы неотличим от приёма).
+
+**ЗАПРЕЩЕНО:** `CLOUDPAYMENTS_API_TOKEN`/`Authorization`, `app_id`, тело ответа поставщика целиком, любые PII.
+
+> **`upstreamStatus` логируется здесь и НЕ логируется в checkout — контраст намеренный ([ADR-098 §8](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)).** `productId` у checkout проходит серверный allowlist ДО вызова, поэтому его не-2xx почти всегда авария поставщика. Коды экспериментов allowlist'а не имеют (их заводит оператор в панели), и самый вероятный не-2xx здесь — `404` «нет такого эксперимента», то есть опечатка. Числовой статус — единственное, что отличает опечатку от аварии; наружу он по-прежнему не проксируется.
+
+### Тестовые ориентиры (для qa)
+- На каждый вызов каждой ручки — **ровно одна** запись; на `error` уровень **WARNING**.
+- `assign`: 2xx с сегментом → `result=assigned` + `assignedSegmentCode`; не-2xx → `result=error`, `reason=upstream_status`, присутствует `upstreamStatus`, HTTP наружу `502`.
+- `paywall-shown`: любой отказ поставщика → `result=error` в логе **и** `200 {"logged": false}` наружу; `502` не выдаётся **ни при каком** отказе (регресс-тест: удаление ветки «никогда не 502» обязано ронять тест).
+- В записях нет `Authorization`/токена/`app_id`/тела ответа.
+
+
+## Тестовые ориентиры (для qa) — вебхук
 - На **каждый** исход — ровно одна запись `"cloudpayments_webhook_outcome"` с корректными `result`/`reason`/`level`.
 - `user_not_found`, `unknown_product` → **WARNING**; `applied`/`duplicate`/технические `ignored` → INFO; `empty_body` → DEBUG.
 - `transactionId`/`userId`/`productId` присутствуют там, где распарсены; отсутствуют (не `null`-ключ) на ранних reason'ах.

@@ -213,3 +213,32 @@
 - Дубликат `TransactionId` → `duplicate`, баланс не изменился.
 - `AccountId` верхним регистром → нормализован к lower → найден пользователь.
 - Карт-данные отсутствуют в `payload`/audit/логах.
+
+---
+
+# Эксперименты пейволла ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)) — две ручки-passthrough
+
+Полный контракт — [02-api-contracts.md](02-api-contracts.md), детали вызова — [03-architecture.md §Эксперименты пейволла](03-architecture.md), лог — [08-observability.md §Эксперименты пейволла](08-observability.md). Миграций нет, новых env нет.
+
+## Фаза E1 — схемы + лимитер
+- `src/app/schemas/billing_cloudpayments.py`: `ExperimentAssignRequest` (`experimentCode`/`segmentCode`/`placement`, StrictModel, `min_length=1`, `max_length=64`), `PaywallShownRequest` (те же поля), `ExperimentSegment` (`code: str`, `isControl: bool`), `ExperimentAssignResponse` (`segment`, `requestedSegmentMatches`, `created`), `PaywallShownResponse` (`logged: bool`). Существующие схемы не трогать.
+- `src/app/api_gateway/rate_limit.py`: `enforce_experiment_limits(*, user_id)` — копия `enforce_other_limits` с ключом `rl:experiments:{user_id}`; лимит/окно берутся из существующих `rate_limit_other_per_user`/`rate_limit_window_seconds`, fail-open на `redis.RedisError`. **Новую env не заводить.**
+
+## Фаза E2 — клиент (`src/app/billing_cloudpayments/experiments.py`, новый)
+- `BroadappsExperimentsClient.assign(...) -> AssignResult` и `.paywall_shown(...) -> bool`; `_EXPERIMENTS_TIMEOUT_SECONDS = 5.0`; `_PLATFORM = "ios"`.
+- Тело — **`json=`** (не `files=`: у вызова вложенный `context`). Состав тела и разбор ответа — [03-architecture.md](03-architecture.md).
+- Маппинг отказа общий (`timeout`/`connect_error`/`upstream_status`/`malformed_response`), последствия разные: `assign` → `UpstreamError` (502); **`paywall_shown` не поднимает исключений никогда** и возвращает `False`.
+- Чистый резолвер локали (`Accept-Language` → `PRESETS_DEFAULT_LOCALE` → `en`, без клампа к локалям каталогов).
+- `src/app/deps.py`: фабрика `get_broadapps_experiments_client()`.
+
+## Фаза E3 — роуты
+- Два роута в существующем `src/app/api_gateway/routers/billing_cloudpayments.py` (тег `Billing (CloudPayments)`), порядок проверок: `CurrentUser` → `cloudpayments_checkout_configured()` иначе `503` → `enforce_experiment_limits` иначе `429` → резолв локали → вызов клиента.
+- `paywall-shown` возвращает `200 {"logged": bool}` **при любом** исходе вызова к поставщику.
+- Swagger-тексты — по [§R2ter](../../08-api-documentation.md): без ADR/TD/Q-ссылок, без имён конфигов и внутреннего жаргона.
+
+## Фаза E4 — наблюдаемость
+- Ровно один `cloudpayments_experiment_assign_outcome` / `cloudpayments_paywall_shown_outcome` на вызов, allowlist — [08-observability.md](08-observability.md). WARNING на `result=error`.
+
+## Что НЕ трогать (эксперименты)
+- `service.py`/`verify.py`/`parser.py`/`auth.py` вебхука, `checkout.py` (кроме соседства в модуле), резолв `billing_common/resolve.py`, `config.py`, `errors.py`, `main.py`, миграции, Adapty/StoreKit/BYOK/policy-engine.
+- Общий лимитер `enforce_other_limits` и его ключ — не переиспользовать и не менять.

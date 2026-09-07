@@ -447,10 +447,10 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 
 ---
 
-## 7b. Billing — CloudPayments/broadapps (RU-путь: [ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md) checkout + [ADR-050](adr/ADR-050-cloudpayments-webhook.md) webhook)
+## 7b. Billing — CloudPayments/broadapps (RU-путь: [ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md) checkout + [ADR-050](adr/ADR-050-cloudpayments-webhook.md) webhook + [ADR-098](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md) эксперименты пейволла)
 
 ### POST /v1/billing/cloudpayments/checkout
-**Наш** эндпоинт создания платёжной ссылки RU-оплаты ([ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md)). **Вызывает iOS-клиент** (JWT). Делает исходящий вызов broadapps `POST /payments/link` и возвращает ссылку YooKassa. Активен **только на avelyra**.
+**Наш** эндпоинт создания платёжной ссылки RU-оплаты ([ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md)). **Вызывает iOS-клиент** (JWT). Делает исходящий вызов broadapps `POST /payments/link` и возвращает ссылку YooKassa. Активен там, где оператор задал **оба** `CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN`; иначе `503`.
 
 **Авторизация:** пользовательский JWT (`Authorization: Bearer <JWT>`, `bearerAuth`). **`userId` = JWT `sub`, НЕ из тела** — фикс «потерянных платежей» (колбэк [ADR-050](adr/ADR-050-cloudpayments-webhook.md) находит пользователя по этому `userId`).
 
@@ -468,6 +468,39 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 | 503 | `cloudpayments_checkout_not_configured` | `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN` не заданы (⇒ только avelyra) |
 
 **Исходящий вызов:** `POST {CLOUDPAYMENTS_API_BASE}/payments/link` (default `https://pay.broadapps.dev/api/v1`), multipart {`app_id`(config), `product_id`, `user_id`(=sub), `customer_email`}, `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>` (**отдельный** от входящего `WEBHOOK_TOKEN`), таймаут 15с. `customer_email` (PII) и токен — не логируются/не в ответе. Контракт — сверить живьём ([Q-051-1](99-open-questions.md)). Детали — [modules/billing-cloudpayments/02-api-contracts.md](modules/billing-cloudpayments/02-api-contracts.md).
+
+
+### POST /v1/billing/cloudpayments/experiments/assign
+Назначение пользователя в сегмент эксперимента пейволла ([ADR-098](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)). **Вызывает iOS-клиент** (JWT) при открытии пейволла; один исходящий вызов broadapps `POST /experiments/assignments`.
+
+**Авторизация:** пользовательский JWT. **`user_id` внешнего запроса = JWT `sub`, НЕ из тела** — тот же инвариант, что у `/checkout`: все наши вызовы к broadapps несут один идентификатор, иначе один человек становится в панели поставщика двумя пользователями.
+
+**Тело** (StrictModel): `{"experimentCode":"yearly_monthly_dojim2","segmentCode":"b","placement":"onbording"}` — три строки 1..64 символа. Значения уходят поставщику **дословно** (регистр и опечатки не правятся); списка допустимых кодов на сервере нет — словарь живёт в панели broadapps. `app_id`, `platform` (`"ios"`) и `locale` (из `Accept-Language`) подставляет **сервер**; передавать их не нужно и нельзя.
+
+**Ответ `200`:**
+```json
+{ "segment": { "code": "b", "isControl": false }, "requestedSegmentMatches": true, "created": true }
+```
+- `segment.code` — **действующий** сегмент. Пейволл рисуется по нему, а **не** по запрошенному `segmentCode`: при `requestedSegmentMatches=false` у пользователя уже есть другое назначение, и оно авторитетно.
+- `created=false` — назначение уже существовало (повторный вызов безопасен: идемпотентность обеспечивает поставщик).
+
+| HTTP | Код | Когда |
+|---|---|---|
+| 200 | — | назначение получено |
+| 401 | `unauthorized` | нет/невалидный JWT |
+| 422 | `validation_error` | пустое/слишком длинное поле, лишнее поле |
+| 429 | `rate_limited` | лимит (у экспериментов **своя** корзина — частые показы не мешают оплате) |
+| 502 | `upstream_error` | broadapps недоступен/таймаут/не-2xx/ответ без сегмента. Сегмент **не подставляется** |
+| 503 | `cloudpayments_checkout_not_configured` | рублёвая оплата на инстансе не настроена |
+
+> **Что делать клиенту при `502`/`429`/`503`:** показать **свой пейволл по умолчанию**. Это не ошибка для пользователя и её не нужно ему показывать.
+
+### POST /v1/billing/cloudpayments/experiments/paywall-shown
+Лог показа пейволла ([ADR-098](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)). Тело — **такое же**, как у `/experiments/assign`. Вызывается на каждый показ; дедупликации нет намеренно (каждый показ — событие).
+
+**Ответ `200`:** `{"logged": true}` — событие принято поставщиком; `{"logged": false}` — не принято (таймаут/сеть/ошибка поставщика).
+
+**Коды:** `200` (всегда при валидном запросе на настроенном инстансе), `401`, `422`, `429`, `503`. **`502` не выдаётся никогда** — отказ логирования не имеет права ломать показ пейволла, а `502` на этом префиксе означает «платёж не создан», и ложные срабатывания обесценили бы код там, где за ним деньги. Ответ этой ручки можно не дожидаться.
 
 ### POST /v1/billing/cloudpayments/webhook
 Серверный вебхук агрегатора **broadapps** (`pay.broadapps.dev`, фронтит YooKassa) в формате **CloudPayments** (**вызывает broadapps, не iOS**) — **отдельный RU-путь**. **[ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md): эндпоинт ПУБЛИЧНЫЙ (нет `401`); колбэк = ТРИГГЕР, начисление — только после ВЕРИФИКАЦИИ платежей через broadapps API.** Активен **только на avelyra** (где задан `CLOUDPAYMENTS_API_TOKEN`).
@@ -852,9 +885,9 @@ Steps-view — агрегированные шаги одного message-шаг
 **Источник ответа выбирается в таком порядке:**
 
 1. **Живой каталог рублёвой оплаты** (broadapps), если на инстансе заданы `CLOUDPAYMENTS_APP_ID`
-   и `CLOUDPAYMENTS_API_TOKEN`. Отсюда приходят `title`, `price`, `currency`, `kind`, `period` и
-   `isSpecialOffer`; `credits` подставляются из нашей карты `TOKEN_PRODUCTS` (поставщик про
-   кредиты не знает), у подписок — `null`.
+   и `CLOUDPAYMENTS_API_TOKEN`. Отсюда приходят `title`, `price`, `currency`, `kind`, `period`,
+   `isSpecialOffer` и `isDefault`; `credits` подставляются из нашей карты `TOKEN_PRODUCTS`
+   (поставщик про кредиты не знает), у подписок — `null`.
 2. **Статический `PRODUCTS_CATALOG`**, если задан.
 3. **Карта `TOKEN_PRODUCTS`** — только `productId` и `credits`, без цен.
 
@@ -866,22 +899,29 @@ Steps-view — агрегированные шаги одного message-шаг
 { "products": [
     { "productId": "week_6.99_nottrial", "title": "Неделя", "kind": "subscription",
       "period": "week", "price": 599, "currency": "RUB", "credits": null,
-      "isSpecialOffer": false },
+      "isSpecialOffer": false, "isDefault": false },
     { "productId": "1000_Tokens_59.99", "title": "1000 токенов", "kind": "tokens",
       "period": null, "price": 5990, "currency": "RUB", "credits": 1000,
-      "isSpecialOffer": true }
+      "isSpecialOffer": true, "isDefault": true }
 ] }
 ```
 
 **Response (200) — вариант без рублёвого каталога:**
 ```json
-{ "products": [ { "productId": "100_tokens_9.99", "credits": 100, "isSpecialOffer": false } ] }
+{ "products": [ { "productId": "100_tokens_9.99", "credits": 100, "isSpecialOffer": false,
+                  "isDefault": false } ] }
 ```
 
 - **`isSpecialOffer`** — помечен ли продукт как специальное предложение (флаг `is_special_offer`
   рублёвого каталога). Поле присутствует **всегда**: там, где такого каталога нет, оно `false`,
   поэтому клиенту не нужно отличать «нет поля» от «не предложение». Значение отображательное —
   ни на цену, ни на начисление кредитов оно не влияет.
+- **`isDefault`** — продукт, предвыбранный на пейволле ([ADR-098](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)). Источник — флаг
+  `is_default` рублёвого каталога, читается строго как булево; поле присутствует **всегда**
+  (`false` там, где такого каталога нет). Значение отображательное — на цену, кредиты и
+  результат покупки не влияет. **Если признак стоит у нескольких продуктов** (ошибка настройки
+  в панели), сервер флаги не переписывает: берите **первый** такой продукт в порядке ответа.
+  **Если ни у одного** — предвыбора нет, поведение прежнее.
 - **`credits`** — сколько кредитов даёт пакет. Источник — только server-side `TOKEN_PRODUCTS`
   ([07-deployment.md](07-deployment.md)); из тела запроса величина не берётся никогда.
   `credits: null` у пакета означает, что продукт есть у поставщика, но **не заведён у нас**, и

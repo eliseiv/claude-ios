@@ -13,28 +13,40 @@
   the ``userId`` sent upstream is the authenticated subject (never the client body), which is the
   key fix for "lost payments". Active only where CLOUDPAYMENTS_APP_ID / CLOUDPAYMENTS_API_TOKEN are
   set (else 503).
+- POST /experiments/assign, POST /experiments/paywall-shown (ADR-098): called by the iOS client
+  (JWT) around paywall rendering; passthrough to broadapps, no money and no DB. Same instance gate
+  as /checkout (503), but a SEPARATE rate-limit bucket so frequent impressions cannot lock the
+  payment path. The upstream ``user_id`` is the JWT subject on both, like every other outgoing
+  broadapps call. Deliberate asymmetry: /assign answers 502 when the provider fails (the segment is
+  never invented), /paywall-shown answers 200 {"logged": false} and NEVER 502.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from app.api_gateway.rate_limit import (
     enforce_cloudpayments_webhook_limits,
+    enforce_experiment_limits,
     enforce_other_limits,
 )
 from app.billing_cloudpayments.auth import require_cloudpayments_webhook
 from app.billing_cloudpayments.checkout import CloudPaymentsCheckoutClient
+from app.billing_cloudpayments.experiments import (
+    BroadappsExperimentsClient,
+    resolve_experiment_locale,
+)
 from app.billing_cloudpayments.service import CloudPaymentsWebhookService
 from app.config import Settings, get_settings
 from app.deps import (
     CurrentUser,
     DbSession,
     client_ip,
+    get_broadapps_experiments_client,
     get_cloudpayments_checkout_client,
     get_cloudpayments_webhook_service,
 )
@@ -45,6 +57,11 @@ from app.schemas.billing_cloudpayments import (
     CloudPaymentsCheckoutRequest,
     CloudPaymentsCheckoutResponse,
     CloudPaymentsWebhookResponse,
+    ExperimentAssignRequest,
+    ExperimentAssignResponse,
+    ExperimentSegment,
+    PaywallShownRequest,
+    PaywallShownResponse,
 )
 
 router = APIRouter(prefix="/v1/billing/cloudpayments", tags=["Billing (CloudPayments)"])
@@ -113,6 +130,86 @@ async def cloudpayments_checkout(
         status=result.status,
         expiresAt=result.expires_at,
     )
+
+
+@router.post(
+    "/experiments/assign",
+    response_model=ExperimentAssignResponse,
+    summary="Назначить сегмент эксперимента",
+    description=(
+        "Назначает пользователя в сегмент эксперимента пейволла и возвращает **действующий** "
+        "сегмент. Требуется JWT; пользователь берётся из токена. Пришлите `experimentCode`, "
+        "`segmentCode` и `placement` — значения передаются как есть. Рисуйте пейволл по "
+        "`segment.code` из ответа, а не по запрошенному `segmentCode`: при "
+        "`requestedSegmentMatches=false` у пользователя уже есть другое назначение. Повторный "
+        "вызов безопасен (`created=false`). При `502`/`429`/`503` покажите свой пейволл по "
+        "умолчанию — это не ошибка для пользователя. Доступно не на всех инсталляциях (`503`)."
+    ),
+)
+async def experiments_assign(
+    body: ExperimentAssignRequest,
+    current: CurrentUser,
+    client: Annotated[BroadappsExperimentsClient, Depends(get_broadapps_experiments_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    accept_language: str | None = Header(default=None),
+) -> ExperimentAssignResponse:
+    # Same order of checks on both experiment endpoints: JWT (dependency) -> instance gate ->
+    # rate limit -> locale -> upstream call. The user id sent upstream is the verified JWT
+    # subject, never a body field: every outgoing broadapps call carries that one identity.
+    if not settings.cloudpayments_checkout_configured():
+        raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
+    if not await enforce_experiment_limits(user_id=current.user_id):
+        raise RateLimitedError("rate limit exceeded")
+    locale = resolve_experiment_locale(accept_language, settings.presets_default_locale)
+    result = await client.assign(
+        user_id=current.user_id,
+        experiment_code=body.experimentCode,
+        segment_code=body.segmentCode,
+        placement=body.placement,
+        locale=locale,
+    )
+    return ExperimentAssignResponse(
+        segment=ExperimentSegment(code=result.segment_code, isControl=result.is_control),
+        requestedSegmentMatches=result.requested_segment_matches,
+        created=result.created,
+    )
+
+
+@router.post(
+    "/experiments/paywall-shown",
+    response_model=PaywallShownResponse,
+    summary="Записать показ пейволла",
+    description=(
+        "Записывает показ пейволла. Тело — такое же, как у назначения сегмента. Вызывается на "
+        'каждый показ; события намеренно не дедуплицируются. Ответ — `{"logged": true|false}`: '
+        "`false` означает, что событие не принято, но на показ пейволла это не влияет и ответа "
+        "можно не дожидаться. Доступно не на всех инсталляциях (`503`)."
+    ),
+)
+async def experiments_paywall_shown(
+    body: PaywallShownRequest,
+    current: CurrentUser,
+    client: Annotated[BroadappsExperimentsClient, Depends(get_broadapps_experiments_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    accept_language: str | None = Header(default=None),
+) -> PaywallShownResponse:
+    # Deliberately asymmetric with /experiments/assign and /checkout: whatever the provider does,
+    # this endpoint answers 200 {"logged": bool} and NEVER 502. A refused impression log must not
+    # break the impression, and a false 502 here would devalue the code that means "payment link
+    # not created" on the same prefix. The refusal is not lost — it is a WARNING in our log.
+    if not settings.cloudpayments_checkout_configured():
+        raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
+    if not await enforce_experiment_limits(user_id=current.user_id):
+        raise RateLimitedError("rate limit exceeded")
+    locale = resolve_experiment_locale(accept_language, settings.presets_default_locale)
+    logged = await client.paywall_shown(
+        user_id=current.user_id,
+        experiment_code=body.experimentCode,
+        segment_code=body.segmentCode,
+        placement=body.placement,
+        locale=locale,
+    )
+    return PaywallShownResponse(logged=logged)
 
 
 @router.post(

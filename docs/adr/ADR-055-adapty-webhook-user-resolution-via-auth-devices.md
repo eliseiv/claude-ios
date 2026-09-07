@@ -5,6 +5,8 @@
 - Тип: bugfix-ADR, **исправляет [ADR-029](ADR-029-adapty-subscription-webhook.md) §3 / [ADR-047 §A](ADR-047-adapty-real-payload-format-and-grant-idempotency.md)** (резолв пользователя входящего Adapty-вебхука). **Портирует семантику [ADR-053](ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)** (тот же баг резолва, ранее починенный только в CloudPayments-ветке) в Adapty-ветку и **выносит резолв в общий модуль** для обоих вебхуков.
 - Связано: [ADR-018](ADR-018-embedded-auth-issuer.md) (device-based identity, таблица `auth_devices`), [ADR-007](ADR-007-lazy-user-provisioning.md) (не провижинить пользователей из вебхука), [ADR-046](ADR-046-adapty-webhook-outcome-logging.md) (outcome-лог), [ADR-047](ADR-047-adapty-real-payload-format-and-grant-idempotency.md) (парсинг/маппинг/идемпотентность гранта), [ADR-005](ADR-005-idempotency-ledger.md) (идемпотентность гранта). Модули [billing-adapty](../modules/billing-adapty/README.md), [billing-cloudpayments](../modules/billing-cloudpayments/README.md).
 
+> **Контраст направлений ([ADR-098 §1](ADR-098-broadapps-paywall-experiments-and-default-product.md)):** общий `billing_common/resolve.py` терпимо резолвит идентификатор, пришедший **ОТ** агрегатора. На ИСХОДЯЩИЕ вызовы это не распространяется: наружу (broadapps) мы всегда шлём JWT `sub` ([ADR-051](ADR-051-cloudpayments-checkout-payment-link.md), [ADR-098](ADR-098-broadapps-paywall-experiments-and-default-product.md)).
+
 ## Context
 
 **Инцидент (прод avelyra, подтверждён логами 7 дней + БД): Adapty-вебхук приходит, авторизуется (200), но события ВЫБРАСЫВАЮТСЯ — «оплата/подписка есть, начисления нет».**

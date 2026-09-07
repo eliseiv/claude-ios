@@ -5,6 +5,8 @@
 - Тип: bugfix-ADR, **исправляет [ADR-050 §2/§5](ADR-050-cloudpayments-webhook.md)** (резолв пользователя входящего вебхука). Расширяет RU-контур [ADR-050](ADR-050-cloudpayments-webhook.md) (вход) / [ADR-051](ADR-051-cloudpayments-checkout-payment-link.md) (checkout) / [ADR-052](ADR-052-cloudpayments-webhook-lenient-auth-header.md) (auth-заголовок).
 - Связано: [ADR-018](ADR-018-embedded-auth-issuer.md) (device-based identity, таблица `auth_devices`), [ADR-007](ADR-007-lazy-user-provisioning.md) (не провижинить пользователей из вебхука), [ADR-005](ADR-005-idempotency-ledger.md) (идемпотентность гранта). Модуль [billing-cloudpayments](../modules/billing-cloudpayments/README.md).
 
+> **Контраст направлений ([ADR-098 §1](ADR-098-broadapps-paywall-experiments-and-default-product.md)) — не переносить это решение на исходящие вызовы.** Здесь описано, как мы терпимо резолвим идентификатор, пришедший **ОТ** broadapps (`users` → `auth_devices` → `legacy_user_ids`). Из того, что поставщик знает пользователя по `deviceId`, **не следует**, что `deviceId` надо слать наружу: во всех НАШИХ исходящих вызовах к broadapps `user_id` = JWT `sub` ([ADR-051](ADR-051-cloudpayments-checkout-payment-link.md), [ADR-098](ADR-098-broadapps-paywall-experiments-and-default-product.md)). Резолв — компенсация уже случившегося расщепления идентичности, а не разрешение создавать новые.
+
 ## Context
 
 **Инцидент (прод avelyra, подтверждён БД + документом iOS-разработчика `RU_PURCHASE_FLOW.md`): «оплата есть — начисления нет» для RU-флоу.**

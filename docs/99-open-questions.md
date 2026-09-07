@@ -307,6 +307,14 @@
 |---|---|---|---|---|
 | Q-017-4 | `SERVICE_DOMAIN` и `LLM_PROVIDER` инстансов livonexa/lumirexa/qoravena | **Closed (2026-08-24)** | Сверено на сервере по `/opt/<dir>/.env`: все три — `<dir>.shop` и `LLM_PROVIDER=openai`; реестр [07-deployment.md](07-deployment.md) заполнен. Там же вскрылось, что `lunexoro` числился Anthropic, а фактически `openai` — исправлено. | Нет |
 
+## Открытые вопросы экспериментов пейволла и каталога продуктов (2026-09-07, [ADR-098](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md))
+
+| ID | Вопрос | Статус | Принятый дефолт (если есть) | Блокирует backend? |
+|---|---|---|---|---|
+| Q-098-1 | Как называется поле «продукт по умолчанию» в ответе broadapps `GET /apps/{app_id}/products` — `is_default`? | Open | Дефолт — **`is_default`**, по образцу соседнего `is_special_offer` ([ADR-098 §9](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)). Сверяется одним запросом каталога с прод-инстанса после того, как оператор проставит признак в панели. Если имя другое — правка одной строки маппера; до сверки худший исход безопасен: `isDefault` всюду `false`, то есть сегодняшнее поведение. | Нет |
+| Q-098-2 | Под каким `user_id` лежат платежи адресуемых инстансов в панели broadapps — под нашим `sub` (ссылка создана через `POST /v1/billing/cloudpayments/checkout`) или под `deviceId` (приложение создаёт ссылку напрямую, как описано в `RU_PURCHASE_FLOW.md`)? | Open | **На наше решение не влияет:** мы в любом случае шлём `sub` ([ADR-098 §1](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)) — иначе один человек станет у поставщика двумя пользователями. От ответа зависит только то, сойдётся ли в панели воронка «сегмент → показ → оплата»: если платежи лежат под `deviceId`, лечится это на стороне iOS (перейти на наш `/checkout`), а не сменой идентификатора у нас. Проверяется сверкой `user_id` любого свежего платежа в панели с `sub` того же пользователя. | Нет |
+| Q-098-3 | Что broadapps возвращает на `POST /experiments/paywall-shown` (код успеха и тело)? | Open | Дефолт — **тело не читать вовсе**, значим только класс статуса: 2xx = событие принято ([ADR-098 §6](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)). Разбор недокументированной формы породил бы ложные `malformed`. Если в теле окажется значимый признак отказа при 2xx — вводить отдельным решением, а не догадкой. | Нет |
+
 ## Блокеры (для orchestrator)
 - ~~**Q-015-1 (покупка токенов × policy)**~~ — **Closed (2026-06-02, вариант б):** покупка токенов требует активной подписки (`403 subscription_required` до grant), [ADR-002](adr/ADR-002-access-policy-state-machine.md) без изменений. Требует backend-доработки: policy-guard перед `WalletService.grant` в token-purchase. См. [ADR-015 §Доступность](adr/ADR-015-consumable-token-iap.md).
 - **Q-016-2 (web search)** — блокирует **только** фичу веб-поиска: нет выбора провайдера → нет контракта server-side tool. Остальное расширение не блокирует.

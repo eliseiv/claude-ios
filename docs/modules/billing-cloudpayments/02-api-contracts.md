@@ -1,12 +1,15 @@
 # billing-cloudpayments / 02 — API Contracts
 
-Модуль содержит **две половины** RU-контура:
+Модуль содержит **две половины** RU-контура плюс **экспериментную поверхность** над тем же поставщиком:
 - **Исходящая** — `POST /v1/billing/cloudpayments/checkout` ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)): **наш** JWT-эндпоинт создаёт платёжную ссылку через broadapps.
 - **Входящая** — `POST /v1/billing/cloudpayments/webhook` ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)): broadapps присылает колбэк о состоявшейся оплате.
+- **Эксперименты пейволла** — `POST /v1/billing/cloudpayments/experiments/assign` и `POST /v1/billing/cloudpayments/experiments/paywall-shown` ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)): passthrough к broadapps, денег не касаются.
+
+> **Инвариант исходящего контура ([ADR-098 §1](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)):** во ВСЕХ наших исходящих вызовах к broadapps (`/payments/link`, отмена подписки, обе ручки экспериментов) `user_id` = **JWT `sub`** и никогда не из тела. Один человек — одна личность у поставщика; трёхступенчатый резолв ([ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)/[ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)) работает только в сторону «поставщик → мы» и панель поставщика не чинит. Единственный вызов, идущий НЕ по нашему `sub`, — верификация `GET /users/{X}/payments` ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)): там `X` пришёл в колбэке и идентификатор выбираем не мы.
 
 ## POST /v1/billing/cloudpayments/checkout
 
-**Наш** эндпоинт создания платёжной ссылки RU-оплаты. **Вызывает iOS-клиент** (JWT). Делает один исходящий вызов broadapps `POST /payments/link` и возвращает `paymentUrl` (ссылка YooKassa). Контракт целиком — [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md). Активен **только на avelyra** (где заданы `CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN`).
+**Наш** эндпоинт создания платёжной ссылки RU-оплаты. **Вызывает iOS-клиент** (JWT). Делает один исходящий вызов broadapps `POST /payments/link` и возвращает `paymentUrl` (ссылка YooKassa). Контракт целиком — [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md). Активен там, где оператор задал **оба** `CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN` (предикат `cloudpayments_checkout_configured()`); состав таких инстансов — операторский и здесь не фиксируется ([07-deployment.md](../../07-deployment.md)).
 
 ### Авторизация
 - Пользовательский **JWT** (`Authorization: Bearer <JWT>`, `bearerAuth`, `CurrentUser`) — как прочие `/v1/*`. Нет/невалидный → `401`.
@@ -53,7 +56,95 @@
 ### Исходящий вызов broadapps
 - `POST {CLOUDPAYMENTS_API_BASE}/payments/link` (default base `https://pay.broadapps.dev/api/v1`), **multipart/form-data** {`app_id`(config), `product_id`, `user_id`(=JWT `sub`), `customer_email`}, `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>`, `Accept: application/json`, таймаут 15с. Детали — [03-architecture §Исходящий вызов](03-architecture.md).
 
+> **Контраст с соседней ручкой [ADR-098 §6](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md):** здесь `502 upstream_error` означает «платёжная ссылка не создана» — реакция на него обязательна. У `POST .../experiments/paywall-shown` при том же классе отказа `502` **не выдаётся никогда** (`200 {"logged": false}`) именно для того, чтобы телеметрия не обесценила этот код. Правило не переносить ни в ту, ни в другую сторону.
+
 > **Контракт исходящего вызова — сверить живьём ([Q-051-1](../../99-open-questions.md)):** имена multipart-полей и shape `201`-ответа взяты из спеки заказчика; после деплоя прислать тестовый checkout и убедиться, что broadapps вернул `payment_url`.
+
+---
+
+## POST /v1/billing/cloudpayments/experiments/assign
+
+Назначение пользователя в сегмент эксперимента пейволла. **Вызывает iOS-клиент** (JWT). Один исходящий вызов broadapps `POST {CLOUDPAYMENTS_API_BASE}/experiments/assignments`. Контракт целиком — [ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md).
+
+### Авторизация и гейт
+- Пользовательский **JWT** (`bearerAuth`, `CurrentUser`); нет/невалидный → `401`.
+- **`user_id` исходящего запроса = JWT `sub`**, тело его не содержит (`extra="forbid"`). Обоснование — [ADR-098 §1](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md).
+- **Гейт инстанса — существующий** `cloudpayments_checkout_configured()` (`CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN`); пусто → `503 cloudpayments_checkout_not_configured`. **Нового флага включения нет** ([ADR-098 §5](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)).
+- **Rate-limit — отдельная корзина** `enforce_experiment_limits(user_id=sub)`, ключ `rl:experiments:{user_id}`, лимит/окно = `RATE_LIMIT_OTHER_PER_USER`/`RATE_LIMIT_WINDOW_SECONDS` → `429`. **Не** общая корзина `rl:other:*`: частые показы пейволла заперли бы `POST /checkout` тому же пользователю ([ADR-098 §7](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)).
+
+### Тело запроса (`ExperimentAssignRequest`, StrictModel `extra="forbid"`)
+
+```json
+{ "experimentCode": "yearly_monthly_dojim2", "segmentCode": "b", "placement": "onbording" }
+```
+
+| Поле | Тип | Обязательно | Правило |
+|---|---|---|---|
+| `experimentCode` | str | да | `min_length=1`, `max_length=64` |
+| `segmentCode` | str | да | `min_length=1`, `max_length=64` — **запрашиваемый** сегмент |
+| `placement` | str | да | `min_length=1`, `max_length=64` — место показа |
+
+**Allowlist значений не вводится** (словарь живёт в панели broadapps; серверный список отдавал бы `422` на валидный новый код). Значения уходят поставщику **дословно**: регистр не нормализуется, опечатки не исправляются (`onbording` остаётся `onbording` — панель матчит строку посимвольно).
+
+### Ответ (`ExperimentAssignResponse`, StrictModel) — наша схема, не тело поставщика
+
+```json
+{ "segment": { "code": "b", "isControl": false }, "requestedSegmentMatches": true, "created": true }
+```
+
+| Поле | Тип | Источник (broadapps) |
+|---|---|---|
+| `segment.code` | str | `assignment.segment.code` — **действующий** сегмент |
+| `segment.isControl` | bool | `assignment.segment.is_control` |
+| `requestedSegmentMatches` | bool | `assignment.requested_segment_matches` |
+| `created` | bool | `assignment.created` (`false` = назначение уже существовало — это и есть идемпотентность, своей мы не заводим) |
+
+> **Инвариант клиента:** пейволл рисуется по `segment.code` **из ответа**, а не по `segmentCode` из запроса. При `requestedSegmentMatches=false` авторитетно действующее назначение; показ запрошенного варианта означал бы, что человек видит один пейволл, а в статистике учтён по другому.
+
+### Коды ответа
+
+| HTTP | Код | Когда |
+|---|---|---|
+| 200 | — | поставщик вернул назначение |
+| 401 | `unauthorized` | нет/невалидный JWT |
+| 422 | `validation_error` | пустой/слишком длинный код, лишнее поле |
+| 429 | `rate_limited` | превышена корзина `rl:experiments:*` |
+| 502 | `upstream_error` | broadapps недоступен/таймаут/не-2xx/ответ без `assignment.segment.code` (без утечки тела/статуса/токена). **Сегмент не выдумывается** |
+| 503 | `cloudpayments_checkout_not_configured` | `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN` не заданы |
+
+> **Контракт клиента на отказ:** `502`/`429`/`503` — **не ошибка для пользователя**: приложение рисует свой пейволл по умолчанию, ничего не показывая про сбой.
+
+---
+
+## POST /v1/billing/cloudpayments/experiments/paywall-shown
+
+Лог показа пейволла. **Вызывает iOS-клиент** (JWT), **часто** — на каждый показ. Один исходящий вызов broadapps `POST {CLOUDPAYMENTS_API_BASE}/experiments/paywall-shown` **с тем же телом**, что у `assign`.
+
+### Тело запроса (`PaywallShownRequest`)
+Идентично `ExperimentAssignRequest` (те же три поля, те же правила).
+
+### Ответ (`PaywallShownResponse`)
+
+```json
+{ "logged": true }
+```
+
+`logged=false` — поставщик не принял событие (таймаут/сеть/не-2xx). Событие теряется, показ пейволла — нет.
+
+### Коды ответа
+
+| HTTP | Код | Когда |
+|---|---|---|
+| 200 | — | всегда, когда запрос дошёл до обработчика: `{"logged": true}` при 2xx поставщика, `{"logged": false}` при любом его отказе |
+| 401 | `unauthorized` | нет/невалидный JWT |
+| 422 | `validation_error` | пустой/слишком длинный код, лишнее поле |
+| 429 | `rate_limited` | превышена корзина `rl:experiments:*` |
+| 503 | `cloudpayments_checkout_not_configured` | инстанс не сконфигурирован |
+| **502** | — | **не выдаётся никогда** |
+
+> **Контраст с `/assign` и `/checkout` — намеренный ([ADR-098 §6](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)).** Классификация отказа у всех трёх одна (`timeout`/`connect_error`/`upstream_status`/`malformed_response`), а последствие разное: `/checkout` и `/assign` отдают `502`, `/paywall-shown` — `200 {"logged": false}`. Причина: `502` на этом префиксе означает «платёж не создан», и ложные срабатывания на телеметрии приучили бы не реагировать на него там, где за ним деньги. Отказ не теряется — он в логе `cloudpayments_paywall_shown_outcome` (WARNING).
+
+> **Идемпотентность НЕ вводится намеренно:** каждый показ — отдельное событие; дедуп уничтожил бы измеряемую величину. Повторные вызовы — штатный режим.
 
 ---
 

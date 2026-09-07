@@ -17,7 +17,7 @@
 - **Входящий вебхук** (`/webhook`): **broadapps (внешний агрегатор)** — серверный HTTP POST в формате CloudPayments (фронтит YooKassa). Не наш iOS-клиент. **[ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md): колбэк приходит БЕЗ авторизации/подписи → эндпоинт публичный (нет `401`), rate-limit per-IP.** Аутентичность события устанавливается **верификацией** через broadapps API (`GET /users/{deviceId}/payments`, `Bearer CLOUDPAYMENTS_API_TOKEN`), а не токеном колбэка. `CLOUDPAYMENTS_WEBHOOK_TOKEN` — легаси/опционален.
 - **Исходящий checkout** (`/checkout`, [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)): **наш iOS-клиент** (JWT). Мы, в свою очередь, **вызываем broadapps** `POST /payments/link` (исходящий httpx, `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>`).
 
-## Исходящая зависимость (checkout)
+## Исходящая зависимость (checkout + эксперименты)
 | Зависимость | Что используется | Источник |
 |---|---|---|
 | httpx-клиент к внешнему API | `httpx.AsyncClient` POST multipart, таймаут, маппинг ошибок → `UpstreamError` (502) | образец исходящих клиентов `src/app/chat/openai_client.py` ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) |
@@ -38,3 +38,8 @@
 
 ## Причина появления (инцидент)
 broadapps был направлен на Adapty-эндпоинт → `401` (несовпадение `ADAPTY_WEBHOOK_SECRET`) + несовместимый формат (Adapty ждёт `profile_event_id`/`event_properties`). Нужен свой эндпоинт + секрет + парсер CloudPayments-формата ([ADR-050 §Context](../../adr/ADR-050-cloudpayments-webhook.md)).
+
+## Исходящая зависимость (эксперименты пейволла, [ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md))
+- `POST {CLOUDPAYMENTS_API_BASE}/experiments/assignments` и `POST {CLOUDPAYMENTS_API_BASE}/experiments/paywall-shown` — **`application/json`** (в теле вложенный `context`), `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>`, таймаут **5с**. Тот же хост и тот же секрет, что у checkout; новых конфигов нет.
+- **Кто вызывает нас:** iOS-клиент (JWT) на открытии пейволла. До [ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md) обе ручки поставщика звало само приложение, напрямую и с `user_id = deviceId` (`RU_PURCHASE_FLOW.md`); теперь вызов серверный, идентификатор — JWT `sub`.
+- **Соседи не затронуты:** wallet/ledger/subscriptions/policy-engine в этом пути не участвуют вовсе.

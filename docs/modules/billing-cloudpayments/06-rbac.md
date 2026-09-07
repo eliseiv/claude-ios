@@ -8,7 +8,7 @@
 | Механизм | Пользовательский JWT (RS256), `Authorization: Bearer <JWT>`; нет/невалидный → `401` |
 | Идентичность | **`userId` = JWT `sub`** (`current.user_id`), **НЕ из тела** — ключевая мера (устраняет клиент-контролируемый `user_id`). Тело не содержит `userId`/`appId` |
 | Провижининг | `get_current_user` лениво provision `users[sub]` ([ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)) → до оплаты гарантирует, что колбэк найдёт пользователя |
-| Rate-limit | `enforce_other_limits(user_id=sub)` → `429` |
+| Rate-limit | `enforce_other_limits(user_id=sub)` (**общая** корзина `rl:other:*`) → `429`. **Контраст ([ADR-098 §7](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)):** у ручек экспериментов корзина **своя** (`rl:experiments:*`) — иначе частые показы пейволла выбрали бы общую и заперли бы этот платёжный эндпоинт. Переводить checkout в чужую корзину или эксперименты в общую нельзя |
 | Исходящая авторизация | к broadapps — серверный `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>` (**отдельный** от входящего `CLOUDPAYMENTS_WEBHOOK_TOKEN`; разные роли: мы→broadapps vs broadapps→мы) |
 | Секреты | `CLOUDPAYMENTS_API_TOKEN` (секрет) и `CLOUDPAYMENTS_APP_ID` — серверные, не в клиенте, не в логах/ответе. `customer_email` — PII, не логируется |
 | Не сконфигурировано | `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN` пусты → `503` ⇒ активен только на avelyra |
@@ -41,3 +41,17 @@
 `require_cloudpayments_webhook` — per-route dependency (Depends), **наблюдательная** (не блокирует). OpenAPI security-схема `cloudPaymentsWebhook` (http bearer, `auto_error=False`) сохраняется **декоративно** (замок в Swagger), реальной проверки токена нет ([ADR-054 §1](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)). Rate-limit и конфиг-гейт `API_TOKEN` — в роутере/`handle()`.
 
 > **Исторически (базовый [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)/[ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md), ОТМЕНЕНО [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)):** вебхук был machine-to-machine-контуром со статическим bearer `CLOUDPAYMENTS_WEBHOOK_TOKEN` (constant-time, `401` на mismatch, `500` если не задан; терпимый разбор [ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md)); идемпотентность по `TransactionId`. Диагностика показала `authScheme=none` → 401-путь и токен-гейт сняты. [Q-052-1](../../99-open-questions.md) закрыт.
+
+## Эксперименты пейволла — пользовательский JWT ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md))
+Эндпоинты `POST /v1/billing/cloudpayments/experiments/assign` и `POST /v1/billing/cloudpayments/experiments/paywall-shown` — тот же пользовательский контур, что у checkout (`bearerAuth`, `CurrentUser`), НЕ M2M.
+
+| Аспект | Значение |
+|---|---|
+| Механизм | Пользовательский JWT (RS256); нет/невалидный → `401` |
+| Идентичность | **`user_id` исходящего запроса = JWT `sub`**, НЕ из тела. Тело не содержит ни `userId`, ни `deviceId`, ни `appId`. `deviceId` (claim `device_id`) **сознательно не используется** ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md) §1): не сойдётся с платежом, созданным под `sub`, и per-устройство расщепляет назначение |
+| Rate-limit | **отдельная корзина** `enforce_experiment_limits(user_id=sub)` (`rl:experiments:{user_id}`) → `429`. Изоляция от `rl:other:*` нужна, чтобы частые показы пейволла не заперли `POST /checkout` тому же пользователю |
+| Исходящая авторизация | серверный `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>` (тот же секрет, что у checkout/verify) |
+| Секреты | `CLOUDPAYMENTS_API_TOKEN` и `CLOUDPAYMENTS_APP_ID` — серверные, не в клиенте, не в логах/ответе. PII в этих вызовах нет вовсе |
+| Не сконфигурировано | `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN` пусты → `503 cloudpayments_checkout_not_configured` (тот же класс ошибки, нового флага не заводится) |
+| SSRF | исходящий вызов только к фиксированному `CLOUDPAYMENTS_API_BASE`; коды экспериментов идут в **тело**, не в путь |
+| Чего эндпоинты НЕ делают | не пишут в БД, не трогают ledger/подписки/кошелёк, не создают пользователей, не дают admin-привилегий, не проксируют наружу тело/статус/токен поставщика |

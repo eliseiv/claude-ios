@@ -1,6 +1,6 @@
 # billing-cloudpayments / 03 — Architecture
 
-Реализует [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md) (входящий вебхук) и [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md) (исходящий checkout). Ниже — точные детали для backend (без додумывания). Образец структуры — модуль [billing-adapty](../billing-adapty/README.md).
+Реализует [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md) (входящий вебхук), [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md) (исходящий checkout) и [ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md) (эксперименты пейволла). Ниже — точные детали для backend (без додумывания). Образец структуры — модуль [billing-adapty](../billing-adapty/README.md).
 
 ## Checkout — исходящий вызов broadapps ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md))
 
@@ -53,6 +53,8 @@ sequenceDiagram
   ```
   **Content-Type руками НЕ ставить** (httpx выставит boundary).
 - Таймаут `_CHECKOUT_TIMEOUT_SECONDS = 15.0`.
+
+> **Контраст с соседним исходящим вызовом ([ADR-098 §10](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)) — по аналогии НЕ переносить:** здесь тело **multipart** (`files=`), а у обеих ручек экспериментов (`/experiments/assignments`, `/experiments/paywall-shown`) — **`application/json`** (`json=`), потому что там во вложенном объекте `context`, который в multipart не выражается. Таймаут тоже различается намеренно: `15.0`с здесь (на другом конце создаётся платёж) против `5.0`с у экспериментов (путь отрисовки пейволла).
 - Маппинг ошибок → `UpstreamError` (502): `httpx.TimeoutException`→`timeout`; `httpx.RequestError`→`connect_error`; статус не `2xx` (success=`201`; принять `200`/`201`)→`upstream_status`; `2xx` без `payment_url`/не-JSON→`malformed_response`. Наружу — generic 502, **без** upstream-тела/статуса/токена.
 
 ### Валидация productId (`validate_product`)
@@ -66,6 +68,71 @@ if kind == KIND_TOKENS and settings.token_products().get(product_id, 0) <= 0:  r
 
 ### Наблюдаемость checkout
 Ровно один структурный лог `"cloudpayments_checkout_outcome"` на вызов. **Allowlist:** `result` (`created`|`error`), `reason` (на ошибке), `userId` (наш UUID), `productId`, `status` (broadapps-статус на успехе), `paymentId` (на успехе). **ЗАПРЕЩЕНО:** `customer_email` (PII), `CLOUDPAYMENTS_API_TOKEN`/Bearer, `app_id`, upstream-тело. Без persist/audit-строки (log-only, [ADR-051 §6](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)).
+
+> **Контраст с логом экспериментов ([ADR-098 §8](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)):** там в allowlist добавлен `upstreamStatus` (числовой код поставщика), здесь его **намеренно нет**. Причина: `productId` проходит серверный allowlist ДО вызова, поэтому не-2xx здесь почти всегда авария поставщика; коды экспериментов allowlist'а не имеют, и их не-2xx чаще всего — опечатка оператора в панели, отличимая только по статусу. Наружу статус не проксируется ни там, ни здесь.
+
+---
+
+## Эксперименты пейволла — исходящие вызовы broadapps ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md))
+
+### Файлы (эксперименты)
+- `src/app/billing_cloudpayments/experiments.py` — **новый**: `BroadappsExperimentsClient` с двумя методами
+  `async def assign(*, user_id: uuid.UUID, experiment_code: str, segment_code: str, placement: str, locale: str) -> AssignResult`
+  и `async def paywall_shown(*, ... те же аргументы ...) -> bool` (`True` = поставщик принял событие).
+  Здесь же `_EXPERIMENTS_TIMEOUT_SECONDS = 5.0`, серверная константа `_PLATFORM = "ios"`, чистый резолвер локали и сборка тела. **Отдельный файл, а не метод `CloudPaymentsCheckoutClient`:** у экспериментов другая политика отказа (`paywall_shown` не поднимает `UpstreamError` вообще) и другой таймаут — держать её в одном классе с денежными вызовами значит рано или поздно применить её к ним.
+- `src/app/schemas/billing_cloudpayments.py` — **добавить** `ExperimentAssignRequest` (=`PaywallShownRequest` по полям), `ExperimentSegment`, `ExperimentAssignResponse`, `PaywallShownResponse` (все StrictModel). Существующие схемы не трогать.
+- `src/app/api_gateway/routers/billing_cloudpayments.py` — **добавить** два роута в тот же `router` (тег `Billing (CloudPayments)`).
+- `src/app/api_gateway/rate_limit.py` — **добавить** `enforce_experiment_limits(*, user_id)` по образцу `enforce_other_limits`: ключ `rl:experiments:{user_id}`, лимит `settings.rate_limit_other_per_user`, окно `settings.rate_limit_window_seconds`, fail-open на `redis.RedisError`. **Новой env не заводится** — переиспользуется значение, изолируется корзина.
+- `src/app/deps.py` — фабрика `get_broadapps_experiments_client()` (нужен только `get_settings()`, без `DbSession`).
+- `src/app/config.py`, `src/app/errors.py`, `src/app/main.py`, миграции — **без изменений** (переиспользуются `cloudpayments_*`-поля, `UpstreamError`, `CloudPaymentsCheckoutNotConfiguredError`, уже зарегистрированный router).
+
+### Поток (обе ручки)
+```mermaid
+sequenceDiagram
+    participant C as iOS (JWT)
+    participant R as Router (/experiments/*)
+    participant E as BroadappsExperimentsClient
+    participant B as broadapps (/experiments/*)
+    C->>R: POST + Bearer <JWT> + {experimentCode, segmentCode, placement}
+    R->>R: get_current_user → userId=sub (+ lazy provision users)
+    R->>R: config gate cloudpayments_checkout_configured() иначе 503
+    R->>R: enforce_experiment_limits(sub) иначе 429
+    R->>R: locale ← Accept-Language → PRESETS_DEFAULT_LOCALE → "en"
+    R->>E: assign(...) | paywall_shown(...)
+    E->>B: POST JSON {experiment_code, user_id=sub, app_id(config), segment_code, context{platform:"ios", locale, paywall{placement}}} + Bearer <api_token>
+    alt timeout / connect / не-2xx / malformed
+        E-->>R: assign → UpstreamError → 502 ; paywall_shown → False → 200 {logged:false}
+    else 2xx
+        B-->>E: {assignment:{segment:{code,is_control}, requested_segment_matches, created}}
+        E-->>R: AssignResult | True
+        R-->>C: 200 {segment{code,isControl}, requestedSegmentMatches, created} | 200 {logged:true}
+    end
+    Note over R,E: ровно один лог cloudpayments_experiment_assign_outcome / cloudpayments_paywall_shown_outcome
+```
+
+### Исходящий вызов (детали для backend)
+- `httpx.AsyncClient` per-call (`async with`), `POST {settings.cloudpayments_api_base}/experiments/assignments` и `.../experiments/paywall-shown`.
+- **`application/json`** — через `json=` (НЕ `files=`: тело содержит вложенный `context`):
+  ```
+  payload = {
+      "experiment_code": experiment_code,
+      "user_id": str(user_id),                       # JWT sub, ADR-098 §1
+      "app_id": settings.cloudpayments_app_id,       # config, не из тела клиента
+      "segment_code": segment_code,
+      "context": {"platform": "ios", "locale": locale, "paywall": {"placement": placement}},
+  }
+  headers = {"Authorization": f"Bearer {settings.cloudpayments_api_token}", "Accept": "application/json"}
+  ```
+- Таймаут `_EXPERIMENTS_TIMEOUT_SECONDS = 5.0` (не 15.0 — см. контраст выше).
+- Разбор ответа `assign`: `body["assignment"]["segment"]["code"]` обязателен; `is_control` / `requested_segment_matches` / `created` — булевы, читаются строго (`значение is True`), отсутствие → `False`. Нет `segment.code` → `malformed_response`.
+- Разбор ответа `paywall_shown`: **тело не читается вообще**, значим только класс статуса (2xx = принято). Форма ответа поставщика не документирована ([Q-098-3](../../99-open-questions.md)); чтение того, чего мы не знаем, — источник ложных `malformed`.
+- **Маппинг отказа — общий предикат, разные последствия** (см. [02-api-contracts](02-api-contracts.md)): `TimeoutException`→`timeout`, `RequestError`→`connect_error`, не-2xx→`upstream_status`, 2xx без `segment.code`→`malformed_response`. `assign` → `UpstreamError` (502); `paywall_shown` → возвращает `False`, **исключение наружу не поднимает никогда**. Наружу не проксируются ни тело, ни статус, ни токен.
+
+### Резолв локали (чистая функция, `experiments.py`)
+Первый **основной субтег** первого тега `Accept-Language`, lower, форма `^[a-z]{2,3}$` → иначе основной субтег `PRESETS_DEFAULT_LOCALE` → иначе `"en"`. **Клампа к `SUPPORTED_PRESET_LOCALES` НЕТ** — в отличие от `resolve_presets_locale` ([ADR-049 §3](../../adr/ADR-049-presets-localization.md)): там локаль выбирает наш текст (нечего показать → `en`), здесь это аналитическая размерность поставщика, и подмена немецкого пользователя английским её искажает. Переменная общая — [TD-035](../../100-known-tech-debt.md).
+
+### Наблюдаемость экспериментов
+Ровно один структурный лог на вызов, allowlist — [08-observability.md](08-observability.md) §Эксперименты.
 
 ---
 

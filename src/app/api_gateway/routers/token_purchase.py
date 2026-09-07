@@ -6,6 +6,7 @@ Consumable StoreKit IAP -> idempotent credit grant. Distinct from subscription/s
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -21,6 +22,7 @@ from app.deps import (
     require_owner,
 )
 from app.errors import RateLimitedError
+from app.observability.logging import log_event
 from app.schemas.token_purchase import (
     TokenProduct,
     TokenProductsResponse,
@@ -28,6 +30,8 @@ from app.schemas.token_purchase import (
     TokenPurchaseResponse,
 )
 from app.token_purchase.service import TokenPurchaseService
+
+logger = logging.getLogger(__name__)  # == "app.api_gateway.routers.token_purchase"
 
 router = APIRouter(prefix="/v1/tokens", tags=["Tokens"])
 
@@ -86,7 +90,7 @@ async def list_token_products(
             if p is not None
         ]
         if live:
-            return TokenProductsResponse(products=live)
+            return _catalog_response(live)
     # 2) Fallback: static PRODUCTS_CATALOG (skip items that fail schema validation).
     catalog = settings.products_catalog()
     if catalog:
@@ -97,14 +101,37 @@ async def list_token_products(
             except ValidationError:
                 continue
         if items:
-            return TokenProductsResponse(products=items)
+            return _catalog_response(items)
     # 3) Fallback: token packs derived from TOKEN_PRODUCTS (productId -> credits).
-    return TokenProductsResponse(
-        products=[
+    return _catalog_response(
+        [
             TokenProduct(productId=product_id, credits=credits)
             for product_id, credits in settings.token_products().items()
         ]
     )
+
+
+def _catalog_response(products: list[TokenProduct]) -> TokenProductsResponse:
+    """Build the catalog response, warning when more than one product is marked as default.
+
+    Более одного `isDefault=true` — ошибка настройки в панели поставщика, и сервер её НЕ прячет:
+    флаги не переписываются (тихая правка сделала бы наш ответ вторым источником истины о
+    каталоге), порядок продуктов сохраняется — он и есть правило выбора для клиента («первый по
+    порядку ответа»). Ноль дефолтных продуктов — штатное состояние: ничего не логируется.
+
+    Проверяется на КАЖДОЙ ветке источника, а не только на живом каталоге: статический
+    PRODUCTS_CATALOG объявляет признак сам и ошибиться в нём можно ровно так же.
+    """
+    defaults = [p.productId for p in products if p.isDefault]
+    if len(defaults) > 1:
+        log_event(
+            logger,
+            logging.WARNING,
+            "token_products_multiple_defaults",
+            count=len(defaults),
+            productIds=defaults,
+        )
+    return TokenProductsResponse(products=products)
 
 
 def _from_broadapps(
@@ -144,6 +171,9 @@ def _from_broadapps(
     # трактовать «непустую строку» как истину нельзя — тогда, например, "false" из ошибочно
     # сериализованного ответа включило бы предложение вместо того, чтобы его выключить.
     special = item.get("is_special_offer")
+    # Признак «продукт по умолчанию» — та же строгость и та же причина, что у флага выше:
+    # значение читается как булево, строка "false" из неудачной сериализации не включает признак.
+    default = item.get("is_default")
     period = item.get("subscription_interval_unit")
     currency = item.get("price_currency")
     name = item.get("name")
@@ -156,4 +186,5 @@ def _from_broadapps(
         currency=currency if isinstance(currency, str) else None,
         credits=None if is_sub else token_products.get(code),
         isSpecialOffer=special is True,
+        isDefault=default is True,
     )

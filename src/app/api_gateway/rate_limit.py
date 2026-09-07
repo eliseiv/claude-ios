@@ -147,6 +147,29 @@ async def enforce_other_limits(*, user_id: uuid.UUID) -> bool:
         return True
 
 
+async def enforce_experiment_limits(*, user_id: uuid.UUID) -> bool:
+    """Separate bucket for the paywall-experiment endpoints (ADR-098 §7).
+
+    Same limit and window as ``enforce_other_limits`` (no new env — the value is already tuned),
+    but a DIFFERENT key: the shared ``rl:other:*`` bucket also serves POST /checkout, so frequent
+    paywall impressions would drain it and the user's very next step — pressing "pay" — would get
+    a 429. Telemetry must never take budget away from the payment path. Admission predicate for
+    this bucket: the call rate is set by screen rendering, not by user intent.
+    """
+    settings = get_settings()
+    client = get_redis()
+    try:
+        return await _allow(
+            client,
+            f"rl:experiments:{user_id}",
+            settings.rate_limit_other_per_user,
+            settings.rate_limit_window_seconds,
+        )
+    except redis.RedisError as exc:
+        log_event(logger, logging.WARNING, "rate_limit_redis_unavailable", error=str(exc))
+        return True
+
+
 async def redis_ping() -> bool:
     try:
         return bool(await get_redis().ping())

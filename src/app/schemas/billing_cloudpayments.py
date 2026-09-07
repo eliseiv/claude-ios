@@ -69,6 +69,79 @@ class CloudPaymentsCheckoutResponse(StrictModel):
     )
 
 
+class _ExperimentRequestBase(StrictModel):
+    """Общие поля обеих ручек экспериментов пейволла.
+
+    Значения уходят в платёжный сервис дословно: регистр не меняется и опечатки не
+    исправляются — панель эксперимента сопоставляет строку посимвольно. Списка допустимых
+    кодов на сервере нет: словарь эксперимента ведётся в панели.
+    """
+
+    experimentCode: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Код эксперимента.",
+        examples=["yearly_monthly_dojim2"],
+    )
+    segmentCode: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Код сегмента.",
+        examples=["b"],
+    )
+    placement: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Место показа пейволла.",
+        examples=["onbording"],
+    )
+
+
+class ExperimentAssignRequest(_ExperimentRequestBase):
+    """Тело запроса на назначение сегмента. Пользователь берётся из JWT, не из тела."""
+
+
+class PaywallShownRequest(_ExperimentRequestBase):
+    """Тело запроса на логирование показа пейволла — такое же, как у назначения сегмента."""
+
+
+class ExperimentSegment(StrictModel):
+    """Сегмент, действующий для пользователя."""
+
+    code: str = Field(description="Код действующего сегмента.", examples=["b"])
+    isControl: bool = Field(description="Контрольная ли это группа.")
+
+
+class ExperimentAssignResponse(StrictModel):
+    """Действующее назначение пользователя. Пейволл рисуется по `segment.code` из ответа."""
+
+    segment: ExperimentSegment = Field(
+        description=(
+            "Действующий сегмент. Рисуйте пейволл по нему, а не по запрошенному `segmentCode`."
+        )
+    )
+    requestedSegmentMatches: bool = Field(
+        description=(
+            "Совпал ли действующий сегмент с запрошенным. `false` — у пользователя уже было "
+            "другое назначение, и оно авторитетно."
+        )
+    )
+    created: bool = Field(
+        description="`true` — назначение создано сейчас; `false` — оно уже существовало."
+    )
+
+
+class PaywallShownResponse(StrictModel):
+    """Итог логирования показа пейволла."""
+
+    logged: bool = Field(
+        description=(
+            "`true` — событие принято; `false` — не принято (таймаут/сеть/ошибка сервиса). "
+            "Показ пейволла это не затрагивает, ответ можно не дожидаться."
+        )
+    )
+
+
 class CloudPaymentsCancelResponse(StrictModel):
     """Итог отмены RU-подписки. Автосписание отключено, доступ сохраняется до конца периода."""
 

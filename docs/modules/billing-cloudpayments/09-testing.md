@@ -49,3 +49,13 @@
 
 ## Swagger-чистота
 - В OpenAPI (`/openapi.json`) у роута нет вхождений `ADR-`/`Q-`/`TD-` и внутренних имён таблиц/namespace ([R2ter](../../08-api-documentation.md)).
+
+## Эксперименты пейволла ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md))
+- **Идентичность:** исходящее тело содержит `user_id == JWT sub`; попытка передать `userId`/`deviceId`/`appId` в теле → `422` (StrictModel). Тест обязан падать, если реализация начнёт брать идентификатор из тела или из claim `device_id`.
+- **Подстановка сервера:** `app_id` = `CLOUDPAYMENTS_APP_ID`, `context.platform == "ios"`, `context.paywall.placement` = переданный `placement` **дословно** (кейс `onbording` — не нормализуется), `context.locale` — из `Accept-Language` (`ru-RU` → `ru`), при отсутствии заголовка — из `PRESETS_DEFAULT_LOCALE`, иначе `en`. Локаль **не** клампится к набору локалей каталогов (кейс `de` → `de`, а не `en`).
+- **Кодировка:** исходящий запрос — `application/json` (регресс: multipart, как у `/payments/link`, недопустим — `context` вложенный).
+- **`assign`:** 2xx с `assignment.segment.code` → `200` с полями нашей схемы; `requested_segment_matches=false` пробрасывается; таймаут/сеть/не-2xx/2xx-без-сегмента → `502 upstream_error`, тело/статус/токен поставщика наружу **не** попадают; сегмент **не подставляется** ни при каком отказе.
+- **`paywall-shown`:** 2xx → `200 {"logged": true}`; **любой** отказ поставщика → `200 {"logged": false}`. Регресс-тест: ни один отказ не даёт `502` (тест обязан падать, если ветку «никогда не 502» убрать).
+- **Гейт:** пустой `CLOUDPAYMENTS_APP_ID` или `CLOUDPAYMENTS_API_TOKEN` → обе ручки `503 cloudpayments_checkout_not_configured`, исходящего вызова нет.
+- **Лимит:** превышение корзины `rl:experiments:{user_id}` → `429`; изоляция — исчерпание этой корзины **не** влияет на `POST /v1/billing/cloudpayments/checkout` (и наоборот). Это ключевой регресс-тест: он обязан падать при возврате к общему `enforce_other_limits`.
+- **Изоляция:** ни одна запись в БД (ledger/subscriptions/wallet/webhook-events) по этим вызовам не появляется.
