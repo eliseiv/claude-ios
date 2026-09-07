@@ -262,9 +262,25 @@ def test_default_flag_is_read_strictly_from_the_provider_catalog() -> None:
     assert _from_broadapps(base, tp).isDefault is False
 
 
-def test_several_defaults_are_reported_and_not_rewritten(caplog) -> None:
-    import logging as _logging
+def _emitted_events(monkeypatch, fn):
+    """События, отданные модулем в журнал, снятые подменой самой функции записи.
 
+    Перехват через logging здесь оказался ненадёжен: тест зеленел в одиночку и падал в полном
+    прогоне — глобальное состояние журналирования меняют другие тесты, и две попытки поймать
+    запись (caplog, затем свой обработчик на логгере) обе не сработали. Подмена функции
+    записи проверяет ровно то, что важно — что событие с таким именем и полями отдано, — и не
+    зависит ни от уровней, ни от обработчиков, ни от порядка тестов.
+    """
+    from app.api_gateway.routers import token_purchase as tp
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        tp, "log_event", lambda _logger, _level, message, **fields: events.append((message, fields))
+    )
+    return fn(), events
+
+
+def test_several_defaults_are_reported_and_not_rewritten(monkeypatch) -> None:
     from app.api_gateway.routers.token_purchase import _catalog_response
     from app.schemas.token_purchase import TokenProduct
 
@@ -273,29 +289,26 @@ def test_several_defaults_are_reported_and_not_rewritten(caplog) -> None:
         TokenProduct(productId="b", credits=250, isDefault=True),
         TokenProduct(productId="c", credits=500, isDefault=False),
     ]
-    with caplog.at_level(_logging.WARNING):
-        out = _catalog_response(products)
+    out, events = _emitted_events(monkeypatch, lambda: _catalog_response(products))
     # Флаги НЕ переписываются: тихая правка спрятала бы ошибку оператора и сделала бы наш
     # ответ вторым источником истины о каталоге.
     assert [p.isDefault for p in out.products] == [True, True, False]
     # Порядок сохранён — он и есть правило выбора клиента.
     assert [p.productId for p in out.products] == ["a", "b", "c"]
-    assert any("token_products_multiple_defaults" in r.message for r in caplog.records)
+    warned = [f for name, f in events if name == "token_products_multiple_defaults"]
+    assert len(warned) == 1
+    # В событии обязаны быть и число, и сами продукты: без них оператору нечего чинить.
+    assert warned[0]["count"] == 2
+    assert warned[0]["productIds"] == ["a", "b"]
 
 
-def test_single_and_zero_defaults_are_silent(caplog) -> None:
-    import logging as _logging
-
+def test_single_and_zero_defaults_are_silent(monkeypatch) -> None:
     from app.api_gateway.routers.token_purchase import _catalog_response
     from app.schemas.token_purchase import TokenProduct
 
     for flags in ([True, False], [False, False]):
-        caplog.clear()
-        with caplog.at_level(_logging.WARNING):
-            _catalog_response(
-                [
-                    TokenProduct(productId=f"p{i}", credits=100, isDefault=f)
-                    for i, f in enumerate(flags)
-                ]
-            )
-        assert not [r for r in caplog.records if "multiple_defaults" in r.message]
+        products = [
+            TokenProduct(productId=f"p{i}", credits=100, isDefault=f) for i, f in enumerate(flags)
+        ]
+        _, events = _emitted_events(monkeypatch, lambda p=products: _catalog_response(p))
+        assert not [n for n, _f in events if n == "token_products_multiple_defaults"]
