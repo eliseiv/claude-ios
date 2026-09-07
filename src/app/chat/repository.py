@@ -92,6 +92,7 @@ class ChatRepository:
         assistant_mode: str = "chat",
         title: str | None = None,
         model: str | None = None,
+        character_id: str | None = None,
         workspace_project_id: uuid.UUID | None = None,
         generation_backend: str | None = None,
         temporary: bool = False,
@@ -104,7 +105,11 @@ class ChatRepository:
         handled by the chats module). ``project_id=None`` creates a «чистый чат» session
         (``chat_sessions.project_id = NULL``; ``site.*`` tools not offered). ``model=None`` stores
         ``chat_sessions.model = NULL`` (= the instance default model, resolved by the client at
-        generation time — ADR-034 §3). ``workspace_project_id=None`` creates a chat without a
+        generation time — ADR-034 §3). ``character_id`` (ADR-097) is fixed the same way:
+        ``None`` stores ``chat_sessions.character_id = NULL`` (= a chat without a character, the
+        pre-feature behaviour); membership in the registry and the instance flag are validated by
+        the caller BEFORE creation, so no invalid character is ever written.
+        ``workspace_project_id=None`` creates a chat without a
         workspace (``chat_sessions.workspace_project_id = NULL`` — ADR-036; NOT the website-builder
         ``project_id``). ``generation_backend`` is also fixed on create so legacy `/v1/chat/*`
         sessions and `/v1/chat/v2/*` sessions do not accidentally mix provider-state and billing
@@ -124,6 +129,7 @@ class ChatRepository:
             assistant_mode=assistant_mode,
             title=title,
             model=model,
+            character_id=character_id,
             workspace_project_id=workspace_project_id,
             generation_backend=generation_backend,
             is_temporary=temporary,

@@ -133,6 +133,7 @@ sequenceDiagram
     else allowed
         P-->>O: allowed (resolved key source)
         O->>O: генерация messageStepId (билинг-ключ message-шага), персист в chat_steps/tool_calls
+        O->>O: сборка system: base(assistantMode) → персонаж сессии (ADR-097) → суффикс режима (ADR-064/084) → workspace.instructions (ADR-036) → подсказки хода
         O->>A: messages.create (prompt caching, tools)
         A-->>O: assistant_message | tool_use
         alt mode=credits AND assistant_message
@@ -146,6 +147,8 @@ sequenceDiagram
     end
 ```
 
+> **Слои `system` собираются заново на КАЖДОМ обращении к модели** — и на turn 0, и на каждом витке tool-loop: `system` не является частью истории сообщений. Порядок слоёв жёстко зафиксирован (персонаж [ADR-097](adr/ADR-097-character-personas.md) — до суффикса режима, инструкции пользователя — после обоих) и живёт целиком в одном месте: [modules/chat-orchestrator/03-architecture.md §Порядок слоёв системного промта](modules/chat-orchestrator/03-architecture.md#порядок-слоёв-системного-промта). Добавляя новый слой, дополняй **и** ту схему, **и** эту диаграмму.
+>
 > **Диаграмма выше — полный порядок хода, включая шаг модерации ([ADR-086](adr/ADR-086-ugc-moderation.md)).** Модерация вызывается **только** на ходе с непустым `attachments[]`, **после** валидации вложений и **до** записи user-шага (то есть до Policy и до вызова провайдера). Ход без вложений идёт как раньше. Отказ — технический `422 content_policy_violation`, **не** бизнес-`blocked`: он описывает содержимое запроса, а не права пользователя, поэтому в `blockReason` не входит и правило «blocked = 200» ([ADR-004](adr/ADR-004-blocked-http-200.md)) на него не распространяется.
 >
 > **Контраст с media-генерацией (обе стороны помечены).** В чате списание идёт **после** успешной генерации, поэтому «модерация до списания» там выполняется автоматически. В `/v1/media/*` кредиты списываются **на сабмите**, поэтому там порядок «модерация → `wallet.consume`» — явный нормативный инвариант ([ADR-086 §4](adr/ADR-086-ugc-moderation.md), [media-generation/03-architecture.md](modules/media-generation/03-architecture.md)), а результат дополнительно проверяется **после** списания и потому обязан возвращать кредиты. Правило одного потока на другой не переносить.

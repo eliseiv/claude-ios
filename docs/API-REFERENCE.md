@@ -14,7 +14,7 @@
 2. [Аутентификация и заголовки](#2-аутентификация-и-заголовки)
 3. [Коды ответа (общие)](#3-коды-ответа-общие)
 4. Эндпоинты по модулям:
-   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
+   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Characters](#28-characters-персонажи) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
 5. [blockReason — справочник (9 значений)](#12-blockreason--справочник)
 6. [Tool-протокол: client-side vs server-side](#13-tool-протокол)
 7. [Монетизация (кратко)](#14-монетизация-кратко)
@@ -122,6 +122,8 @@
 | `content_policy_violation` | 422 | промпт / изображение / вложение отклонены модерацией ([раздел 27](#27-модерация-контента-ugc)) |
 | `moderation_unavailable` | 503 | провайдер модерации недоступен — операция не выполнена, повторите позже |
 | `moderation_not_configured` | 503 | модерация не настроена на инстансе (проблема оператора) |
+| `characters_disabled` | 422 | `characterId` прислан при создании чата на инстансе, где выбор персонажа выключен ([ADR-097](adr/ADR-097-character-personas.md)) |
+| `unknown_character` | 422 | `characterId` вне реестра персонажей ([раздел 28](#28-characters-персонажи)) |
 | `unsupported_model`, `workspace_not_found`, `message_not_found`, `session_not_found`, `insufficient_credits`, `job_not_terminal`, `subscription_required`, `media_generation_not_configured`, `gateway_timeout` | по разделу | доменные коды соответствующих эндпоинтов |
 
 > **Совместимость (2026-08-24, [ADR-089](adr/ADR-089-attachment-limits-and-error-taxonomy.md)).** Отказы вложений раньше приходили с `code: "validation_error"` и различались только текстом. Теперь у каждого свой `code`, **HTTP-статусы не изменились**, а тексты `message` сохранены **дословно** — клиент, который сегодня разбирает строку, продолжает работать; новый клиент ветвится по `code`.
@@ -149,7 +151,8 @@
 | `mode` | `credits` \| `byok` | **billing_mode** — способ оплаты генерации (фиксируется на сессию) |
 | `assistantMode` | `chat` \| `code`, опц. | **assistant_mode** — тип ассистента (ADR-012). При отсутствии — дефолт из `GET /v1/preferences` (`defaultAssistantMode`), затем `chat`. Фиксируется при создании сессии. **Ортогонален `mode`** |
 | `model` | string, **опц.** | **Выбор модели** ([ADR-034](adr/ADR-034-user-model-selection.md)). Id из `GET /v1/models` (модели активного провайдера инстанса). **Session-fixed**: фиксируется при создании сессии; при resume берётся из сессии (поле запроса игнорируется). Без `model` → дефолтная модель инстанса (`ANTHROPIC_MODEL`/`OPENAI_MODEL`). Непустая после `strip`; вне allowlist → **`422 unsupported_model`** (тихого фолбэка нет). На биллинг не влияет (1 кредит, [ADR-006](adr/ADR-006-credit-billing-and-subscription-grant.md)); `usage.model` отражает использованную модель. |
-| `workspaceProjectId` | string (uuid), **опц.** | **Привязка чата к рабочему пространству** ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)/[ADR-036](adr/ADR-036-workspaces-implementation.md)). **Session-fixed**: фиксируется при создании сессии; при resume берётся из сессии (поле запроса игнорируется). При создании валидируется принадлежность workspace пользователю → чужой/несуществующий = **`404 workspace_not_found`**. При наличии: `workspace.instructions` подмешиваются в system-prompt после base-промта; файлы-знания workspace подаются как контекст (document/text → извлечённый текст, image → vision). **≠ `projectId`** (website-builder). На биллинг не влияет. |
+| `characterId` | string, **опц.** | **Выбор персонажа** ([ADR-097](adr/ADR-097-character-personas.md)). `id` из `GET /v1/characters` (раздел 28). **Session-fixed**: фиксируется при создании сессии; при resume берётся из сессии (поле запроса игнорируется), смена персонажа внутри чата не поддерживается — для другого персонажа новый чат. Без `characterId` → чат без персонажа (поведение прежнее). Непустая после `strip`. **Инстанс с выключенной фичей** (дефолт) → **`422` `characters_disabled`**; id вне реестра → **`422` `unknown_character`**; оба отказа — только при создании сессии. Тихого игнорирования нет: выбор виден пользователю в интерфейсе. Влияет только на системный промт (голос ответа) — на инструменты, модерацию, policy и биллинг не влияет. Возвращается в `GET /v1/chats` и `GET /v1/chats/{id}`. |
+| `workspaceProjectId` | string (uuid), **опц.** | **Привязка чата к рабочему пространству** ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)/[ADR-036](adr/ADR-036-workspaces-implementation.md)). **Session-fixed**: фиксируется при создании сессии; при resume берётся из сессии (поле запроса игнорируется). При создании валидируется принадлежность workspace пользователю → чужой/несуществующий = **`404 workspace_not_found`**. При наличии: `workspace.instructions` подмешиваются в system-prompt после base-промта (и после слоя персонажа, [ADR-097](adr/ADR-097-character-personas.md)); файлы-знания workspace подаются как контекст (document/text → извлечённый текст, image → vision). **≠ `projectId`** (website-builder). На биллинг не влияет. |
 | `attachments` | array, опц. | **inline base64-вложения** (фото/PDF/текст), ≤ 10. **Принимаются на ЛЮБОМ ходе сессии** — и при создании, и на продолжении, и при редактировании ([ADR-088](adr/ADR-088-attachments-per-turn-contract.md)); в `/chat/tool-result` не принимаются. Каждый элемент: `{ type: image\|document\|text, mediaType, filename?, data (base64) }`. См. ниже. ([ADR-020](adr/ADR-020-inline-base64-attachments-mvp.md)) |
 | `context` | object, опц. | **Per-message доп-настройки хода** ([ADR-037](adr/ADR-037-chatrunrequest-context-allowlist-injection.md)). НЕ session-fixed — присылается на каждый `/chat/run`, может меняться по ходу чата (без БД). Allowlist: `codeLanguage` (str≤40), `responseStyle` (`concise\|balanced\|detailed`), `verbosity` (`low\|medium\|high`), `tone` (str≤40), `locale` (str≤35 BCP-47-подобный). Неизвестные ключи и невалидные значения — **игнорируются** (lenient). Инъектируется в текущее user-сообщение (НЕ в system). Служебный блок **не виден** в истории `GET /v1/chats/{id}` и превью `GET /v1/chats` — срезается при отдаче ([ADR-042](adr/ADR-042-hide-context-block-from-user-facing-history.md)); хранение/реплей модели не меняются. Без валидных ключей → поведение неизменно. Size ≤ 64 KB сериализованного JSON (иначе `422`). |
 | `editMessageStepId` | string (uuid), **опц.** | **Редактирование отправленного сообщения** ([ADR-040](adr/ADR-040-edit-message-and-regenerate.md)). `messageStepId` хода, который надо отредактировать (берётся из `steps[].messageStepId` истории или `ChatResponse.messageStepId`). Backend усекает историю от этого хода (его user-шаг и всё после) и генерирует новый ход с переданными `message`/`attachments`/`context`. **Требует `sessionId`** (resume): без него → `422`. Чужая/несуществующая сессия → `404`; нет user-шага с этим `messageStepId` → `404 message_not_found`. Биллинг: новый ход = **новый дебит 1 кредита**, возврата за старый ход нет. См. callout ниже. |
@@ -683,6 +686,7 @@ Read-only просмотр кошелька для саппорта.
 | `items[].title` | string \| null | заголовок (автоген из первого сообщения; null до генерации) |
 | `items[].preview` | string \| null | срез текста последнего сообщения. Для user-сообщения **без** ведущего conversation-settings блока ([ADR-042](adr/ADR-042-hide-context-block-from-user-facing-history.md)): служебный блок `[Conversation settings for this message: …]` ([ADR-037](adr/ADR-037-chatrunrequest-context-allowlist-injection.md)) срезается при отдаче |
 | `items[].assistantMode` | `chat` \| `code` | тип ассистента сессии |
+| `items[].characterId` | string \| null | персонаж чата ([ADR-097](adr/ADR-097-character-personas.md)) — `id` из `GET /v1/characters` (раздел 28), `null` = чат без персонажа. Session-fixed. Клиент восстанавливает по нему шапку чата; **аддитивно** — старые клиенты игнорируют поле |
 | `items[].isPinned` | bool | закреплён ли чат |
 | `items[].projectId` | string \| null | свободная строка website-builder-проекта (`= chat_sessions.project_id`, [ADR-022](adr/ADR-022-optional-project-and-tool-gating.md)/[ADR-028](adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)); тот же формат, что `projectId` в `/chat/run`. `null` = «чистый чат» (без проекта). ≠ `workspaceProjectId` |
 | `items[].workspaceProjectId` | string (uuid) \| null | привязка к рабочему пространству ([ADR-036](adr/ADR-036-workspaces-implementation.md)) — реальное значение `chat_sessions.workspace_project_id` (`null` = чат без workspace); **не** website-builder `projectId` ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)) |
@@ -702,6 +706,7 @@ Read-only просмотр кошелька для саппорта.
 | `id` | string (uuid) | идентификатор чата |
 | `title` | string \| null | заголовок |
 | `assistantMode` | `chat` \| `code` | тип ассистента (assistant_mode) |
+| `characterId` | string \| null | персонаж чата ([ADR-097](adr/ADR-097-character-personas.md)), `null` = без персонажа; **аддитивно** |
 | `mode` | `credits` \| `byok` | режим оплаты сессии (billing_mode) |
 | `steps` | array | шаги, упорядоченные по `chat_steps.seq` (порядок вставки, ADR-021); `createdAt` — информационный timestamp |
 | `steps[].id` | string (uuid) | идентификатор шага |
@@ -1121,6 +1126,40 @@ JWKS с публичным ключом (для самопроверки/отл�
 
 ---
 
+## 28. Characters (персонажи)
+
+### GET /v1/characters
+Каталог персонажей для экрана выбора собеседника. Выбранный `id` передаётся в `characterId` при **создании** чата (`POST /v1/chat/run` / `POST /v1/chat/v2/run`, раздел 4) — дальше ассистент отвечает голосом этого персонажа. Набор и тексты меняются деплоем backend **без релиза iOS-приложения**. [ADR-097](adr/ADR-097-character-personas.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1characters--каталог-персонажей-adr-097).
+
+**Auth:** `Authorization: Bearer <JWT>` (обязателен). Read-only.
+
+**Query:** `locale` (опц.) — `en` / `ru` / `zh-Hans`, канонизируется (`ru-RU`→`ru`); явное значение вне набора → `422`.
+
+**Резолвинг локали** — тот же, что у `GET /v1/presets`: `?locale=` → `Accept-Language` (первый поддерживаемый) → per-instance `PRESETS_DEFAULT_LOCALE` → `en`. Отдельной переменной под язык каталога персонажей нет ([TD-035](100-known-tech-debt.md)).
+
+**Response (200):**
+```json
+{ "enabled": true, "locale": "ru", "characters": [
+  { "id": "anime_girl",     "name": "Аниме-девушка",    "tagline": "Восторженная героиня аниме",     "icon": "sparkles" },
+  { "id": "fantasy_queen",  "name": "Королева фэнтези", "tagline": "Церемонная правительница",       "icon": "crown" },
+  { "id": "vampire_lord",   "name": "Лорд вампиров",    "tagline": "Древний аристократ ночи",        "icon": "moon.stars" },
+  { "id": "cyber_assassin", "name": "Кибер-ассасин",    "tagline": "Немногословный оперативник",     "icon": "bolt.shield" },
+  { "id": "virtual_friend", "name": "Виртуальный друг", "tagline": "Тёплый повседневный собеседник", "icon": "person.wave.2" }
+] }
+```
+- `enabled` — включена ли фича на инстансе. **По умолчанию выключена на всех инстансах**; при `false` список **пуст**, а `characterId` в `/chat/run` отклоняется (`422 characters_disabled`). Клиент прячет вход в выбор персонажа по этому полю, а не по пустому списку и не по коду ответа.
+- `locale` — фактически отданная локаль. `name`/`tagline` локализованы (EN — канон и per-field fallback); `id`/`icon` стабильны и не переводятся. `icon` — имя SF Symbol.
+- Порядок элементов = порядок на экране, един во всех локалях. Состав закрыт пятью персонажами.
+- Системный текст персонажа наружу **не отдаётся** — это внутренняя инструкция модели, а не отображаемый контент.
+
+**Что делает персонаж:** меняет **только** голос ответа (слой системного промта). Набор инструментов, модерация, история, policy и биллинг (1 кредит = 1 сообщение / цена режима v2) не меняются; точность ответа приоритетнее образа, а стиль не попадает в аргументы инструментов (поисковые запросы, промты генерации медиа).
+
+**Смена персонажа** внутри начатого чата не поддерживается — персонаж фиксируется на сессию, для другого нужен новый чат (симметрично `model`).
+
+**Коды:** `200`; `401`; `422` (явный `?locale=` вне набора); `429`; `5xx`.
+
+---
+
 ## 26. Workspaces (рабочие пространства / «Projects») ([ADR-036](adr/ADR-036-workspaces-implementation.md))
 
 Рабочее пространство = `name` + `description` + кастомные `instructions` (system-prompt проекта) + файлы-знания (контекст для всех чатов проекта) + группировка чатов. iOS отображает «Projects»; API-путь — **`/v1/workspaces`** (слово «project» в API занято website-builder, [ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). Все эндпоинты — JWT, изоляция по `sub`: чужой/несуществующий → `404`. Биллинг: CRUD/файлы бесплатны; генерация в чате проекта — 1 кредит ([ADR-006](adr/ADR-006-credit-billing-and-subscription-grant.md)). Модуль — [modules/workspaces](modules/workspaces/README.md).
@@ -1153,7 +1192,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 ### DELETE /v1/workspaces/{workspace_id}/files/{file_id}
 **Response 200:** `{ "deleted": true }`. Отсутствующий/чужой → `404`. (Path-параметры URL — `workspace_id`/`file_id`; в теле ответов id-поля — camelCase: `fileId`.)
 
-> **Подача контекста модели.** В сессии с `workspaceProjectId`: `instructions` → system-prompt (после base assistant_mode prompt) на **КАЖДОМ ходе** — turn 0 И continuation tool-loop (`system` не часть истории, переинъектируется на каждый вызов LLM, [ADR-036 §3](adr/ADR-036-workspaces-implementation.md)). Файлы-знания — только turn 0: document/text → `extracted_text` (работает на **обоих** провайдерах — это текст, не нативный PDF, ограничение [TD-023](100-known-tech-debt.md) не применяется); image → vision (сохраняются в истории, на continuation не дублируются). Лимит суммарного текста — `WORKSPACE_CONTEXT_MAX_CHARS` (усечение, [Q-013-1](99-open-questions.md)).
+> **Подача контекста модели.** В сессии с `workspaceProjectId`: `instructions` → system-prompt (после base assistant_mode prompt, после слоя персонажа и после суффикса режима — то есть последними из пользовательских слоёв, [ADR-097](adr/ADR-097-character-personas.md)) на **КАЖДОМ ходе** — turn 0 И continuation tool-loop (`system` не часть истории, переинъектируется на каждый вызов LLM, [ADR-036 §3](adr/ADR-036-workspaces-implementation.md)). Файлы-знания — только turn 0: document/text → `extracted_text` (работает на **обоих** провайдерах — это текст, не нативный PDF, ограничение [TD-023](100-known-tech-debt.md) не применяется); image → vision (сохраняются в истории, на continuation не дублируются). Лимит суммарного текста — `WORKSPACE_CONTEXT_MAX_CHARS` (усечение, [Q-013-1](99-open-questions.md)).
 
 > **Список чатов проекта** — `GET /v1/chats?workspaceProjectId={id}` (раздел 17).
 

@@ -176,6 +176,13 @@ class ChatSession(Base):
     # «дефолтная модель инстанса» (the active provider's default, resolved by the client at
     # generation time). Validated against allowed_models() before write; on resume not re-written.
     model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ADR-097 (migration 0031): selected character, session-fixed at creation. nullable; NULL =
+    # чат без персонажа (existing rows and requests without the field keep today's behaviour).
+    # NO FK — the registry lives in code (app.chat.characters), exactly like `model`: referential
+    # integrity is held by validation before the row is written (422 unknown_character /
+    # characters_disabled), not by the database. No index: nobody filters or sorts by character.
+    # Affects ONLY the system-prompt layer; billing, tools, moderation and replay do not read it.
+    character_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # --- Figma-gap extension (migration 0004), chats/preferences modules ---
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     # ADR-012: assistant type fixed at session creation (chat|code), distinct from `mode`.

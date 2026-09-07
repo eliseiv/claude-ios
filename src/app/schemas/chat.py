@@ -156,6 +156,19 @@ class ChatRunRequest(StrictModel):
             "сессии, поле запроса игнорируется."
         ),
     )
+    characterId: str | None = Field(
+        default=None,
+        description=(
+            "Персонаж, от лица которого отвечает ассистент (`id` из `GET /v1/characters`). "
+            "Опционально: без поля — чат без персонажа (обратная совместимость). Если "
+            "указано — непустая строка после `strip` (пустая/whitespace → 422) и должна быть "
+            "из каталога (иначе 422). На инстансе с выключенным выбором персонажа непустое "
+            "значение отклоняется с 422. Фиксируется при создании сессии; при продолжении "
+            "берётся из сессии, поле запроса игнорируется — для другого персонажа создайте "
+            "новый чат. Влияет только на голос ответа: инструменты, модерация и тарификация "
+            "не меняются."
+        ),
+    )
     message: str = Field(
         default="",
         description="Текст сообщения пользователя. Опционален при наличии хотя бы одного вложения.",
@@ -251,6 +264,12 @@ class ChatRunRequest(StrictModel):
         # validated in the orchestrator at session creation (needs settings.allowed_models()).
         if self.model is not None and not self.model.strip():
             raise ValueError("model must be a non-empty string when provided")
+        # ADR-097 §7: characterId is optional; when present it must be a non-empty string after
+        # strip (symmetric to model/projectId). Registry membership and the instance flag are
+        # checked in the orchestrator at session creation only (they need settings), so a stale
+        # field on a resume never breaks a live chat.
+        if self.characterId is not None and not self.characterId.strip():
+            raise ValueError("characterId must be a non-empty string when provided")
         # ADR-039 §1: message is optional but the turn must carry content. Valid iff message is
         # non-empty after strip OR at least one attachment is present in the request. A
         # whitespace-only message with no attachment is also rejected (→ 422). The size limit below

@@ -46,6 +46,11 @@ class ChatListItemView:
     title: str | None
     preview: str | None
     assistant_mode: str
+    # ADR-097: персонаж чата (= chat_sessions.character_id), null = чат без персонажа. Клиент
+    # восстанавливает по нему шапку чата после перезапуска. Отдаётся и при выключенном на
+    # инстансе флаге — значение в БД сохраняется, — поэтому по нему нельзя судить, отвечает ли
+    # чат голосом персонажа СЕЙЧАС: это решает CHARACTERS_ENABLED.
+    character_id: str | None
     is_pinned: bool
     # ADR-028 Решение 1: website-builder project key (= chat_sessions.project_id, ADR-022).
     # null = «чистый чат» (сессия создана без projectId). Независимо от workspace_project_id.
@@ -75,6 +80,8 @@ class ChatHistoryView:
     id: uuid.UUID
     title: str | None
     assistant_mode: str
+    # ADR-097: персонаж чата (= chat_sessions.character_id), null = чат без персонажа.
+    character_id: str | None
     mode: str
     steps: list[ChatStepView]
     next_cursor: str | None = None
@@ -146,6 +153,8 @@ class ChatsService:
                 title=item.session.title,
                 preview=item.preview,
                 assistant_mode=item.session.assistant_mode,
+                # ADR-097: session-fixed character (NULL = chat without one).
+                character_id=item.session.character_id,
                 is_pinned=item.session.is_pinned,
                 # ADR-028: website-builder project key from the session (free string, ADR-022).
                 project_id=item.session.project_id,
@@ -225,6 +234,7 @@ class ChatsService:
             id=session.id,
             title=session.title,
             assistant_mode=session.assistant_mode,
+            character_id=session.character_id,
             mode=session.mode,
             steps=history_steps,
             next_cursor=next_cursor,

@@ -37,6 +37,7 @@ from app.chat.attachment_refs import (
     upload_turn_attachment_refs,
 )
 from app.chat.attachments import ImageAttachmentRef, PreparedAttachments, prepare_attachments
+from app.chat.characters import character_prompt_layer, is_known_character
 from app.chat.global_tools import (
     DOCUMENT_INVALID_ERROR_CODE,
     MEDIA_INVALID_ERROR_CODE,
@@ -90,11 +91,13 @@ from app.chat.transcription import TranscriptionClient
 from app.config import get_settings
 from app.documents import DocumentsService
 from app.errors import (
+    CharactersDisabledError,
     ContentPolicyViolationError,
     InsufficientCreditsError,
     MediaGenerationNotConfiguredError,
     MessageNotFoundError,
     NotFoundError,
+    UnknownCharacterError,
     UpstreamError,
     ValidationFailedError,
     WorkspaceNotFoundError,
@@ -380,8 +383,10 @@ def _uses_generation_client(use_generation_v2: bool) -> bool:
     return use_generation_v2 or get_settings().chat_legacy_web_search_enabled
 
 
-def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") -> str:
-    """Base system prompt for the turn: assistant_mode prompt + the generation-mode suffix.
+def _system_prompt_for(
+    assistant_mode: str, generation_mode: str = "general", character_id: str | None = None
+) -> str:
+    """Base system prompt for the turn: assistant_mode prompt + character + mode suffix.
 
     The mode suffix is added ONLY for the modes that declare one (``study_learn``, ADR-064;
     ``research``, ADR-084). ``generation_mode`` MUST be the EFFECTIVE mode of the turn. Legacy is
@@ -393,6 +398,14 @@ def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") ->
     ADR-081: families in ``CHAT_DISABLED_TOOL_FAMILIES`` are omitted from the tool sentence.
     ADR-094: the code-work instruction is appended under the SAME condition that offers the code
     tools (``CODE_TOOLS_ENABLED`` and ``assistant_mode == "code"``) — never one without the other.
+    ADR-097: the character layer (persona + guardrails) goes AFTER the base prompt and its tool
+    instructions but BEFORE the mode suffix — the last layer weighs more in practice, so the task
+    of the turn and the user's own instructions must be able to outweigh a decorative voice, not
+    the other way round. This function is the ONE assembly point that serves both turn 0 and the
+    `/chat/tool-result` continuation: `system` is not part of the message history and is sent
+    afresh on EVERY provider call, so a character added anywhere else would vanish mid tool-loop.
+    ``CHARACTERS_ENABLED=false`` means the layer is never assembled — including for sessions that
+    already have a stored ``character_id`` (an instance where the flag was taken back down).
     """
     base = _compose_system_prompt(assistant_mode, get_settings().disabled_tool_families())
     # ADR-094 ось D: указания по работе с кодом добавляются ровно по тому же условию, по которому
@@ -402,6 +415,10 @@ def _system_prompt_for(assistant_mode: str, generation_mode: str = "general") ->
         base = f"{base} {_CODE_TOOLS_INSTRUCTION}"
     if get_settings().chat_media_tools_enabled:
         base = f"{base} {_MEDIA_GENERATE_INSTRUCTION}"
+    if get_settings().characters_enabled:
+        persona = character_prompt_layer(character_id)
+        if persona is not None:
+            base = f"{base}\n\n{persona}"
     if generation_mode == "study_learn":
         return f"{base}\n\n{_STUDY_LEARN_INSTRUCTION}"
     if generation_mode == "research":
@@ -560,17 +577,25 @@ def _compose_turn0_text(block: str | None, msg: str) -> str:
 
 
 def _system_prompt_with_workspace(
-    assistant_mode: str, instructions: str | None, generation_mode: str = "general"
+    assistant_mode: str,
+    instructions: str | None,
+    generation_mode: str = "general",
+    character_id: str | None = None,
 ) -> str:
     """Compose the system prompt for a workspace session (ADR-036 §3).
 
-    ``base(assistant_mode[, generation_mode])`` → ``\\n\\n`` → ``workspace.instructions`` when
-    instructions are non-empty; otherwise the base prompt unchanged (so the prompt cache is not
-    broken for sessions without instructions). Provider-agnostic (part of ``system``, identical for
-    both providers). Layer order is normative: base prompt → generation-mode suffix
-    (ADR-064 / ADR-084) → workspace instructions LAST (ADR-036 §3).
+    ``base(assistant_mode[, generation_mode][, character_id])`` → ``\\n\\n`` →
+    ``workspace.instructions`` when instructions are non-empty; otherwise the base prompt
+    unchanged (so the prompt cache is not broken for sessions without instructions).
+    Provider-agnostic (part of ``system``, identical for both providers). Layer order is
+    normative: base prompt → character (ADR-097) → generation-mode suffix (ADR-064 / ADR-084) →
+    workspace instructions LAST (ADR-036 §3).
+
+    ``character_id`` MUST be threaded through: this helper REPLACES the prompt built by
+    ``_system_prompt_for`` at the call sites, so dropping the argument here would silently strip
+    the character from every chat that belongs to a workspace, and only from those.
     """
-    base = _system_prompt_for(assistant_mode, generation_mode)
+    base = _system_prompt_for(assistant_mode, generation_mode, character_id)
     if instructions and instructions.strip():
         return f"{base}\n\n{instructions.strip()}"
     return base
@@ -1015,6 +1040,7 @@ class ChatOrchestrator:
         assistant_mode: str | None = None,
         attachments: list[AttachmentIn] | None = None,
         model: str | None = None,
+        character_id: str | None = None,
         workspace_project_id: uuid.UUID | None = None,
         context: dict[str, Any] | None = None,
         edit_message_step_id: uuid.UUID | None = None,
@@ -1049,6 +1075,7 @@ class ChatOrchestrator:
             assistant_mode=assistant_mode,
             attachments=attachments,
             model=model,
+            character_id=character_id,
             workspace_project_id=workspace_project_id,
             context=context,
             edit_message_step_id=edit_message_step_id,
@@ -1072,6 +1099,7 @@ class ChatOrchestrator:
         assistant_mode: str | None = None,
         attachments: list[AttachmentIn] | None = None,
         model: str | None = None,
+        character_id: str | None = None,
         workspace_project_id: uuid.UUID | None = None,
         context: dict[str, Any] | None = None,
         edit_message_step_id: uuid.UUID | None = None,
@@ -1109,6 +1137,20 @@ class ChatOrchestrator:
             raise ValidationFailedError(
                 f"model '{resolved_model}' is not available on this instance"
             )
+        # ADR-097 §7: characterId is session-fixed like `model`, so BOTH refusals fire ONLY on
+        # create — on resume the field is ignored entirely and an old or careless client never
+        # breaks a live chat. Silent dropping is deliberately NOT an option here: the choice is
+        # visible to the user in the UI, so a discarded characterId would give a chat that looks
+        # like Vampire Lord and answers in the plain assistant voice — a failure nobody can
+        # diagnose from outside. The schema already guarantees a non-empty value.
+        resolved_character = character_id.strip() if character_id is not None else None
+        if will_create and resolved_character is not None:
+            if not get_settings().characters_enabled:
+                raise CharactersDisabledError("character selection is not enabled on this instance")
+            if not is_known_character(resolved_character):
+                raise UnknownCharacterError(
+                    f"character '{resolved_character}' is not available on this instance"
+                )
         # ADR-036 §3: workspaceProjectId is session-fixed (like mode/model). On CREATE validate the
         # workspace belongs to the user (foreign/missing → 404 workspace_not_found, isolation)
         # BEFORE the session row is written; on resume the request field is ignored (the binding is
@@ -1137,6 +1179,9 @@ class ChatOrchestrator:
             title=derive_title(message),
             # ADR-034 §3: session-fixed model; written only at creation, ignored on resume.
             model=resolved_model,
+            # ADR-097 §4: session-fixed character; written only at creation (validated just
+            # above), ignored on resume — for another character the client starts a new chat.
+            character_id=resolved_character if will_create else None,
             # ADR-036 §3: session-fixed workspace binding; written only at creation, ignored on
             # resume (the request field is validated above only when a new session is created).
             workspace_project_id=workspace_project_id if will_create else None,
@@ -1211,7 +1256,11 @@ class ChatOrchestrator:
         # For a non-workspace chat the system prompt is unchanged (base) → no double-injection and
         # the provider prompt cache stays intact.
         workspace_attachments: PreparedAttachments | None = None
-        system_prompt = _system_prompt_for(sess.assistant_mode, effective_generation_mode)
+        # ADR-097 §4: the character comes from the SESSION, never from the request — on a resume
+        # the request field was ignored, and the stored value is the one the chat was created with.
+        system_prompt = _system_prompt_for(
+            sess.assistant_mode, effective_generation_mode, sess.character_id
+        )
         # Credits dual-provider (ADR-073): attachments/workspace follow the SESSION model.
         # BYOK keeps the instance default provider (same as before ADR-073; generation still
         # routes by the key in _generate_loop).
@@ -1254,7 +1303,10 @@ class ChatOrchestrator:
                 )
                 if ws_context is not None:
                     system_prompt = _system_prompt_with_workspace(
-                        sess.assistant_mode, ws_context.instructions, effective_generation_mode
+                        sess.assistant_mode,
+                        ws_context.instructions,
+                        effective_generation_mode,
+                        sess.character_id,
                     )
                     workspace_attachments = ws_context.attachments
             else:
@@ -1262,7 +1314,10 @@ class ChatOrchestrator:
                     sess.workspace_project_id, user_id
                 )
                 system_prompt = _system_prompt_with_workspace(
-                    sess.assistant_mode, instructions, effective_generation_mode
+                    sess.assistant_mode,
+                    instructions,
+                    effective_generation_mode,
+                    sess.character_id,
                 )
 
         system_prompt = await self._system_prompt_with_last_media_job(sess.id, system_prompt)
@@ -1705,6 +1760,7 @@ class ChatOrchestrator:
         assistant_mode: str | None = None,
         attachments: list[AttachmentIn] | None = None,
         model: str | None = None,
+        character_id: str | None = None,
         workspace_project_id: uuid.UUID | None = None,
         context: dict[str, Any] | None = None,
         edit_message_step_id: uuid.UUID | None = None,
@@ -1740,6 +1796,7 @@ class ChatOrchestrator:
                 assistant_mode=assistant_mode,
                 attachments=attachments,
                 model=model,
+                character_id=character_id,
                 workspace_project_id=workspace_project_id,
                 context=context,
                 edit_message_step_id=edit_message_step_id,
@@ -1911,13 +1968,16 @@ class ChatOrchestrator:
         # ADR-064: the continuation carries the SAME mode suffix as the original run leg (the mode
         # was restored from the user step above), so the model keeps the quiz instructions for the
         # rest of the turn.
-        system_prompt = _system_prompt_for(sess.assistant_mode, generation_mode)
+        # ADR-097 §5: `system` is rebuilt on the continuation leg too, so the character of the
+        # session is re-injected here — a character that lived only on turn 0 would evaporate
+        # mid tool-loop, exactly as workspace instructions once did.
+        system_prompt = _system_prompt_for(sess.assistant_mode, generation_mode, sess.character_id)
         if sess.workspace_project_id is not None:
             instructions = await self._deps.workspaces.instructions_for_session(
                 sess.workspace_project_id, user_id
             )
             system_prompt = _system_prompt_with_workspace(
-                sess.assistant_mode, instructions, generation_mode
+                sess.assistant_mode, instructions, generation_mode, sess.character_id
             )
         system_prompt = await self._system_prompt_with_last_media_job(sess.id, system_prompt)
         system_prompt = await self._system_prompt_with_recent_photo(sess.id, system_prompt)

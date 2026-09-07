@@ -625,6 +625,15 @@ class Settings(BaseSettings):
     # a startup crash — read via resolved_presets_default_locale(), not the raw field.
     presets_default_locale: str = Field(default="en", alias="PRESETS_DEFAULT_LOCALE")
 
+    # --- Персонажи (ADR-097) ---
+    # Выбор персонажа. Выключено по умолчанию: на действующих инстансах поведение не меняется
+    # ни на байт. Включать там, где приложение умеет показать выбор собеседника. ОДНА ось
+    # гейтит и каталог, и поведение: при false `GET /v1/characters` отдаёт пустой список,
+    # `characterId` при создании чата отклоняется (422 characters_disabled), а слой промта не
+    # собирается даже для сессий с уже сохранённым chat_sessions.character_id. Язык каталога —
+    # общий PRESETS_DEFAULT_LOCALE (второй переменной под язык не заводится, TD-035).
+    characters_enabled: bool = Field(default=False, alias="CHARACTERS_ENABLED")
+
     # --- Observability ---
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     otel_exporter_otlp_endpoint: str = Field(default="", alias="OTEL_EXPORTER_OTLP_ENDPOINT")

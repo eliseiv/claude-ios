@@ -13,6 +13,7 @@
   "mode": "credits | byok",
   "assistantMode": "chat | code (optional)",
   "model": "string (optional)",
+  "characterId": "string (optional, персонаж — ADR-097)",
   "workspaceProjectId": "uuid (optional)",
   "attachments": [
     {
@@ -26,7 +27,7 @@
   "editMessageStepId": "uuid (optional, редактирование сообщения — ADR-040)"
 }
 ```
-- `sessionId` отсутствует → создаётся новая сессия. На сессию фиксируются: `mode` (billing_mode, credits|byok — **способ оплаты**, [ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)), `assistantMode` (тип ассистента chat|code), `model` (опц., см. ниже), `projectId` (опц., см. ниже) и `workspaceProjectId` (привязка к рабочему пространству, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
+- `sessionId` отсутствует → создаётся новая сессия. На сессию фиксируются: `mode` (billing_mode, credits|byok — **способ оплаты**, [ADR-012](../../adr/ADR-012-assistant-mode-vs-billing-mode.md)), `assistantMode` (тип ассистента chat|code), `model` (опц., см. ниже), `characterId` (опц., персонаж, [ADR-097](../../adr/ADR-097-character-personas.md), см. ниже), `projectId` (опц., см. ниже) и `workspaceProjectId` (привязка к рабочему пространству, [ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)).
 <a id="model-опц-session-fixed-adr-034"></a>
 - **`model` (опц., session-fixed, [ADR-034](../../adr/ADR-034-user-model-selection.md) / [ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md)).** Выбор модели из разрешённого инстансом набора (`GET /v1/models`). Фиксируется на сессию при создании (как `mode`/`assistantMode`/`projectId`); **провайдер чата не меняется на resume**:
   - **без `model`** → сессия создаётся с `chat_sessions.model = NULL` = «дефолтная модель инстанса» (`ANTHROPIC_MODEL`/`OPENAI_MODEL` активного `LLM_PROVIDER`) — обратная совместимость;
@@ -35,6 +36,14 @@
   - **Дефолт инстанса ([ADR-087 §1](../../adr/ADR-087-default-chat-model-gpt-4-1.md)):** на инстансах `LLM_PROVIDER=openai` дефолтная модель чата — **`gpt-4.1`** (`OPENAI_MODEL`), а не `gpt-4o`: у `gpt-4o` встроенный guardrail отказывается описывать изображения с людьми (в системном промте сервиса такого правила нет). `gpt-4o` остаётся в каталоге и выбирается явно. Уже начатые сессии продолжаются на зафиксированной модели — backfill `chat_sessions.model` не выполняется.
   - **Биллинг от выбора модели не зависит** (1 кредит = 1 сообщение, [ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)). Возвращаемый `usage.model` отражает фактически использованную модель.
   - Без `LLM_PROVIDERS` инстанс одно-провайдерный ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)) → выбрать чужую (Claude на openai-инстансе) нельзя. Dual ([ADR-073](../../adr/ADR-073-dual-credits-llm-providers.md)) — opt-in.
+<a id="characterid-опц-session-fixed-adr-097"></a>
+- **`characterId` (опц., session-fixed, [ADR-097](../../adr/ADR-097-character-personas.md)).** Персонаж, от лица которого отвечает ассистент. Значение — `id` из `GET /v1/characters`. Фиксируется на сессию при создании (как `model`/`assistantMode`/`projectId`/`workspaceProjectId`):
+  - **без `characterId`** → сессия создаётся с `chat_sessions.character_id = NULL` — чат без персонажа, поведение полностью прежнее (обратная совместимость);
+  - **с `characterId`** → должен быть непустой строкой после `strip` (пустая/whitespace → `422`, симметрия с `model`/`projectId`) **и** входить в реестр персонажей;
+  - **инстанс с `CHARACTERS_ENABLED=false`** (дефолт) → непустой `characterId` при создании → **`422`** `error.code = characters_disabled`; **инстанс с флагом, id вне реестра** → **`422`** `error.code = unknown_character` (`"character '<x>' is not available on this instance"`). Тихого игнорирования нет: выбор персонажа виден пользователю в интерфейсе, и молча отброшенный выбор дал бы чат, который выглядит персонажем и отвечает как обычный ассистент ([ADR-097 §7](../../adr/ADR-097-character-personas.md)). Прецедент строгого отказа — `422 unsupported_model` ([ADR-034 §3](#model-опц-session-fixed-adr-034)).
+  - **Resume-сессия:** `characterId` берётся из сессии; поле запроса при resume **игнорируется** (не ошибка) — единообразно с `mode`/`assistantMode`/`model`/`projectId`, поэтому оба отказа выше возможны **только при создании** сессии. **Смена персонажа внутри начатой сессии не поддерживается:** для другого персонажа клиент создаёт новый чат ([ADR-097 §4](../../adr/ADR-097-character-personas.md)).
+  - **Влияние:** только слой системного промта ([03-architecture.md §Персонаж](03-architecture.md#персонаж-сессии--слой-системного-промта-adr-097)). Набор инструментов, модерация ([ADR-086](../../adr/ADR-086-ugc-moderation.md)), реплей истории, policy и биллинг (1 кредит = 1 сообщение / цена режима v2) **не зависят** от персонажа.
+  - Значение отдаётся обратно в `GET /v1/chats` и `GET /v1/chats/{id}` ([chats/02-api-contracts](../chats/02-api-contracts.md)); в `ChatResponse` поля нет (на продолжении оно неизменно).
 - **`projectId` (опц., [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)).** Основной поток сервиса — **чат-агрегатор**; website-builder — **опциональная** фича. Поле фиксируется на сессию при создании (как `mode`/`assistantMode`):
   - **без `projectId`** → «чистый чат»: сессия создаётся с `project_id = NULL`; server-side `site.*` tools **НЕ предлагаются** Claude (нет проекта для записи); прочие client-side tools (`files.*`/`calendar.*`/`reminders.*`) доступны по обычным правилам;
   - **с `projectId`** → website-builder доступен: `site.*` входят в tool-набор, как сейчас.
@@ -259,7 +268,7 @@
 ### POST /v1/chat/v2/run
 
 #### Request
-Все поля [`POST /v1/chat/run`](#post-v1chatrun) (`userId`, `sessionId`, `projectId`, `message`, `mode`, `assistantMode`, `model`, `workspaceProjectId`, `attachments`, `context`, `editMessageStepId` — семантика, валидация и коды **идентичны**) **плюс одно**:
+Все поля [`POST /v1/chat/run`](#post-v1chatrun) (`userId`, `sessionId`, `projectId`, `message`, `mode`, `assistantMode`, `model`, `characterId`, `workspaceProjectId`, `attachments`, `context`, `editMessageStepId` — семантика, валидация и коды **идентичны**) **плюс одно**:
 
 > **`attachments` здесь ровно тот же контракт**, включая приём на **любом** ходе сессии ([ADR-088](../../adr/ADR-088-attachments-per-turn-contract.md)), модерацию хода с вложениями ([ADR-086](../../adr/ADR-086-ugc-moderation.md), нарушение → `422 content_policy_violation`), разведённые коды ошибок и [лимиты](#лимиты-вложений-adr-089). Повышенный transport-лимит тела действует и на `/v1/chat/v2/run`, и на `/v1/chat/v2/run/stream` ([ADR-089 §1](../../adr/ADR-089-attachment-limits-and-error-taxonomy.md)).
 
@@ -268,6 +277,7 @@
 ```
 <a id="generationmode-adr-064"></a>
 - **`generationMode` (опц., дефолт `general`, per-turn).** Не фиксируется на сессию: в одном `sessionId` ход может быть `research`, следующий — `general`, затем `study_learn`. Значение вне набора → `422` (`StrictModel`/`Literal`). Отдельной оси «режим диалога» (`dialogMode`) в контракте **нет** — режим один ([ADR-064 §1](../../adr/ADR-064-study-learn-quiz-generation-mode.md)).
+- **Контраст с соседним полем `characterId`: правила противоположны, не переносить по аналогии.** `generationMode` — **per-turn**, приходит в каждом запросе, персистится на user-шаге и может меняться внутри одной сессии. `characterId` ([§выше](#characterid-опц-session-fixed-adr-097)) — **session-fixed**: принимается только при создании сессии, на resume игнорируется, внутри сессии не меняется ([ADR-097 §4](../../adr/ADR-097-character-personas.md): в реплеенной истории остаются реплики прежнего персонажа, и смена голоса посреди чата даёт смешанного собеседника — в отличие от режима, который меняет лишь то, что ассистент делает на этом ходе).
 - Значение персистится в user-шаге хода (`chat_steps.payload.generationMode`) — из него continuation восстанавливает режим (см. `/v1/chat/v2/tool-result`).
 - **Что даёт режим:**
 
@@ -730,5 +740,46 @@ Backend только инициирует tool-call; исполняет клие
 **Агенты (18, после семёрки, [ADR-080](../../adr/ADR-080-preset-categories.md) / [ADR-083](../../adr/ADR-083-preset-subcategories-and-descriptions.md)):** `work` — `editor`, `letters`, `analyst`, `ideas`, `code`, `documents`; `life` — `finances`, `advisor`, `planner`, `studies`, `translator`, `health`; `entertainment` — `creator`, `movies`, `quizzes`, `companion`, `stories`, `games`. Новый клиент: вкладки по `category`, сетка агентов = `id == subcategory`; старый продолжает читать только `id`/`title`/`icon`/`prompt`.
 
 **Совместимость:** без env и без запроса локали (`locale` отсутствует, `Accept-Language` без поддерживаемых, дефолт `en`) → EN-ответ как раньше; поле `locale` при этом = `"en"`. Без миграции; провайдер-агностично ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)).
+
+**Коды:** `200`; `401` нет/невалидный JWT; `422` явный `?locale=` вне набора; `429` rate-limit.
+
+## GET /v1/characters — каталог персонажей ([ADR-097](../../adr/ADR-097-character-personas.md))
+
+Источник для экрана выбора персонажа. Тап по карточке передаётся в `characterId` при создании чата ([§`characterId`](#characterid-опц-session-fixed-adr-097)). Набор и тексты меняются деплоем backend **без релиза iOS-приложения**. Источник — статический реестр в коде (`src/app/chat/characters.py`, single source of truth, по образцу [`GET /v1/presets`](#get-v1presets--пресеты-промтов-adr-035)).
+
+### Auth
+- **JWT-protected** (как `GET /v1/tools` / `GET /v1/models` / `GET /v1/presets`): `Authorization: Bearer <JWT>` обязателен. Метод `GET`, read-only, без побочных эффектов (не создаёт сессию, не пишет ledger/audit). Per-user rate-limit как у прочих read-эндпоинтов.
+
+### Query-параметры (локализация)
+- **`locale` (опц., str)** — тот же набор и та же канонизация, что у пресетов (`en`, `ru`, `zh-Hans`; `ru-RU`→`ru`, `zh-CN`→`zh-Hans`). Явное значение вне набора → **`422`** (`"locale '<x>' is not supported"`).
+
+### Резолвинг локали
+Порядок **тот же**, что у `GET /v1/presets` ([ADR-049 §3](../../adr/ADR-049-presets-localization.md)), и та же per-instance переменная: `?locale=` → `Accept-Language` (тихий fallback) → **`PRESETS_DEFAULT_LOCALE`** → `en`. Второй env под язык каталога персонажей **не заводится** — язык каталогов инстанса один. Имя переменной шире своей области действия — [TD-035](../../100-known-tech-debt.md).
+
+### Response (200)
+```json
+{
+  "enabled": true,
+  "locale": "ru",
+  "characters": [
+    { "id": "anime_girl",     "name": "Аниме-девушка",   "tagline": "Восторженная героиня аниме",     "icon": "sparkles" },
+    { "id": "fantasy_queen",  "name": "Королева фэнтези","tagline": "Церемонная правительница",       "icon": "crown" },
+    { "id": "vampire_lord",   "name": "Лорд вампиров",   "tagline": "Древний аристократ ночи",        "icon": "moon.stars" },
+    { "id": "cyber_assassin", "name": "Кибер-ассасин",   "tagline": "Немногословный оперативник",     "icon": "bolt.shield" },
+    { "id": "virtual_friend", "name": "Виртуальный друг","tagline": "Тёплый повседневный собеседник", "icon": "person.wave.2" }
+  ]
+}
+```
+- `enabled` — включена ли фича на этом инстансе (`CHARACTERS_ENABLED`). **`false` → `characters: []`** и `characterId` при создании чата отклоняется (`422 characters_disabled`). Клиент прячет вход в выбор персонажа по этому полю.
+- `locale` — фактически отданная локаль (результат резолвинга), как в `GET /v1/presets`.
+- `id` — стабильный slug (`[a-z0-9_]`), **не локализуется**: ключ сессии (`chat_sessions.character_id`), ключ клиентской графики и аналитики.
+- `name` / `tagline` — отображаемое имя и однострочная подпись на выбранной локали. **Per-field EN-fallback** (EN — канон): незаполненное поле локали берётся из EN. `zh-Hans` на старте не заполнен и целиком приходит по fallback.
+- `icon` — имя **SF Symbol** (клиент рендерит `Image(systemName:)`, при отсутствии символа — свой fallback). Не emoji, **не локализуется** (стабильный ресурс iOS).
+- Порядок элементов = порядок на экране (порядок объявления в реестре), **един во всех локалях**.
+- **Системного текста персонажа (`persona`) в ответе нет** и не будет ([ADR-097 §3](../../adr/ADR-097-character-personas.md)): это внутренняя инструкция модели, которую правят по наблюдениям за ответами; отдав её, мы сделали бы правку формулировки релизом приложения.
+
+**Состав (5, закрыт):** `anime_girl`, `fantasy_queen`, `vampire_lord`, `cyber_assassin`, `virtual_friend` — расширение набора только новым решением.
+
+**Совместимость:** эндпоинт аддитивен; на инстансе без `CHARACTERS_ENABLED` отвечает `200` с пустым списком (а не `404` — иначе приложение не отличит «инстанс не умеет» от «бэкенд старее фичи», [ADR-097 §7](../../adr/ADR-097-character-personas.md)). Без миграции; провайдер-агностично ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md)).
 
 **Коды:** `200`; `401` нет/невалидный JWT; `422` явный `?locale=` вне набора; `429` rate-limit.

@@ -21,6 +21,7 @@ Gateway не добавляет собственных бизнес-endpoint, к
 | POST | /v1/chat/v2/tool-result | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#post-v1chatv2tool-result) |
 | GET | /v1/models | chat-orchestrator (каталог инстанса, [ADR-075](../../adr/ADR-075-unified-instance-models-catalog.md)) | [link](../chat-orchestrator/02-api-contracts.md#get-v1models--список-доступных-моделей-инстанса-adr-034--adr-073--adr-075) |
 | GET | /v1/presets | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#get-v1presets--пресеты-промтов-adr-035) |
+| GET | /v1/characters | chat-orchestrator (каталог персонажей, [ADR-097](../../adr/ADR-097-character-personas.md)) | [link](../chat-orchestrator/02-api-contracts.md#get-v1characters--каталог-персонажей-adr-097) |
 | GET POST DELETE | /v1/media/models, /v1/media/uploads, /v1/media/images, /v1/media/videos, /v1/media/jobs[/{id}], /v1/media/templates/* | media-generation ([ADR-060](../../adr/ADR-060-media-generation-fal.md), [ADR-085](../../adr/ADR-085-media-asset-download-proxy.md)); модерация UGC — [ADR-086](../../adr/ADR-086-ugc-moderation.md) | [link](../media-generation/02-api-contracts.md) |
 | GET | /v1/chat/v2/capabilities | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#get-v1chatv2capabilities) |
 | GET | /v1/tools | chat-orchestrator | [link](../chat-orchestrator/02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019) |

@@ -133,6 +133,7 @@ OpenAPI-тексты (`summary`, `description` эндпоинтов, `Field(desc
 | `Tools` | `GET /v1/tools` | `bearerAuth` | Каталог инструментов, доступных в tool-loop. |
 | `Models` | `GET /v1/models` | `bearerAuth` | Каталог доступных моделей активного провайдера для селектора модели ([ADR-034](adr/ADR-034-user-model-selection.md)). |
 | `Presets` | `GET /v1/presets` | `bearerAuth` | Пресеты промтов для чипов на главном экране чата ([ADR-035](adr/ADR-035-prompt-presets-endpoint.md)). |
+| `Characters` | `GET /v1/characters` | `bearerAuth` | Каталог персонажей для выбора собеседника ([ADR-097](adr/ADR-097-character-personas.md)). Пользовательские строки — по [§R2ter](#r2ter-лаконичность-user-facing-текстов-для-тестировщиков): без ADR/Q/TD-ссылок; коды `characters_disabled`/`unknown_character` живут в `error.code`, а не в прозе. |
 | `Policy` | `GET /v1/policy/effective` | `bearerAuth` | Эффективные права пользователя для UI (можно ли генерировать и почему нет). |
 | `Wallet` | `GET /v1/wallet`, `POST /v1/wallet/consume` | `bearerAuth` | Баланс кредитов и списание (1 кредит = 1 сообщение). |
 | `Subscription` | `POST /v1/subscription/sync` | `bearerAuth` | Синхронизация подписки StoreKit и начисление кредитов периода. |

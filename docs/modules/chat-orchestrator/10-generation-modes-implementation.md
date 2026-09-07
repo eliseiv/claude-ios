@@ -557,6 +557,7 @@ wire-контракт запроса/ответа/инструмента — [02
   является** тем, что решает: решает явный выключатель.
 - `AnthropicClient` добавляет web-search/thinking параметры только при `research/reasoning`.
 - `research` ([ADR-084](../../adr/ADR-084-research-system-prompt-suffix.md)): system-prompt хода содержит статичный суффикс только при эффективном `research` (v2 и legacy opt-in); dummy-поиск в промте запрещён; `tool_choice` не форсируется.
+- **Суффикс режима стоит ПОСЛЕ слоя персонажа** ([ADR-097](../../adr/ADR-097-character-personas.md)): персонаж задаёт голос, режим — задачу хода, и последний слой весомее. Персонаж при этом **не** влияет ни на knobs провайдера, ни на tool-набор, ни на цену режима. Полный порядок слоёв — [03-architecture §Порядок слоёв системного промта](03-architecture.md#порядок-слоёв-системного-промта). Оси не путать: `generationMode` — per-turn, `characterId` — session-fixed.
 - `AnthropicClient` в `general` делает обычный Messages call без v2 knobs.
 - `/v1/chat/v2/run` списывает mode-specific credits и позволяет переключать режимы в одной сессии.
 - `/v1/chat/v2/tool-result` сохраняет исходный mode/cost всего tool-loop хода.

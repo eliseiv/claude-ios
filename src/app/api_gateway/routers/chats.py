@@ -72,6 +72,7 @@ async def list_chats(
                 title=item.title,
                 preview=item.preview,
                 assistantMode=item.assistant_mode,
+                characterId=item.character_id,
                 isPinned=item.is_pinned,
                 projectId=item.project_id,
                 workspaceProjectId=item.workspace_project_id,
@@ -117,6 +118,7 @@ async def get_chat(
         id=view.id,
         title=view.title,
         assistantMode=view.assistant_mode,
+        characterId=view.character_id,
         mode=view.mode,
         steps=[
             ChatStepSchema(

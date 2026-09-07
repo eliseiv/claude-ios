@@ -20,6 +20,14 @@ class ChatListItemSchema(StrictModel):
         default=None, description="Срез текста последнего сообщения (или null)."
     )
     assistantMode: Literal["chat", "code"] = Field(description="Тип ассистента (chat|code).")
+    characterId: str | None = Field(
+        default=None,
+        description=(
+            "Персонаж чата (`id` из `GET /v1/characters`) или null, если чат без персонажа. "
+            "Задаётся при создании чата и не меняется. Отдаётся и тогда, когда выбор персонажа "
+            "на инстансе выключен, — включён ли он, сообщает `enabled` в `GET /v1/characters`."
+        ),
+    )
     isPinned: bool = Field(description="Закреплён ли чат.")
     projectId: str | None = Field(
         default=None,
@@ -57,6 +65,13 @@ class ChatHistoryResponse(StrictModel):
     id: uuid.UUID = Field(description="Идентификатор чата.")
     title: str | None = Field(default=None, description="Заголовок чата.")
     assistantMode: Literal["chat", "code"] = Field(description="Тип ассистента (chat|code).")
+    characterId: str | None = Field(
+        default=None,
+        description=(
+            "Персонаж чата (`id` из `GET /v1/characters`) или null, если чат без персонажа. "
+            "Задаётся при создании чата и не меняется."
+        ),
+    )
     mode: Literal["credits", "byok"] = Field(description="Режим оплаты сессии.")
     steps: list[ChatStepSchema] = Field(
         description=(

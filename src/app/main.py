@@ -23,6 +23,7 @@ from app.api_gateway.routers import (
     billing_adapty,
     billing_cloudpayments,
     byok,
+    characters,
     chat,
     chats,
     documents,
@@ -133,6 +134,14 @@ _OPENAPI_TAGS = [
     {
         "name": "Presets",
         "description": "Пресеты промтов для чипов на главном экране чата.",
+    },
+    {
+        "name": "Characters",
+        "description": (
+            "Каталог персонажей для экрана выбора собеседника. Выбранный `id` передаётся в "
+            "`characterId` при создании чата — дальше ассистент отвечает голосом этого "
+            "персонажа. Поле `enabled` сообщает, включён ли выбор персонажа на инстансе."
+        ),
     },
     {
         "name": "Media",
@@ -301,6 +310,7 @@ def create_app() -> FastAPI:
         memory,
         models,
         presets,
+        characters,
         media,
         media_templates,
         policy,

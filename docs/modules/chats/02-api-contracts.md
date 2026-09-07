@@ -21,6 +21,7 @@
       "title": "string | null",
       "preview": "string (срез последнего сообщения)",
       "assistantMode": "chat | code",
+      "characterId": "string | null",
       "isPinned": false,
       "projectId": "string | null",
       "workspaceProjectId": "uuid | null",
@@ -34,6 +35,7 @@
 - **`preview` без conversation-settings блока ([ADR-042](../../adr/ADR-042-hide-context-block-from-user-facing-history.md)):** превью user-сообщения **не** содержит ведущий служебный блок `[Conversation settings for this message: …]` ([ADR-037](../../adr/ADR-037-chatrunrequest-context-allowlist-injection.md) §4). Блок персистится внутри текста user-шага (для replay), но **срезается при отдаче**: превью формируется в `ChatsRepository._preview` / `_text_from_payload` (`src/app/chats/repository.py`), где к тексту первого text-блока user-шага применяется единый helper `strip_context_block` **строго ДО** `_truncate` (collapse в `_truncate` схлопывает `\n\n` и сломал бы якорь среза). Превью показывает только текст пользователя; если сообщение было image-only/file-only с `context` (текст = только блок) — превью этого шага пусто́.
 - **`preview` не зависит от провайдера ([ADR-058](../../adr/ADR-058-provider-agnostic-assistant-payload-in-chats-reads.md)):** `chat_steps.payload["content"]` assistant-шага хранится в форме активного провайдера ([ADR-033](../../adr/ADR-033-llm-provider-abstraction.md) §3) — у `openai` это assistant-**сообщение** `[{"role":"assistant","content":…,"tool_calls":[…]}]`, а не доменные блоки. `_text_from_payload` читает content через `to_domain_blocks` (`src/app/chats/provider_blocks.py`), поэтому превью содержит текст последнего сообщения на любом инстансе. До фикса на OpenAI-инстансах `preview` был **всегда `null`**.
 - **`projectId` (свободная строка, [ADR-028](../../adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md), аддитивно):** `= chat_sessions.project_id` — тот же свободный строковый идентификатор website-builder-проекта, что клиент передал в `POST /v1/chat/run` при создании сессии ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)). Формат и семантика **идентичны** `projectId` из `/chat/run`. **`null` = «чистый чат»** — сессия создана без `projectId` (website-builder не активирован, `site.*` Claude не предлагались); это основной режим сервиса. Поле позволяет iOS в списке отличить проектные чаты от чистых без запроса истории.
+- **`characterId` (аддитивно, [ADR-097](../../adr/ADR-097-character-personas.md))** — персонаж чата (`chat_sessions.character_id`, `id` из [`GET /v1/characters`](../chat-orchestrator/02-api-contracts.md#get-v1characters--каталог-персонажей-adr-097)); `null` = чат без персонажа. Session-fixed: этим модулем **не** изменяется — `PATCH /v1/chats/{id}` персонажа не принимает (для другого персонажа клиент создаёт новый чат, [ADR-097 §4](../../adr/ADR-097-character-personas.md)). Значение отдаётся и при выключенном на инстансе флаге (в БД оно сохраняется), поэтому по нему нельзя судить, отвечает ли чат голосом персонажа сейчас — это решает `CHARACTERS_ENABLED`. Старые клиенты игнорируют поле.
 - **`projectId` ≠ `workspaceProjectId`** — независимые, не взаимозаменяемые поля ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)): `projectId` — свободная строка website-builder, `workspaceProjectId` — UUID рабочего пространства. Оба присутствуют в ответе одновременно.
 - **`workspaceProjectId` (Поставка 3, [ADR-036](../../adr/ADR-036-workspaces-implementation.md)) — реальное значение** из `chat_sessions.workspace_project_id` (более не заглушка-null). `null` = чат без workspace. До миграции `0011` (пока колонки нет) сервис отдаёт `null`; после — фактическую привязку.
 - N+1 на `preview` (отдельный запрос на каждый чат страницы) — осознанный tech-debt [`TD-012`](../../100-known-tech-debt.md), приемлемо для текущего per-user масштаба.
@@ -51,6 +53,7 @@
   "id": "uuid",
   "title": "string | null",
   "assistantMode": "chat | code",
+  "characterId": "string | null",
   "mode": "credits | byok",
   "steps": [
     {
