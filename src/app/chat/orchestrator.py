@@ -797,9 +797,13 @@ def _fold_turn_documents(cards: list[dict[str, Any]]) -> list[dict[str, Any]] | 
     then rewrote it must surface a single card carrying the FINAL size/version/filename, sitting
     where the document first showed up. Two cards for one file would be a duplicate in the UI, and
     the version of the next-to-last edit would be a plain lie about the stored state.
-    DELIBERATE CONTRAST with mediaJobs, which APPENDS: every media job has its own jobId and is a
-    separate entity, whereas one document legitimately repeats within a turn. Do not carry the rule
-    of either field over to the other.
+    DELIBERATE CONTRAST with mediaJobs (both sides marked, ADR-103 §2): the two fields now share
+    the MECHANISM — unconditional recovery, merge of both sources, fold by an identity key — and
+    differ only where the entities differ. Here last-wins carries MEANING (a turn legitimately
+    rewrites one document, and the surviving card must show the FINAL version); there one job is
+    submitted once and never changes within the turn, so its fold is pure idempotency of the merge
+    and the append rule of ADR-068 §2 stands untouched — different jobs still accumulate. Carry
+    neither the meaning of last-wins nor the append rule over to the other field.
     A card without an addressable documentId is dropped: the client could neither open it nor
     update an already shown card by it, and it would only add a phantom entry.
     Returns None (never []) when nothing is left — ADR-101 §6.
@@ -814,6 +818,55 @@ def _fold_turn_documents(cards: list[dict[str, Any]]) -> list[dict[str, Any]] | 
         # dict keeps the position of an already-present key on reassignment: values are replaced,
         # the slot of the first appearance is kept — exactly the rule above, without a second pass.
         folded[document_id] = dict(card)
+    return list(folded.values()) or None
+
+
+def _recovered_media_job(ref: dict[str, Any]) -> dict[str, Any]:
+    """Project a RECOVERED media job ref onto this response: ``creditsCharged = 0`` (ADR-103 §3).
+
+    ``creditsCharged`` in ``ChatResponse.mediaJobs`` is the amount THIS call debited, and a ref that
+    reached us only through the turn's saved steps was submitted (and paid for) on an earlier leg,
+    or on no leg at all when the turn is being replayed idempotently. Reporting the stored amount
+    again would make every later leg of a multi-leg turn claim the same debit, and a client that
+    updates the balance by the sum of the field would charge one job twice — which is why §3 is not
+    a detail of §1 but its precondition.
+    ``status`` / ``kind`` / ``model`` are deliberately NOT refreshed: they are the snapshot taken at
+    submit time (``queued``, ADR-068 §1); the live state comes from ``GET /v1/media/jobs/{jobId}``
+    and the ADR-067 push.
+    DELIBERATE CONTRAST with the history anchor ``steps[].payload.mediaJobs`` (both sides marked,
+    ADR-103 §3): there the SAME field means the PRICE OF THE JOB, is written from the submit result
+    and is never zeroed — a cold start must still see what the generation cost. This projection rule
+    must not travel into history, and the history rule must not travel into the response.
+    """
+    return {**ref, "creditsCharged": 0}
+
+
+def _fold_turn_media_jobs(refs: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Fold a turn's media job refs to ONE entry per jobId (ADR-103 §2).
+
+    Applied to the UNION of both producers (recovered turn steps + this call's accumulator), so it
+    must be — and is — IDEMPOTENT on an overlap: a job that a step already recorded arrives from
+    both sources and collapses into one entry. FIRST-APPEARANCE on the position, LAST-WINS on the
+    values, and because the accumulator is concatenated LAST, a job submitted in THIS call keeps the
+    amount this call actually debited (§3) while a purely recovered one keeps the 0 that
+    ``_recovered_media_job`` put there.
+    This is NOT a repeal of the append rule of ADR-068 §2: DIFFERENT jobs of one turn still
+    accumulate and none of them drops out. The fold collapses only refs carrying the SAME jobId —
+    one job seen through two sources. Two cards for one job would be a duplicate in the UI and, more
+    expensively, a second «charged» message for a single debit.
+    A ref without an addressable jobId is dropped — see ``_media_job_ref`` in the repository.
+    Returns None (never []) when nothing is left — ADR-068 §2 / ADR-103 §6.
+    """
+    folded: dict[str, dict[str, Any]] = {}
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        job_id = ref.get("jobId")
+        if not isinstance(job_id, str) or not job_id:
+            continue
+        # dict keeps the position of an already-present key on reassignment: values are replaced,
+        # the slot of the first appearance is kept — exactly the rule above, without a second pass.
+        folded[job_id] = dict(ref)
     return list(folded.values()) or None
 
 
@@ -911,8 +964,12 @@ class ChatRunOut:
     # replay: server_tools answers «what ran in this call», quiz answers «what this turn contains».
     # Do not carry the rule of either field over to the other.
     quiz: dict[str, Any] | None = None
-    # ADR-068: media jobs submitted in THIS TURN via media.generate_* — turn-scoped like quiz.
-    # None = «no media jobs in this turn»; a list (possibly recovered from tool steps) otherwise.
+    # ADR-068 §2 / ADR-103: media jobs submitted in THIS TURN (media.generate_* or a wizard submit)
+    # — turn-scoped like quiz and documents, already folded to one entry per jobId. Set on EVERY
+    # terminal leg from the call accumulator MERGED with the turn's saved steps, so every leg of one
+    # turn answers the same list. creditsCharged is the amount THIS call debited: 0 on a purely
+    # recovered ref (ADR-103 §3) — NOT the price stored in the history anchor.
+    # None = «no media jobs in this turn»; never [].
     media_jobs: list[dict[str, Any]] | None = None
     # ADR-070: catalog-backed mediaChoices wizard step for this turn (from media.ask_params /
     # mediaSelection continuation). None = no picker in this response.
@@ -943,10 +1000,13 @@ class _QuizAccumulator:
 
 @dataclass
 class _MediaJobsAccumulator:
-    """Media jobs submitted in the CURRENT call (ADR-068).
+    """Media jobs submitted in the CURRENT call (ADR-068 §2, producer 1).
 
     APPEND (not last-wins): the model may queue several images/videos in one turn; the client needs
     every jobId. Threaded through the tool-loop like ``_QuizAccumulator``.
+    This accumulator is NOT the gate of producer 2 (ADR-103 §1): assembly always ALSO reads the
+    turn's saved steps and merges them, with these rows winning on an overlap — as the freshest and,
+    for ``creditsCharged``, as the only ones that may report a debit of THIS call (§3).
     """
 
     jobs: list[dict[str, Any]] = field(default_factory=list)
@@ -959,8 +1019,9 @@ class _DocumentsAccumulator:
     APPEND in execution order; the fold to one entry per documentId happens at assembly
     (``_fold_turn_documents``), not here — the raw order of appearances is what decides the
     position of each folded entry. Threaded through the tool-loop like ``_MediaJobsAccumulator``.
-    This accumulator is NOT the gate of producer 2 (unlike mediaJobs): assembly always ALSO reads
-    the turn's saved steps and merges them, with these rows winning on an overlap as the freshest.
+    This accumulator is NOT the gate of producer 2: assembly always ALSO reads the turn's saved
+    steps and merges them, with these rows winning on an overlap as the freshest. Since ADR-103 §1
+    ``mediaJobs`` works the same way — it is no longer the counter-example it used to be.
     """
 
     documents: list[dict[str, Any]] = field(default_factory=list)
@@ -2378,13 +2439,33 @@ class ChatOrchestrator:
         message_step_id: uuid.UUID,
         accumulated: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]] | None:
-        """Media jobs of the TURN (ADR-068): call accumulator, else persisted media tool results."""
-        if accumulated:
-            return list(accumulated)
-        recovered = await self._deps.repo.tool_results_for_message_step(
-            session_id, message_step_id, _MEDIA_TOOL_NAMES
+        """Media jobs of the TURN (ADR-103 §1): the turn's saved steps MERGED with this call's.
+
+        Producer 2 runs UNCONDITIONALLY whenever the turn exists — NOT only when the accumulator is
+        empty. Gating it on an empty accumulator drops a job of an earlier leg exactly when the
+        current call submitted another one: a turn that queued A before handing off to a client-side
+        tool and then queued B on /chat/tool-result answered [B], while the idempotent replay of
+        that very same turn (accumulator empty) answered [A, B] — one turn, two different answers,
+        and the leg the client reacts to was the one missing A. ADR-068 §2 calls the field the
+        content of the TURN, so that gate made the norm false on the very leg that matters.
+        Merge order = order of the turn: recovered refs first (``seq ASC``), then this call's rows.
+        An overlap between the sources is expected and harmless — the fold of ADR-103 §2 is
+        idempotent and the accumulator's ref wins, which is also what keeps its ``creditsCharged``
+        (§3) from being zeroed by the recovered copy of the same job.
+        The recovery reads THREE sources, not just ``media.generate_*`` tool results
+        (``media_job_refs_for_message_step``): the normative lower bound is the source list of the
+        history anchor, because a wizard submit (ADR-070 §3) runs before the LLM and may leave no
+        such tool step at all.
+        DELIBERATE CONTRAST with ``serverTools[]`` (both sides marked, ADR-103 §6): that one is a
+        per-CALL indicator and comes back EMPTY on an idempotent replay; mediaJobs is turn CONTENT
+        and is recovered there. Carry the rule of neither field over to the other.
+        """
+        recovered = await self._deps.repo.media_job_refs_for_message_step(
+            session_id, message_step_id
         )
-        return recovered or None
+        return _fold_turn_media_jobs(
+            [*(_recovered_media_job(ref) for ref in recovered), *(accumulated or [])]
+        )
 
     async def _with_turn_media_jobs(
         self,
@@ -2393,7 +2474,13 @@ class ChatOrchestrator:
         message_step_id: uuid.UUID,
         accumulated: list[dict[str, Any]] | None,
     ) -> ChatRunOut:
-        """Attach turn-scoped mediaJobs to a terminal ChatRunOut (ADR-068)."""
+        """Attach turn-scoped mediaJobs to a terminal ChatRunOut (ADR-068 §2, ADR-103 §6).
+
+        A response with ``message_step_id is None`` carries no turn at all (policy-block before
+        generation), so there is nothing to attribute a job to and no read is issued — ``mediaJobs``
+        stays ``null``. The ``blocked``+``max_tokens`` leg is NOT this case: its turn id is set, so
+        a job queued before the truncation still reaches the client.
+        """
         if out.message_step_id is None:
             return out
         media_jobs = await self._resolve_turn_media_jobs(
@@ -2421,10 +2508,12 @@ class ChatOrchestrator:
         Merge order = order of the turn: recovered rows first (``seq ASC``), then this call's rows.
         An overlap between the sources is expected and harmless — the fold of §5 is idempotent and
         the accumulator's value wins as the freshest one.
-        DELIBERATE CONTRAST with mediaJobs (``_resolve_turn_media_jobs``), whose producer 2 IS gated
-        on an empty accumulator: mediaJobs APPENDS and has no dedup key, so an unconditional merge
-        would duplicate a job there. The mechanisms differ because the semantics already differ —
-        carry neither rule over to the other field without a separate decision.
+        DELIBERATE CONTRAST with mediaJobs (``_resolve_turn_media_jobs``) — and since ADR-103 the
+        contrast is no longer about the MECHANISM: that field is assembled the same way (producer 2
+        unconditional, both sources merged, folded by an identity key). What still differs is the
+        key (``documentId`` vs ``jobId``), the meaning of last-wins (final version of one document
+        vs plain idempotency of the merge) and ``creditsCharged``, which documents do not have at
+        all — they are free. Carry none of those three over to the other field.
         Producer 2 needs no extraction code of its own: ``tool_results_for_message_step`` already
         returns ONLY successful results (errored rounds have a null ``result``) ordered by ``seq``,
         and a successful document.create/update result IS the card (``_doc_brief``). That is why
