@@ -56,6 +56,13 @@ _EXPECTED_NAMES = {
     "git.commit",
     "git.branch",
     "git.push",
+    # ADR-102 §12: семейство карт. Каталог осями не режется — ось E `MAPS_TOOLS_ENABLED` управляет
+    # ТОЛЬКО тем, что предлагается модели, а этот эндпоинт отдаёт технический реестр целиком.
+    "maps.show_place",
+    "maps.geocode",
+    "maps.reverse_geocode",
+    "maps.route",
+    "maps.search_places",
 }
 _MUTATING = {
     "files.write",

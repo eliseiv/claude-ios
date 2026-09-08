@@ -199,6 +199,13 @@ def test_other_tools_unchanged_by_adr027() -> None:
         "git.commit",
         "git.branch",
         "git.push",
+        # ADR-102 добавил семейство карт — состав реестра снова расширился, а inputSchema
+        # соседей (в т.ч. calendar.read) обязан остаться прежним: это и проверяет тест ниже.
+        "maps.show_place",
+        "maps.geocode",
+        "maps.reverse_geocode",
+        "maps.route",
+        "maps.search_places",
     }
 
 

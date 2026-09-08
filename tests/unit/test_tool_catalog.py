@@ -64,6 +64,13 @@ _EXPECTED_NAMES = {
     "git.commit",
     "git.branch",
     "git.push",
+    # ADR-102 §12: семейство карт — клиентское, ось E `MAPS_TOOLS_ENABLED`. Каталог осями НЕ
+    # режется: он технический реестр, по которому клиент понимает, что ему предстоит реализовать.
+    "maps.show_place",
+    "maps.geocode",
+    "maps.reverse_geocode",
+    "maps.route",
+    "maps.search_places",
 }
 
 
