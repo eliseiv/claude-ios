@@ -37,6 +37,11 @@ from app.chat.tools import (
     TOOL_DOCUMENT_UPDATE,
     TOOL_FILES_PATCH,
     TOOL_GENERATION_MODES,
+    TOOL_MAPS_GEOCODE,
+    TOOL_MAPS_REVERSE_GEOCODE,
+    TOOL_MAPS_ROUTE,
+    TOOL_MAPS_SEARCH_PLACES,
+    TOOL_MAPS_SHOW_PLACE,
     TOOL_MEDIA_ASK_PARAMS,
     TOOL_MEDIA_GENERATE_IMAGE,
     TOOL_MEDIA_GENERATE_VIDEO,
@@ -218,6 +223,17 @@ def test_registries_are_disjoint_and_within_the_tool_namespace() -> None:
         # ADR-094: форму unified diff не гарантирует ни один провайдер. Прод 2026-08-31: 8 из 8
         # заплаток ушли клиенту наброском, `patch(1)` их отверг, и модель бросала правку.
         TOOL_FILES_PATCH,
+        # ADR-102 §8: кросс-полевые правила семейства карт (парность координат, `at` ⇒
+        # departureTimeLocal) в JSON Schema без oneOf/if-then не выражаются, поэтому их нарушение
+        # — ОЖИДАЕМЫЙ исход, а не аномалия схемы, и ронять им весь ход в 422 нельзя.
+        # Перечень намеренно ЛИТЕРАЛЬНЫЙ, а не `*MAPS_TOOLS`: смысл ассерта — заставить осознанно
+        # пересмотреть попадание в деградацию при КАЖДОМ пополнении allowlist, включая шестой
+        # инструмент карт, у которого кросс-полевых правил может не быть вовсе.
+        TOOL_MAPS_SHOW_PLACE,
+        TOOL_MAPS_GEOCODE,
+        TOOL_MAPS_REVERSE_GEOCODE,
+        TOOL_MAPS_ROUTE,
+        TOOL_MAPS_SEARCH_PLACES,
     }
 
 

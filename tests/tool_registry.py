@@ -22,6 +22,7 @@ from __future__ import annotations
 from app.chat.tools import (
     ALL_TOOL_NAMES,
     CODE_TOOLS,
+    MAPS_TOOLS,
     SERVER_SIDE_TOOLS,
     TOOL_GENERATION_MODES,
 )
@@ -40,8 +41,18 @@ MODE_GATED_TOOL_NAMES: frozenset[str] = frozenset(TOOL_GENERATION_MODES)
 # иначе модель звала бы их впустую и ход оставался бы незавершённым.
 CODE_GATED_TOOL_NAMES: frozenset[str] = frozenset(CODE_TOOLS)
 
+# Инструменты, закрытые осью E (ADR-102 §10, `MAPS_TOOLS_ENABLED`, дефолт False). Как и ось D,
+# ось E выключена по умолчанию, потому что семейство исполняет КЛИЕНТ: позванный, но неисполнимый
+# client-side вызов оставляет ход незавершённым навсегда (барьер ADR-025 ждёт tool-result, а
+# таймаута в коде нет). Отличие от оси D — с `assistant_mode` ось НЕ складывается, поэтому
+# вычитание одинаково верно и для `chat`, и для `code`.
+MAPS_GATED_TOOL_NAMES: frozenset[str] = frozenset(MAPS_TOOLS)
+
 TOOLS_OFFERED_IN_EVERY_MODE: frozenset[str] = (
-    frozenset(ALL_TOOL_NAMES) - MODE_GATED_TOOL_NAMES - CODE_GATED_TOOL_NAMES
+    frozenset(ALL_TOOL_NAMES)
+    - MODE_GATED_TOOL_NAMES
+    - CODE_GATED_TOOL_NAMES
+    - MAPS_GATED_TOOL_NAMES
 )
 
 # The same set under axis A «no project» (ADR-022): project-scoped `site.*` drop out; global

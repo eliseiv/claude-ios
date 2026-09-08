@@ -7,6 +7,7 @@ import pytest
 from app.chat.tools import (
     ALL_TOOL_NAMES,
     CODE_TOOLS,
+    MAPS_TOOLS,
     MUTATING_TOOLS,
     TOOL_QUIZ_GENERATE,
     anthropic_tool_definitions,
@@ -77,7 +78,9 @@ def test_anthropic_definitions_cover_all_tools() -> None:
     # covered by the default (`general`) call is ALL_TOOL_NAMES minus that one tool.
     # ADR-094 ось D: инструменты кода выключены по умолчанию, поэтому в набор по умолчанию
     # они не входят — как и mode-gated quiz.generate.
-    expected_domain = set(ALL_TOOL_NAMES) - {TOOL_QUIZ_GENERATE} - set(CODE_TOOLS)
+    # ADR-102 ось E: карты тоже выключены по умолчанию (`MAPS_TOOLS_ENABLED`), и по той же
+    # причине: исполняет их клиент, а неисполнимый client-side вызов оставляет ход висеть.
+    expected_domain = set(ALL_TOOL_NAMES) - {TOOL_QUIZ_GENERATE} - set(CODE_TOOLS) - set(MAPS_TOOLS)
     defs = anthropic_tool_definitions()
     names = {d["name"] for d in defs}
     # The emitted names are the underscore wire names (no dots), one per domain tool.
@@ -88,9 +91,11 @@ def test_anthropic_definitions_cover_all_tools() -> None:
     for d in defs:
         assert "input_schema" in d
         assert d["description"]
-    # При поднятых обеих осях покрыт весь реестр (по дороге больше ничего не потерялось).
+    # При поднятых ВСЕХ осях покрыт весь реестр (по дороге больше ничего не потерялось).
     study_names = {
         d["name"]
-        for d in anthropic_tool_definitions(generation_mode="study_learn", code_tools_enabled=True)
+        for d in anthropic_tool_definitions(
+            generation_mode="study_learn", code_tools_enabled=True, maps_tools_enabled=True
+        )
     }
     assert {to_domain_tool_name(n) for n in study_names} == set(ALL_TOOL_NAMES)
