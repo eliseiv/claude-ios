@@ -487,9 +487,9 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
     )
     # ADR-101: documents of the TURN — addressable cards without content; the client fetches the
     # file itself from GET /v1/chats/{sessionId}/documents/{documentId} (or /download) under the
-    # same Authorization. The orchestrator already folded them for this leg (one entry per
-    # documentId, final version), whether they were produced in this call or recovered from the
-    # turn's tool steps.
+    # same Authorization. The orchestrator already merged both producers for this leg (the turn's
+    # saved document steps + this call's accumulator) and folded them to one entry per documentId
+    # with the final version, so every leg of one turn answers the same set.
     documents = (
         [ChatDocumentRefSchema.model_validate(item) for item in out.documents]
         if out.documents is not None

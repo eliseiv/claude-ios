@@ -10,6 +10,7 @@ from pydantic import Field, model_validator
 from app.chat.tools import Quiz, QuizQuestion
 from app.config import get_settings
 from app.schemas.common import StrictModel
+from app.schemas.documents import DocumentMediaType
 
 # Allowed mediaType values per attachment class (ADR-020, 05-security.md; Q-020-1 extension).
 # Fixed in code as a server-side allowlist (not a denylist) — anything else => 422.
@@ -558,7 +559,12 @@ class ChatDocumentRefSchema(StrictModel):
             "из текста ответа модели."
         )
     )
-    mediaType: str = Field(
+    # ADR-101 §1 (правка 2026-09-08): ПЕРЕЧИСЛЕНИЕ, а не свободная строка, и переиспользованный
+    # алиас модуля документов, а не вторая копия того же перечня: это ТА ЖЕ величина с ТЕМ ЖЕ
+    # доменом, что у `mediaType` REST-объекта документа. Домен закрыт сервером на записи
+    # (422 unsupported_media_type, ADR-090 §1), поэтому пятого значения элемент нести не может, а
+    # два независимых списка об одном факте разъезжались бы молча.
+    mediaType: DocumentMediaType = Field(
         description=(
             "Тип содержимого: `text/markdown`, `text/plain`, `text/csv` или `application/json`."
         )

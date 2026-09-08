@@ -754,6 +754,8 @@ def _server_tool_summary(execution: ToolExecution) -> str | None:
 def _fold_turn_documents(cards: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
     """Fold a turn's document cards to ONE entry per documentId (ADR-101 §5).
 
+    Applied to the UNION of both producers (recovered turn steps + this call's accumulator), so it
+    must be — and is — IDEMPOTENT on an overlap: a card present in both sources collapses into one.
     LAST-WINS on the values, FIRST-APPEARANCE on the position: a turn that created a document and
     then rewrote it must surface a single card carrying the FINAL size/version/filename, sitting
     where the document first showed up. Two cards for one file would be a duplicate in the UI, and
@@ -920,6 +922,8 @@ class _DocumentsAccumulator:
     APPEND in execution order; the fold to one entry per documentId happens at assembly
     (``_fold_turn_documents``), not here — the raw order of appearances is what decides the
     position of each folded entry. Threaded through the tool-loop like ``_MediaJobsAccumulator``.
+    This accumulator is NOT the gate of producer 2 (unlike mediaJobs): assembly always ALSO reads
+    the turn's saved steps and merges them, with these rows winning on an overlap as the freshest.
     """
 
     documents: list[dict[str, Any]] = field(default_factory=list)
@@ -2377,20 +2381,31 @@ class ChatOrchestrator:
         message_step_id: uuid.UUID,
         accumulated: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]] | None:
-        """Documents of the TURN (ADR-101 §4): call accumulator, else the turn's document steps.
+        """Documents of the TURN (ADR-101 §4): the turn's saved steps MERGED with this call's.
 
+        Producer 2 runs UNCONDITIONALLY whenever the turn exists — NOT only when the accumulator is
+        empty. Gating it on an empty accumulator drops a document of an earlier leg exactly when the
+        current call touched another one: a turn that created A before handing off to a client-side
+        tool and then created B on /chat/tool-result would answer [B], while the idempotent replay
+        of that very same turn (accumulator empty) would answer [A, B] — one turn, two different
+        answers, which the card composition of ADR-101 §1 forbids outright.
+        Merge order = order of the turn: recovered rows first (``seq ASC``), then this call's rows.
+        An overlap between the sources is expected and harmless — the fold of §5 is idempotent and
+        the accumulator's value wins as the freshest one.
+        DELIBERATE CONTRAST with mediaJobs (``_resolve_turn_media_jobs``), whose producer 2 IS gated
+        on an empty accumulator: mediaJobs APPENDS and has no dedup key, so an unconditional merge
+        would duplicate a job there. The mechanisms differ because the semantics already differ —
+        carry neither rule over to the other field without a separate decision.
         Producer 2 needs no extraction code of its own: ``tool_results_for_message_step`` already
         returns ONLY successful results (errored rounds have a null ``result``) ordered by ``seq``,
         and a successful document.create/update result IS the card (``_doc_brief``). That is why
         the card in the response and the card in the tool result must stay identical — the two
         producers would otherwise disagree on different legs of one turn.
         """
-        if accumulated:
-            return _fold_turn_documents(accumulated)
         recovered = await self._deps.repo.tool_results_for_message_step(
             session_id, message_step_id, _DOCUMENT_MUTATING_TOOL_NAMES
         )
-        return _fold_turn_documents(recovered)
+        return _fold_turn_documents([*recovered, *(accumulated or [])])
 
     async def _with_turn_documents(
         self,
