@@ -200,13 +200,13 @@
 | `messageStepId` | string (uuid) \| null | ключ **хода** (один на сообщение, переиспользуется во всех tool-раундах); `null` при `blocked`. Совпадает с `steps[].messageStepId` в истории. ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)) |
 | `stepId` | string (uuid) \| null | id **конкретного** assistant/tool-шага этого ответа; `null` при `blocked`. Совпадает с `steps[].id` в истории `GET /v1/chats/{id}`. ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)) |
 | `assistantMessage` | string, опц. | присутствует при `assistant_message`; **также при `tool_call`**, если Claude выдал текст вместе с `tool_use` — текст того же assistant-шага (`stepId`); `null`/опущено, если текста не было ([Q-024-1](99-open-questions.md) / [ADR-024](adr/ADR-024-history-payload-domain-normalization.md)) |
-| `toolCalls` | array `[{ id, name, args }]`, опц. | **присутствует при `tool_call` — ВСЕ client-side tool-вызовы хода** (parallel tool use). Клиент обязан исполнить и вернуть результаты на все элементы ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). Server-side `site.*` сюда не входят. |
+| `toolCalls` | array `[{ id, name, args, requiresConfirmation }]`, опц. | **присутствует при `tool_call` — ВСЕ client-side tool-вызовы хода** (parallel tool use). Клиент обязан исполнить и вернуть результаты на все элементы ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). Server-side `site.*` сюда не входят. `requiresConfirmation` — спрашивать ли пользователя перед исполнением; признак задаёт **сервер**, выводить его из имени инструмента запрещено ([ADR-094 §4](adr/ADR-094-code-assistant-tools.md)). |
 | `toolCall` | object `{ id, name, args }`, опц. (**deprecated**) | присутствует при `tool_call`, **= `toolCalls[0]`**; читайте `toolCalls[]`. `id` — публичный UUID для `/chat/tool-result` (≠ `stepId`) |
 | `serverTools` | array `[{ toolCallId, toolName, status, summary? }]` | **server-side инструменты (`site.*`/`time.now`), выполненные backend за ЭТОТ вызов** ([ADR-028](adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)). Дополняет `toolCalls[]` (там — только client-side). `toolCallId` ([ADR-030](adr/ADR-030-toolcallid-in-server-tools.md)) — доменный uuid4 (= `tool_calls.id`), обязательный; **совпадает** с `toolCallId` соответствующего tool-шага истории `GET /v1/chats/{id}` (`steps[].payload.toolCallId`) → корреляция записи с историей; тот же домен id, что у `toolCalls[].id` (client-side). `status` = `completed`\|`errored`; `summary` — компактный итог (≤120, **без raw/путей/URL/токенов**; полный результат — в истории). Присутствует при `assistant_message`/`tool_call`/`blocked` (хотя бы `[]`); пустой `[]` при policy-`blocked`; может быть НЕ пустым при `max_tokens`. Биллинг неизменен. Семантика «за один вызов», не за сессию |
 | `blockReason` | enum, опц. | присутствует при `blocked` (см. [раздел 12](#12-blockreason--справочник)); `max_tokens` = обрезка ответа ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) |
 | `usage` | object `{ inputTokens, outputTokens, model }` | при `assistant_message`/`tool_call`; **также при `blocked`+`blockReason=max_tokens`**; нет при policy-`blocked` |
 | `quiz` | object \| null | Структура квиза ([ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md)). Схема ответа общая с `/v1/chat/v2/*`, поэтому поле присутствует и здесь, но на legacy-роуте **всегда `null`** (ни в одном ходе `/v1/chat/run` квиза не бывает): квиз выдаётся только в ходах режима `generationMode=study_learn`, а `/v1/chat/run` режимов не принимает. Семантика поля — [раздел 4a](#4a-chat-v2--режимы-генерации). |
-| `documents` | array \| null | **Документы чата, созданные или изменённые в ЭТОМ ходе** ([ADR-101](adr/ADR-101-chat-response-documents.md), **спроектировано, код не написан** — на сегодняшних инстансах поля ещё нет). Элемент: `{ documentId, filename, mediaType, size, version }`, **без содержимого**. Только успешные `document.create`/`document.update`; `document.read`/`document.list` и отказы сюда **не** попадают. `null` — ход ничего не менял. Полный контракт и что делать клиенту — [раздел 30](#30-documents-документы-чата). |
+| `documents` | array \| null | **Документы чата, созданные или изменённые в ЭТОМ ходе** ([ADR-101](adr/ADR-101-chat-response-documents.md); **код написан, но ревью не проходил, в `main` не слит и не выкачен** — на сегодняшних инстансах поля ещё нет). Элемент: `{ documentId, filename, mediaType, size, version }`, **без содержимого**; `mediaType` — одно из четырёх значений (`text/markdown`, `text/plain`, `text/csv`, `application/json`). Только успешные `document.create`/`document.update`; `document.read`/`document.list` и отказы сюда **не** попадают. `null` — ход ничего не менял. Полный контракт и что делать клиенту — [раздел 30](#30-documents-документы-чата). |
 
 > **Синхронизация с историей чата ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)).** `messageStepId`/`stepId` дают клиенту ключ для склейки ответа генерации с шагами `GET /v1/chats/{id}` → `steps[]`: `stepId` = точный шаг (`steps[].id`), `messageStepId` = ход для группировки tool-loop-раундов (`steps[].messageStepId`). При `status=blocked` шаг/ход не создаются (блок до генерации) → оба `null`. На `/v1/chat/tool-result` `messageStepId` стабилен в пределах хода (равен исходному `/chat/run`), `stepId` — id нового шага этого ответа.
 
@@ -988,6 +988,16 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | `files.write` | mutate | записать файл |
 | `files.list` | read | список файлов/директорий |
 | `files.mkdir` | mutate | создать директорию |
+| `files.search` | read | поиск по дереву проекта ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `files.patch` | mutate | точечная правка файла заменой фрагмента — предпочтительна перед `files.write`, который переписывает файл целиком ([ADR-094 §2](adr/ADR-094-code-assistant-tools.md)) |
+| `files.delete` | mutate | удалить файл ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `files.move` | mutate | переместить/переименовать файл ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.status` | read | состояние рабочего дерева ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.diff` | read | диф ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.log` | read | история коммитов ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.commit` | mutate | создать коммит ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.branch` | mutate | создать/переключить ветку ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.push` | mutate | отправить в удалённый репозиторий; `force` — **отдельное булево поле**, а не часть строки аргументов ([ADR-094 §5](adr/ADR-094-code-assistant-tools.md)) |
 | `calendar.read` | read | прочитать события календаря. Args: `{ start, end, calendarId? }` — `start`/`end` в ISO8601 **datetime** (local, без offset, напр. `"2026-06-11T09:00:00"`), интервал end-exclusive `[start, end)` ([ADR-027](adr/ADR-027-calendar-read-contract-alignment.md)) |
 | `calendar.create_events` | mutate | создать события. `events[].start`/`events[].end` — ISO8601 **datetime** (тот же формат, что `calendar.read`, [ADR-027](adr/ADR-027-calendar-read-contract-alignment.md)) |
 | `reminders.read` | read | прочитать напоминания |
@@ -997,6 +1007,12 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | `maps.reverse_geocode` | read | координаты → адрес. Args: `{ pointKind: "current_location"\|"coordinates", latitude?, longitude? }` |
 | `maps.route` | read | маршрут и время в пути. Args: `{ originKind, originName?, originLatitude?, originLongitude?, destinationName, destinationLatitude, destinationLongitude, transportType: "automobile"\|"walking"\|"transit", departureKind: "now"\|"at", departureTimeLocal? }` |
 | `maps.search_places` | read | поиск мест поблизости. Args: `{ query, centerKind, centerLatitude?, centerLongitude?, radiusMeters, maxResults }` |
+
+> **Инструменты работы с кодом — ось D ([ADR-094](adr/ADR-094-code-assistant-tools.md)).** Десять инструментов (`files.search`/`patch`/`delete`/`move` и все `git.*`) исполняет **приложение**: файлы и репозиторий лежат на машине человека. Предлагаются модели, только когда флаг инстанса `CODE_TOOLS_ENABLED=true` **и** сессия в режиме `assistantMode=code`; дефолт — **выключено**, потому что инструмент, который модель позвала, а клиент исполнить не умеет, оставляет ход незавершённым. На состав `GET /v1/tools` флаг не влияет ([раздел 22](#22-tools-каталог-инструментов)): записи видны до включения — по каталогу клиент и узнаёт, что ему предстоит реализовать.
+> - **Подтверждение задаёт сервер, а не клиент** ([ADR-094 §4](adr/ADR-094-code-assistant-tools.md)): признак `requiresConfirmation` приходит и в каталоге, и в каждом `toolCall`. Выводить его из имени инструмента **запрещено** — догадка ломается сразу: `files.search` только читает, а `git.branch` меняет состояние, и оба начинаются с «безопасного» префикса.
+> - **Читающие инструменты подтверждения не требуют намеренно:** диалог на каждый просмотр файла приучает нажимать «да» не глядя и обесценивает единственный диалог, который важен — перед `git.push` с перезаписью истории.
+> - **`force` у `git.push` — отдельное булево поле**, а не часть строки аргументов: спрятанный в строке флаг человек в диалоге не увидит, а «отправить» и «отправить с перезаписью истории» — разные по последствиям действия.
+> - Песочница путей у этих инструментов снята осознанно (проект лежит там, где лежит), и на `files.read` / `files.write` послабление **не** распространяется — они остаются в песочнице.
 
 > **Календарь — единый контракт диапазона `start`/`end` ([ADR-027](adr/ADR-027-calendar-read-contract-alignment.md)).** `calendar.read` и `calendar.create_events` используют **идентичные** имена (`start`/`end`) и формат (ISO8601 datetime, local, без offset, напр. `"2026-06-11T09:00:00"`); интервал чтения end-exclusive `[start, end)` («весь день» = с `00:00:00` до полуночи следующего дня). **Breaking change `calendar.read` для iOS:** прежние args `startDate`/`endDate` (date-only) заменены на `start`/`end` (datetime) — клиент обязан обновиться. Полная схема — [chat-orchestrator/02-api-contracts.md §Контракт календарных инструментов](modules/chat-orchestrator/02-api-contracts.md#контракт-календарных-инструментов-startend-нормативно-adr-027).
 
@@ -1024,7 +1040,7 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 `quiz.generate` тоже исполняет backend без проекта, **но предлагается модели только в режиме `generationMode=study_learn`** ([раздел 4a](#4a-chat-v2--режимы-генерации)): «global» здесь означает «не требует проекта», а не «доступен всегда». На legacy `/v1/chat/run` он не предлагается никогда. Read-only, без audit-мутации, без отдельных списаний. Каталог `GET /v1/tools` при этом перечисляет **все** инструменты, включая те, что в конкретном ходе не предлагались бы ([раздел 22](#22-tools-каталог-инструментов)).
 
 ### Формат
-- **tool_call** (от backend к iOS): `toolCalls = [ { "id": "<uuid>", "name": "<доменное имя, напр. files.read>", "args": { ... } }, ... ]` — **все** client-side вызовы хода ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). `id` — публичный стабильный идентификатор для `/chat/tool-result`. Поле `toolCall` (одиночное) = `toolCalls[0]`, **deprecated** — читайте `toolCalls[]`.
+- **tool_call** (от backend к iOS): `toolCalls = [ { "id": "<uuid>", "name": "<доменное имя, напр. files.read>", "args": { ... }, "requiresConfirmation": <bool> }, ... ]` — **все** client-side вызовы хода ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); `requiresConfirmation` задаёт сервер ([ADR-094 §4](adr/ADR-094-code-assistant-tools.md)), клиент его не выводит из имени. `id` — публичный стабильный идентификатор для `/chat/tool-result`. Поле `toolCall` (одиночное) = `toolCalls[0]`, **deprecated** — читайте `toolCalls[]`.
 - **tool-result** (от iOS к backend, батч): `{ "userId", "sessionId", "results": [ { "toolCallId": "<id>", "result": { ... } }, { "toolCallId": "<id>", "error": { "code", "message" } } ] }`. В каждом элементе ровно одно из `result`/`error`. Backend продолжает диалог только когда собраны результаты на **все** `toolCalls[]` хода (барьер хода). Одиночная форma (`toolCallId` + `result|error` на верхнем уровне) — deprecated, поддерживается.
 - Имена инструментов в публичном контракте — доменные, с точкой (`files.read`). Внутреннее преобразование к формату Anthropic — деталь реализации, iOS её не касается.
 
@@ -1423,7 +1439,7 @@ Backend нормализует `filename` и в REST, и в вызове мод�
 Отказ инструмента (лимит, недопустимый тип, чужой документ, пустое содержимое у `create`) **не роняет ход**: модель получает машиночитаемую ошибку и может переформулировать. Наружу такой отказ виден в `serverTools[]` со `status="errored"`.
 
 ### Как приложение узнаёт о новом документе
-> **`ChatResponse.documents[]` ([ADR-101](adr/ADR-101-chat-response-documents.md)) — спроектировано, код не написан.** На сегодняшних инстансах поля в ответе ещё нет.
+> **`ChatResponse.documents[]` ([ADR-101](adr/ADR-101-chat-response-documents.md)) — код написан, но ревью не проходил, в `main` не слит и на инстансы не выкачен.** На сегодняшних инстансах поля в ответе ещё нет.
 
 Ход, в котором модель звала `document.create` или `document.update`, вернёт в ответе генерации:
 ```json
@@ -1433,7 +1449,8 @@ Backend нормализует `filename` и в REST, и в вызове мод�
 ```
 - содержимого в элементе **нет** — берите его `GET …/documents/{documentId}` или `/download`;
 - только **изменившие** ход инструменты: `document.read` и `document.list` в список **не** попадают, отказавшие вызовы — тоже;
-- поле привязано к **ходу** (`messageStepId`): документ, созданный на раннем витке tool-loop, придёт и в последующих ответах того же хода, и при сетевом повторе запроса;
+- `mediaType` — одно из четырёх значений (`text/markdown`, `text/plain`, `text/csv`, `application/json`), то же перечисление, что у объекта документа выше;
+- поле привязано к **ходу** (`messageStepId`): документ, созданный на раннем витке tool-loop, придёт и в последующих ответах того же хода, и при сетевом повторе запроса — **в том числе когда в этом же ходе позже тронут ещё один документ**: ответ несёт оба, а не только последний;
 - **одна запись на `documentId`** с последней `version`: ход, создавший и тут же поправивший документ, даёт одну карточку, а не две;
 - `null` — ход ничего не менял (в том числе при `status="blocked"`).
 
