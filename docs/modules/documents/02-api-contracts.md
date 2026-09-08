@@ -150,6 +150,8 @@
 | `document.read` | `documentId` | `{ documentId, filename, mediaType, size, version, content }` |
 | `document.update` | `documentId`, `content` | `{ documentId, filename, mediaType, size, version }` |
 
+> **Расхождение с телом [ADR-090 §3](../../adr/ADR-090-chat-documents.md) — [TD-045](../../100-known-tech-debt.md).** Там та же таблица объявляет результат `document.create` **без** `mediaType`, а `document.read` — **без** `size`. Какая сторона верна, решается сверкой с кодом (`_doc_brief()`), а не выбором между документами; до закрытия долга нормативен состав из этой таблицы — он же лежит в основе элемента `ChatResponse.documents[]` ([ADR-101 §1](../../adr/ADR-101-chat-response-documents.md)).
+
 **Все аргументы необязательны намеренно:** пропущенный или кривой аргумент обязан вырождаться в tool-result ошибку, а не ронять весь ход `422` (прод 2026-08-24: модель, не приславшая `mediaType`, роняла ответ целиком). Создание и обновление входят в `MUTATING_TOOLS` (аудит), но **не** в `CONFIRM_TOOLS` — подтверждать нечего, изменение происходит на бэкенде по прямой просьбе пользователя.
 
 **Отказы приходят tool-result ошибкой, ход не падает:** `invalid_document_request` (кривые аргументы, не-uuid `documentId`, пустое содержимое у `create`, несуществующий/чужой документ), `document_too_large`, `too_many_documents`, `documents_total_too_large`, `unsupported_media_type`, `documents_not_available` (документы не подключены в этом контексте).
