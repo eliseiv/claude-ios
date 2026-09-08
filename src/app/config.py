@@ -325,6 +325,18 @@ class Settings(BaseSettings):
         default=False, alias="TOKEN_PRODUCTS_PRICE_MINOR_UNITS"
     )
 
+    # --- Предвыбранные продукты (ADR-098 §7, пересмотр 2026-09-08) -------------------------
+    # Список идентификаторов, которым `GET /v1/tokens/products` отдаёт `isDefault: true`.
+    # JSON-массив строк или строки через запятую: `["a","b"]` и `a,b` равнозначны.
+    #
+    # Прежде признак читался из каталога поставщика. Проверка живого каталога broadapps
+    # (novirell, 2026-09-08) показала, что поля с таким смыслом у него НЕТ вовсе — есть
+    # `is_special_offer`, признака «по умолчанию» нет. Значит источником может быть только наша
+    # сторона: величина, которую поставщик не отдаёт, не может прийти от поставщика.
+    #
+    # Пустой список — штатное состояние: признак не поднят ни у одного продукта.
+    token_products_default_raw: str = Field(default="", alias="TOKEN_PRODUCTS_DEFAULT")
+
     # --- Голосовые сообщения (ADR-095) ---------------------------------------------------
     # Приём аудио от пользователя. Выключено по умолчанию: включать там, где приложение умеет
     # записывать и слать голос, иначе класс вложения объявлен, а прислать его некому.
@@ -772,6 +784,29 @@ class Settings(BaseSettings):
         """
         parts = (item.strip().lower() for item in self.fal_upload_host_suffixes_raw.split(","))
         return tuple(part for part in parts if part)
+
+    def token_products_default(self) -> frozenset[str]:
+        """Идентификаторы продуктов с поднятым `isDefault` (ADR-098 §7).
+
+        Принимаются обе записи — JSON-массив и перечисление через запятую: величина правится
+        руками в `.env`, и требовать от оператора JSON ради списка строк значит напрашиваться на
+        сломанную кавычку. Пустые элементы отбрасываются, порядок не важен (порядок витрины
+        задаёт каталог, а не этот список). Разбор чистый, кэшируется вместе с настройками.
+        """
+        import json
+
+        text = (self.token_products_default_raw or "").strip()
+        if not text:
+            return frozenset()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (ValueError, json.JSONDecodeError):
+                parsed = []
+            if isinstance(parsed, list):
+                return frozenset(x.strip() for x in parsed if isinstance(x, str) and x.strip())
+            return frozenset()
+        return frozenset(x.strip() for x in text.split(",") if x.strip())
 
     def products_catalog(self) -> list[dict[str, Any]]:
         """Parse PRODUCTS_CATALOG (JSON array) into a list of display product dicts.

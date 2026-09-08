@@ -22,7 +22,6 @@ from app.deps import (
     require_owner,
 )
 from app.errors import RateLimitedError
-from app.observability.logging import log_event
 from app.schemas.token_purchase import (
     TokenProduct,
     TokenProductsResponse,
@@ -112,25 +111,30 @@ async def list_token_products(
 
 
 def _catalog_response(products: list[TokenProduct]) -> TokenProductsResponse:
-    """Build the catalog response, warning when more than one product is marked as default.
+    """Собрать ответ каталога, подняв `isDefault` у продуктов из `TOKEN_PRODUCTS_DEFAULT`.
 
-    Более одного `isDefault=true` — ошибка настройки в панели поставщика, и сервер её НЕ прячет:
-    флаги не переписываются (тихая правка сделала бы наш ответ вторым источником истины о
-    каталоге), порядок продуктов сохраняется — он и есть правило выбора для клиента («первый по
-    порядку ответа»). Ноль дефолтных продуктов — штатное состояние: ничего не логируется.
+    Признак ставится ЗДЕСЬ, в единой точке для всех трёх веток источника, а не в каждой по
+    отдельности: ветки различаются тем, ОТКУДА взят перечень продуктов, а «этот продукт
+    предвыбран» — свойство продукта, одинаковое для любого источника. Разложив ту же логику по
+    трём веткам, мы получили бы три места, где её можно забыть обновить.
 
-    Проверяется на КАЖДОЙ ветке источника, а не только на живом каталоге: статический
-    PRODUCTS_CATALOG объявляет признак сам и ошибиться в нём можно ровно так же.
+    Пересмотр ADR-098 §7 (2026-09-08):
+    раньше признак читался из каталога поставщика. Живой каталог broadapps показал, что поля с
+    таким смыслом у него НЕТ вовсе — значит источником может быть только наша сторона. Величина,
+    которую поставщик не отдаёт, не может прийти от поставщика, сколько её ни жди.
+
+    Предупреждения о нескольких предвыбранных продуктах больше нет намеренно: пока признак
+    приходил из чужой панели, несколько помеченных означали ошибку оператора, которую стоило
+    показать. Теперь список задаёт оператор ЭТОГО сервиса явной строкой в конфигурации — если он
+    перечислил пять, это его решение, а не описка. Предупреждение на каждом запросе каталога
+    приучало бы игнорировать предупреждения.
     """
-    defaults = [p.productId for p in products if p.isDefault]
-    if len(defaults) > 1:
-        log_event(
-            logger,
-            logging.WARNING,
-            "token_products_multiple_defaults",
-            count=len(defaults),
-            productIds=defaults,
-        )
+    marked = get_settings().token_products_default()
+    if marked:
+        products = [
+            p.model_copy(update={"isDefault": True}) if p.productId in marked else p
+            for p in products
+        ]
     return TokenProductsResponse(products=products)
 
 
@@ -172,8 +176,6 @@ def _from_broadapps(
     # сериализованного ответа включило бы предложение вместо того, чтобы его выключить.
     special = item.get("is_special_offer")
     # Признак «продукт по умолчанию» — та же строгость и та же причина, что у флага выше:
-    # значение читается как булево, строка "false" из неудачной сериализации не включает признак.
-    default = item.get("is_default")
     period = item.get("subscription_interval_unit")
     currency = item.get("price_currency")
     name = item.get("name")
@@ -186,5 +188,7 @@ def _from_broadapps(
         currency=currency if isinstance(currency, str) else None,
         credits=None if is_sub else token_products.get(code),
         isSpecialOffer=special is True,
-        isDefault=default is True,
+        # `isDefault` здесь НЕ выставляется: поставщик такого поля не отдаёт, признак поднимает
+        # _catalog_response по нашему списку. Чтение несуществующего поля выглядело бы как
+        # поддержка, которой нет.
     )

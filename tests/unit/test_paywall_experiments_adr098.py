@@ -244,7 +244,13 @@ async def test_experiment_bucket_fails_open_when_redis_is_down(monkeypatch) -> N
 # ---- продукт по умолчанию ------------------------------------------------------------------
 
 
-def test_default_flag_is_read_strictly_from_the_provider_catalog() -> None:
+def test_provider_default_field_is_not_read_at_all() -> None:
+    """Признак не читается у поставщика: такого поля у него нет.
+
+    Живой каталог broadapps (novirell, 2026-09-08) отдаёт `is_special_offer`, но поля со
+    значением «по умолчанию» не содержит вовсе. Чтение несуществующего поля выглядело бы как
+    поддержка, которой нет: оператор ждал бы, что «проставлю в панели — заработает».
+    """
     from app.api_gateway.routers.token_purchase import _from_broadapps
 
     tp = {"100_Tokens_9.99": 100}
@@ -255,63 +261,67 @@ def test_default_flag_is_read_strictly_from_the_provider_catalog() -> None:
         "price_amount": 999,
         "price_currency": "RUB",
     }
-    assert _from_broadapps({**base, "is_default": True}, tp).isDefault is True
-    # Строка "false" — не истина; отсутствие поля — тоже false.
-    assert _from_broadapps({**base, "is_default": "false"}, tp).isDefault is False
-    assert _from_broadapps({**base, "is_default": "true"}, tp).isDefault is False
+    # Даже если поставщик однажды начнёт отдавать поле — оно не влияет: источник у нас.
+    assert _from_broadapps({**base, "is_default": True}, tp).isDefault is False
     assert _from_broadapps(base, tp).isDefault is False
 
 
-def _emitted_events(monkeypatch, fn):
-    """События, отданные модулем в журнал, снятые подменой самой функции записи.
-
-    Перехват через logging здесь оказался ненадёжен: тест зеленел в одиночку и падал в полном
-    прогоне — глобальное состояние журналирования меняют другие тесты, и две попытки поймать
-    запись (caplog, затем свой обработчик на логгере) обе не сработали. Подмена функции
-    записи проверяет ровно то, что важно — что событие с таким именем и полями отдано, — и не
-    зависит ни от уровней, ни от обработчиков, ни от порядка тестов.
-    """
-    from app.api_gateway.routers import token_purchase as tp
-
-    events: list[tuple[str, dict]] = []
-    monkeypatch.setattr(
-        tp, "log_event", lambda _logger, _level, message, **fields: events.append((message, fields))
-    )
-    return fn(), events
-
-
-def test_several_defaults_are_reported_and_not_rewritten(monkeypatch) -> None:
+def test_default_flag_comes_from_our_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api_gateway.routers.token_purchase import _catalog_response
     from app.schemas.token_purchase import TokenProduct
 
-    products = [
-        TokenProduct(productId="a", credits=100, isDefault=True),
-        TokenProduct(productId="b", credits=250, isDefault=True),
-        TokenProduct(productId="c", credits=500, isDefault=False),
-    ]
-    out, events = _emitted_events(monkeypatch, lambda: _catalog_response(products))
-    # Флаги НЕ переписываются: тихая правка спрятала бы ошибку оператора и сделала бы наш
-    # ответ вторым источником истины о каталоге.
-    assert [p.isDefault for p in out.products] == [True, True, False]
-    # Порядок сохранён — он и есть правило выбора клиента.
-    assert [p.productId for p in out.products] == ["a", "b", "c"]
-    warned = [f for name, f in events if name == "token_products_multiple_defaults"]
-    assert len(warned) == 1
-    # В событии обязаны быть и число, и сами продукты: без них оператору нечего чинить.
-    assert warned[0]["count"] == 2
-    assert warned[0]["productIds"] == ["a", "b"]
-
-
-def test_single_and_zero_defaults_are_silent(monkeypatch) -> None:
-    from app.api_gateway.routers.token_purchase import _catalog_response
-    from app.schemas.token_purchase import TokenProduct
-
-    for flags in ([True, False], [False, False]):
-        products = [
-            TokenProduct(productId=f"p{i}", credits=100, isDefault=f) for i, f in enumerate(flags)
+    monkeypatch.setenv("TOKEN_PRODUCTS_DEFAULT", '["b","c"]')
+    get_settings.cache_clear()
+    out = _catalog_response(
+        [
+            TokenProduct(productId="a", credits=100),
+            TokenProduct(productId="b", credits=250),
+            TokenProduct(productId="c", credits=500),
         ]
-        _, events = _emitted_events(monkeypatch, lambda p=products: _catalog_response(p))
-        assert not [n for n, _f in events if n == "token_products_multiple_defaults"]
+    )
+    assert [p.isDefault for p in out.products] == [False, True, True]
+    # Порядок витрины задаёт каталог, а не список: он лишь помечает.
+    assert [p.productId for p in out.products] == ["a", "b", "c"]
+    get_settings.cache_clear()
+
+
+def test_comma_separated_form_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api_gateway.routers.token_purchase import _catalog_response
+    from app.schemas.token_purchase import TokenProduct
+
+    # Величина правится руками в .env; требовать JSON ради списка строк значит напрашиваться
+    # на сломанную кавычку.
+    monkeypatch.setenv("TOKEN_PRODUCTS_DEFAULT", " a , c ")
+    get_settings.cache_clear()
+    out = _catalog_response([TokenProduct(productId=x, credits=100) for x in ("a", "b", "c")])
+    assert [p.isDefault for p in out.products] == [True, False, True]
+    get_settings.cache_clear()
+
+
+def test_empty_configuration_marks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api_gateway.routers.token_purchase import _catalog_response
+    from app.schemas.token_purchase import TokenProduct
+
+    monkeypatch.setenv("TOKEN_PRODUCTS_DEFAULT", "")
+    get_settings.cache_clear()
+    out = _catalog_response([TokenProduct(productId="a", credits=100)])
+    assert out.products[0].isDefault is False
+    get_settings.cache_clear()
+
+
+def test_unknown_id_in_the_list_is_harmless(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api_gateway.routers.token_purchase import _catalog_response
+    from app.schemas.token_purchase import TokenProduct
+
+    # Список задаётся руками и переживает смену каталога: лишний идентификатор не должен
+    # ни ронять ответ, ни помечать чужой продукт.
+    monkeypatch.setenv("TOKEN_PRODUCTS_DEFAULT", '["a","product_that_left"]')
+    get_settings.cache_clear()
+    out = _catalog_response(
+        [TokenProduct(productId="a", credits=100), TokenProduct(productId="b", credits=250)]
+    )
+    assert [p.isDefault for p in out.products] == [True, False]
+    get_settings.cache_clear()
 
 
 # ---- форма тела поставщика ------------------------------------------------------------------
