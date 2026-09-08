@@ -138,6 +138,13 @@ _DOCUMENT_TOOL_NAMES = frozenset(
     {TOOL_DOCUMENT_CREATE, TOOL_DOCUMENT_LIST, TOOL_DOCUMENT_READ, TOOL_DOCUMENT_UPDATE}
 )
 
+# ADR-101 §3: в ChatResponse.documents[] попадают инструменты семейства document, МЕНЯЮЩИЕ
+# состояние на сервере, — то есть пересечение семейства с MUTATING_TOOLS (сегодня document.create
+# и document.update). Предикат, а не переписанный список: инструмент семейства, попавший в
+# MUTATING_TOOLS позже, войдёт сюда сам, а document.read / document.list не войдут никогда — ход
+# ими ничего не изменил (и результат document.read несёт content, которому в ответе не место).
+_DOCUMENT_MUTATING_TOOL_NAMES = _DOCUMENT_TOOL_NAMES & MUTATING_TOOLS
+
 logger = logging.getLogger("app.chat.orchestrator")
 
 _MEDIA_TOOL_NAMES = frozenset({TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO})
@@ -750,6 +757,35 @@ def _server_tool_summary(execution: ToolExecution) -> str | None:
     return "ok"
 
 
+def _fold_turn_documents(cards: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Fold a turn's document cards to ONE entry per documentId (ADR-101 §5).
+
+    Applied to the UNION of both producers (recovered turn steps + this call's accumulator), so it
+    must be — and is — IDEMPOTENT on an overlap: a card present in both sources collapses into one.
+    LAST-WINS on the values, FIRST-APPEARANCE on the position: a turn that created a document and
+    then rewrote it must surface a single card carrying the FINAL size/version/filename, sitting
+    where the document first showed up. Two cards for one file would be a duplicate in the UI, and
+    the version of the next-to-last edit would be a plain lie about the stored state.
+    DELIBERATE CONTRAST with mediaJobs, which APPENDS: every media job has its own jobId and is a
+    separate entity, whereas one document legitimately repeats within a turn. Do not carry the rule
+    of either field over to the other.
+    A card without an addressable documentId is dropped: the client could neither open it nor
+    update an already shown card by it, and it would only add a phantom entry.
+    Returns None (never []) when nothing is left — ADR-101 §6.
+    """
+    folded: dict[str, dict[str, Any]] = {}
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        document_id = card.get("documentId")
+        if not isinstance(document_id, str) or not document_id:
+            continue
+        # dict keeps the position of an already-present key on reassignment: values are replaced,
+        # the slot of the first appearance is kept — exactly the rule above, without a second pass.
+        folded[document_id] = dict(card)
+    return list(folded.values()) or None
+
+
 @dataclass(frozen=True)
 class ToolCallOut:
     id: str
@@ -850,6 +886,13 @@ class ChatRunOut:
     # ADR-070: catalog-backed mediaChoices wizard step for this turn (from media.ask_params /
     # mediaSelection continuation). None = no picker in this response.
     media_choices: dict[str, Any] | None = None
+    # ADR-101: chat documents CREATED or REWRITTEN in THIS TURN (successful document.create /
+    # document.update) — turn-scoped like quiz and media_jobs, already folded to one entry per
+    # documentId. None = «this turn changed no document»; a list of _doc_brief cards otherwise.
+    # DELIBERATE CONTRAST with server_tools, which is per-call and stays EMPTY on idempotent
+    # replay: documents answers «what this turn changed on the server», so it IS reconstructed.
+    # Do not carry the rule of either field over to the other.
+    documents: list[dict[str, Any]] | None = None
     # Credits newly debited during THIS HTTP call. Idempotent replay is 0 even
     # when the saved usage contains historical creditsCharged (ADR-077).
     credits_spent: int = 0
@@ -876,6 +919,20 @@ class _MediaJobsAccumulator:
     """
 
     jobs: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class _DocumentsAccumulator:
+    """Documents created/rewritten in the CURRENT call (ADR-101 §4, producer 1).
+
+    APPEND in execution order; the fold to one entry per documentId happens at assembly
+    (``_fold_turn_documents``), not here — the raw order of appearances is what decides the
+    position of each folded entry. Threaded through the tool-loop like ``_MediaJobsAccumulator``.
+    This accumulator is NOT the gate of producer 2 (unlike mediaJobs): assembly always ALSO reads
+    the turn's saved steps and merges them, with these rows winning on an overlap as the freshest.
+    """
+
+    documents: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1957,6 +2014,7 @@ class ChatOrchestrator:
                 quiz_accumulated=None,
                 media_accumulated=None,
                 generation_mode=generation_mode,
+                documents_accumulated=None,
             )
 
         # Barrier closed. Idempotent replay: if a continuation step was already saved for this turn
@@ -1967,12 +2025,15 @@ class ChatOrchestrator:
             # ADR-064 §7: the replay is NOT a special rule — it is the ordinary turn-scoped fallback
             # (no accumulator in this call → read the turn's quiz step). server_tools stays empty
             # here by contrast (ADR-028): it is a per-call indicator, quiz is turn content.
+            # ADR-101 §4: documents behave like quiz here, NOT like server_tools — a document
+            # written earlier in the turn is recovered and comes back on the replay too.
             return await self._decorate_turn_out(
                 self._render_saved_step(session_id, message_step_id, saved),
                 message_step_id=message_step_id,
                 quiz_accumulated=None,
                 media_accumulated=None,
                 generation_mode=generation_mode,
+                documents_accumulated=None,
             )
 
         mode = Mode(sess.mode)
@@ -2311,6 +2372,62 @@ class ChatOrchestrator:
         )
         return replace(out, media_jobs=media_jobs)
 
+    async def _resolve_turn_documents(
+        self,
+        *,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        accumulated: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Documents of the TURN (ADR-101 §4): the turn's saved steps MERGED with this call's.
+
+        Producer 2 runs UNCONDITIONALLY whenever the turn exists — NOT only when the accumulator is
+        empty. Gating it on an empty accumulator drops a document of an earlier leg exactly when the
+        current call touched another one: a turn that created A before handing off to a client-side
+        tool and then created B on /chat/tool-result would answer [B], while the idempotent replay
+        of that very same turn (accumulator empty) would answer [A, B] — one turn, two different
+        answers, which the card composition of ADR-101 §1 forbids outright.
+        Merge order = order of the turn: recovered rows first (``seq ASC``), then this call's rows.
+        An overlap between the sources is expected and harmless — the fold of §5 is idempotent and
+        the accumulator's value wins as the freshest one.
+        DELIBERATE CONTRAST with mediaJobs (``_resolve_turn_media_jobs``), whose producer 2 IS gated
+        on an empty accumulator: mediaJobs APPENDS and has no dedup key, so an unconditional merge
+        would duplicate a job there. The mechanisms differ because the semantics already differ —
+        carry neither rule over to the other field without a separate decision.
+        Producer 2 needs no extraction code of its own: ``tool_results_for_message_step`` already
+        returns ONLY successful results (errored rounds have a null ``result``) ordered by ``seq``,
+        and a successful document.create/update result IS the card (``_doc_brief``). That is why
+        the card in the response and the card in the tool result must stay identical — the two
+        producers would otherwise disagree on different legs of one turn.
+        """
+        recovered = await self._deps.repo.tool_results_for_message_step(
+            session_id, message_step_id, _DOCUMENT_MUTATING_TOOL_NAMES
+        )
+        return _fold_turn_documents([*recovered, *(accumulated or [])])
+
+    async def _with_turn_documents(
+        self,
+        out: ChatRunOut,
+        *,
+        message_step_id: uuid.UUID,
+        accumulated: list[dict[str, Any]] | None,
+    ) -> ChatRunOut:
+        """Attach turn-scoped documents to a terminal ChatRunOut (ADR-101 §4).
+
+        A response with ``message_step_id is None`` carries no turn (policy-block before
+        generation), so there is nothing to attribute a document to and no read is issued —
+        ``documents`` stays ``null``. The ``blocked``+``max_tokens`` leg is NOT this case: its turn
+        id is set, so a document written before the truncation still reaches the client.
+        """
+        if out.message_step_id is None:
+            return out
+        documents = await self._resolve_turn_documents(
+            session_id=out.session_id,
+            message_step_id=message_step_id,
+            accumulated=accumulated,
+        )
+        return replace(out, documents=documents)
+
     async def _resolve_turn_media_choices(
         self,
         *,
@@ -2358,8 +2475,13 @@ class ChatOrchestrator:
         media_accumulated: list[dict[str, Any]] | None,
         generation_mode: str,
         media_choices_accumulated: dict[str, Any] | None = None,
+        documents_accumulated: list[dict[str, Any]] | None = None,
     ) -> ChatRunOut:
-        """Attach turn-scoped quiz + mediaJobs + mediaChoices (ADR-064 / ADR-068 / ADR-070)."""
+        """Attach turn-scoped quiz + mediaJobs + mediaChoices + documents.
+
+        ADR-064 / ADR-068 / ADR-070 / ADR-101. Every terminal leg of a turn goes through here, so
+        each turn-scoped field is resolved in ONE place instead of being re-derived per branch.
+        """
         decorated = await self._with_turn_quiz(
             out,
             message_step_id=message_step_id,
@@ -2370,6 +2492,11 @@ class ChatOrchestrator:
             decorated,
             message_step_id=message_step_id,
             accumulated=media_accumulated,
+        )
+        decorated = await self._with_turn_documents(
+            decorated,
+            message_step_id=message_step_id,
+            accumulated=documents_accumulated,
         )
         return await self._with_turn_media_choices(
             decorated,
@@ -2505,6 +2632,9 @@ class ChatOrchestrator:
         media_accumulator = _MediaJobsAccumulator()
         # ADR-070: mediaChoices wizard of THIS call, last-wins.
         media_choices_accumulator = _MediaChoicesAccumulator()
+        # ADR-101 §4 producer 1: documents created/rewritten in THIS call, threaded through
+        # every round; the fold to one card per documentId happens at assembly.
+        documents_accumulator = _DocumentsAccumulator()
         # ADR-044 §5 / ADR-073 / ADR-074: select the generation client + the effective model.
         # - credits → first candidate is the session model's provider (ADR-073). Unset
         #   LLM_PROVIDERS → LLM_PROVIDER only (ADR-033). Spare keys / crossover happen inside
@@ -2703,6 +2833,7 @@ class ChatOrchestrator:
                     media_accumulated=media_accumulator.jobs or None,
                     generation_mode=effective_generation_mode,
                     media_choices_accumulated=media_choices_accumulator.state,
+                    documents_accumulated=documents_accumulator.documents or None,
                 )
 
             if result.stop_reason == STOP_REASON_TOOL_USE and result.tool_uses:
@@ -2718,6 +2849,7 @@ class ChatOrchestrator:
                     quiz_accumulator=quiz_accumulator,
                     media_accumulator=media_accumulator,
                     media_choices_accumulator=media_choices_accumulator,
+                    documents_accumulator=documents_accumulator,
                     turn_images=turn_images,
                     recent_image_urls=recent_image_urls,
                     last_image_job_id=last_image_job_id,
@@ -2739,6 +2871,7 @@ class ChatOrchestrator:
                         media_accumulated=media_accumulator.jobs or None,
                         generation_mode=effective_generation_mode,
                         media_choices_accumulated=media_choices_accumulator.state,
+                        documents_accumulated=documents_accumulator.documents or None,
                     )
                 # Pure server-side turn: results are persisted; continue the loop to Anthropic.
                 continue
@@ -2761,6 +2894,7 @@ class ChatOrchestrator:
                 media_accumulated=media_accumulator.jobs or None,
                 generation_mode=effective_generation_mode,
                 media_choices_accumulated=media_choices_accumulator.state,
+                documents_accumulated=documents_accumulator.documents or None,
             )
 
         # Exceeded MAX_SERVER_TOOL_ROUNDS consecutive server-side rounds (ADR-011 §2): controlled
@@ -2999,6 +3133,7 @@ class ChatOrchestrator:
         quiz_accumulator: _QuizAccumulator | None = None,
         media_accumulator: _MediaJobsAccumulator | None = None,
         media_choices_accumulator: _MediaChoicesAccumulator | None = None,
+        documents_accumulator: _DocumentsAccumulator | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
         last_image_job_id: str | None = None,
@@ -3228,6 +3363,18 @@ class ChatOrchestrator:
                 ):
                     # ADR-070: last-wins wizard state for ChatResponse.mediaChoices.
                     media_choices_accumulator.state = execution.result
+                if (
+                    tool_name in _DOCUMENT_MUTATING_TOOL_NAMES
+                    and documents_accumulator is not None
+                    and not execution.is_error
+                    and isinstance(execution.result, dict)
+                ):
+                    # ADR-101 §3: only a SUCCESSFUL create/update is an actual change on the
+                    # server. An errored round (limit, unsupported type, foreign document) left
+                    # nothing behind, so it must not reach documents[] — the client would show
+                    # «document ready» for a turn where nothing happened. The refusal is still
+                    # visible to the client in serverTools[] (status=errored + error code).
+                    documents_accumulator.documents.append(execution.result)
             elif tool_name in SERVER_SIDE_TOOLS:
                 # Invariant (ADR-022): reaching here implies has_project is True (the project-less
                 # site.* anomaly raised above), so external_project_id is a resolved string. The

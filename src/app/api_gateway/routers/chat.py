@@ -31,6 +31,7 @@ from app.request_logs.service import RequestLogWriter
 from app.schemas.chat import (
     DEFAULT_GENERATION_MODE,
     ChatCapabilitiesResponse,
+    ChatDocumentRefSchema,
     ChatResponse,
     ChatRunRequest,
     ChatToolResultRequest,
@@ -485,6 +486,16 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
         if out.media_jobs is not None
         else None
     )
+    # ADR-101: documents of the TURN — addressable cards without content; the client fetches the
+    # file itself from GET /v1/chats/{sessionId}/documents/{documentId} (or /download) under the
+    # same Authorization. The orchestrator already merged both producers for this leg (the turn's
+    # saved document steps + this call's accumulator) and folded them to one entry per documentId
+    # with the final version, so every leg of one turn answers the same set.
+    documents = (
+        [ChatDocumentRefSchema.model_validate(item) for item in out.documents]
+        if out.documents is not None
+        else None
+    )
     # ADR-064 §7, HARD half of the anti-spoiler guarantee — the single point where it is applied.
     # Keyed on the PRESENCE OF A QUIZ, not on the endpoint, the status or the generation mode:
     # - not on the mode, because a study_learn turn where the model produced NO quiz must still
@@ -510,6 +521,7 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
         quiz=quiz,
         mediaChoices=media_choices,
         mediaJobs=media_jobs,
+        documents=documents,
         serverTools=server_tools,
     )
 
