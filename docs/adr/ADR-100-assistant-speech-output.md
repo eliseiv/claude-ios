@@ -228,7 +228,7 @@ Bool, per-instance, дефолт `false` — на всех действующи�
 
 - **Обратная совместимость полная.** При `VOICE_OUTPUT_ENABLED=false` (дефолт всех инстансов) не меняются ни один запрос, ни один ответ, ни один байт `system`.
 - **Схема `ChatResponse` не меняется вовсе** — ни в JSON, ни в SSE.
-- **`user_preferences` получает одну nullable-колонку** (`default_voice_id`, миграция `0033`, expand-only, без backfill) — [03-data-model.md](../03-data-model.md#12-user_preferences-adr-012-модуль-preferences).
+- **`user_preferences` получает одну nullable-колонку** (`default_voice_id`, миграция `0032_user_default_voice`, expand-only, без backfill) — [03-data-model.md](../03-data-model.md#12-user_preferences-adr-012-модуль-preferences).
 - **Расход входных токенов растёт** на длину подсказки §7 (единицы сотен токенов) на каждом ходе инстанса с включённой озвучкой. Подсказка статична и одинакова для всех ходов инстанса, поэтому **новой записи prompt-кэша не создаёт** — в отличие от персонажа ([ADR-097 §5](ADR-097-character-personas.md)), у которого своя запись на каждого.
 - **Провайдер-агностично по LLM** ([ADR-033](ADR-033-llm-provider-abstraction.md)): синтез идёт мимо chat-провайдера, как модерация и распознавание.
 - **Инстанс без `OPENAI_API_KEY`** теряет одновременно распознавание и озвучку — один факт, один выключатель; это названо в prod-чеклисте ([07-deployment.md](../07-deployment.md)).
