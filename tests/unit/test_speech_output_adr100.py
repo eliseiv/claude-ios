@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import datetime
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -22,6 +25,12 @@ from app.errors import (
     UpstreamError,
     ValidationFailedError,
     VoiceOutputDisabledError,
+)
+from app.instance_config.snapshot import (
+    InstanceConfigSnapshot,
+    SettingOverlay,
+    install_snapshot,
+    reset_snapshot,
 )
 
 # ---- чистка текста -------------------------------------------------------------------------
@@ -92,23 +101,48 @@ def test_assistant_text_is_read_from_the_stored_step() -> None:
 # ---- выбор голоса --------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _characters_setting(monkeypatch: pytest.MonkeyPatch, *, operator: bool) -> Iterator[None]:
+    """Выключатель персонажей задан ОПЕРАТОРОМ из панели, а env — противоположный (ADR-099 §8).
+
+    Значения расходятся намеренно. Настройка объявлена управляемой из CRM, поэтому её
+    потребитель обязан читать оверлей, а не сырой ``Settings``; при совпадающих значениях тест
+    прошёл бы при ЛЮБОМ из двух способов чтения и стерёг бы пустоту. Расхождение делает кейс
+    диф-стойким: возврат потребителя на ``get_settings()`` роняет его немедленно.
+    """
+    monkeypatch.setenv("CHARACTERS_ENABLED", "false" if operator else "true")
+    get_settings.cache_clear()
+    install_snapshot(
+        InstanceConfigSnapshot(
+            settings={
+                "chat.characters_enabled": SettingOverlay(
+                    setting_id="chat.characters_enabled",
+                    value=operator,
+                    updated_at=datetime.datetime.now(tz=datetime.UTC),
+                )
+            }
+        )
+    )
+    try:
+        yield
+    finally:
+        reset_snapshot()
+        get_settings.cache_clear()
+
+
 def test_character_voice_wins_over_user_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CHARACTERS_ENABLED", "true")
-    get_settings.cache_clear()
-    voice = resolve_voice(character_id="vampire_lord", user_default_voice_id="default_female")
-    assert voice.id != "default_female"
-    get_settings.cache_clear()
+    with _characters_setting(monkeypatch, operator=True):
+        voice = resolve_voice(character_id="vampire_lord", user_default_voice_id="default_female")
+        assert voice.id != "default_female"
 
 
 def test_with_characters_off_the_session_character_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CHARACTERS_ENABLED", "false")
-    get_settings.cache_clear()
-    # Иначе чат ОТВЕЧАЛ бы обычным ассистентом, но ЗВУЧАЛ бы персонажем.
-    voice = resolve_voice(character_id="vampire_lord", user_default_voice_id="default_male")
-    assert voice.id == "default_male"
-    get_settings.cache_clear()
+    with _characters_setting(monkeypatch, operator=False):
+        # Иначе чат ОТВЕЧАЛ бы обычным ассистентом, но ЗВУЧАЛ бы персонажем.
+        voice = resolve_voice(character_id="vampire_lord", user_default_voice_id="default_male")
+        assert voice.id == "default_male"
 
 
 def test_retired_stored_default_degrades_instead_of_failing(

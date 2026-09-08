@@ -163,16 +163,41 @@ ANTHROPIC_WEB_SEARCH_TOOL_TYPE=web_search_20260318
 
 Методы:
 
-- `chat_generation_credit_cost(generation_mode)` - переводит `general/research/reasoning/study_learn`
-  в стоимость кредитов. **Единственный мост «режим → сумма списания»**: одно и то же значение
-  используется и для pre-generation balance-гейта, и для финального идемпотентного дебита, и для
-  `creditCost` в `GET /v1/chat/v2/capabilities`. Второго механизма цены режима нет и не вводится
-  ([ADR-064 §9](../../adr/ADR-064-study-learn-quiz-generation-mode.md)).
 - `resolved_reasoning_level()` - нормализует OpenAI reasoning effort.
 - `resolved_anthropic_thinking_display()` - нормализует Anthropic thinking display.
 
-Legacy `/v1/chat/run` эти цены не использует и всегда проверяет/списывает 1 кредит. V2 использует
-`chat_generation_credit_cost`.
+> ⚠️ **С [ADR-099](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md) цена хода —
+> функция МОДЕЛИ, а не режима.** `chat_generation_credit_cost(generation_mode)` заменён резолвером
+> **`chat_turn_credit_cost(model)`** поверх снимка операторских оверлеев
+> (`admin_tariffs` → env → дефолт кода). **Мост остаётся ЕДИНСТВЕННЫМ** — меняется его аргумент:
+> ту же функцию зовут pre-generation balance-гейт, финальный идемпотентный дебит и `creditCost` в
+> `GET /v1/chat/v2/capabilities`; второго механизма цены по-прежнему не существует
+> ([ADR-064 §9](../../adr/ADR-064-study-learn-quiz-generation-mode.md)).
+>
+> - `CHAT_CREDIT_COST_GENERAL` продолжает жить и служит **дефолтом строки тарифа каждой модели** —
+>   поэтому и валидатор положительности выше **остаётся в силе**; оверлей защищён своим
+>   ограничением `tokens ≥ 1`;
+> - `CHAT_CREDIT_COST_RESEARCH` / `_REASONING` / `_STUDY_LEARN` на цену **больше не влияют**:
+>   надбавка за режим снята решением владельца. Построчная сверка «было → стало» —
+>   [ADR-099 §5.3](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md);
+> - **legacy `/v1/chat/run` тарифицируется тем же резолвером** — как и v2: оба пути берут цену
+>   модели сессии, а при пустой `model` — цену дефолтной модели инстанса.
+>   ⚠️ **Это изменение в СТОРОНУ УДОРОЖАНИЯ, и его легко принять за «без изменений».** Сегодня
+>   `_turn_credit_cost` при выключенном `CHAT_LEGACY_WEB_SEARCH_ENABLED` возвращает **литерал
+>   `1`** — переменную `CHAT_CREDIT_COST_GENERAL` этот путь не читает вовсе. После перевода на
+>   резолвер цена станет ценой модели, дефолт которой = `CHAT_CREDIT_COST_GENERAL`; там, где она
+>   задана значением `> 1`, легаси-ход **подорожает для пользователя**. Остальные строки сверки
+>   [ADR-099 §5.3](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md) меняются в
+>   противоположную сторону, поэтому эта помечена рядом с ними, а фактическая дельта снимается
+>   **по данным** до раскатки ([ADR-099 §13](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md), шаг 1).
+>   При `CHAT_LEGACY_WEB_SEARCH_ENABLED=true` ход и сегодня тарифицируется как `research`
+>   ([ADR-082](../../adr/ADR-082-legacy-web-search.md)) — там изменение обратное, в сторону удешевления.
+> - **`CHAT_CREDIT_COST_RESEARCH`/`_REASONING`/`_STUDY_LEARN` остаются в `.env` без потребителя** —
+>   правка любой из них не даёт ни ошибки, ни эффекта ([TD-038](../../100-known-tech-debt.md)).
+>   Строка таблицы «declared ≠ wired» [ADR-064 §12](../../adr/ADR-064-study-learn-quiz-generation-mode.md)
+>   («`CHAT_CREDIT_COST_STUDY_LEARN` → balance-гейт + дебит + `capabilities`») с этой волны
+>   **неверна**; тело ADR-064 не переписывается (immutability), ревизия зафиксирована в
+>   [adr/INDEX.md §Ревизии](../../adr/INDEX.md).
 
 ## Data model
 
@@ -557,7 +582,7 @@ wire-контракт запроса/ответа/инструмента — [02
   является** тем, что решает: решает явный выключатель.
 - `AnthropicClient` добавляет web-search/thinking параметры только при `research/reasoning`.
 - `research` ([ADR-084](../../adr/ADR-084-research-system-prompt-suffix.md)): system-prompt хода содержит статичный суффикс только при эффективном `research` (v2 и legacy opt-in); dummy-поиск в промте запрещён; `tool_choice` не форсируется.
-- **Суффикс режима стоит ПОСЛЕ слоя персонажа** ([ADR-097](../../adr/ADR-097-character-personas.md)): персонаж задаёт голос, режим — задачу хода, и последний слой весомее. Персонаж при этом **не** влияет ни на knobs провайдера, ни на tool-набор, ни на цену режима. Полный порядок слоёв — [03-architecture §Порядок слоёв системного промта](03-architecture.md#порядок-слоёв-системного-промта). Оси не путать: `generationMode` — per-turn, `characterId` — session-fixed.
+- **Суффикс режима стоит ПОСЛЕ слоя персонажа** ([ADR-097](../../adr/ADR-097-character-personas.md)) **и после подсказки озвучки** ([ADR-100](../../adr/ADR-100-assistant-speech-output.md)): персонаж задаёт голос, подсказка озвучки — форму подачи, режим — задачу хода, и последний слой весомее. **Контраст помечен:** подсказка озвучки просит «без ссылок», а `research` требует живого веб-поиска со ссылками — поэтому она обязана стоять РАНЬШЕ суффикса режима, иначе испортила бы читаемый текст; ссылки из **звука** убирает чистка на чтении, а не промт. Персонаж при этом **не** влияет ни на knobs провайдера, ни на tool-набор, ни на цену режима. Полный порядок слоёв — [03-architecture §Порядок слоёв системного промта](03-architecture.md#порядок-слоёв-системного-промта). Оси не путать: `generationMode` — per-turn, `characterId` — session-fixed.
 - `AnthropicClient` в `general` делает обычный Messages call без v2 knobs.
 - `/v1/chat/v2/run` списывает mode-specific credits и позволяет переключать режимы в одной сессии.
 - `/v1/chat/v2/tool-result` сохраняет исходный mode/cost всего tool-loop хода.

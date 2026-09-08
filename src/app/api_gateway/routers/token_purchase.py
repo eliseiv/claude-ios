@@ -12,6 +12,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
 
+from app import instance_config
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.billing_cloudpayments.checkout import CloudPaymentsCheckoutClient
 from app.config import get_settings
@@ -89,7 +90,10 @@ async def list_token_products(
             if p is not None
         ]
         if live:
-            return _catalog_response(live)
+            # Каталогом ЗДЕСЬ владеет поставщик: оверлей уточняет `credits`/`title` уже
+            # перечисленных продуктов и НЕ добавляет своих строк — придуманная нами строка не
+            # имеет платёжной ссылки и стала бы некликабельной позицией на пейволле.
+            return _catalog_response(_refined(live))
     # 2) Fallback: static PRODUCTS_CATALOG (skip items that fail schema validation).
     catalog = settings.products_catalog()
     if catalog:
@@ -100,14 +104,70 @@ async def list_token_products(
             except ValidationError:
                 continue
         if items:
-            return _catalog_response(items)
+            # Витриной этой ветки владеем МЫ, поэтому созданные оператором продукты в неё
+            # включаются.
+            return _catalog_response(_refined(items) + _operator_products())
     # 3) Fallback: token packs derived from TOKEN_PRODUCTS (productId -> credits).
     return _catalog_response(
-        [
-            TokenProduct(productId=product_id, credits=credits)
-            for product_id, credits in settings.token_products().items()
-        ]
+        _refined(
+            [
+                TokenProduct(productId=product_id, credits=credits)
+                for product_id, credits in settings.token_products().items()
+            ]
+        )
+        + _operator_products()
     )
+
+
+def _refined(products: list[TokenProduct]) -> list[TokenProduct]:
+    """Уточнить перечисленные продукты оверлеем и убрать архивные.
+
+    Фильтр архивных применяется ко ВСЕМ трём веткам источника: «снят с витрины» есть свойство
+    ПРОДУКТА, а не свойство источника, из которого строка пришла. На начисления архив не влияет —
+    иначе он ломал бы уже оплаченное и активные подписки.
+
+    ⚠️ **Уточнение ПОФИЛДОВОЕ** (ADR-099 §6.1): `credits`/`title` берутся у оверлея только там,
+    где он их ЗАДАЛ. Безусловная подстановка обоих полей затёрла бы пустотой живые значения
+    источника у строки, созданной правкой одного `archived`, — то есть правка, витрины не
+    касавшаяся, убрала бы с пейволла цену и название.
+    """
+    snapshot = instance_config.get_snapshot()
+    refined: list[TokenProduct] = []
+    for product in products:
+        overlay = snapshot.products.get(product.productId)
+        if overlay is None:
+            refined.append(product)
+            continue
+        if overlay.archived:
+            continue
+        update: dict[str, Any] = {}
+        if overlay.tokens is not None:
+            update["credits"] = overlay.tokens
+        if overlay.name is not None:
+            update["title"] = overlay.name
+        refined.append(product.model_copy(update=update) if update else product)
+    return refined
+
+
+def _operator_products() -> list[TokenProduct]:
+    """Продукты, заведённые оператором: витриной владеем мы, значит показываем их.
+
+    `price`/`currency` остаются пустыми, пока оператор не завёл продукт в панели поставщика:
+    «продукт работает» на этом сервисе означает ровно серверную сторону.
+    """
+    return [
+        TokenProduct(
+            productId=row.product_id,
+            title=row.name,
+            kind=(
+                "subscription"
+                if row.purchase_kind == instance_config.PURCHASE_KIND_SUBSCRIPTION
+                else "tokens"
+            ),
+            credits=row.tokens,
+        )
+        for row in instance_config.operator_created_rows()
+    ]
 
 
 def _catalog_response(products: list[TokenProduct]) -> TokenProductsResponse:

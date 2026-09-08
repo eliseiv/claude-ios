@@ -7,7 +7,7 @@
 | Auth-образец | constant-time bearer (`hmac.compare_digest`), `auto_error=False` security scheme | `src/app/billing_adapty/auth.py`, `src/app/api_gateway/openapi_security.py` (образец `adapty_webhook_scheme`) |
 | Wallet | `WalletService.grant(*, user_id, amount, idempotency_key, meta, reason) -> GrantResult` — идемпотентный кредит-грант | `src/app/wallet/service.py` ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)) |
 | Subscription upsert | `INSERT subscriptions ... ON CONFLICT (user_id) DO UPDATE` (status/plan/expires_at) | образец `src/app/admin/service.py::grant_subscription` ([ADR-048](../../adr/ADR-048-admin-subscription-grant.md)) |
-| Config | `token_products()` (JSON-парсинг env-карты) — образец для `cloudpayments_product_tokens()` | `src/app/config.py:293` |
+| Config | `token_products()` (JSON-парсинг env-карты) — образец для `cloudpayments_product_tokens()` | `Settings.token_products()`, `src/app/config.py` |
 | Audit | `AuditService.record`, `assert_no_secrets` | `src/app/audit/service.py`, `src/app/observability/redaction.py` |
 | Observability | `log_event(logger, level, msg, **fields)` | образец `app.billing_adapty.service` ([ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md)) |
 | Policy | читает `subscriptions.status` (active/expired) | [ADR-002](../../adr/ADR-002-access-policy-state-machine.md) |

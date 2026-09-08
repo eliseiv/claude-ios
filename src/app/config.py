@@ -43,6 +43,29 @@ def _dedup_nonempty(*values: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+# Допустимые значения продуктовых enum-настроек. ЕДИНСТВЕННОЕ объявление набора: та же
+# константа питает и нормализатор значения ниже, и `options` строки в GET /v1/admin/settings
+# (ADR-099 §8.1). Инлайновый литерал внутри функции дал бы два списка об одном факте, и
+# разошёлся бы тот, который забыли: значение вне перечня показывается как есть, но выбрать его
+# обратно нечем — настройка становится невозвратимой.
+SUPPORTED_REASONING_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+DEFAULT_REASONING_LEVEL = "medium"
+SUPPORTED_ANTHROPIC_THINKING_DISPLAYS: tuple[str, ...] = ("omitted", "summarized")
+DEFAULT_ANTHROPIC_THINKING_DISPLAY = "omitted"
+
+# Минимальный блок-набор модерации. Держится КОДОМ, а не значением настройки: как бы оператор
+# ни изменил перечень, эта категория остаётся — поэтому пустая строка НЕ эквивалентна
+# выключенной модерации, и величина безопасна при любом своём значении.
+MANDATORY_MODERATION_BLOCK_CATEGORY = "sexual/minors"
+
+
+def parse_moderation_block_categories(raw: str) -> frozenset[str]:
+    """Разобрать CSV категорий и добавить обязательную. ЕДИНСТВЕННЫЙ дом этого правила."""
+    parsed = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    parsed.add(MANDATORY_MODERATION_BLOCK_CATEGORY)
+    return frozenset(parsed)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -466,6 +489,34 @@ class Settings(BaseSettings):
     admin_rate_limit_per_min: int = Field(default=10, alias="ADMIN_RATE_LIMIT_PER_MIN")
     # Body size limit for admin endpoints (<= 8 KB, ADR-009 §6).
     admin_size_limit_body: int = Field(default=8 * 1024, alias="ADMIN_SIZE_LIMIT_BODY")
+    # Отдельная корзина для поверхности экономики и настроек (ADR-099 §10.1). CRM зовёт эти
+    # ручки ПАЧКОЙ на отрисовку одной страницы (6 вызовов) плюс правки с рефетчами, а
+    # ADMIN_RATE_LIMIT_PER_MIN=10 задан ЯВНО в .env каждого инстанса и дефолт кода там мёртв.
+    # Новая переменная в существующих .env отсутствует, поэтому дефолт применяется без единой
+    # ручной правки файла. Денежные ручки остаются в прежней, узкой корзине.
+    admin_economics_rate_limit_per_min: int = Field(
+        default=120, alias="ADMIN_ECONOMICS_RATE_LIMIT_PER_MIN"
+    )
+    # Окно обновления снимка операторских оверлеев (ADR-099 §2). Оно же уходит наружу как
+    # effective_after_seconds / cache_effective_after_seconds: занижать нельзя (невидимость окна
+    # рассинхрона делает расхождение дорогим), завышать — тоже (оператор повторяет правку).
+    admin_overrides_refresh_seconds: int = Field(
+        default=30, alias="ADMIN_OVERRIDES_REFRESH_SECONDS"
+    )
+
+    def admin_overrides_refresh_window(self) -> int:
+        """Действующее окно применения правок, не меньше секунды.
+
+        ⚠️ **Ноль здесь НЕ означает «выключить обновитель»**, в отличие от
+        ``MEDIA_RECONCILE_INTERVAL_SECONDS``, и это разные по последствиям величины. Выключенный
+        реконсилятор теряет фоновую починку — неприятно, но честно. Выключенный обновитель
+        снимка заставил бы контракт ЛГАТЬ: наружу ушло бы ``effective_after_seconds = 0``
+        («применяется мгновенно везде»), тогда как остальные процессы инстанса не обновились бы
+        НИКОГДА. Ручка, способная сделать объявление ложным, ручкой быть не должна, поэтому
+        величина зажимается снизу, а обновитель работает всегда. То же значение уходит в
+        контракт — объявленное окно и фактическое совпадают по построению.
+        """
+        return max(1, self.admin_overrides_refresh_seconds)
 
     # --- Website builder / preview (ADR-010, ADR-011, WB-2) ---
     # Isolated HMAC secret for signed preview URLs. Separate from JWT/KMS/ADMIN secrets.
@@ -946,25 +997,6 @@ class Settings(BaseSettings):
         """Anthropic extended thinking requires a positive token budget."""
         return value if value > 0 else 4096
 
-    def chat_generation_credit_cost(self, generation_mode: str) -> int:
-        """Return the wallet debit amount for one completed assistant turn.
-
-        This is the single bridge between the public chat generation mode
-        (``general|research|reasoning|study_learn``) and the existing integer-credit wallet. The
-        value is used for the pre-generation balance gate, for the final idempotent debit AND for
-        ``creditCost`` in ``GET /v1/chat/v2/capabilities``, so a mode cannot be advertised at one
-        price, allowed at another and charged at a third. No second pricing mechanism exists
-        (ADR-064 §9). An unknown mode falls back to the ``general`` price.
-        """
-        normalized = generation_mode.strip().lower()
-        if normalized == "research":
-            return self.chat_credit_cost_research
-        if normalized == "reasoning":
-            return self.chat_credit_cost_reasoning
-        if normalized == "study_learn":
-            return self.chat_credit_cost_study_learn
-        return self.chat_credit_cost_general
-
     def advertised_generation_modes(self) -> tuple[str, ...]:
         """Generation modes this instance ADVERTISES in GET /v1/chat/v2/capabilities (ADR-065 §1).
 
@@ -1023,7 +1055,7 @@ class Settings(BaseSettings):
     def resolved_reasoning_level(self) -> str:
         """Provider-safe reasoning effort for the public ``generationMode=reasoning`` mode."""
         level = self.chat_reasoning_level.strip().lower()
-        return level if level in {"low", "medium", "high"} else "medium"
+        return level if level in SUPPORTED_REASONING_LEVELS else DEFAULT_REASONING_LEVEL
 
     def resolved_anthropic_thinking_display(self) -> str:
         """Provider-safe Anthropic thinking display setting.
@@ -1033,7 +1065,11 @@ class Settings(BaseSettings):
         reasoning summaries.
         """
         display = self.anthropic_thinking_display.strip().lower()
-        return display if display in {"omitted", "summarized"} else "omitted"
+        return (
+            display
+            if display in SUPPORTED_ANTHROPIC_THINKING_DISPLAYS
+            else DEFAULT_ANTHROPIC_THINKING_DISPLAY
+        )
 
     def cloudpayments_paid_statuses(self) -> frozenset[str]:
         """Parse CLOUDPAYMENTS_PAID_STATUSES into the set of "paid" broadapps statuses (ADR-054 §4).
@@ -1199,13 +1235,7 @@ class Settings(BaseSettings):
         ``sexual/minors`` входит ВСЕГДА, даже если оператор удалил её из env — это не
         настраиваемая политика.
         """
-        parsed = {
-            item.strip().lower()
-            for item in self.moderation_block_categories_raw.split(",")
-            if item.strip()
-        }
-        parsed.add("sexual/minors")
-        return frozenset(parsed)
+        return parse_moderation_block_categories(self.moderation_block_categories_raw)
 
     def byok_default_model_for(self, provider: str) -> str:
         """BYOK default model for a SPECIFIC provider (ADR-044 §5/§6, ADR-016).

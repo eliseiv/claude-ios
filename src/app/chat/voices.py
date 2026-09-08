@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal, NamedTuple
 
+from app import instance_config
 from app.chat.characters import character_voice_id
 from app.chat.presets import DEFAULT_PRESET_LOCALE
 from app.config import get_settings
@@ -261,7 +262,7 @@ def resolve_voice(*, character_id: str | None, user_default_voice_id: str | None
     all. A default-voice setting that only affected chats the user has not started yet would be
     indistinguishable from a broken setting.
     """
-    if get_settings().characters_enabled:
+    if instance_config.characters_enabled():
         voice_id = character_voice_id(character_id)
         if voice_id is not None:
             entry = get_voice(voice_id)

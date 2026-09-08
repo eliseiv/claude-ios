@@ -6,16 +6,31 @@ LLM. One question per response so cascading enums (resolution depends on model) 
 Priced options (resolution / duration / audio) show the estimated credit cost in the label so the
 user sees that 1K/2K/4K are not the same price.
 
+⚠️ **Каждая показанная здесь цена берётся из ТОГО ЖЕ резолвера, что и списание** —
+``instance_config.media_run_price`` / ``media_base_credits`` поверх снимка операторских
+оверлеев (ADR-099 §5.1). Реестровая формула ``catalog.run_price`` в этот модуль не приходит и
+приходить не должна: она не читает тариф оператора, и первая же правка ячейки из CRM развела бы
+подпись опции и фактическое списание — пользователь тапнул бы «1080p · 128 cr.» и получил 200.
+Снимок берётся ОДИН раз на построение шага, чтобы все опции одной карточки были посчитаны по
+одному и тому же состоянию оверлеев.
+
 When starting a **video** wizard and the chat has a prior generated image, the first card asks
 ``useLastImage`` (Да/Нет) — same UI as duration/resolution — before model/params.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
-from app.media_generation.catalog import FalModel, FalVariant, find_model, models_of_kind, run_price
+from app.config import Settings, get_settings
+from app.instance_config import (
+    InstanceConfigSnapshot,
+    get_snapshot,
+    media_base_credits,
+    media_run_price,
+)
+from app.media_generation.catalog import FalModel, FalVariant, find_model, models_of_kind
 
 # Wizard step ids (= question.id and answers keys).
 STEP_USE_LAST_IMAGE = "useLastImage"
@@ -111,20 +126,26 @@ def estimate_run_credits(
     model: FalModel,
     answers: Mapping[str, str],
     *,
-    base_credits: int,
     overrides: Mapping[str, str] | None = None,
+    settings: Settings | None = None,
+    snapshot: InstanceConfigSnapshot | None = None,
 ) -> int:
-    """Credits for a hypothetical submit with answers (+ overrides for option labels)."""
+    """Credits for a hypothetical submit with answers (+ overrides for option labels).
+
+    Тот же резолвер, что и в ``MediaGenerationService.price_of`` → списание: квота и списание
+    не могут расходиться, потому что число у них одно (ADR-099 §5.1).
+    """
     merged = {**dict(answers), **dict(overrides or {})}
     audio: bool | None = None
     if STEP_GENERATE_AUDIO in merged:
         audio = merged[STEP_GENERATE_AUDIO] == "true"
-    return run_price(
+    return media_run_price(
         model=model,
-        base_credits=base_credits,
         resolution=merged.get(STEP_RESOLUTION),
         duration=merged.get(STEP_DURATION),
         generate_audio=audio,
+        settings=settings,
+        snapshot=snapshot,
     )
 
 
@@ -182,11 +203,19 @@ def build_step_questions(
     kind: str,
     answers: Mapping[str, str],
     source_job_id: str | None,
-    credits_for: Callable[[FalModel], int],
     image_urls: list[str] | None = None,
     last_image_job_id: str | None = None,
+    settings: Settings | None = None,
+    snapshot: InstanceConfigSnapshot | None = None,
 ) -> tuple[str, list[dict[str, Any]]] | None:
-    """Build (step, questions[]) for the next wizard step, or None if ready to submit."""
+    """Build (step, questions[]) for the next wizard step, or None if ready to submit.
+
+    Цены опций резолвятся ЗДЕСЬ, а не приходят функцией от вызывающего: сменный поставщик цены
+    — это ровно то место, куда подставляется реестровая формула, не знающая операторского
+    тарифа. Снимок оверлеев берётся один раз на карточку.
+    """
+    cfg = settings or get_settings()
+    snap = snapshot if snapshot is not None else get_snapshot()
     step = next_step_id(
         answers,
         kind=kind,
@@ -213,7 +242,7 @@ def build_step_questions(
     if step == STEP_MODEL:
         options = []
         for m in models_of_kind(kind):
-            cr = credits_for(m)
+            cr = media_base_credits(m, settings=cfg, snapshot=snap)
             options.append(_option(m.id, f"{m.title} · from {cr} cr.", credits=cr))
         if not options:
             raise ValueError(f"no media models configured for kind={kind}")
@@ -225,13 +254,16 @@ def build_step_questions(
     variant = _variant_for(model, source_job_id=eff_source, image_urls=image_urls)
     if variant is None:
         raise ValueError("selected model does not support this reference mode")
-    base = credits_for(model)
 
     if step == STEP_RESOLUTION:
         options = []
         for v in variant.resolutions:
             cr = estimate_run_credits(
-                model, answers, base_credits=base, overrides={STEP_RESOLUTION: v}
+                model,
+                answers,
+                overrides={STEP_RESOLUTION: v},
+                settings=cfg,
+                snapshot=snap,
             )
             options.append(_option(v, f"{v} · {cr} cr.", credits=cr))
         return step, [
@@ -243,7 +275,11 @@ def build_step_questions(
         options = []
         for v in variant.durations:
             cr = estimate_run_credits(
-                model, answers, base_credits=base, overrides={STEP_DURATION: v}
+                model,
+                answers,
+                overrides={STEP_DURATION: v},
+                settings=cfg,
+                snapshot=snap,
             )
             options.append(_option(v, f"{v} · {cr} cr.", credits=cr))
         return step, [
@@ -253,10 +289,18 @@ def build_step_questions(
         ]
     if step == STEP_GENERATE_AUDIO:
         yes_cr = estimate_run_credits(
-            model, answers, base_credits=base, overrides={STEP_GENERATE_AUDIO: "true"}
+            model,
+            answers,
+            overrides={STEP_GENERATE_AUDIO: "true"},
+            settings=cfg,
+            snapshot=snap,
         )
         no_cr = estimate_run_credits(
-            model, answers, base_credits=base, overrides={STEP_GENERATE_AUDIO: "false"}
+            model,
+            answers,
+            overrides={STEP_GENERATE_AUDIO: "false"},
+            settings=cfg,
+            snapshot=snap,
         )
         options = [
             _option("true", f"Yes · {yes_cr} cr.", credits=yes_cr),
@@ -302,7 +346,6 @@ def allowed_values_for_step(
         source_job_id=source_job_id,
         image_urls=image_urls,
         last_image_job_id=last_image_job_id,
-        credits_for=lambda m: m.default_credits,
     )
     if built is None or built[0] != step:
         return set()
@@ -371,9 +414,10 @@ def build_wizard_state(
     prompt: str,
     source_job_id: str | None,
     answers: Mapping[str, str],
-    credits_for: Callable[[FalModel], int],
     image_urls: list[str] | None = None,
     last_image_job_id: str | None = None,
+    settings: Settings | None = None,
+    snapshot: InstanceConfigSnapshot | None = None,
 ) -> dict[str, Any] | None:
     """Persisted wizard state for the next question, or None when ready to submit."""
     urls = [u for u in (image_urls or []) if isinstance(u, str) and u]
@@ -386,7 +430,8 @@ def build_wizard_state(
         source_job_id=source_job_id,
         image_urls=urls or None,
         last_image_job_id=last_id,
-        credits_for=credits_for,
+        settings=settings,
+        snapshot=snapshot,
     )
     if built is None:
         return None

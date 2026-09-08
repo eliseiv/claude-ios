@@ -14,7 +14,7 @@
 2. [Аутентификация и заголовки](#2-аутентификация-и-заголовки)
 3. [Коды ответа (общие)](#3-коды-ответа-общие)
 4. Эндпоинты по модулям:
-   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Characters](#28-characters-персонажи) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
+   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Characters](#28-characters-персонажи) · [Озвучка ответа](#29-озвучка-ответа-speech) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
 5. [blockReason — справочник (9 значений)](#12-blockreason--справочник)
 6. [Tool-протокол: client-side vs server-side](#13-tool-протокол)
 7. [Монетизация (кратко)](#14-монетизация-кратко)
@@ -323,7 +323,12 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 }
 ```
 
-- `generationModes[]` — режимы, которые **этот инстанс объявляет**, с фактической ценой инстанса. Состав задаётся конфигурацией инстанса: приложение без квиз-UI режим `study_learn` в списке **не увидит** (элемент отсутствует, а не помечен `available:false`). Гейт — **присутствие элемента**; `available` у присутствующих элементов всегда `true` и гейтом не является.
+> ⚠️ **Цена хода зависит от МОДЕЛИ, а не от режима генерации** ([ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)). Поэтому:
+> - **`creditCost` без параметра `model` — это ПОТОЛОК:** максимальная цена хода среди **всех моделей, которые инстанс тарифицирует** (включая те, что уже не предлагаются для новых чатов, но обслуживают начатые). Он одинаков у всех элементов `generationModes[]`. Значение выбрано так, чтобы фактическое списание **никогда не превышало показанного**;
+> - **точная цена конкретной модели** — в аддитивном query-параметре **`?model=<id>`** (при передаче `creditCost` каждого режима равен цене этой модели) и в поле `creditCost` chat-строк [`GET /v1/models`](#get-v1models);
+> - неизвестный `model` → `422`.
+
+- `generationModes[]` — режимы, которые **этот инстанс объявляет**, с ценой по правилу выше. Состав задаётся конфигурацией инстанса: приложение без квиз-UI режим `study_learn` в списке **не увидит** (элемент отсутствует, а не помечен `available:false`). Гейт — **присутствие элемента**; `available` у присутствующих элементов всегда `true` и гейтом не является.
 - **Отсутствие режима в списке ≠ запрет:** `POST /v1/chat/v2/run` примет `generationMode=study_learn` и на инстансе, который его не объявляет, — приложение, знающее имя режима, работает.
 - Порядок фиксирован, новые режимы добавляются **в конец**. Клиент обязан **игнорировать неизвестные ему значения `mode`** — появление нового режима не ломает старые сборки приложения.
 - `reasoningLevel` — серверная настройка глубины для режима `reasoning`.
@@ -826,7 +831,7 @@ Steps-view — агрегированные шаги одного message-шаг
 
 ## 19. Preferences
 
-Пользовательские настройки. Источник дефолта `assistantMode` для `/chat/run` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Если строка ещё не создана — возвращаются дефолты (`chat` / `false` / `{}`). Дефолт `notificationsEnabled=false` ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default; iOS включает push через `PATCH` после системного разрешения. Существующие строки `user_preferences` сохраняют ранее сохранённое значение (без backfill).
+Пользовательские настройки. Источник дефолта `assistantMode` для `/chat/run` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Если строка ещё не создана — возвращаются дефолты (`chat` / `false` / `null` / `{}`). Дефолт `notificationsEnabled=false` ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default; iOS включает push через `PATCH` после системного разрешения. Существующие строки `user_preferences` сохраняют ранее сохранённое значение (без backfill).
 
 **Заголовки:** `Authorization: Bearer <JWT>`.
 
@@ -836,6 +841,7 @@ Steps-view — агрегированные шаги одного message-шаг
 |---|---|---|
 | `defaultAssistantMode` | `chat` \| `code` | дефолтный тип ассистента; ортогонален billing_mode |
 | `notificationsEnabled` | bool | единый toggle уведомлений (push-токены — модуль notifications, Спринт 3); дефолт `false` при отсутствии строки ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)) |
+| `defaultVoiceId` | string \| null | голос озвучки по умолчанию ([ADR-100](adr/ADR-100-assistant-speech-output.md)); `null` = голос инстанса. Каталог допустимых значений — [`GET /v1/voices`](#29-озвучка-ответа-speech). Голос **персонажа** этой настройкой не переопределяется |
 | `codeDefaults` | object | дефолты Code-контекста (язык и т.п.); без секретов |
 
 **Коды:** `200`; `401`; `429`; `5xx`.
@@ -843,11 +849,11 @@ Steps-view — агрегированные шаги одного message-шаг
 ### PATCH /v1/preferences
 Частичное обновление (любое подмножество полей); создаёт строку при отсутствии (upsert). Требуется хотя бы одно поле.
 
-**Request:** любое подмножество `{ "defaultAssistantMode": "chat"|"code", "notificationsEnabled": bool, "codeDefaults": object }`. `codeDefaults` — ≤ 8 KB сериализованного JSON, без секретов (ключи вида `key`/`token`/`secret` → `422`).
+**Request:** любое подмножество `{ "defaultAssistantMode": "chat"|"code", "notificationsEnabled": bool, "defaultVoiceId": string|null, "codeDefaults": object }`. `codeDefaults` — ≤ 8 KB сериализованного JSON, без секретов (ключи вида `key`/`token`/`secret` → `422`). `defaultVoiceId` вне каталога `GET /v1/voices` → `422 unknown_voice`; при выключенной на инстансе озвучке любое непустое значение → `422 voice_output_disabled` (уже сохранённое значение при этом продолжает отдаваться в `GET`); `null` возвращает голос инстанса.
 
 **Response (200):** полный актуальный объект настроек (как у `GET`).
 
-**Коды:** `200`; `401`; `422` (ни одного поля / `codeDefaults` > 8 KB / секреты в `codeDefaults` / схема); `429`; `5xx`.
+**Коды:** `200`; `401`; `422` (ни одного поля / `codeDefaults` > 8 KB / секреты в `codeDefaults` / `unknown_voice` / `voice_output_disabled` / схема); `429`; `5xx`.
 
 ---
 
@@ -893,6 +899,17 @@ Steps-view — агрегированные шаги одного message-шаг
 
 То есть на инстансе без рублёвой оплаты цен в ответе нет, и это не отказ: там цены берёт клиент
 из StoreKit.
+
+**Оператор управляет каталогом удалённо** ([ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)):
+
+- **удалённый (архивный) продукт в ответе не появляется** — ни в одной из трёх веток. Уже
+  совершённые покупки и активные подписки при этом продолжают начислять кредиты как прежде;
+- **продукт, заведённый оператором, появляется** в ветках 2 и 3 (каталогом там владеем мы) с
+  `credits` и `title` из настройки и `price`/`currency` = `null`, пока продукт не заведён в панели
+  поставщика. В ветке 1 каталог принадлежит поставщику: там мы уточняем `credits`/`title` уже
+  перечисленных продуктов и **не добавляем** своих строк — позиция без платёжной ссылки была бы
+  некликабельной;
+- `credits` может измениться без обновления приложения — берите значение из ответа, не кэшируйте.
 
 **Response (200) — вариант с рублёвым каталогом:**
 ```json
@@ -1002,6 +1019,7 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 - **Режимы генерации (`mode`):**
   - `credits` — списывается кредит с баланса, генерация на сервисном Anthropic-ключе.
   - `byok` — пользователь приносит свой ключ (Anthropic или OpenAI, [ADR-044](adr/ADR-044-multi-provider-byok.md)); генерация через провайдера ключа; кредиты не списываются.
+- **Озвучка ответа ([раздел 29](#29-озвучка-ответа-speech), [ADR-100](adr/ADR-100-assistant-speech-output.md)):** тарифицируется **отдельно** от хода — `TTS_CREDIT_COST` (дефолт 1 кредит) за озвучку одного ответа. **Платится один раз навсегда** за пару «ответ + голос»: повтор, переустановка приложения и второе устройство стоят `0`. Смена голоса — новая озвучка и новое списание. **Озвучка списывает кредиты и в режиме `byok`** — синтез идёт через наш ключ независимо от ключа пользователя (в отличие от самого хода). Приём **голоса** от пользователя ([ADR-095](adr/ADR-095-voice-messages.md)) по-прежнему **бесплатен** — он входит в цену хода.
 
 ---
 
@@ -1041,6 +1059,7 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | Эндпоинт | Лимиты |
 |---|---|
 | `POST /v1/chat/run` | 30 req/min per user · 60 req/min per device · 120 req/min per IP |
+| `POST /v1/chat/speech` | `TTS_RATE_LIMIT_PER_MIN`, дефолт 10 req/min per user (отдельный бакет — [ADR-100](adr/ADR-100-assistant-speech-output.md)) |
 | Прочие POST `/v1/*` | 60 req/min per user |
 | `/v1/admin/*` | 10 req/min per source IP |
 
@@ -1124,8 +1143,8 @@ JWKS с публичным ключом (для самопроверки/отл�
 **Response 200:**
 ```json
 { "models": [
-  { "id": "gpt-4.1", "displayName": "GPT-4.1", "name": "GPT-4.1", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null },
-  { "id": "gpt-4o", "displayName": "GPT-4o", "name": "GPT-4o", "default": false, "provider": "openai", "modality": "chat", "variant": null, "family": null },
+  { "id": "gpt-4.1", "displayName": "GPT-4.1", "name": "GPT-4.1", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null, "creditCost": 1 },
+  { "id": "gpt-5", "displayName": "GPT-5", "name": "GPT-5", "default": false, "provider": "openai", "modality": "chat", "variant": null, "family": null, "creditCost": 3 },
   { "id": "fal-ai/nano-banana-pro", "displayName": "Nano Banana Pro", "name": "Nano Banana Pro", "default": true, "provider": "fal", "modality": "photo", "variant": "Text to Image", "family": "Nano-Banana-Pro" },
   { "id": "fal-ai/veo3.1", "displayName": "Veo 3.1", "name": "Veo 3.1", "default": false, "provider": "fal", "modality": "video", "variant": "Text to Video", "family": "veo3.1" }
 ] }
@@ -1135,6 +1154,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 - **`modality` (`chat`\|`photo`\|`video`) — стабильный фильтр ([ADR-087 §5](adr/ADR-087-default-chat-model-gpt-4-1.md)):** значения не переименовываются и не меняют смысла; новое значение может быть только добавлено (отдельным решением), поэтому клиент обязан **игнорировать** строку с неизвестной `modality`, а не падать.
 - **Дефолт чата на OpenAI-инстансах — `gpt-4.1`** ([ADR-087](adr/ADR-087-default-chat-model-gpt-4-1.md)): у `gpt-4o` встроенный guardrail отказывался описывать изображения с людьми. `gpt-4o` остаётся в списке и выбирается явно. **Модель фиксируется на сессию** — сменить её внутри начатого чата нельзя (создайте новый чат); уже начатые чаты продолжаются на своей модели.
 - `provider` (`openai`\|`anthropic`\|`fal`), `variant`/`family` (у chat `null`) — аддитивные поля; старые клиенты игнорируют.
+- **`creditCost`** (аддитивное поле, [ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)) — сколько кредитов спишется за **один завершённый ход** на этой модели. Заполнено у `modality=chat`; у `photo`/`video` — `null` (там цена зависит от параметров запуска, см. `GET /v1/media/models`). Значение точное: именно оно проверяется балансовым гейтом и списывается. Режим генерации (`generationMode`) на цену **не влияет**. Оператор инстанса может изменить цену модели без обновления приложения — не кэшируйте её надолго.
 - Chat без `LLM_PROVIDERS` — встроенный каталог активного провайдера ([ADR-076](adr/ADR-076-builtin-chat-product-catalog.md)) + дефолт первым. Env allowlist добавляет extras. С `LLM_PROVIDERS` — union обоих (нужны оба ключа). Leftover-ключ dual не включает. Пустой `FAL_API_KEY` — без fal-строк.
 **Коды:** `200`; `401`; `429`.
 
@@ -1197,6 +1217,49 @@ JWKS с публичным ключом (для самопроверки/отл�
 **Смена персонажа** внутри начатого чата не поддерживается — персонаж фиксируется на сессию, для другого нужен новый чат (симметрично `model`).
 
 **Коды:** `200`; `401`; `422` (явный `?locale=` вне набора); `429`; `5xx`.
+
+---
+
+## 29. Озвучка ответа (Speech)
+
+Озвучка **уже полученного** ответа ассистента. Ход чата не меняется: `POST /v1/chat/run` / `/v1/chat/v2/run` и SSE отдают ровно то же, что раньше. [ADR-100](adr/ADR-100-assistant-speech-output.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#post-v1chatspeech--озвучка-ответа-adr-100).
+
+### GET /v1/voices
+Каталог голосов для экрана настроек. **Auth:** JWT. **Query:** `locale` (как у `/v1/presets` и `/v1/characters`).
+
+```json
+{ "enabled": true, "locale": "ru", "defaultVoiceId": "default_female",
+  "voices": [ { "id": "default_male", "name": "Мужской", "gender": "male" },
+              { "id": "default_female", "name": "Женский", "gender": "female" } ] }
+```
+- `enabled` — включена ли озвучка на инстансе. **По умолчанию выключена на всех инстансах**; при `false` список пуст, `defaultVoiceId: null`, а `POST /v1/chat/speech` отвечает `422 voice_output_disabled`. Клиент прячет и настройку голоса, и кнопку воспроизведения по этому полю.
+- `defaultVoiceId` — что прозвучит у **этого** пользователя в чате без персонажа (его настройка либо голос инстанса). Используется как предвыбранная строка в настройках.
+- В списке — **только выбираемые** голоса. Голоса персонажей закреплены за персонажами, пользователем не меняются и в каталоге отсутствуют.
+- Выбранный `id` сохраняется через `PATCH /v1/preferences` → `defaultVoiceId` (раздел 19). `null` возвращает голос инстанса.
+
+**Коды:** `200`; `401`; `422` (явный `?locale=` вне набора); `429`.
+
+### POST /v1/chat/speech
+Синтез речи по конкретному ответу. **Auth:** JWT; `userId` = `sub`.
+
+```json
+{ "userId": "uuid", "sessionId": "uuid", "stepId": "uuid" }
+```
+- `stepId` — id assistant-шага: то же значение, что пришло в `ChatResponse.stepId` или лежит в `GET /v1/chats/{id}` → `steps[].id`. Адресуется конкретное сообщение, а не «последний ответ».
+- Голос в запросе **не передаётся** — его выбирает сервер: голос персонажа чата, иначе голос пользователя из настроек, иначе голос инстанса.
+
+**Response (200):**
+```json
+{ "stepId": "uuid", "voiceId": "char_vampire_lord", "mediaType": "audio/mpeg",
+  "audio": "<base64>", "truncated": false, "creditsCharged": 1 }
+```
+- `audio` — готовый файл в base64; проигрывается из памяти, отдельная ссылка не нужна.
+- `voiceId` — фактически использованный голос. **Ключ клиентского кэша — пара `(stepId, voiceId)`:** после смены голоса в настройках приложение запрашивает шаг заново и получает новую пару.
+- `truncated: true` — прозвучало начало ответа: длина озвучки ограничена сервером. **Текст ответа при этом полный и не изменён.**
+- `creditsCharged` — сколько списал **этот** вызов. **Повторная озвучка того же ответа тем же голосом — `0`** (платится один раз, навсегда; переустановка приложения и второе устройство ничего не стоят). Смена голоса — новая озвучка и новое списание.
+- Перед синтезом текст приводится к произносимому виду: блоки кода, таблицы, ссылки, эмодзи и разметка удаляются. Это касается **только звука** — история и текст на экране не меняются.
+
+**Коды:** `200`; `401`; `403` (`userId ≠ sub`); `404` `session_not_found` / `step_not_found`; `409` `insufficient_credits`; `422` `voice_output_disabled` (озвучка выключена на инстансе) / `nothing_to_speak` (произносить нечего — например ответ целиком из кода); `429`; `502` (сбой синтезатора); `503` `voice_output_not_configured`; `504` (таймаут синтеза).
 
 ---
 

@@ -6,6 +6,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import instance_config
 from app.config import Settings, get_settings
 from app.errors import NotFoundError, ValidationFailedError
 from app.memory.embedding import EmbeddingClient, get_embedding_client
@@ -41,7 +42,7 @@ class MemoryService:
         workspace_project_id: uuid.UUID | None = None,
         scope: str | None = None,
     ) -> list[SearchResultView]:
-        if not self._settings.memory_enabled:
+        if not instance_config.memory_enabled(settings=self._settings):
             raise ValidationFailedError("memory is disabled on this instance")
         q = query.strip()
         if not q:
@@ -71,7 +72,7 @@ class MemoryService:
             message=message,
             # ADR-091 (ревизия 2026-08-25): гейт ТОЛЬКО инстансный. Персональной настройки больше
             # нет — память работает везде, где RAG включён оператором.
-            memory_enabled=self._settings.memory_enabled,
+            memory_enabled=instance_config.memory_enabled(settings=self._settings),
         ):
             explicit_only = await self._explicit_memory_block(
                 user_id=user_id,
@@ -108,7 +109,7 @@ class MemoryService:
         memory_search_scope: str,
         workspace_project_id: uuid.UUID | None,
     ) -> str | None:
-        if not self._settings.memory_enabled:
+        if not instance_config.memory_enabled(settings=self._settings):
             return None
         global_rows = await self._repo.list_memories(user_id, scope="global")
         workspace_rows: list[MemoryRow] = []

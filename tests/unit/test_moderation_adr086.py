@@ -380,9 +380,6 @@ class _RaisingMedia:
     def __init__(self, error: Exception) -> None:
         self._error = error
 
-    def credits_for(self, model: Any) -> int:
-        return 1
-
     async def submit(self, **kwargs: Any) -> Any:
         raise self._error
 

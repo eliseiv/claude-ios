@@ -14,13 +14,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, Query, Request
 
+from app import instance_config
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.chat.presets import (
     DEFAULT_PRESET_LOCALE,
     canonicalize_preset_locale,
     preset_catalog,
 )
-from app.config import get_settings
 from app.deps import CurrentUser
 from app.errors import RateLimitedError, ValidationFailedError
 from app.schemas.presets import PresetsResponse
@@ -117,6 +117,6 @@ async def list_presets(
     resolved = resolve_presets_locale(
         query_locale=locale,
         accept_language=accept_language,
-        default_locale=get_settings().resolved_presets_default_locale(),
+        default_locale=instance_config.presets_default_locale(),
     )
     return PresetsResponse.model_validate({"locale": resolved, "presets": preset_catalog(resolved)})

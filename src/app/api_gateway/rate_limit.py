@@ -88,6 +88,34 @@ async def enforce_admin_limits(*, ip: str | None) -> bool:
         return True
 
 
+async def enforce_admin_economics_limits(*, ip: str | None) -> bool:
+    """Отдельная корзина для admin-поверхности экономики и настроек (ADR-099 §10.1).
+
+    Правило корзины — ПО ФОРМЕ ВЫЗОВА, а не по списку путей: отдельную корзину получает путь,
+    который CRM зовёт ПАЧКОЙ при отрисовке одной страницы (products + pricing + settings +
+    capabilities = до 6 вызовов на загрузку, плюс до 14 правок с рефетчами). Денежные ручки
+    (`wallet/grant`, `subscription/grant`, `users/*/tokens`) и `costs/daily` остаются в узкой
+    корзине ``rl:admin:{ip}``: ослаблять лимит на деньгах ради страницы каталога незачем.
+
+    Ключ Redis намеренно ДРУГОЙ (``rl:admin_econ``): общая корзина означала бы, что отрисовка
+    страницы каталога съедает бюджет денежных операций. Fail-open на ошибке Redis — как у
+    остальных лимитеров.
+    """
+    settings = get_settings()
+    client = get_redis()
+    bucket = ip or "unknown"
+    try:
+        return await _allow(
+            client,
+            f"rl:admin_econ:{bucket}",
+            settings.admin_economics_rate_limit_per_min,
+            settings.rate_limit_window_seconds,
+        )
+    except redis.RedisError as exc:
+        log_event(logger, logging.WARNING, "rate_limit_redis_unavailable", error=str(exc))
+        return True
+
+
 async def enforce_auth_limits(*, ip: str | None) -> bool:
     """Per-IP rate limit on /v1/auth/* (ADR-018 §6). Auth endpoints are public (no JWT), so the
     only throttle is per source IP. When the client IP cannot be resolved, a single shared bucket

@@ -383,8 +383,11 @@ class AuditLog(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    # Nullable с миграции 0033 (ADR-099 §10): правка каталога, тарифа или настройки инстанса
+    # субъекта-пользователя не имеет вовсе, и подставить сюда чей-то id значило бы приписать
+    # операторское действие случайному пользователю. Все прежние события пишут его как раньше.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
     )
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), nullable=True
@@ -885,4 +888,80 @@ class AuthIdentity(Base):
             unique=True,
         ),
         Index("ix_auth_identities_user", "user_id"),
+    )
+
+
+# --- Оверлеи удалённого управления инстансом (ADR-099, миграция 0033_admin_economics) ---
+#
+# ОВЕРЛЕЙ, а не полная таблица: строка существует только там, где оператор изменил величину из
+# CRM. Пустая таблица воспроизводит сегодняшний день бит-в-бит — засев и backfill запрещены
+# (ADR-099 §2). Индексов сверх PK нет: таблицы читаются целиком раз в окно обновления снимка.
+# Внешних ключей нет: product_id принадлежит стору, tariff_id/setting_id выводятся из реестров
+# в коде, ссылочная целостность держится валидацией на входе.
+
+
+class AdminProduct(Base):
+    """Операторский оверлей строки каталога продуктов (ADR-099 §6)."""
+
+    __tablename__ = "admin_products"
+
+    product_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    # NULL = «оверлей этого поля не задаёт» ⇒ читатель берёт значение источника (ADR-099 §6.1).
+    # Строка хранит РОВНО то, что задал оператор: пустая строка (одно `archived` при трёх NULL)
+    # законна и осмысленна.
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    purchase_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa_text("false"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "purchase_kind IS NULL OR purchase_kind IN ('subscription', 'one_time')",
+            name="ck_admin_products_kind",
+        ),
+        # Несёт инвариант «число только вместе с классом»: `tokens IS NOT NULL ⇒
+        # purchase_kind IS NOT NULL`. Комбинация «число без класса» неписуема (ADR-099 §9).
+        CheckConstraint(
+            "tokens IS NULL"
+            " OR (purchase_kind = 'one_time' AND tokens >= 1)"
+            " OR (purchase_kind = 'subscription' AND tokens >= 0)",
+            name="ck_admin_products_tokens",
+        ),
+    )
+
+
+class AdminTariff(Base):
+    """Операторский оверлей цены одного варианта генерации (ADR-099 §3, §4)."""
+
+    __tablename__ = "admin_tariffs"
+
+    tariff_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (CheckConstraint("tokens >= 1", name="ck_admin_tariffs_tokens"),)
+
+
+class AdminSetting(Base):
+    """Операторский оверлей продуктовой настройки инстанса (ADR-099 §8).
+
+    ``value`` полиморфно по объявленному ``type`` (bool / строка / массив строк); значение, не
+    соответствующее типу, при чтении снимка ИГНОРИРУЕТСЯ с WARNING — оверлей не имеет права
+    уронить инстанс.
+    """
+
+    __tablename__ = "admin_settings"
+
+    setting_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
     )

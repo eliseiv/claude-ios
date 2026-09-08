@@ -62,7 +62,6 @@ def test_wizard_stores_image_urls_in_state() -> None:
         source_job_id=None,
         image_urls=["https://fal.media/files/example.png"],
         answers={},
-        credits_for=lambda m: m.default_credits,
     )
     assert state is not None
     assert state["imageUrls"] == ["https://fal.media/files/example.png"]
@@ -71,7 +70,6 @@ def test_wizard_stores_image_urls_in_state() -> None:
 @pytest.mark.asyncio
 async def test_ask_params_uploads_turn_images() -> None:
     media = AsyncMock()
-    media.credits_for = lambda m: m.default_credits
     media.upload_reference_image = AsyncMock(
         return_value=UploadedFile(
             url="https://fal.media/files/uploaded.png",
@@ -98,7 +96,6 @@ async def test_ask_params_uploads_turn_images() -> None:
 @pytest.mark.asyncio
 async def test_generate_image_uploads_turn_images_when_no_urls() -> None:
     media = AsyncMock()
-    media.credits_for = lambda m: m.default_credits
     media.upload_reference_image = AsyncMock(
         return_value=UploadedFile(
             url="https://fal.media/files/uploaded.png",
@@ -142,7 +139,6 @@ async def test_ask_params_use_recent_image() -> None:
     from app.chat.attachment_refs import MEDIA_NO_RECENT_IMAGE_ERROR_CODE
 
     media = AsyncMock()
-    media.credits_for = lambda m: m.default_credits
     handlers = GlobalToolHandlers(media=media)
     out = await handlers.execute(
         tool_name=TOOL_MEDIA_ASK_PARAMS,

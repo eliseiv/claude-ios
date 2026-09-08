@@ -2,7 +2,7 @@
 
 ## Таблица: `cloudpayments_webhook_events` (миграция `0014`; семантика значений пересмотрена [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md))
 
-Журнал начисленных платежей broadapps. Единая точка дедупликации + аудиторский след **санитизированного** payload (без карт-данных). Миграция **`0014`** (`down_revision="0013"`, single head, expand-only) — **уже существует; [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md) НЕ добавляет миграцию** (репурпозинг значений колонок без DDL; прод-таблица пуста от успешных строк).
+Журнал начисленных платежей broadapps. Единая точка дедупликации + аудиторский след **санитизированного** payload (без карт-данных). Миграция **`0014`** (`down_revision="0013_byok_provider"`, single head, expand-only) — **уже существует; [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md) НЕ добавляет миграцию** (репурпозинг значений колонок без DDL; прод-таблица пуста от успешных строк).
 
 > **[ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md) — репурпозинг колонок (без изменения схемы):** единица дедупа/идемпотентности — теперь **broadapps `payment_id`** (стабильный id платежа из `GET /users/{deviceId}/payments`), НЕ callback `TransactionId`. Колонка `transaction_id` **хранит `payment_id`**; `user_id` — **резолвнутый** наш `userId` (после двухступенчатого резолва deviceId→userId, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)); `product_id` — `product.code` из верифицированного ответа. Переименование колонки `transaction_id`→`payment_id` — отложенный не-блокирующий долг ([Q-054-3](../../99-open-questions.md)).
 
@@ -48,6 +48,6 @@ CREATE INDEX ix_cloudpayments_webhook_events_user_id ON cloudpayments_webhook_ev
 Добавить модель `CloudPaymentsWebhookEvent` в `src/app/models/tables.py`. Без новых enum-типов.
 
 ## Миграция 0014 (инварианты)
-- `down_revision = "0013"` (после `byok_provider`); **single head** — проверить `alembic heads` = один.
+- `down_revision = "0013_byok_provider"` (ПОЛНЫЙ id ревизии, не короткий `0013`); **single head** — проверить `alembic heads` = один.
 - **Expand-only** (только CREATE TABLE + CREATE INDEX), без backfill, без изменения существующих таблиц.
 - `upgrade` создаёт таблицу+индекс; `downgrade` — `DROP TABLE cloudpayments_webhook_events`.

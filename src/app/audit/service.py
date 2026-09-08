@@ -32,11 +32,20 @@ EVENT_TOOL_CALL_COMPLETED = "tool_call_completed"
 EVENT_ADMIN_GRANT = "admin_grant"
 EVENT_ADMIN_SUBSCRIPTION_GRANT = "admin_subscription_grant"
 EVENT_CRM_SUBSCRIPTION_GRANT = "crm_subscription_grant"
+# ADR-099 §10: правки экономики и настроек инстанса. ИМЯ СОБЫТИЯ НАЗЫВАЕТ ИЗМЕНЁННОЕ —
+# записать смену настройки действием тарифа запрещено, и наоборот.
+EVENT_ADMIN_PRODUCT_CREATED = "admin_product_created"
+EVENT_ADMIN_PRODUCT_UPDATED = "admin_product_updated"
+EVENT_ADMIN_PRODUCT_ARCHIVED = "admin_product_archived"
+EVENT_ADMIN_TARIFF_UPDATED = "admin_tariff_updated"
+EVENT_ADMIN_SETTING_UPDATED = "admin_setting_updated"
 
 
 @dataclass(frozen=True)
 class AuditEvent:
-    user_id: uuid.UUID
+    # None — у события нет пользователя-цели: правка каталога/тарифа/настройки инстанса
+    # (ADR-099 §10). Для всех прежних событий поле обязательно, как и было.
+    user_id: uuid.UUID | None
     event_type: str
     payload: dict[str, Any]
     session_id: uuid.UUID | None = None

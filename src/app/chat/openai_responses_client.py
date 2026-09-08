@@ -22,6 +22,7 @@ from typing import Any, Final
 
 import openai
 
+from app import instance_config
 from app.chat.attachments import PreparedAttachments
 from app.chat.llm_client import (
     STOP_REASON_END_TURN,
@@ -39,7 +40,6 @@ from app.chat.openai_client import (
     _log_upstream_error,
 )
 from app.chat.tools import UnknownToolNameError, openai_tool_function, to_domain_tool_name
-from app.config import get_settings
 from app.errors import UpstreamError, ValidationFailedError
 
 # gpt-4o / gpt-4.1 reject Responses `reasoning.effort` (400 unsupported_parameter).
@@ -612,9 +612,8 @@ class OpenAIResponsesClient(OpenAIClient):
             self._inject_responses_attachments(input_items, attachments)
 
         response_tools = self._serialize_responses_tools(tools, generation_mode)
-        settings = get_settings()
         reasoning = (
-            {"effort": settings.resolved_reasoning_level()}
+            {"effort": instance_config.reasoning_level()}
             if generation_mode == "reasoning"
             else openai.NOT_GIVEN
         )
@@ -677,9 +676,8 @@ class OpenAIResponsesClient(OpenAIClient):
             self._inject_responses_attachments(input_items, attachments)
 
         response_tools = self._serialize_responses_tools(tools, generation_mode)
-        settings = get_settings()
         reasoning = (
-            {"effort": settings.resolved_reasoning_level()}
+            {"effort": instance_config.reasoning_level()}
             if generation_mode == "reasoning"
             else openai.NOT_GIVEN
         )

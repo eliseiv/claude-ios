@@ -59,3 +59,13 @@
 - **Гейт:** пустой `CLOUDPAYMENTS_APP_ID` или `CLOUDPAYMENTS_API_TOKEN` → обе ручки `503 cloudpayments_checkout_not_configured`, исходящего вызова нет.
 - **Лимит:** превышение корзины `rl:experiments:{user_id}` → `429`; изоляция — исчерпание этой корзины **не** влияет на `POST /v1/billing/cloudpayments/checkout` (и наоборот). Это ключевой регресс-тест: он обязан падать при возврате к общему `enforce_other_limits`.
 - **Изоляция:** ни одна запись в БД (ledger/subscriptions/wallet/webhook-events) по этим вызовам не появляется.
+
+## Экономика инстанса из CRM ([ADR-099](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md))
+
+Полный перечень сценариев обеих поверхностей — [modules/admin/09-testing.md](../admin/09-testing.md#integration--экономика-и-настройки-инстанса-adr-099). Здесь — только путь этого модуля.
+
+- Ветка `KIND_TOKENS`: пустой оверлей → `TOKEN_PRODUCTS[product_code]`; оверлей → его `tokens`; ни там ни там → `skipped/unknown_product` (поведение не ослаблено).
+- Ветка `KIND_SUBSCRIPTION`: пустой оверлей → `CLOUDPAYMENTS_PRODUCT_TOKENS` / фиксированный грант; оверлей → его `tokens`.
+- Две ветки проверяются **раздельно**: резолвер отвечает на «сколько», классификация по `payment_type` и реклассификация [ADR-057](../../adr/ADR-057-cloudpayments-payment-type-mismatch-fallback.md) — на «какого класса платёж», и одно не подменяет другое.
+- Идемпотентность по `payment_id` не меняется при активном оверлее.
+- Архивный продукт: оплата по нему **начисляет**, из `GET /v1/tokens/products` он исчез.

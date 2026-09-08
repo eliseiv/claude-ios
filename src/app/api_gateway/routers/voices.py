@@ -20,6 +20,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 
+from app import instance_config
 from app.api_gateway.rate_limit import enforce_other_limits, enforce_speech_limits
 from app.api_gateway.routers.presets import resolve_presets_locale
 from app.chat.speech import SpeechSynthesisService
@@ -95,7 +96,7 @@ async def list_voices(
     resolved = resolve_presets_locale(
         query_locale=locale,
         accept_language=accept_language,
-        default_locale=settings.resolved_presets_default_locale(),
+        default_locale=instance_config.presets_default_locale(),
     )
     enabled = settings.voice_output_enabled
     # Каталог отвечает по ФЛАГУ, а не по ключу (ADR-100 §8): он не выполняет работы, для которой

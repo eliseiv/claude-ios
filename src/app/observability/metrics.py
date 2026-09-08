@@ -154,3 +154,42 @@ speech_synthesis_total = Counter(
     "Assistant speech-synthesis outcomes (ADR-100)",
     ["outcome"],
 )
+
+
+# ADR-099 §10. У каждой метрики назван producer -> consumer; producer лежит на РАБОЧЕМ пути,
+# иначе серия была бы объявлена и никогда не заполнена.
+#
+# producer: обновление снимка оверлеев (app.instance_config.snapshot); consumer: /metrics,
+# отвечает на вопрос «правит ли кто-то этот инстанс из CRM».
+admin_overrides_active = Gauge(
+    "admin_overrides_active",
+    "Number of operator overrides currently in effect, by scope (ADR-099).",
+    ["scope"],
+)
+# producer: то же обновление снимка; consumer: алерт «фоновый обновитель умер». Возраст больше
+# 3x окна означает, что правки оператора НЕ применяются, при том что запись проходит успешно.
+admin_overrides_snapshot_age_seconds = Gauge(
+    "admin_overrides_snapshot_age_seconds",
+    "Age of the in-process instance-config snapshot in seconds (ADR-099).",
+)
+# producer: ветка отказа обновления снимка; consumer: разбор инцидента.
+admin_overrides_refresh_failures_total = Counter(
+    "admin_overrides_refresh_failures_total",
+    "Failed instance-config snapshot refreshes by reason (ADR-099).",
+    ["reason"],
+)
+# producer: валидация PATCH/POST admin-поверхности; consumer: разбор «CRM шлёт то, что мы
+# отвергаем» — то есть расхождение нашего объявления с нашей же валидацией.
+admin_override_rejected_total = Counter(
+    "admin_override_rejected_total",
+    "Rejected operator overrides by scope and reason (ADR-099).",
+    ["scope", "reason"],
+)
+# producer: сборка каталога GET /v1/media/models; consumer: сигнал «выпущенные сборки
+# показывают цену ВЫШЕ фактической». На дефолтной таблице серия равна НУЛЮ — это её нормативное
+# состояние, а не «обычно ноль»: единица на нетронутом инстансе означает дефект вывода.
+media_price_legacy_overquote = Gauge(
+    "media_price_legacy_overquote",
+    "1 when the legacy multiplier triple over-quotes at least one price cell (ADR-099 §4.4).",
+    ["model"],
+)

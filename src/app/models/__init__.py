@@ -3,6 +3,9 @@
 from app.models.base import Base
 from app.models.tables import (
     AdaptyWebhookEvent,
+    AdminProduct,
+    AdminSetting,
+    AdminTariff,
     AuditLog,
     BYOKKey,
     ChatChunk,
@@ -30,6 +33,9 @@ from app.models.tables import (
 __all__ = [
     "Base",
     "AdaptyWebhookEvent",
+    "AdminProduct",
+    "AdminSetting",
+    "AdminTariff",
     "CloudPaymentsWebhookEvent",
     "User",
     "Subscription",

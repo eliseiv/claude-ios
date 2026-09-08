@@ -52,6 +52,14 @@ class ModelInfo(StrictModel):
         default=None,
         description="Семейство fal для группировки вариантов. У chat всегда `null`.",
     )
+    creditCost: int | None = Field(
+        default=None,
+        description=(
+            "Chat: сколько кредитов списывается за один завершённый ход на этой модели. "
+            "`null` у photo/video — их цена зависит от параметров запуска и приходит в "
+            "`GET /v1/media/models`."
+        ),
+    )
 
 
 class ModelsResponse(StrictModel):

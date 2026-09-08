@@ -85,7 +85,7 @@
 - Отсутствующий/нечисловой обязательный query (`date_from`, `date_to`, `limit`, `offset`) → **`422`**
   штатным конвейером валидации FastAPI. Отдельной ветки под это нет и не вводится.
 - Разобранный, но **невалидный период** (не `YYYY-MM-DD`, `date_from > date_to`, длиннее 92 дней) →
-  **`400`** (`src/app/api_gateway/routers/crm_admin.py:208-215`).
+  **`400`** (`crm_daily_costs`, `src/app/api_gateway/routers/crm_admin.py`).
 - **`404` на этом пути не возникает никогда.** По контракту `404` означает ровно одно — «расширение
   v1.3 не реализовано»; отдать его в ответ на кривой параметр значило бы сообщить CRM, что
   эндпоинта нет, и она перестала бы опрашивать бэк вовсе (`daily_costs_supported = false`).
@@ -115,7 +115,7 @@
 
 | Путь | Что это на самом деле | Решение |
 |---|---|---|
-| Шаг `role='assistant'` с `usage IS NULL` отсечён `WHERE` (`src/app/admin/crm_costs.py:111`) | **НЕ вызов LLM.** Это шаг-объявление медиа-визарда «Generation started …» (`src/app/chat/orchestrator.py:1457-1465` — `add_step(role="assistant", …)` **без** `usage`). Оплаченная генерация уже посчитана строкой `media_jobs`. | **Норма, менять запрещено.** Фильтр `AND s.usage IS NOT NULL` снимать нельзя: счёт такого шага в `requests` **удвоил** бы media-генерацию и придумал обращение к провайдеру, которого не было. |
+| Шаг `role='assistant'` с `usage IS NULL` отсечён `WHERE` (`src/app/admin/crm_costs.py:111`) | **НЕ вызов LLM.** Это шаг-объявление медиа-визарда «Generation started …» (`ChatOrchestrator._handle_media_selection`, `src/app/chat/orchestrator.py` — путь «продолжить или завершить визард **без вызова LLM**», `add_step(role="assistant", …)` **без** `usage`). Оплаченная генерация уже посчитана строкой `media_jobs`. | **Норма, менять запрещено.** Фильтр `AND s.usage IS NOT NULL` снимать нельзя: счёт такого шага в `requests` **удвоил** бы media-генерацию и придумал обращение к провайдеру, которого не было. |
 | Шаг с `usage`, но без строкового `model` | **Оплаченный вызов LLM**, который нечему приписать: счётчики есть, имени вендора нет. | **Норма:** отдать клетку с сырым ключом `"Unknown"`, `requests = N`, `spend_usd = null`, `tokens = null`. Реализовано — `src/app/admin/crm_costs.py:198-210`. |
 
 **Почему клетка, а не молчание.** `"Unknown"` — легальный сырой ключ: CRM нормализует его в `other`
@@ -202,16 +202,23 @@ SQL отдаёт **сырые суммы счётчиков** по `(день, �
 
 ## Статус реализации (сверка 2026-08-26, дерево стабильно)
 
+> ⚠️ **Адреса кода в этой таблице переведены с номеров строк на имена символов 2026-09-08.**
+> Причина названа прямо: волна [ADR-099](ADR-099-crm-admin-economics-and-instance-settings.md)
+> добавила в `src/app/api_gateway/routers/crm_admin.py` гейты admin-поверхности экономики и
+> сдвинула всё ниже них примерно на 40 строк — четыре адреса этой таблицы стали указывать
+> **не туда**, при том что ни один гейт не покраснел. Решения ADR-092 не переписаны: изменён
+> только способ адресации ([README §ссылка на код](../README.md)). Тело §1–§8 выше не тронуто.
+
 | Норма | Состояние | Где |
 |---|---|---|
-| §1 эндпоинт, заморожённые имена, порядок, предел 92 дня | **реализовано** | `src/app/api_gateway/routers/crm_admin.py:186-216`, `src/app/schemas/crm_admin.py:125-149` |
+| §1 эндпоинт, заморожённые имена, порядок, предел 92 дня | **реализовано** | `crm_daily_costs` (`src/app/api_gateway/routers/crm_admin.py`), `CrmDailyCostItem`/`CrmDailyCostListResponse` (`src/app/schemas/crm_admin.py`) |
 | §2 `requests` = вызовы (chat-шаг с `usage`, строка `media_jobs`) | **реализовано** | `src/app/admin/crm_costs.py:211-212`, `:230-233` |
 | §3 `tokens` по конвенции прайса; `Fal` → `0.0` | **реализовано** | `src/app/admin/crm_costs.py:219-221`, `:234-237` |
 | §4 `null` только при нуле оценённых вызовов | **реализовано** | `src/app/admin/crm_costs.py:161-178` |
-| §5 `422` / `400`, `404` не возникает; форма даты — регуляркой до `strptime` | **реализовано** | `src/app/api_gateway/routers/crm_admin.py:62-84` (`_ISO_DATE_RE` `:66`), `:208-215` |
+| §5 `422` / `400`, `404` не возникает; форма даты — регуляркой до `strptime` | **реализовано** | `_parse_date` + `_ISO_DATE_RE`, вызовы — из `crm_daily_costs` (всё в `src/app/api_gateway/routers/crm_admin.py`) |
 | §6 клетка `"Unknown"` для вызова без имени модели | **реализовано** | `src/app/admin/crm_costs.py:198-210`; константа `PROVIDER_UNKNOWN` — `src/app/pricing/provider_prices.py:129`, фасад `src/app/pricing/__init__.py:8,24` |
-| §7 метрика + лог | **реализовано** | `src/app/observability/metrics.py:107-111`, `src/app/pricing/provider_prices.py:193-255` |
-| §8 индекс + миграция | **реализовано** | `src/app/models/tables.py:275`, `migrations/versions/20260826_0029_chat_steps_created_at_idx.py` |
+| §7 метрика + лог | **реализовано** | `chat_unpriced_steps_total` (`src/app/observability/metrics.py`), `report_chat_step_pricing` (`src/app/pricing/provider_prices.py`) |
+| §8 индекс + миграция | **реализовано** | `Index("ix_steps_created_at", …)` в `ChatStep.__table_args__` (`src/app/models/tables.py`), `migrations/versions/20260826_0029_chat_steps_created_at_idx.py` |
 | Тесты эндпоинта | **написаны** — `tests/integration/test_crm_daily_costs_adr092.py`, **32** кейса (21 функция, две параметризованы на 7 и 6 входов) | зона `qa`, перечень сценариев — [modules/admin/09-testing.md](../modules/admin/09-testing.md#integration--get-v1admincostsdaily-adr-092) |
 
 **Все нормы этого ADR приведены к коду.** §6 (последняя открытая) закрыта: неатрибутируемый вызов

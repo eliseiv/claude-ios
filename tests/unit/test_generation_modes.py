@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.instance_config.snapshot import EMPTY_SNAPSHOT
 from app.policy.engine import (
     BlockReason,
     ByokState,
@@ -95,29 +96,46 @@ def test_action_prompt_alone_is_valid_turn() -> None:
     assert req.effective_user_text() == "Summarize"
 
 
-def test_generation_mode_credit_costs_are_configurable_positive_values() -> None:
+def test_turn_price_is_a_function_of_the_model_not_of_the_generation_mode() -> None:
+    """ADR-099 §5: решение владельца №1 сняло надбавку за режим.
+
+    Мост цены остался ЕДИНСТВЕННЫМ (ADR-064 §9), сменился только его аргумент: раньше цену давал
+    режим, теперь — модель. Кейс diff-стойкий с двух сторон: он падает и если резолвер вернётся к
+    `CHAT_CREDIT_COST_RESEARCH`/`_REASONING` (значения выбраны заведомо разными), и если он
+    перестанет читать `CHAT_CREDIT_COST_GENERAL` как дефолт строки тарифа.
+    """
+    from app.instance_config import chat_turn_credit_cost
+
     settings = Settings(
         CHAT_CREDIT_COST_GENERAL=2,
         CHAT_CREDIT_COST_RESEARCH=5,
         CHAT_CREDIT_COST_REASONING=7,
     )
 
-    assert settings.chat_generation_credit_cost("general") == 2
-    assert settings.chat_generation_credit_cost("research") == 5
-    assert settings.chat_generation_credit_cost("reasoning") == 7
-    assert settings.chat_generation_credit_cost("unknown") == 2
+    price = chat_turn_credit_cost(None, settings=settings, snapshot=EMPTY_SNAPSHOT)
+    assert price == 2
+    for model_id in settings.allowed_models_union():
+        assert chat_turn_credit_cost(model_id, settings=settings, snapshot=EMPTY_SNAPSHOT) == 2
 
 
 def test_generation_mode_credit_costs_fallback_to_one_when_misconfigured() -> None:
+    """Валидатор положительности остаётся: из `CHAT_CREDIT_COST_*` берётся дефолт строки тарифа.
+
+    Ноль не даёт ни ошибки старта, ни блокировки — гейт баланса проходит, дебит списывает ноль,
+    и ход тихо становится бесплатным (ADR-099 §5.1).
+    """
+    from app.instance_config import chat_turn_credit_cost
+
     settings = Settings(
         CHAT_CREDIT_COST_GENERAL=0,
         CHAT_CREDIT_COST_RESEARCH=-10,
         CHAT_CREDIT_COST_REASONING=0,
     )
 
-    assert settings.chat_generation_credit_cost("general") == 1
-    assert settings.chat_generation_credit_cost("research") == 1
-    assert settings.chat_generation_credit_cost("reasoning") == 1
+    assert settings.chat_credit_cost_general == 1
+    assert settings.chat_credit_cost_research == 1
+    assert settings.chat_credit_cost_reasoning == 1
+    assert chat_turn_credit_cost(None, settings=settings, snapshot=EMPTY_SNAPSHOT) == 1
 
 
 def test_policy_blocks_active_credits_when_balance_below_required_cost() -> None:

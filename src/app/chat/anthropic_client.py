@@ -24,6 +24,7 @@ from typing import Any, cast
 
 import anthropic
 
+from app import instance_config
 from app.chat.attachments import PreparedAttachments
 from app.chat.llm_client import (
     STOP_REASON_END_TURN,
@@ -374,7 +375,7 @@ class AnthropicClient:
                 "thinking": {
                     "type": "enabled",
                     "budget_tokens": budget,
-                    "display": settings.resolved_anthropic_thinking_display(),
+                    "display": instance_config.anthropic_thinking_display(),
                 }
             }
 
@@ -496,7 +497,7 @@ class AnthropicClient:
                 "thinking": {
                     "type": "enabled",
                     "budget_tokens": budget,
-                    "display": settings.resolved_anthropic_thinking_display(),
+                    "display": instance_config.anthropic_thinking_display(),
                 }
             }
 

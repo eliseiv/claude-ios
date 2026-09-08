@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from app.config import Settings
+from app.instance_config import base_credits_for
 from app.media_generation.catalog import KIND_IMAGE, KIND_VIDEO, find_model
 from app.media_generation.service import MediaGenerationService, _normalize_result
 from app.schemas.media import ImageGenerationRequest, VideoGenerationRequest
@@ -21,7 +22,7 @@ def _settings(raw: str) -> Settings:
 
 
 def _service(settings: Settings) -> MediaGenerationService:
-    # Pricing needs no collaborators; the None-typed ones are never touched by credits_for.
+    # Pricing needs no collaborators; the None-typed ones are never touched by price_of.
     return MediaGenerationService(
         repo=None,  # type: ignore[arg-type]
         fal=None,  # type: ignore[arg-type]
@@ -72,17 +73,15 @@ def test_non_positive_int_overrides_are_dropped(raw: str) -> None:
 
 
 def test_price_falls_back_to_the_catalog_default() -> None:
-    service = _service(Settings())
     model = find_model("veo-3.1")
     assert model is not None
-    assert service.credits_for(model) == model.default_credits
+    assert base_credits_for(model, Settings()) == model.default_credits
 
 
 def test_price_uses_the_operator_override_when_present() -> None:
-    service = _service(_settings('{"veo-3.1":400}'))
     model = find_model("veo-3.1")
     assert model is not None
-    assert service.credits_for(model) == 400
+    assert base_credits_for(model, _settings('{"veo-3.1":400}')) == 400
 
 
 def test_image_override_scales_resolution_tiers_from_the_1k_cell() -> None:
@@ -95,10 +94,9 @@ def test_image_override_scales_resolution_tiers_from_the_1k_cell() -> None:
 
 
 def test_a_dropped_override_cannot_make_a_run_free() -> None:
-    service = _service(_settings('{"veo-3.1":0}'))
     model = find_model("veo-3.1")
     assert model is not None
-    assert service.credits_for(model) == model.default_credits
+    assert base_credits_for(model, _settings('{"veo-3.1":0}')) == model.default_credits
 
 
 def test_request_schemas_have_no_price_field() -> None:

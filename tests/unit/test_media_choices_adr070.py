@@ -55,7 +55,6 @@ def test_build_use_last_image_yes_no_options() -> None:
         source_job_id=None,
         last_image_job_id=_LAST_IMAGE,
         answers={},
-        credits_for=lambda m: m.default_credits,
     )
     assert state is not None
     assert state["step"] == STEP_USE_LAST_IMAGE
@@ -120,7 +119,6 @@ def test_build_model_step_options_from_catalog() -> None:
         prompt="a cat",
         source_job_id=None,
         answers={},
-        credits_for=lambda m: m.default_credits,
     )
     assert state is not None
     assert state["step"] == STEP_MODEL
@@ -143,7 +141,6 @@ def test_resolution_labels_include_tier_prices() -> None:
         prompt="a cat",
         source_job_id=None,
         answers={"model": "nano-banana-2"},
-        credits_for=lambda m: m.default_credits,
     )
     assert state is not None
     assert state["step"] == STEP_RESOLUTION
@@ -169,7 +166,6 @@ def test_media_choices_wire_omits_fal_prompt() -> None:
         prompt="secret fal prompt text",
         source_job_id=None,
         answers={},
-        credits_for=lambda m: m.default_credits,
     )
     assert state is not None
     wire = media_choices_response(state)

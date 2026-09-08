@@ -23,6 +23,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from app import instance_config
 from app.chat.attachments import (
     _check_magic_bytes,
     _decode_base64,
@@ -45,7 +46,6 @@ from app.media_generation.catalog import (
     build_fal_input,
     find_model,
     resolve_values,
-    run_price,
 )
 from app.media_generation.cursor import MediaJobCursor
 from app.media_generation.fal_client import (
@@ -165,13 +165,10 @@ class MediaGenerationService:
 
     # ---- pricing ----
 
-    def credits_for(self, model: FalModel) -> int:
-        """Base price of one run: MEDIA_MODEL_CREDITS override, else the catalog default.
-
-        Never derived from the request body (anti-tamper) and never zero: a non-positive override
-        is dropped by ``Settings.media_model_credits()``, so the catalog default always wins.
-        """
-        return self._settings.media_model_credits().get(model.id, model.default_credits)
+    # Базовой цены реестра у сервиса больше НЕТ отдельным методом: показывать её пользователю
+    # нельзя (она не читает операторский тариф — ADR-099 §5.1), а внутри сервиса цену считает
+    # только `price_of`. Единственное определение реестровой базы живёт в
+    # `instance_config.base_credits_for`; цена ДЛЯ ПОКАЗА — `instance_config.media_base_credits`.
 
     def price_of(
         self,
@@ -187,13 +184,16 @@ class MediaGenerationService:
         Image: per-resolution credits × numImages. Video: pack price × duration packs × (Veo)
         resolution/audio multipliers. text-to-* vs image-to-* does not change the price.
         """
-        return run_price(
+        # ADR-099 §4: цена берётся из ячейки операторского тарифа, если она настроена, и из
+        # сегодняшней формулы, если нет. Пустой оверлей воспроизводит прежнее списание
+        # бит-в-бит — это свойство конструкции, а не проверка сидов.
+        return instance_config.media_run_price(
             model=model,
-            base_credits=self.credits_for(model),
             num_images=num_images,
             duration=duration,
             resolution=resolution,
             generate_audio=generate_audio,
+            settings=self._settings,
         )
 
     # ---- submit ----

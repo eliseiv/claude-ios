@@ -62,7 +62,15 @@ def test_effective_mode_v2_ignores_legacy_flag() -> None:
         settings.chat_legacy_web_search_enabled = original
 
 
-def test_turn_credit_cost_legacy_default_stays_one() -> None:
+def test_turn_credit_cost_legacy_gets_more_expensive_when_general_is_above_one() -> None:
+    """ADR-099 §5.3, последняя строка таблицы: легаси-ход ДОРОЖАЕТ, а не дешевеет.
+
+    Сегодня легаси-путь возвращал литерал `1` и `CHAT_CREDIT_COST_GENERAL` не читал вовсе.
+    Перевод на общий резолвер (обязательный — иначе появился бы второй механизм цены, ADR-064 §9)
+    делает ход равным цене модели, дефолт которой = `CHAT_CREDIT_COST_GENERAL`. Правило «после
+    выката всё дешевеет» неверно, и кейс закрывает именно эту сторону: он падает при возврате
+    литерала `1`, потому что `_GENERAL` выставлен заведомо больше единицы.
+    """
     settings = get_settings()
     original = (
         settings.chat_legacy_web_search_enabled,
@@ -73,8 +81,7 @@ def test_turn_credit_cost_legacy_default_stays_one() -> None:
     settings.chat_credit_cost_general = 9
     settings.chat_credit_cost_research = 3
     try:
-        assert _turn_credit_cost("general", use_generation_v2=False) == 1
-        assert _turn_credit_cost("research", use_generation_v2=False) == 1
+        assert _turn_credit_cost(None) == 9
     finally:
         (
             settings.chat_legacy_web_search_enabled,
@@ -83,19 +90,30 @@ def test_turn_credit_cost_legacy_default_stays_one() -> None:
         ) = original
 
 
-def test_turn_credit_cost_legacy_flag_uses_research_price() -> None:
+def test_turn_credit_cost_ignores_the_legacy_flag_entirely() -> None:
+    """Флаг переводит ход в `research` ПО ПОВЕДЕНИЮ (hosted-поиск), но не по цене.
+
+    Кейс падает, если списание снова начнёт зависеть от `CHAT_CREDIT_COST_RESEARCH`: значение
+    выставлено отличным от `_GENERAL` намеренно.
+    """
     settings = get_settings()
     original = (
         settings.chat_legacy_web_search_enabled,
+        settings.chat_credit_cost_general,
         settings.chat_credit_cost_research,
     )
-    settings.chat_legacy_web_search_enabled = True
+    settings.chat_credit_cost_general = 2
     settings.chat_credit_cost_research = 3
     try:
-        assert _turn_credit_cost("research", use_generation_v2=False) == 3
+        settings.chat_legacy_web_search_enabled = True
+        with_flag = _turn_credit_cost(None)
+        settings.chat_legacy_web_search_enabled = False
+        without_flag = _turn_credit_cost(None)
+        assert with_flag == without_flag == 2
     finally:
         (
             settings.chat_legacy_web_search_enabled,
+            settings.chat_credit_cost_general,
             settings.chat_credit_cost_research,
         ) = original
 

@@ -14,12 +14,13 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, Path, Request
 
 from app.admin.service import AdminService
+from app.api_gateway.admin_guards import enforce_admin_body_size
 from app.api_gateway.auth import require_admin
 from app.api_gateway.rate_limit import enforce_admin_limits
 from app.api_gateway.routers import admin_media_templates, crm_admin, memory
 from app.config import get_settings
 from app.deps import client_ip, get_admin_service
-from app.errors import PayloadTooLargeError, RateLimitedError
+from app.errors import RateLimitedError
 from app.schemas.admin import (
     AdminGrantRequest,
     AdminGrantResponse,
@@ -44,17 +45,6 @@ router.include_router(admin_media_templates.router)
 router.include_router(memory.admin_router)
 
 
-def _enforce_admin_body_size(request: Request) -> None:
-    """Reject admin bodies over the stricter admin cap (<= 8 KB, ADR-009 §6) → 413."""
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            if int(content_length) > get_settings().admin_size_limit_body:
-                raise PayloadTooLargeError("admin request body exceeds limit")
-        except ValueError:
-            pass
-
-
 async def _enforce_admin_rate_limit(request: Request) -> None:
     if not await enforce_admin_limits(ip=client_ip(request)):
         raise RateLimitedError("admin rate limit exceeded")
@@ -76,7 +66,7 @@ async def admin_wallet_grant(
     admin: Annotated[AdminService, Depends(get_admin_service)],
     body: Annotated[AdminGrantRequest, Body()],
 ) -> AdminGrantResponse:
-    _enforce_admin_body_size(request)
+    enforce_admin_body_size(request)
     await _enforce_admin_rate_limit(request)
     result = await admin.grant(
         user_id=body.userId,
@@ -109,7 +99,7 @@ async def admin_subscription_grant(
     admin: Annotated[AdminService, Depends(get_admin_service)],
     body: Annotated[AdminSubscriptionGrantRequest, Body()],
 ) -> AdminSubscriptionGrantResponse:
-    _enforce_admin_body_size(request)
+    enforce_admin_body_size(request)
     await _enforce_admin_rate_limit(request)
     expires_at = body.expiresAt
     if expires_at is None:

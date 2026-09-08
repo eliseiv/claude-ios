@@ -51,17 +51,26 @@ async def test_legacy_run_default_stays_general_without_web_search(
 
 
 @pytest.mark.asyncio
-async def test_legacy_run_with_flag_attaches_web_search_and_charges_research(
+async def test_legacy_run_with_flag_attaches_web_search_and_charges_the_model_price(
     client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     fake_anthropic: FakeAnthropicClient,
 ) -> None:
+    """ADR-099 §5.3: флаг переводит ход в `research` ПО ПОВЕДЕНИЮ, но не по цене.
+
+    Легаси-ход теперь стоит цену модели (дефолт строки — `CHAT_CREDIT_COST_GENERAL`), и на
+    инстансе с `CHAT_CREDIT_COST_GENERAL > 1` он ДОРОЖАЕТ — изменение в противоположную сторону
+    от остальных строк таблицы §5.3. Три величины здесь заведомо различны (1 / 2 / 3): кейс
+    падает и при возврате литерала `1`, и при чтении надбавки `_RESEARCH`.
+    """
     settings = get_settings()
     original = (
         settings.chat_legacy_web_search_enabled,
+        settings.chat_credit_cost_general,
         settings.chat_credit_cost_research,
     )
     settings.chat_legacy_web_search_enabled = True
+    settings.chat_credit_cost_general = 2
     settings.chat_credit_cost_research = 3
     try:
         async with db_sessionmaker() as s:
@@ -93,10 +102,11 @@ async def test_legacy_run_with_flag_attaches_web_search_and_charges_research(
             bal = await s.scalar(
                 text("SELECT balance FROM wallets WHERE user_id=:u"), {"u": str(uid)}
             )
-        assert int(bal) == 7
+        assert int(bal) == 8  # цена модели (2), а не надбавка research (3) и не литерал 1
     finally:
         (
             settings.chat_legacy_web_search_enabled,
+            settings.chat_credit_cost_general,
             settings.chat_credit_cost_research,
         ) = original
 

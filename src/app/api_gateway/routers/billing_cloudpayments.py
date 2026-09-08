@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
+from app import instance_config
 from app.api_gateway.rate_limit import (
     enforce_cloudpayments_webhook_limits,
     enforce_experiment_limits,
@@ -160,7 +161,7 @@ async def experiments_assign(
         raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
     if not await enforce_experiment_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
-    locale = resolve_experiment_locale(accept_language, settings.presets_default_locale)
+    locale = resolve_experiment_locale(accept_language, instance_config.presets_default_locale())
     result = await client.assign(
         user_id=current.user_id,
         experiment_code=body.experimentCode,
@@ -201,7 +202,7 @@ async def experiments_paywall_shown(
         raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
     if not await enforce_experiment_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
-    locale = resolve_experiment_locale(accept_language, settings.presets_default_locale)
+    locale = resolve_experiment_locale(accept_language, instance_config.presets_default_locale())
     logged = await client.paywall_shown(
         user_id=current.user_id,
         experiment_code=body.experimentCode,

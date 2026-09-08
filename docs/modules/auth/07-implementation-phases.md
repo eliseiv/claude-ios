@@ -12,7 +12,7 @@
 - **Не ломать** существующие `JWT_PUBLIC_KEY`/`JWT_JWKS_URL`/`JWT_ISSUER`/`JWT_AUDIENCE` (verify-path).
 
 ## Phase 2 — Миграция 0005
-- `auth_devices`, `auth_refresh_tokens` ([04-data-model.md](04-data-model.md)). Expand-only, `down_revision='0004'`. `users` не трогать.
+- `auth_devices`, `auth_refresh_tokens` ([04-data-model.md](04-data-model.md)). Expand-only, `down_revision='0004_figma_gap_sprint1'` (ПОЛНЫЙ id — см. пункт ниже). `users` не трогать.
 
 ## Phase 3 — TokenIssuer + AuthService
 - `src/app/auth/issuer.py` — RS256-подпись (claims `sub/device_id/iss/aud/iat/exp`, заголовок `kid`), reuse значений `JWT_ISSUER`/`JWT_AUDIENCE`.

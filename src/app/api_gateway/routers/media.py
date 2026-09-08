@@ -18,6 +18,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Path, Query, Request
 from starlette.responses import StreamingResponse
 
+from app import instance_config
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.deps import (
     CurrentUser,
@@ -30,8 +31,8 @@ from app.media_generation.asset_proxy import stream_fal_asset
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
+    FalModel,
     all_models,
-    resolution_credits_for_api,
 )
 from app.media_generation.cursor import InvalidCursorError, MediaJobCursor
 from app.media_generation.service import MediaGenerationService, MediaJobView
@@ -47,6 +48,7 @@ from app.schemas.media import (
     MediaModelSchema,
     MediaModelsResponse,
     MediaModeSchema,
+    MediaPriceCellSchema,
     MediaUploadRequest,
     MediaUploadResponse,
     VideoGenerationRequest,
@@ -132,13 +134,86 @@ def _decode_cursor(value: str | None) -> MediaJobCursor | None:
         raise ValidationFailedError("invalid cursor") from exc
 
 
+def _legacy_video_pricing(model: FalModel) -> instance_config.LegacyVideoPricing | None:
+    """Легаси-тройка видео-модели; ``None`` у image-моделей (у них поячеечная карта точна).
+
+    Вычисляется ОДИН раз на модель за запрос: вывод перебирает все ячейки модели и попутно
+    выставляет метрику непредставимости и пишет лог-событие. Три отдельных вызова ради трёх
+    полей одного ответа утроили бы и работу, и записи в журнал.
+    """
+    if model.kind != KIND_VIDEO:
+        return None
+    return instance_config.derive_legacy_video_pricing(model)
+
+
+def _model_schema(
+    model: FalModel,
+    derived: instance_config.LegacyVideoPricing | None,
+) -> MediaModelSchema:
+    return MediaModelSchema(
+        id=model.id,
+        title=model.title,
+        kind=model.kind,
+        # ADR-099 §4.4. Скаляр выводится ИЗ ТЕХ ЖЕ ЯЧЕЕК, что и соседние поля: иначе после
+        # правки одной ячейки ответ противоречил бы сам себе, а `credits` занижал бы списание.
+        # У ФОТО деградации нет: `resolutionCredits` — уже поячеечная карта, и `credits` равен
+        # ячейке базового качества, поэтому любая правка отображается точно. У ВИДЕО
+        # легаси-тройка ВЫВОДИТСЯ из ячеек минимальными значениями, не занижающими ни одну из
+        # них после клиентского округления. Два соседних поля одного ответа с разными нормами —
+        # и это названо, чтобы одну норму не скопировали на другую.
+        credits=(
+            derived.credits if derived is not None else instance_config.media_base_credits(model)
+        ),
+        baseDurationSeconds=model.base_duration_seconds,
+        resolutionCredits=(instance_config.photo_resolution_credits(model) or None),
+        resolutionMultipliers=derived.resolution_multipliers if derived is not None else None,
+        audioMultiplier=derived.audio_multiplier if derived is not None else None,
+        prices=_price_cells(model),
+        supportsImageInput=model.image_variant is not None,
+        maxInputImages=model.max_input_images if model.image_variant else 0,
+        supportsAudio=model.supports_audio,
+        modes=[
+            MediaModeSchema(
+                mode=mode,
+                # Sorted so the payload is stable across restarts (fields is a frozenset).
+                params=sorted(variant.fields),
+                aspectRatios=list(variant.aspect_ratios),
+                resolutions=list(variant.resolutions),
+                durations=list(variant.durations),
+                defaults=dict(variant.defaults),
+            )
+            for mode, variant in model.variants()
+        ],
+    )
+
+
+def _price_cells(model: FalModel) -> list[MediaPriceCellSchema]:
+    cells = (
+        instance_config.photo_price_cells(model)
+        if model.kind == KIND_IMAGE
+        else instance_config.video_price_cells(model)
+    )
+    return [
+        MediaPriceCellSchema(
+            resolution=cell.resolution,
+            durationSeconds=cell.duration_seconds,
+            audio=cell.audio,
+            credits=cell.credits,
+        )
+        for cell in cells
+    ]
+
+
 @router.get(
     "/models",
     response_model=MediaModelsResponse,
     summary="Каталог моделей генерации",
     description=(
         "Возвращает доступные модели генерации фото и видео: идентификатор для поля `model`, "
-        "базовую цену и **ступени качества**. Image: `resolutionCredits[resolution] × numImages`. "
+        "точные цены комбинаций в `prices[]` и совместимый агрегат для старых сборок. "
+        "Считайте стоимость по `prices[]`: агрегат никогда не занижает списание, но после "
+        "поячеечной правки цены может его завысить. "
+        "Image: `resolutionCredits[resolution] × numImages`. "
         "Video: `credits × ceil(duration/baseDurationSeconds) × resolutionMultipliers[resolution] "
         "× (audioMultiplier при generateAudio)`, итог округляется вверх. Mode text/image на цену "
         "не влияет. Режимов у модели два — без референса и с ним; у каждого свои `params`, наборы "
@@ -151,42 +226,10 @@ def _decode_cursor(value: str | None) -> MediaJobCursor | None:
 async def list_media_models(
     request: Request,
     current: CurrentUser,
-    media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
 ) -> MediaModelsResponse:
     await _rate_limit(current.user_id)
     return MediaModelsResponse(
-        models=[
-            MediaModelSchema(
-                id=model.id,
-                title=model.title,
-                kind=model.kind,
-                credits=media.credits_for(model),
-                baseDurationSeconds=model.base_duration_seconds,
-                resolutionCredits=(
-                    resolution_credits_for_api(model, base_credits=media.credits_for(model)) or None
-                ),
-                resolutionMultipliers=(
-                    dict(model.resolution_multipliers) if model.resolution_multipliers else None
-                ),
-                audioMultiplier=model.audio_multiplier,
-                supportsImageInput=model.image_variant is not None,
-                maxInputImages=model.max_input_images if model.image_variant else 0,
-                supportsAudio=model.supports_audio,
-                modes=[
-                    MediaModeSchema(
-                        mode=mode,
-                        # Sorted so the payload is stable across restarts (fields is a frozenset).
-                        params=sorted(variant.fields),
-                        aspectRatios=list(variant.aspect_ratios),
-                        resolutions=list(variant.resolutions),
-                        durations=list(variant.durations),
-                        defaults=dict(variant.defaults),
-                    )
-                    for mode, variant in model.variants()
-                ],
-            )
-            for model in all_models()
-        ]
+        models=[_model_schema(model, _legacy_video_pricing(model)) for model in all_models()]
     )
 
 
