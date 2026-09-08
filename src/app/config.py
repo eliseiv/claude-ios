@@ -396,6 +396,15 @@ class Settings(BaseSettings):
     # таких вызовов не умеет, модель звала бы их впустую и ход оставался бы незавершённым.
     # Включать только там, где клиент их реализовал.
     code_tools_enabled: bool = Field(default=False, alias="CODE_TOOLS_ENABLED")
+    # ADR-102 (ось E): инструменты карт (maps.show_place/geocode/reverse_geocode/route/
+    # search_places). Выключены по умолчанию НАМЕРЕННО и по той же причине, что ось D: их
+    # исполняет КЛИЕНТ, а позванный, но неисполнимый клиентский вызов оставляет ход
+    # НЕЗАВЕРШЁННЫМ — барьер ADR-025 ждёт tool-result, которого приложение прислать не может,
+    # и ни таймаута, ни сборщика «протухших» вызовов в коде нет. Включать только там, где
+    # приложение реализовало ВСЕ ПЯТЬ исполнителей: частичная реализация недопустима.
+    # В отличие от оси D, с `assistant_mode` НЕ складывается — «как доехать» это обычный чат,
+    # а не режим. На каталог GET /v1/tools не влияет.
+    maps_tools_enabled: bool = Field(default=False, alias="MAPS_TOOLS_ENABLED")
     # ADR-082: when True, legacy `/v1/chat/run` (and `/tool-result`) attach hosted web search
     # by treating the turn as `research` (price = CHAT_CREDIT_COST_RESEARCH). Default False —
     # every other instance keeps 1-credit general chat. Per-instance (orvianix / ravionet).

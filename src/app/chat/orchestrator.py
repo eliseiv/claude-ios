@@ -64,6 +64,9 @@ from app.chat.repository import ChatRepository, derive_title
 from app.chat.tools import (
     ARGS_DEGRADE_TOOLS,
     GLOBAL_SERVER_SIDE_TOOLS,
+    MAPS_INVALID_ERROR_CODE,
+    MAPS_PAIRING_HINT,
+    MAPS_TOOLS,
     MEDIA_CHAT_TOOLS,
     MUTATING_TOOLS,
     PATCH_FORMAT_HINT,
@@ -84,6 +87,7 @@ from app.chat.tools import (
     content_free_args_error,
     neutral_tool_definitions,
     offered_in_generation_mode,
+    offered_maps_tool,
     offered_media_chat_tool,
     offered_tool_family,
     validate_tool_args,
@@ -282,6 +286,25 @@ _CODE_TOOLS_INSTRUCTION = (
 )
 
 
+# ADR-102 §11: указания по картам живут ОТДЕЛЬНОЙ строкой и добавляются только там, где семейство
+# реально предложено (ось E) — образец `_CODE_TOOLS_INSTRUCTION` выше. При выключенном флаге
+# базовый промт остаётся БАЙТ-В-БАЙТ прежним, включая перечисление «(files, calendar, reminders)»:
+# иначе на всём флоте сменился бы префикс и обнулился prompt-кэш, а модель получила бы предписание
+# звать инструменты, которых у неё нет.
+# Инструкция задаёт ПОРЯДОК, а не перечисляет инструменты: место сперва разрешается, и только
+# потом показывается или прокладывается маршрут.
+_MAPS_TOOLS_INSTRUCTION = (
+    "When the user asks about a place, an address, a route or travel time: first resolve the "
+    "place with maps.geocode or maps.search_places, then show it with maps.show_place or build "
+    "the route with maps.route using the coordinates the tool returned — never coordinates you "
+    "recalled. State intent explicitly instead of relying on a default: pass current_location "
+    "only when the user asked about where THEY are, coordinates otherwise; and always name the "
+    "departure moment — 'now' for a trip starting now, 'at' with a local departure time for any "
+    "other. Quote the localized distance and duration strings from the result verbatim rather "
+    "than converting the numbers yourself."
+)
+
+
 def _compose_system_prompt(assistant_mode: str, disabled: frozenset[str]) -> str:
     """Base assistant_mode prompt, with disabled tool families stripped (ADR-081).
 
@@ -431,6 +454,9 @@ def _system_prompt_for(
     ADR-081: families in ``CHAT_DISABLED_TOOL_FAMILIES`` are omitted from the tool sentence.
     ADR-094: the code-work instruction is appended under the SAME condition that offers the code
     tools (``CODE_TOOLS_ENABLED`` and ``assistant_mode == "code"``) — never one without the other.
+    ADR-102: the maps instruction is appended under the SAME condition that offers the maps tools
+    (``MAPS_TOOLS_ENABLED``) — and, unlike axis D, WITHOUT an ``assistant_mode`` condition. With
+    the flag off the prompt is byte-for-byte the previous one (prompt cache).
     ADR-097: the character layer (persona + guardrails) goes AFTER the base prompt and its tool
     instructions but BEFORE the mode suffix — the last layer weighs more in practice, so the task
     of the turn and the user's own instructions must be able to outweigh a decorative voice, not
@@ -450,6 +476,11 @@ def _system_prompt_for(
         base = f"{base} {_CODE_TOOLS_INSTRUCTION}"
     if instance_config.media_tools_enabled():
         base = f"{base} {_MEDIA_GENERATE_INSTRUCTION}"
+    # ADR-102 ось E: как и у оси D, указания добавляются РОВНО по тому условию, по которому
+    # предлагаются сами инструменты, — но БЕЗ `assistant_mode`: карты доступны в обычном чате.
+    # Флаг выключен → строки нет вовсе, и `system` побайтно совпадает с прежним.
+    if get_settings().maps_tools_enabled:
+        base = f"{base} {_MAPS_TOOLS_INSTRUCTION}"
     if instance_config.characters_enabled():
         persona = character_prompt_layer(character_id)
         if persona is not None:
@@ -2744,6 +2775,9 @@ class ChatOrchestrator:
                         and sess is not None
                         and sess.assistant_mode == "code"
                     ),
+                    # ADR-102 ось E: карты гейтит ТОЛЬКО флаг инстанса. С `assistant_mode` ось
+                    # намеренно не складывается — «как доехать» это обычный чат, а не режим.
+                    maps_tools_enabled=get_settings().maps_tools_enabled,
                 ),
                 "attachments": turn0_attachments,
                 "generation_mode": effective_generation_mode,
@@ -3258,6 +3292,38 @@ class ChatOrchestrator:
                 )
                 continue
 
+            # ADR-102 §10: defensive guard оси E — ОБЯЗАТЕЛЕН, в отличие от оси D (TD-044), и не
+            # является дублированием гейта. Гейт лишь не показывает инструмент модели; если она
+            # всё же вернёт `maps.*` при выключенном флаге, клиентский вызов создавать НЕЛЬЗЯ:
+            # приложение исполнить его не умеет, tool-result не придёт никогда, а барьер ADR-025
+            # продолжает ход только когда КАЖДЫЙ client-side вызов получил `completed`/`errored`
+            # — ни таймаута, ни сборщика «протухших» вызовов в коде нет. Без guard'а выключенный
+            # флаг не спасал бы от подвисшего хода: человек не получил бы ответа вовсе.
+            # Отказ МЯГКИЙ (побочных эффектов у карт нет), тем же механизмом, что денилист
+            # ADR-081: ход продолжается и заканчивается ответом. Наблюдаемое следствие, названное
+            # заранее: отказ проходит через `_persist_tool_execution` и попадает в `serverTools[]`
+            # записью со `status="errored"`, хотя `maps.*` клиентские, — там отражается ДЕЙСТВИЕ
+            # БЭКЕНДА (отказ), а не исполнение инструмента; ровно так уже ведут себя отказы
+            # `files.*` по денилисту.
+            if tool_name in MAPS_TOOLS and not offered_maps_tool(
+                tool_name,
+                maps_tools_enabled=get_settings().maps_tools_enabled,
+            ):
+                await self._record_refused_tool_call(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message_step_id=message_step_id,
+                    tool_name=tool_name,
+                    raw_args=raw_args,
+                    provider_tool_use_id=provider_tool_use_id,
+                    execution=ToolExecution.error(
+                        "tool_not_available",
+                        f"tool {tool_name} is not available on this instance",
+                    ),
+                    server_tools=server_tools,
+                )
+                continue
+
             try:
                 validated_args = validate_tool_args(tool_name, raw_args)
             except ValueError as exc:
@@ -3287,6 +3353,14 @@ class ChatOrchestrator:
                     # Свой код, а не media-шный: модель по нему понимает, ЧТО переспросить.
                     degrade_code = DOCUMENT_INVALID_ERROR_CODE
                     degrade_msg = content_free_args_error(exc)
+                elif tool_name in MAPS_TOOLS:
+                    # ADR-102 §8: свой код + постоянная подсказка о ПАРНОСТИ полей — кросс-полевые
+                    # правила в JSON Schema не выражаются, и узнать о них модель может только
+                    # отсюда. Сообщение строго content-free: `str(exc)` у pydantic печатает
+                    # ЗНАЧЕНИЯ, вызвавшие отказ, то есть координаты, а этот текст персистируется
+                    # в шаге и реплеится провайдеру на каждом следующем витке.
+                    degrade_code = MAPS_INVALID_ERROR_CODE
+                    degrade_msg = f"{content_free_args_error(exc)}; {MAPS_PAIRING_HINT}"
                 else:
                     degrade_code = MEDIA_INVALID_ERROR_CODE
                     degrade_msg = content_free_args_error(exc)

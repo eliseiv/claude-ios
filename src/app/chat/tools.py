@@ -43,6 +43,18 @@ TOOL_CALENDAR_CREATE = "calendar.create_events"
 TOOL_REMINDERS_READ = "reminders.read"
 TOOL_REMINDERS_CREATE = "reminders.create"
 
+# --- Инструменты карт (ADR-102) --------------------------------------------------------------
+# Клиентские: MapKit, CoreLocation и CLGeocoder живут ТОЛЬКО на устройстве — у бэкенда нет ни
+# карт, ни геопозиции, ни права её спрашивать. Бэкенд объявляет модели и инициирует вызов,
+# приложение исполняет и возвращает результат через POST /v1/chat/tool-result. Тот же класс, что
+# calendar.*/reminders.*. Включаются флагом инстанса MAPS_TOOLS_ENABLED (ось E), с `assistant_mode`
+# ось НЕ складывается. Ни один из пяти не мутирует и подтверждения не требует.
+TOOL_MAPS_SHOW_PLACE = "maps.show_place"
+TOOL_MAPS_GEOCODE = "maps.geocode"
+TOOL_MAPS_REVERSE_GEOCODE = "maps.reverse_geocode"
+TOOL_MAPS_ROUTE = "maps.route"
+TOOL_MAPS_SEARCH_PLACES = "maps.search_places"
+
 # Server-side tools (site.*, ADR-011): executed by the backend, not the iOS client.
 TOOL_SITE_WRITE_FILE = "site.write_file"
 TOOL_SITE_PREVIEW = "site.preview"
@@ -123,6 +135,21 @@ MEDIA_CHAT_TOOLS = frozenset(
     }
 )
 
+# Инструменты карт (ADR-102 §10). Все клиентские. Гейтит ось E — флаг инстанса
+# MAPS_TOOLS_ENABLED, дефолт выключено. В DISABLEABLE_TOOL_FAMILIES семейство НАМЕРЕННО не
+# входит: денилист — механизм opt-out (по умолчанию семейство предлагается везде и гасится
+# правкой .env на каждом инстансе), а карты обязаны быть по умолчанию ВЫКЛЮЧЕНЫ; вдобавок
+# денилист режет и каталог GET /v1/tools, который обязан оставаться полным.
+MAPS_TOOLS = frozenset(
+    {
+        TOOL_MAPS_SHOW_PLACE,
+        TOOL_MAPS_GEOCODE,
+        TOOL_MAPS_REVERSE_GEOCODE,
+        TOOL_MAPS_ROUTE,
+        TOOL_MAPS_SEARCH_PLACES,
+    }
+)
+
 # Axis C — generation-mode gate (ADR-064 §3). A tool listed here is offered to the model IF AND
 # ONLY IF the EFFECTIVE generation mode of the turn is in its set. A tool ABSENT from this registry
 # is not mode-gated at all (all 14 others behave exactly as before). The gate is evaluated against
@@ -168,6 +195,13 @@ ARGS_DEGRADE_TOOLS = frozenset(
         # возвращает модели подсказку о формате в ТОМ ЖЕ ходе — она переписывает заплатку сама,
         # и до машины человека негодный diff не доезжает вовсе.
         TOOL_FILES_PATCH,
+        # ADR-102 §8: кросс-полевые правила семейства карт (`coordinates` ⇒ обе координаты
+        # заданы; `current_location` ⇒ обе пусты; `at` ⇒ задан departureTimeLocal) в JSON Schema
+        # без oneOf/if-then не выражаются, а опираться на их поддержку двумя провайдерами
+        # контракт не должен. Значит нарушение парности — ОЖИДАЕМЫЙ исход, а не аномалия схемы,
+        # и ронять им весь ход в 422 нельзя: человек остался бы без ответа из-за того, что
+        # модель перепутала пару полей.
+        *MAPS_TOOLS,
     }
 )
 
@@ -218,6 +252,7 @@ ALL_TOOL_NAMES = frozenset(
         TOOL_REMINDERS_READ,
         TOOL_REMINDERS_CREATE,
         *CODE_TOOLS,
+        *MAPS_TOOLS,
         *SERVER_SIDE_TOOLS,
         *GLOBAL_SERVER_SIDE_TOOLS,
     }
@@ -252,6 +287,13 @@ _DOMAIN_TO_ANTHROPIC: dict[str, str] = {
     TOOL_CALENDAR_CREATE: "calendar_create_events",
     TOOL_REMINDERS_READ: "reminders_read",
     TOOL_REMINDERS_CREATE: "reminders_create",
+    # ADR-102: тот же перевод точки в подчёркивание. Пропущенная здесь строка — молчаливый
+    # отказ: Anthropic отвергает точку в имени инструмента и отвечает 400, то есть 502 наружу.
+    TOOL_MAPS_SHOW_PLACE: "maps_show_place",
+    TOOL_MAPS_GEOCODE: "maps_geocode",
+    TOOL_MAPS_REVERSE_GEOCODE: "maps_reverse_geocode",
+    TOOL_MAPS_ROUTE: "maps_route",
+    TOOL_MAPS_SEARCH_PLACES: "maps_search_places",
     # Server-side site.* (ADR-011 §3): same dot→underscore mapping as client-side tools.
     TOOL_SITE_WRITE_FILE: "site_write_file",
     TOOL_SITE_PREVIEW: "site_preview",
@@ -519,6 +561,185 @@ class ReminderInput(_StrictModel):
 
 class RemindersCreateArgs(_StrictModel):
     reminders: list[ReminderInput]
+
+
+# --- инструменты карт (ADR-102) ---
+# Числовые ограничения живут КЛЮЧАМИ СХЕМЫ, а не кастомным валидатором (ADR-065 §4): strict-режим
+# tool-args выключен у обоих провайдеров, они эти ключи не отвергают, и модель узнаёт о границе
+# из подсказки, а не из оплаченного degrade-витка.
+MAPS_LATITUDE_MIN = -90.0
+MAPS_LATITUDE_MAX = 90.0
+MAPS_LONGITUDE_MIN = -180.0
+MAPS_LONGITUDE_MAX = 180.0
+MAPS_QUERY_MAX_LENGTH = 200
+MAPS_NAME_MAX_LENGTH = 200
+MAPS_MIN_RESULTS = 1
+MAPS_MAX_RESULTS = 10
+MAPS_DEFAULT_RESULTS = 5
+MAPS_MIN_RADIUS_METERS = 100
+MAPS_MAX_RADIUS_METERS = 50_000
+MAPS_DEFAULT_RADIUS_METERS = 2_000
+MAPS_DEPARTURE_TIME_MAX_LENGTH = 32
+
+# Координата — ТОЛЬКО именованное поле, никогда позиционная пара и никогда строка «55.75,37.62»
+# (ADR-102 §2). Перепутанный порядок «долгота, широта» — самая частая МОЛЧАЛИВАЯ ошибка области:
+# значения валидны, тип верен, а точка оказывается в другом полушарии. Диапазоны ниже ловят
+# только |latitude| > 90; от перестановки двух значений, каждое ≤ 90 по модулю, защищают ИМЕНА
+# полей, а не границы, — поэтому именование здесь несущая конструкция, а не стиль.
+MapsLatitude = Annotated[float, Field(ge=MAPS_LATITUDE_MIN, le=MAPS_LATITUDE_MAX)]
+MapsLongitude = Annotated[float, Field(ge=MAPS_LONGITUDE_MIN, le=MAPS_LONGITUDE_MAX)]
+
+# Величину, которую подставляет ПРИЛОЖЕНИЕ, а не модель, модель обязана выбрать ЯВНО (ADR-102 §4).
+# Умолчание «нет координат ⇒ взять геопозицию» невидимо: его нет ни в аргументах, ни в истории,
+# ни в ответе, и «кофейни рядом» выглядело бы в args так же, как «кофейни в Берлине».
+MapsPointKind = Literal["current_location", "coordinates"]
+# Велосипеда в перечне НЕТ: MKDirectionsTransportType его не поддерживает, а значение, которое
+# приложение исполнить не может, — гарантированный отказ, оформленный как возможность.
+MapsTransportType = Literal["automobile", "walking", "transit"]
+# Ловушка «на сейчас» закрывается не запретом, а требованием НАЗВАТЬ момент: «now» разрешает
+# приложение на устройстве, где локальное время известно точно (time.now без `tz` его не даёт).
+MapsDepartureKind = Literal["now", "at"]
+
+# Код отказа семейства — СВОЙ, а не media-шный: по коду модель понимает, ЧТО именно переделать.
+MAPS_INVALID_ERROR_CODE = "invalid_maps_args"
+
+# Постоянная content-free подсказка о ПАРНОСТИ полей, дописываемая к сообщению отказа: сами
+# кросс-полевые правила в JSON Schema не выражаются, поэтому модель узнаёт о них только отсюда.
+MAPS_PAIRING_HINT = (
+    "when centerKind/originKind/pointKind is 'coordinates' send BOTH the latitude and the "
+    "longitude of that point; when it is 'current_location' send NEITHER — the app resolves the "
+    "position on the device. When departureKind is 'at' send departureTimeLocal (ISO8601 local "
+    "time without offset, e.g. '2026-09-09T07:10:00')"
+)
+
+
+def _check_point_pairing(
+    kind: str, latitude: float | None, longitude: float | None, field_pair: str
+) -> None:
+    """Кросс-полевое правило точки (ADR-102 §4), одинаковое у всех трёх инструментов.
+
+    ``coordinates`` ⇒ заданы ОБЕ координаты; ``current_location`` ⇒ не задана НИ ОДНА — точное
+    положение человека резолвит приложение на устройстве и в аргументы не попадает вовсе
+    (инвариант приватности, ADR-102 §9). В JSON Schema без ``oneOf``/``if-then`` это не
+    выражается, а опираться на их поддержку двумя провайдерами контракт не должен, — поэтому
+    правило живёт валидатором, а нарушение вырождается в tool-ошибку, не роняя ход.
+
+    Сообщения — фиксированные строки БЕЗ значений полей: они уходят модели через
+    ``content_free_args_error`` и персистируются вместе с шагом.
+    """
+    if kind == "coordinates":
+        if latitude is None or longitude is None:
+            raise ValueError(f"kind 'coordinates' requires both {field_pair}")
+    elif latitude is not None or longitude is not None:
+        raise ValueError(f"kind 'current_location' must not carry {field_pair}")
+
+
+class MapsGeocodeArgs(_StrictModel):
+    """Args for maps.geocode: адрес/название → координаты.
+
+    Смещения к текущему месту здесь НЕТ намеренно: неявный центр поиска — ровно то умолчание,
+    которое ADR-102 §4 запрещает. Неоднозначный адрес уточняется городом внутри ``query``.
+    """
+
+    query: str = Field(min_length=1, max_length=MAPS_QUERY_MAX_LENGTH)
+    maxResults: int = Field(default=MAPS_DEFAULT_RESULTS, ge=MAPS_MIN_RESULTS, le=MAPS_MAX_RESULTS)
+
+
+class MapsReverseGeocodeArgs(_StrictModel):
+    """Args for maps.reverse_geocode: координаты → адрес.
+
+    Направление геокодирования разведено по ДВУМ инструментам, а не по переключателю внутри
+    одного: «заполни ровно одну сторону» ключами JSON Schema не выражается, и модель узнавала бы
+    о нарушении лишним витком. Здесь обязательность выражена ключом ``required``, а направление —
+    именем инструмента.
+    """
+
+    pointKind: MapsPointKind
+    latitude: MapsLatitude | None = None
+    longitude: MapsLongitude | None = None
+
+    @model_validator(mode="after")
+    def _point_pairing(self) -> MapsReverseGeocodeArgs:
+        # Сообщение — ФИКСИРОВАННАЯ строка без значений полей: она уходит модели, персистится в
+        # шаге и реплеится, а координаты в отбракованных args цитировать нельзя (ADR-102 §8/§9).
+        _check_point_pairing(self.pointKind, self.latitude, self.longitude, "latitude/longitude")
+        return self
+
+
+class MapsSearchPlacesArgs(_StrictModel):
+    """Args for maps.search_places: поиск мест вокруг явно названного центра."""
+
+    query: str = Field(min_length=1, max_length=MAPS_QUERY_MAX_LENGTH)
+    centerKind: MapsPointKind
+    centerLatitude: MapsLatitude | None = None
+    centerLongitude: MapsLongitude | None = None
+    radiusMeters: int = Field(
+        default=MAPS_DEFAULT_RADIUS_METERS,
+        ge=MAPS_MIN_RADIUS_METERS,
+        le=MAPS_MAX_RADIUS_METERS,
+    )
+    # Единственный рычаг, которым сервер реально ограничивает РАЗМЕР результата: сам результат
+    # клиентского инструмента не валидируется (только размер тела), а персистится и реплеится
+    # провайдеру на каждом следующем витке хода и каждом последующем ходе сессии.
+    maxResults: int = Field(default=MAPS_DEFAULT_RESULTS, ge=MAPS_MIN_RESULTS, le=MAPS_MAX_RESULTS)
+
+    @model_validator(mode="after")
+    def _center_pairing(self) -> MapsSearchPlacesArgs:
+        _check_point_pairing(
+            self.centerKind,
+            self.centerLatitude,
+            self.centerLongitude,
+            "centerLatitude/centerLongitude",
+        )
+        return self
+
+
+class MapsRouteArgs(_StrictModel):
+    """Args for maps.route: маршрут с временем в пути.
+
+    Координаты НАЗНАЧЕНИЯ обязательны: модель обязана получить их через ``maps.geocode`` /
+    ``maps.search_places`` и не имеет права их выдумывать. Точка «по памяти» отличается от прочих
+    ошибок тем, что НЕ ДАЁТ ОШИБКИ, — маршрут построится, просто не туда.
+    """
+
+    originKind: MapsPointKind
+    originName: str | None = Field(default=None, max_length=MAPS_NAME_MAX_LENGTH)
+    originLatitude: MapsLatitude | None = None
+    originLongitude: MapsLongitude | None = None
+    destinationName: str = Field(min_length=1, max_length=MAPS_NAME_MAX_LENGTH)
+    destinationLatitude: MapsLatitude
+    destinationLongitude: MapsLongitude
+    transportType: MapsTransportType
+    departureKind: MapsDepartureKind
+    departureTimeLocal: str | None = Field(default=None, max_length=MAPS_DEPARTURE_TIME_MAX_LENGTH)
+
+    @model_validator(mode="after")
+    def _origin_and_departure_pairing(self) -> MapsRouteArgs:
+        _check_point_pairing(
+            self.originKind,
+            self.originLatitude,
+            self.originLongitude,
+            "originLatitude/originLongitude",
+        )
+        # MapKit считает маршрут на момент ИСПОЛНЕНИЯ, если момент отправления не передан, и
+        # модель этого умолчания не видит: она получает число и выдаёт его как ответ на вопрос
+        # «во сколько выезжать завтра к семи». Поэтому ветка `at` обязана нести время.
+        if self.departureKind == "at" and self.departureTimeLocal is None:
+            raise ValueError("departureKind 'at' requires departureTimeLocal")
+        return self
+
+
+class MapsShowPlaceArgs(_StrictModel):
+    """Args for maps.show_place: показать место на карте.
+
+    Ничего на устройстве не меняет (не мутирующий, подтверждения не требует). Координаты
+    обязательны по той же причине, что у ``maps.route``: выдуманная точка не даёт ошибки —
+    булавка просто встаёт не там.
+    """
+
+    name: str = Field(min_length=1, max_length=MAPS_NAME_MAX_LENGTH)
+    latitude: MapsLatitude
+    longitude: MapsLongitude
 
 
 # --- server-side site.* (ADR-011) ---
@@ -802,6 +1023,16 @@ _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_CALENDAR_CREATE: CalendarCreateArgs,
     TOOL_REMINDERS_READ: RemindersReadArgs,
     TOOL_REMINDERS_CREATE: RemindersCreateArgs,
+    # ADR-102. Все пять моделей ПЛОСКИЕ (никаких вложенных моделей), поэтому
+    # `model_json_schema()` не порождает `$defs` и схема self-contained по построению — в
+    # `_SELF_CONTAINED_SCHEMA_TOOLS` семейство добавлять не требуется. Появится вложенная
+    # модель — семейство ОБЯЗАНО туда попасть, иначе провайдеру уедет `$ref`, поддержка
+    # которого не гарантирована ни одним из двух.
+    TOOL_MAPS_SHOW_PLACE: MapsShowPlaceArgs,
+    TOOL_MAPS_GEOCODE: MapsGeocodeArgs,
+    TOOL_MAPS_REVERSE_GEOCODE: MapsReverseGeocodeArgs,
+    TOOL_MAPS_ROUTE: MapsRouteArgs,
+    TOOL_MAPS_SEARCH_PLACES: MapsSearchPlacesArgs,
     TOOL_SITE_WRITE_FILE: SiteWriteFileArgs,
     TOOL_SITE_PREVIEW: SitePreviewArgs,
     TOOL_SITE_LIST: SiteListArgs,
@@ -817,6 +1048,42 @@ _ARGS_BY_TOOL: dict[str, type[_StrictModel]] = {
     TOOL_DOCUMENT_READ: DocumentReadArgs,
     TOOL_DOCUMENT_UPDATE: DocumentUpdateArgs,
 }
+
+
+# ADR-102 §Факт 2: результат клиентского инструмента сервер НЕ валидирует (единственная проверка —
+# размер тела), поэтому весь нормативный контракт семейства обязан доходить до модели ЗДЕСЬ, а не
+# только в документации. Ровно на этом сломался календарь: формат `start`/`end` жил в
+# 02-api-contracts.md, в схеме стоял голый `str` без описания, и модель подставляла date-only
+# (ADR-027). Норма, записанная только в документацию, для модели НЕ СУЩЕСТВУЕТ.
+#
+# Блок общий для ВСЕХ ПЯТИ инструментов намеренно: каждое из перечисленных правил (выдуманные
+# координаты, дословная цитата локализованных строк, «пустой список — не ошибка», поведение на
+# каждый код отказа, огрублённая точность) действует на любом вызове семейства, а описание — это
+# единственный канал, который модель видит в момент вызова ИМЕННО ЭТОГО инструмента.
+_MAPS_COMMON_GUIDANCE = (
+    "Maps tools are executed by the user's device (MapKit); the server neither has maps nor knows "
+    "where the user is. "
+    "Never invent coordinates — obtain them with maps.geocode or maps.search_places first. A "
+    "remembered point produces NO error: the route is simply built to the wrong place and the pin "
+    "lands somewhere else. "
+    "Coordinates are always separate named fields (latitude and longitude), never a positional "
+    "pair and never a string like '55.75,37.62'. "
+    "Datetimes are ISO8601 in LOCAL time WITHOUT a timezone offset, e.g. '2026-09-09T07:10:00'. "
+    "Quote the localized strings of the result verbatim (distanceText, travelTimeText, "
+    "summaryText, originLabel) and never convert the numbers into text yourself: you know neither "
+    "the user's locale nor their unit system. The numbers are there for you to compare and sort, "
+    "not to show. "
+    "An EMPTY list is NOT an error — it means nothing was found. Say so; do not repeat the call. "
+    "When the result carries locationAccuracy 'reduced', say the position is approximate and do "
+    "not present a travel time as exact. "
+    "On error.code 'location_permission_denied' or 'location_permission_not_determined': do not "
+    "call again with current_location in this turn — ask the user to name the place in words and "
+    "resolve it with maps.geocode. On 'location_unavailable': say the position cannot be "
+    "determined right now and ask for a place. On 'transport_unavailable': do not retry the same "
+    "transportType — offer automobile or walking and ask. On 'maps_unavailable': answer in words "
+    "and never substitute invented coordinates or distances. "
+    "Never repeat the same call without new input."
+)
 
 
 # Human-readable tool descriptions — single source of truth for both the Anthropic tool
@@ -862,6 +1129,51 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     TOOL_REMINDERS_READ: "Read reminders.",
     TOOL_REMINDERS_CREATE: "Create reminders.",
+    TOOL_MAPS_GEOCODE: (
+        "Resolve an address or place name into coordinates. Returns "
+        "{query, places:[{name, address, latitude, longitude}]}. There is NO implicit search "
+        "around the user: disambiguate by putting the city or region into 'query' itself, e.g. "
+        "'Tverskaya 12, Moscow'. Use this before maps.show_place or maps.route whenever you do "
+        "not already have coordinates from a tool result. " + _MAPS_COMMON_GUIDANCE
+    ),
+    TOOL_MAPS_REVERSE_GEOCODE: (
+        "Resolve coordinates into an address. Returns "
+        "{places:[{name, address, latitude, longitude}], locationAccuracy?}. "
+        "Set pointKind 'coordinates' and pass latitude and longitude for a point you already "
+        "have, or pointKind 'current_location' to ask about where the USER is — then send no "
+        "coordinates at all, the device resolves them and the returned latitude/longitude are "
+        "null by contract. " + _MAPS_COMMON_GUIDANCE
+    ),
+    TOOL_MAPS_SEARCH_PLACES: (
+        "Find places near an explicitly named centre. Returns "
+        "{query, places:[{name, address, distanceText, distanceMeters, latitude, longitude}], "
+        "locationAccuracy?}. Set centerKind 'current_location' ONLY when the user asked about "
+        "places near THEMSELVES, and send no coordinates then; otherwise set centerKind "
+        "'coordinates' and pass centerLatitude and centerLongitude of the place they named "
+        "(resolve it with maps.geocode first). Keep maxResults small — every result is replayed "
+        "on every later turn of this chat. " + _MAPS_COMMON_GUIDANCE
+    ),
+    TOOL_MAPS_ROUTE: (
+        "Build a route and get the travel time. Returns "
+        "{originName, destinationName, transportType, locationAccuracy?, routes:[{summaryText, "
+        "travelTimeText, travelTimeSeconds, distanceText, distanceMeters, departureTimeLocal, "
+        "arrivalTimeLocal, trafficAware}]}; routes may be EMPTY, which means no route of that "
+        "type exists between those points. Destination coordinates are required — get them from "
+        "maps.geocode or maps.search_places. Set originKind 'current_location' to start from "
+        "where the user is (send no origin coordinates then), or 'coordinates' with "
+        "originLatitude and originLongitude. Always name the departure moment: departureKind "
+        "'now' lets the device fill in the current local time, departureKind 'at' requires "
+        "departureTimeLocal, e.g. '2026-09-09T07:10:00' — without saying 'at' you would be "
+        "answering a question about tomorrow morning with tonight's traffic. Report "
+        "trafficAware honestly: when it is false the duration is an estimate, not a forecast. "
+        "transportType has no bicycle option — the device cannot route one. "
+        + _MAPS_COMMON_GUIDANCE
+    ),
+    TOOL_MAPS_SHOW_PLACE: (
+        "Show a place on the map to the user. Returns {name, shown}. Changes nothing on the "
+        "device. Coordinates are required and must come from maps.geocode or "
+        "maps.search_places. " + _MAPS_COMMON_GUIDANCE
+    ),
     TOOL_SITE_WRITE_FILE: (
         "Write or overwrite a file in the website project. Path is relative to the project "
         "root. Use encoding 'utf8' for text (HTML/CSS/JS) and 'base64' for binary assets "
@@ -1057,6 +1369,21 @@ def offered_code_tool(tool_name: str, *, code_tools_enabled: bool) -> bool:
     return code_tools_enabled or tool_name not in CODE_TOOLS
 
 
+def offered_maps_tool(tool_name: str, *, maps_tools_enabled: bool) -> bool:
+    """ADR-102 §10 (ось E): карты предлагаются модели только там, где оператор их включил.
+
+    Выключены по умолчанию НАМЕРЕННО: исполняет их КЛИЕНТ, а клиентский вызов, который
+    приложение исполнить не умеет, оставляет ход НЕЗАВЕРШЁННЫМ — барьер ADR-025 продолжает ход
+    только когда каждый client-side вызов получил `completed`/`errored`, а ни таймаута, ни
+    сборщика «протухших» вызовов в коде нет. С точки зрения человека это «ассистент не ответил».
+
+    В отличие от оси D, с `assistant_mode` НЕ складывается: «как доехать» — обычный чат.
+    Предикат — только ГЕЙТ (не показывает инструмент модели); от исполнения защищает отдельный
+    defensive guard в tool-loop оркестратора, и он для этой оси ОБЯЗАТЕЛЕН.
+    """
+    return maps_tools_enabled or tool_name not in MAPS_TOOLS
+
+
 def offered_in_generation_mode(tool_name: str, generation_mode: str) -> bool:
     """Axis C predicate (ADR-064 §3): may ``tool_name`` be offered in ``generation_mode``?
 
@@ -1194,10 +1521,13 @@ def _offered_to_model(
     include_media_chat_tools: bool,
     disabled_families: frozenset[str],
     code_tools_enabled: bool = False,
+    maps_tools_enabled: bool = False,
 ) -> bool:
     if not include_server_side and name in SERVER_SIDE_TOOLS:
         return False
     if not offered_code_tool(name, code_tools_enabled=code_tools_enabled):
+        return False
+    if not offered_maps_tool(name, maps_tools_enabled=maps_tools_enabled):
         return False
     if not offered_in_generation_mode(name, generation_mode):
         return False
@@ -1213,6 +1543,7 @@ def anthropic_tool_definitions(
     include_media_chat_tools: bool = True,
     disabled_families: frozenset[str] = frozenset(),
     code_tools_enabled: bool = False,
+    maps_tools_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     """Tool definitions for the Anthropic messages API (input_schema per tool).
 
@@ -1236,6 +1567,10 @@ def anthropic_tool_definitions(
     only when ``generation_mode`` (the EFFECTIVE mode of the turn) is in its set. The default
     ``general`` therefore excludes ``quiz.generate`` — including on the legacy path, which forces
     ``general``. Axes A and C compose by logical AND.
+
+    ADR-102 §10 (axis E — maps): ``maps_tools_enabled`` gates ``MAPS_TOOLS``. Default False, so a
+    caller that does not pass it offers no maps tool at all. Unlike axis D this axis does NOT
+    compose with ``assistant_mode`` — asking for directions is ordinary chat, not a mode.
     """
     definitions: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
@@ -1246,6 +1581,7 @@ def anthropic_tool_definitions(
             include_media_chat_tools=include_media_chat_tools,
             disabled_families=disabled_families,
             code_tools_enabled=code_tools_enabled,
+            maps_tools_enabled=maps_tools_enabled,
         ):
             continue
         definitions.append(
@@ -1267,6 +1603,7 @@ def neutral_tool_definitions(
     include_media_chat_tools: bool = True,
     disabled_families: frozenset[str] = frozenset(),
     code_tools_enabled: bool = False,
+    maps_tools_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     """Provider-neutral tool definitions (ADR-033 §4): ``{name(domain dotted), description,
     input_schema}``.
@@ -1279,6 +1616,8 @@ def neutral_tool_definitions(
     axis C: ``quiz.generate`` only in ``study_learn``; the ``general`` default excludes it).
     ADR-072: ``include_media_chat_tools=False`` drops ``MEDIA_CHAT_TOOLS``.
     ADR-081: ``disabled_families`` drops ``files`` / ``calendar`` / ``reminders`` / ``site``.
+    ADR-102 §10 (axis E): ``maps_tools_enabled=False`` (the default) drops ``MAPS_TOOLS``; the
+    axis does not compose with ``assistant_mode``.
     """
     definitions: list[dict[str, Any]] = []
     for name in _ARGS_BY_TOOL:
@@ -1289,6 +1628,7 @@ def neutral_tool_definitions(
             include_media_chat_tools=include_media_chat_tools,
             disabled_families=disabled_families,
             code_tools_enabled=code_tools_enabled,
+            maps_tools_enabled=maps_tools_enabled,
         ):
             continue
         definitions.append(
@@ -1339,6 +1679,7 @@ def openai_tool_definitions(
     include_media_chat_tools: bool = True,
     disabled_families: frozenset[str] = frozenset(),
     code_tools_enabled: bool = False,
+    maps_tools_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     """Tool definitions for the OpenAI Chat Completions API (ADR-033 §4).
 
@@ -1346,8 +1687,9 @@ def openai_tool_definitions(
     serializes each via ``openai_tool_function`` (the one OpenAI-wire wrapper). The
     ``include_server_side`` gate is identical to ``anthropic_tool_definitions`` (ADR-022 §A;
     ``GLOBAL_SERVER_SIDE_TOOLS`` never gated — ADR-026 §3), and so is the ``generation_mode``
-    axis-C gate (ADR-064 §3) and the ``code_tools_enabled`` axis-D gate (ADR-094 §3). ADR-072:
-    ``include_media_chat_tools`` mirrors neutral defs.
+    axis-C gate (ADR-064 §3), the ``code_tools_enabled`` axis-D gate (ADR-094 §3) and the
+    ``maps_tools_enabled`` axis-E gate (ADR-102 §10). ADR-072: ``include_media_chat_tools``
+    mirrors neutral defs.
     """
     return [
         openai_tool_function(d)
@@ -1357,5 +1699,6 @@ def openai_tool_definitions(
             include_media_chat_tools=include_media_chat_tools,
             disabled_families=disabled_families,
             code_tools_enabled=code_tools_enabled,
+            maps_tools_enabled=maps_tools_enabled,
         )
     ]
