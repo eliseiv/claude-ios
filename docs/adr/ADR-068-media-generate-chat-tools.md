@@ -1,6 +1,6 @@
 # ADR-068 — Chat tools `media.generate_image` / `media.generate_video` + `ChatResponse.mediaJobs`
 
-- **Статус:** Accepted
+- **Статус:** Accepted. **§2 уточнён [ADR-103](ADR-103-media-jobs-turn-scoped-merge.md) (2026-09-08)** — условие срабатывания второго производителя, слияние источников и значение `creditsCharged` у восстановленной записи задаются там; прочие разделы не меняются.
 - **Дата:** 2026-08-11
 - **Связано:** [ADR-060](ADR-060-media-generation-fal.md) (очередь fal, биллинг `media-gen:{jobId}`), [ADR-026](ADR-026-global-server-side-tools-and-time-now.md) (global server-side), [ADR-064](ADR-064-study-learn-quiz-generation-mode.md) (паттерн turn-scoped поля ответа), [ADR-067](ADR-067-media-ready-push-and-reconciler.md) (push по готовности)
 
@@ -29,6 +29,8 @@
 - fallback — успешные tool-result шаги `media.generate_*` этого хода.
 
 Клиент опрашивает `GET /v1/media/jobs/{jobId}` и/или опирается на push (ADR-067).
+
+> **Уточнение 2026-09-08 — [ADR-103](ADR-103-media-jobs-turn-scoped-merge.md).** Условие срабатывания второго производителя здесь **не задано**, и поведение существовало только в коде. [ADR-103](ADR-103-media-jobs-turn-scoped-merge.md) задаёт его нормой: восстановление по ходу выполняется **безусловно** при непустом `messageStepId` (а не только при пустом аккумуляторе), источники **сливаются**, к объединённому списку применяется свёртка **одна запись на `jobId`** (позиция — по первому появлению), а `creditsCharged` восстановленной записи — **`0`** (величина ВЫЗОВА, не задачи). Перечень источников восстановления не уже, чем у якоря истории, — визардный сабмит ([ADR-070 §3](ADR-070-media-choices-wizard.md)) tool-шага `media.generate_*` может не давать. Правило «append, не last-wins» **сохраняется**: разные задачи хода накапливаются, свёртка схлопывает только одну и ту же задачу, увиденную через два источника.
 
 ### 3. Биллинг
 
