@@ -312,3 +312,68 @@ def test_single_and_zero_defaults_are_silent(monkeypatch) -> None:
         ]
         _, events = _emitted_events(monkeypatch, lambda p=products: _catalog_response(p))
         assert not [n for n, _f in events if n == "token_products_multiple_defaults"]
+
+
+# ---- форма тела поставщика ------------------------------------------------------------------
+
+_FLAT = {
+    "app_id": "994e9fc9-2e68-405f-b880-e528a2115d2f",
+    "user_id": "1103022e-3061-4bcc-b4de-5d8a86e48593",
+    "created": False,
+    "experiment": {"code": "yearly_monthly_dojim3", "name": "A vs B"},
+    "segment": {"code": "a", "name": "main"},
+    "requested_segment_matches": True,
+    "assigned_at": "2026-09-08T08:13:21+00:00",
+}
+
+
+@pytest.mark.asyncio
+async def test_flat_provider_body_is_accepted(monkeypatch) -> None:
+    """Живое тело broadapps приходит БЕЗ обёртки assignment.
+
+    Прод 2026-09-08, novirell: поставщик отвечал 200 плоским телом, а мы искали обёртку из
+    примера в задании и признавали ответ неразборным. Наружу это выглядело как «провайдер
+    недоступен», хотя он ответил и назначение состоялось.
+    """
+    _patch(monkeypatch, response=_FakeResponse(200, _FLAT))
+    res = await _client().assign(
+        user_id=uuid.uuid4(),
+        experiment_code="yearly_monthly_dojim3",
+        segment_code="a",
+        placement="onboarding",
+        locale="ru",
+    )
+    assert res.segment_code == "a"
+    assert res.requested_segment_matches is True
+    assert res.created is False
+    # Признака контрольной группы поставщик не отдаёт вовсе — читается как False, а не как ошибка.
+    assert res.is_control is False
+
+
+@pytest.mark.asyncio
+async def test_wrapped_provider_body_still_works(monkeypatch) -> None:
+    # Обёртку тоже принимаем: различать эти два случая незачем, нужен один набор полей.
+    _patch(monkeypatch, response=_FakeResponse(200, {"assignment": _FLAT}))
+    res = await _client().assign(
+        user_id=uuid.uuid4(),
+        experiment_code="e",
+        segment_code="a",
+        placement="p",
+        locale="ru",
+    )
+    assert res.segment_code == "a"
+
+
+@pytest.mark.asyncio
+async def test_body_without_a_segment_is_still_malformed(monkeypatch) -> None:
+    # Послабление формы не должно превратиться в «принимаем что угодно»: без кода сегмента
+    # выдумывать назначение по-прежнему нельзя.
+    _patch(monkeypatch, response=_FakeResponse(200, {"app_id": "x", "created": True}))
+    with pytest.raises(UpstreamError):
+        await _client().assign(
+            user_id=uuid.uuid4(),
+            experiment_code="e",
+            segment_code="a",
+            placement="p",
+            locale="ru",
+        )

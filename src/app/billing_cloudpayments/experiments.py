@@ -269,15 +269,21 @@ class BroadappsExperimentsClient:
     def _to_assign_result(body: Any) -> AssignResult | None:
         """Project the broadapps body into an ``AssignResult``, or None if malformed.
 
-        ``assignment.segment.code`` is mandatory — a 2xx without it is ``malformed_response``, not
-        an "empty segment". The three booleans are read STRICTLY (``is True``): a stringified
-        ``"false"`` from a bad serialization must not read as truth; absent => False.
+        Обе формы тела принимаются: поставщик отдаёт поля НА ВЕРХНЕМ УРОВНЕ
+        (``{"segment": {...}, "requested_segment_matches": ..., "created": ...}``), тогда как
+        пример в задании показывал обёртку ``{"assignment": {...}}``. Прод 2026-09-08,
+        novirell: живой ответ приходил с кодом 200 и признавался ``malformed_response``, потому
+        что обёртки в нём нет. Принимаем и обёртку — она может вернуться, и различать эти два
+        случая нам незачем: нужен один и тот же набор полей.
+
+        ``segment.code`` обязателен — 2xx без него это ``malformed_response``, а не «пустой
+        сегмент». Булевы читаются СТРОГО (``is True``): строковое ``"false"`` из кривой
+        сериализации не должно прочитаться как истина; отсутствие ⇒ False.
         """
         if not isinstance(body, dict):
             return None
-        assignment = body.get("assignment")
-        if not isinstance(assignment, dict):
-            return None
+        wrapped = body.get("assignment")
+        assignment = wrapped if isinstance(wrapped, dict) else body
         segment = assignment.get("segment")
         if not isinstance(segment, dict):
             return None
