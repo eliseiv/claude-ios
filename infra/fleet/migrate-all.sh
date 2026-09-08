@@ -54,8 +54,12 @@ echo "== 3. Репликация на резервный сервер =="
 for inst in "${DONE[@]}"; do
   primary="$(awk -F'\t' -v i="$inst" '$1==i{print $4}' instances.tsv)"
   standby="$(other "$primary")"
-  pg_port="$(awk -F'\t' -v i="$inst" '$1==i{print $3}' instances.tsv)"
   ph="$(host_of "$primary")"; sh_="$(host_of "$standby")"
+  # Порт базы берётся из .env основного, а НЕ из колонки 3 таблицы: колонка 3 — порт api
+  # (18005), postgres слушает PG_HOST_PORT (15005). Подстановка колонки 3 направляла
+  # pg_basebackup в приложение, и резерв молча оставался самостоятельной базой.
+  pg_port="$(ssh -n -o BatchMode=yes "$ph" "grep -m1 '^PG_HOST_PORT=' /opt/$inst/.env | cut -d= -f2-" | tr -d '[:space:]')"
+  if [ -z "$pg_port" ]; then echo "    $inst: PG_HOST_PORT не задан — резерв не поднят"; continue; fi
 
   ssh -o BatchMode=yes "$ph" "/opt/fleet/replication.sh prepare $inst $(ip_of "$standby")" 2>&1 | sed 's/^/    /'
   pw="$(ssh -o BatchMode=yes "$ph" "grep -m1 '^PG_REPL_PASSWORD=' /opt/$inst/.env | cut -d= -f2-" 2>/dev/null)"
