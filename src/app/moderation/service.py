@@ -22,6 +22,7 @@ from typing import Any, cast
 
 import openai
 
+from app import instance_config
 from app.config import Settings
 from app.errors import ModerationNotConfiguredError, ModerationUnavailableError
 from app.observability.logging import log_event
@@ -123,7 +124,7 @@ class ModerationService:
 
     @property
     def enabled(self) -> bool:
-        return self.settings.moderation_enabled
+        return instance_config.moderation_enabled(settings=self.settings)
 
     def _ensure_client(self) -> openai.AsyncOpenAI:
         if self._client is not None:
@@ -212,7 +213,7 @@ class ModerationService:
     def _verdict_from(
         self, response: Any, *, stage: str, checked_at: datetime.datetime
     ) -> ModerationVerdict:
-        block = self.settings.moderation_block_categories()
+        block = instance_config.moderation_block_categories(settings=self.settings)
         per_part: list[ModerationVerdict] = []
         for result in getattr(response, "results", None) or []:
             categories = _flagged_categories(result)

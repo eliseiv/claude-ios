@@ -22,7 +22,7 @@ RESOLVED_VIA_LEGACY_ID = "legacy_user_id"
 
 
 async def resolve_user(session: AsyncSession, x: uuid.UUID) -> tuple[uuid.UUID, str] | None:
-    """Resolve the webhook identifier ``X`` to our internal ``userId`` (ADR-055, two-step).
+    """Resolve the webhook identifier ``X`` to our ``userId`` (ADR-055 + ADR-096, three-step).
 
     Aggregators send a deviceId (not our userId) as the customer identifier. First-match wins,
     deterministic (``users`` before ``auth_devices`` for compat):

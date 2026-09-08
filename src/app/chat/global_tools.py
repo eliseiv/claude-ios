@@ -299,11 +299,6 @@ class GlobalToolHandlers:
             else None
         )
 
-        def _credits(model: Any) -> int:
-            if self._media is not None:
-                return self._media.credits_for(model)
-            return int(model.default_credits)
-
         selection_id = str(uuid.uuid4())
         try:
             state = build_wizard_state(
@@ -314,7 +309,6 @@ class GlobalToolHandlers:
                 image_urls=image_urls or None,
                 last_image_job_id=offer_last,
                 answers={},
-                credits_for=_credits,
             )
         except ValueError as exc:
             return ToolExecution.error(MEDIA_INVALID_ERROR_CODE, str(exc)[:400])

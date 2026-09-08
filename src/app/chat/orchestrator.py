@@ -19,6 +19,7 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import instance_config
 from app.audit.service import (
     EVENT_CHAT_STEP,
     EVENT_POLICY_DECISION,
@@ -102,6 +103,7 @@ from app.errors import (
     ValidationFailedError,
     WorkspaceNotFoundError,
 )
+from app.instance_config import chat_turn_credit_cost
 from app.memory.indexer import schedule_delete_from_message_step, schedule_index_turn
 from app.memory.service import MemoryService
 from app.models import ChatSession, ChatStep, ToolCall
@@ -393,11 +395,15 @@ def _effective_generation_mode(
     return "general"
 
 
-def _turn_credit_cost(effective_generation_mode: str, *, use_generation_v2: bool) -> int:
-    """v2 (and opted-in legacy research) use the mode price; other legacy stays 1 credit."""
-    if use_generation_v2 or get_settings().chat_legacy_web_search_enabled:
-        return get_settings().chat_generation_credit_cost(effective_generation_mode)
-    return 1
+def _turn_credit_cost(session_model: str | None) -> int:
+    """Цена одного хода — функция МОДЕЛИ (ADR-099 §5).
+
+    Тот же единственный мост, что и раньше, переключённый на другой ключ: гейт баланса,
+    идемпотентное списание и `creditCost` пользовательского контракта зовут ОДНУ функцию, и
+    режим генерации на цену больше не влияет. Легаси-путь переведён на тот же резолвер —
+    иначе появился бы второй механизм цены, запрещённый ADR-064 §9.
+    """
+    return chat_turn_credit_cost(session_model)
 
 
 def _uses_generation_client(use_generation_v2: bool) -> bool:
@@ -436,15 +442,15 @@ def _system_prompt_for(
     ADR-100: the speech hint sits AFTER the character and BEFORE the mode suffix, and only when
     ``VOICE_OUTPUT_ENABLED`` is on and ``assistant_mode != "code"``.
     """
-    base = _compose_system_prompt(assistant_mode, get_settings().disabled_tool_families())
+    base = _compose_system_prompt(assistant_mode, instance_config.disabled_tool_families())
     # ADR-094 ось D: указания по работе с кодом добавляются ровно по тому же условию, по которому
     # предлагаются сами инструменты. Разойдись эти два условия — модель на инстансе без флага
     # получала бы предписание звать files.search / git.*, которых ей не дали.
-    if get_settings().code_tools_enabled and assistant_mode == "code":
+    if instance_config.code_tools_enabled() and assistant_mode == "code":
         base = f"{base} {_CODE_TOOLS_INSTRUCTION}"
-    if get_settings().chat_media_tools_enabled:
+    if instance_config.media_tools_enabled():
         base = f"{base} {_MEDIA_GENERATE_INSTRUCTION}"
-    if get_settings().characters_enabled:
+    if instance_config.characters_enabled():
         persona = character_prompt_layer(character_id)
         if persona is not None:
             base = f"{base}\n\n{persona}"
@@ -1095,7 +1101,7 @@ class ChatOrchestrator:
         voice = [a for a in attachments if a.type == "audio"]
         if not voice:
             return message, attachments, None
-        if not get_settings().voice_input_enabled:
+        if not instance_config.voice_input_enabled():
             # Отдельная причина, а не «неподдерживаемый тип»: класс объявлен в контракте, и
             # приложению нужно отличить «инстанс не умеет» от «формат не тот».
             raise ValidationFailedError("voice input is not enabled on this instance")
@@ -1220,7 +1226,7 @@ class ChatOrchestrator:
         if (
             will_create
             and resolved_model is not None
-            and resolved_model not in get_settings().allowed_models_union()
+            and not instance_config.model_is_selectable(resolved_model)
         ):
             raise ValidationFailedError(
                 f"model '{resolved_model}' is not available on this instance"
@@ -1233,7 +1239,7 @@ class ChatOrchestrator:
         # diagnose from outside. The schema already guarantees a non-empty value.
         resolved_character = character_id.strip() if character_id is not None else None
         if will_create and resolved_character is not None:
-            if not get_settings().characters_enabled:
+            if not instance_config.characters_enabled():
                 raise CharactersDisabledError("character selection is not enabled on this instance")
             if not is_known_character(resolved_character):
                 raise UnknownCharacterError(
@@ -1291,7 +1297,7 @@ class ChatOrchestrator:
         if media_selection is not None:
             if not use_generation_v2:
                 raise ValidationFailedError("mediaSelection is only supported on /v1/chat/v2/*")
-            if not get_settings().chat_media_tools_enabled:
+            if not instance_config.media_tools_enabled():
                 raise ValidationFailedError(
                     "media chat tools are disabled on this instance "
                     "(use /v1/media/* for generation)"
@@ -1503,9 +1509,7 @@ class ChatOrchestrator:
             payload=user_payload,
         )
 
-        generation_credit_cost = _turn_credit_cost(
-            effective_generation_mode, use_generation_v2=use_generation_v2
-        )
+        generation_credit_cost = _turn_credit_cost(sess.model or None)
         decision, state = await self._evaluate(
             user_id,
             effective_mode,
@@ -1582,7 +1586,7 @@ class ChatOrchestrator:
         self, session_id: uuid.UUID, system_prompt: str
     ) -> str:
         """Append the latest chat media jobId so edits use image-to-image (ADR-070)."""
-        if not get_settings().chat_media_tools_enabled:
+        if not instance_config.media_tools_enabled():
             return system_prompt
         last_media = await self._deps.repo.last_media_job_ref(session_id)
         last_image = await self._deps.repo.last_image_job_ref(session_id)
@@ -1608,7 +1612,7 @@ class ChatOrchestrator:
         self, session_id: uuid.UUID, system_prompt: str
     ) -> str:
         """Hint the model to ask before reusing a photo from recent user messages."""
-        if not get_settings().chat_media_tools_enabled:
+        if not instance_config.media_tools_enabled():
             return system_prompt
         payloads = await self._deps.repo.recent_user_payloads(
             session_id, limit=RECENT_USER_STEPS_SCAN
@@ -1708,9 +1712,6 @@ class ChatOrchestrator:
         if media_svc is None:
             raise ValidationFailedError("media generation is not configured on this instance")
 
-        def _credits(model: Any) -> int:
-            return media_svc.credits_for(model)
-
         next_state = build_wizard_state(
             selection_id=str(selection_id),
             kind=kind,
@@ -1719,7 +1720,6 @@ class ChatOrchestrator:
             image_urls=image_urls or None,
             last_image_job_id=last_image_job_id,
             answers=merged,
-            credits_for=_credits,
         )
 
         if next_state is not None:
@@ -2037,9 +2037,7 @@ class ChatOrchestrator:
             )
 
         mode = Mode(sess.mode)
-        generation_credit_cost = _turn_credit_cost(
-            generation_mode, use_generation_v2=use_generation_v2
-        )
+        generation_credit_cost = _turn_credit_cost(sess.model or None)
         # Re-evaluate policy (access may have changed).
         decision, state = await self._evaluate(
             user_id,
@@ -2666,6 +2664,19 @@ class ChatOrchestrator:
                 effective_model = get_settings().byok_default_model_for(byok_provider)
             provider = byok_provider
         else:
+            if model is None:
+                # ADR-099 §8: пустая `model` сессии означает «дефолт инстанса», а дефолт
+                # инстанса оператор может изменить из панели. Подставляем его ЗДЕСЬ, до выбора
+                # провайдера — иначе ход ушёл бы на env-модель, то есть правка применилась бы к
+                # каталогу и к цене, но не к самому ходу.
+                #
+                # Подстановка происходит ТОЛЬКО когда оператор действительно переопределил
+                # дефолт: без оверлея клиент сам берёт ту же самую env-модель, и явная
+                # подстановка была бы изменением исходящего вызова там, где ничего не менялось.
+                # Пустой оверлей обязан воспроизводить сегодняшний день бит-в-бит.
+                operator_default = instance_config.instance_default_model()
+                if operator_default != get_settings().default_model():
+                    model = operator_default
             # ADR-073: route credits by the session model (session-fixed; no mid-chat switch).
             # ADR-074 may still answer from the other provider on this call only.
             provider = get_settings().credits_provider_for_model(model)
@@ -2723,13 +2734,13 @@ class ChatOrchestrator:
                 "tools": neutral_tool_definitions(
                     include_server_side=has_project,
                     generation_mode=effective_generation_mode,
-                    include_media_chat_tools=get_settings().chat_media_tools_enabled,
-                    disabled_families=get_settings().disabled_tool_families(),
+                    include_media_chat_tools=instance_config.media_tools_enabled(),
+                    disabled_families=instance_config.disabled_tool_families(),
                     # ADR-094 ось D: инструменты кода предлагаются только при флаге инстанса И
                     # только в режиме `code`. Режим — не косметика: в обычном чате модель не
                     # должна даже рассматривать правку файлов на машине человека.
                     code_tools_enabled=(
-                        get_settings().code_tools_enabled
+                        instance_config.code_tools_enabled()
                         and sess is not None
                         and sess.assistant_mode == "code"
                     ),
@@ -3210,7 +3221,7 @@ class ChatOrchestrator:
             # ADR-081: whole family disabled on this instance (other instances keep the tools).
             if not offered_tool_family(
                 tool_name,
-                disabled_families=get_settings().disabled_tool_families(),
+                disabled_families=instance_config.disabled_tool_families(),
             ):
                 await self._record_refused_tool_call(
                     user_id=user_id,
@@ -3230,7 +3241,7 @@ class ChatOrchestrator:
             # ADR-072: media chat tools disabled on this instance (REST /v1/media/* may still work).
             if tool_name in MEDIA_CHAT_TOOLS and not offered_media_chat_tool(
                 tool_name,
-                include_media_chat_tools=get_settings().chat_media_tools_enabled,
+                include_media_chat_tools=instance_config.media_tools_enabled(),
             ):
                 await self._record_refused_tool_call(
                     user_id=user_id,

@@ -14,7 +14,7 @@
 2. [Аутентификация и заголовки](#2-аутентификация-и-заголовки)
 3. [Коды ответа (общие)](#3-коды-ответа-общие)
 4. Эндпоинты по модулям:
-   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Characters](#28-characters-персонажи) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Documents (документы чата)](#29-documents-документы-чата) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
+   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Characters](#28-characters-персонажи) · [Озвучка ответа](#29-озвучка-ответа-speech) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Documents (документы чата)](#30-documents-документы-чата) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
 5. [blockReason — справочник (9 значений)](#12-blockreason--справочник)
 6. [Tool-протокол: client-side vs server-side](#13-tool-протокол)
 7. [Монетизация (кратко)](#14-монетизация-кратко)
@@ -124,10 +124,10 @@
 | `moderation_not_configured` | 503 | модерация не настроена на инстансе (проблема оператора) |
 | `characters_disabled` | 422 | `characterId` прислан при создании чата на инстансе, где выбор персонажа выключен ([ADR-097](adr/ADR-097-character-personas.md)) |
 | `unknown_character` | 422 | `characterId` вне реестра персонажей ([раздел 28](#28-characters-персонажи)) |
-| `document_too_large` | 422 | документ чата больше лимита одного документа ([раздел 29](#29-documents-документы-чата)) |
-| `too_many_documents` | 422 | в чате уже максимум документов ([раздел 29](#29-documents-документы-чата)) |
-| `documents_total_too_large` | 422 | суммарный размер документов чата больше лимита ([раздел 29](#29-documents-документы-чата)) |
-| `document_not_found` | 404 | документ чужой или не существует — неотличимы ([раздел 29](#29-documents-документы-чата)) |
+| `document_too_large` | 422 | документ чата больше лимита одного документа ([раздел 30](#30-documents-документы-чата)) |
+| `too_many_documents` | 422 | в чате уже максимум документов ([раздел 30](#30-documents-документы-чата)) |
+| `documents_total_too_large` | 422 | суммарный размер документов чата больше лимита ([раздел 30](#30-documents-документы-чата)) |
+| `document_not_found` | 404 | документ чужой или не существует — неотличимы ([раздел 30](#30-documents-документы-чата)) |
 | `unsupported_model`, `workspace_not_found`, `message_not_found`, `session_not_found`, `insufficient_credits`, `job_not_terminal`, `subscription_required`, `media_generation_not_configured`, `gateway_timeout` | по разделу | доменные коды соответствующих эндпоинтов |
 
 > **Совместимость (2026-08-24, [ADR-089](adr/ADR-089-attachment-limits-and-error-taxonomy.md)).** Отказы вложений раньше приходили с `code: "validation_error"` и различались только текстом. Теперь у каждого свой `code`, **HTTP-статусы не изменились**, а тексты `message` сохранены **дословно** — клиент, который сегодня разбирает строку, продолжает работать; новый клиент ветвится по `code`.
@@ -200,13 +200,13 @@
 | `messageStepId` | string (uuid) \| null | ключ **хода** (один на сообщение, переиспользуется во всех tool-раундах); `null` при `blocked`. Совпадает с `steps[].messageStepId` в истории. ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)) |
 | `stepId` | string (uuid) \| null | id **конкретного** assistant/tool-шага этого ответа; `null` при `blocked`. Совпадает с `steps[].id` в истории `GET /v1/chats/{id}`. ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)) |
 | `assistantMessage` | string, опц. | присутствует при `assistant_message`; **также при `tool_call`**, если Claude выдал текст вместе с `tool_use` — текст того же assistant-шага (`stepId`); `null`/опущено, если текста не было ([Q-024-1](99-open-questions.md) / [ADR-024](adr/ADR-024-history-payload-domain-normalization.md)) |
-| `toolCalls` | array `[{ id, name, args }]`, опц. | **присутствует при `tool_call` — ВСЕ client-side tool-вызовы хода** (parallel tool use). Клиент обязан исполнить и вернуть результаты на все элементы ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). Server-side `site.*` сюда не входят. |
+| `toolCalls` | array `[{ id, name, args, requiresConfirmation }]`, опц. | **присутствует при `tool_call` — ВСЕ client-side tool-вызовы хода** (parallel tool use). Клиент обязан исполнить и вернуть результаты на все элементы ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). Server-side `site.*` сюда не входят. `requiresConfirmation` — спрашивать ли пользователя перед исполнением; признак задаёт **сервер**, выводить его из имени инструмента запрещено ([ADR-094 §4](adr/ADR-094-code-assistant-tools.md)). |
 | `toolCall` | object `{ id, name, args }`, опц. (**deprecated**) | присутствует при `tool_call`, **= `toolCalls[0]`**; читайте `toolCalls[]`. `id` — публичный UUID для `/chat/tool-result` (≠ `stepId`) |
 | `serverTools` | array `[{ toolCallId, toolName, status, summary? }]` | **server-side инструменты (`site.*`/`time.now`), выполненные backend за ЭТОТ вызов** ([ADR-028](adr/ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md)). Дополняет `toolCalls[]` (там — только client-side). `toolCallId` ([ADR-030](adr/ADR-030-toolcallid-in-server-tools.md)) — доменный uuid4 (= `tool_calls.id`), обязательный; **совпадает** с `toolCallId` соответствующего tool-шага истории `GET /v1/chats/{id}` (`steps[].payload.toolCallId`) → корреляция записи с историей; тот же домен id, что у `toolCalls[].id` (client-side). `status` = `completed`\|`errored`; `summary` — компактный итог (≤120, **без raw/путей/URL/токенов**; полный результат — в истории). Присутствует при `assistant_message`/`tool_call`/`blocked` (хотя бы `[]`); пустой `[]` при policy-`blocked`; может быть НЕ пустым при `max_tokens`. Биллинг неизменен. Семантика «за один вызов», не за сессию |
 | `blockReason` | enum, опц. | присутствует при `blocked` (см. [раздел 12](#12-blockreason--справочник)); `max_tokens` = обрезка ответа ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)) |
 | `usage` | object `{ inputTokens, outputTokens, model }` | при `assistant_message`/`tool_call`; **также при `blocked`+`blockReason=max_tokens`**; нет при policy-`blocked` |
 | `quiz` | object \| null | Структура квиза ([ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md)). Схема ответа общая с `/v1/chat/v2/*`, поэтому поле присутствует и здесь, но на legacy-роуте **всегда `null`** (ни в одном ходе `/v1/chat/run` квиза не бывает): квиз выдаётся только в ходах режима `generationMode=study_learn`, а `/v1/chat/run` режимов не принимает. Семантика поля — [раздел 4a](#4a-chat-v2--режимы-генерации). |
-| `documents` | array \| null | **Документы чата, созданные или изменённые в ЭТОМ ходе** ([ADR-101](adr/ADR-101-chat-response-documents.md), **спроектировано, код не написан** — на сегодняшних инстансах поля ещё нет). Элемент: `{ documentId, filename, mediaType, size, version }`, **без содержимого**. Только успешные `document.create`/`document.update`; `document.read`/`document.list` и отказы сюда **не** попадают. `null` — ход ничего не менял. Полный контракт и что делать клиенту — [раздел 29](#29-documents-документы-чата). |
+| `documents` | array \| null | **Документы чата, созданные или изменённые в ЭТОМ ходе** ([ADR-101](adr/ADR-101-chat-response-documents.md); **код написан, но ревью не проходил, в `main` не слит и не выкачен** — на сегодняшних инстансах поля ещё нет). Элемент: `{ documentId, filename, mediaType, size, version }`, **без содержимого**; `mediaType` — одно из четырёх значений (`text/markdown`, `text/plain`, `text/csv`, `application/json`). Только успешные `document.create`/`document.update`; `document.read`/`document.list` и отказы сюда **не** попадают. `null` — ход ничего не менял. Полный контракт и что делать клиенту — [раздел 30](#30-documents-документы-чата). |
 
 > **Синхронизация с историей чата ([ADR-023](adr/ADR-023-sync-ids-in-chat-response.md)).** `messageStepId`/`stepId` дают клиенту ключ для склейки ответа генерации с шагами `GET /v1/chats/{id}` → `steps[]`: `stepId` = точный шаг (`steps[].id`), `messageStepId` = ход для группировки tool-loop-раундов (`steps[].messageStepId`). При `status=blocked` шаг/ход не создаются (блок до генерации) → оба `null`. На `/v1/chat/tool-result` `messageStepId` стабилен в пределах хода (равен исходному `/chat/run`), `stepId` — id нового шага этого ответа.
 
@@ -328,7 +328,12 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 }
 ```
 
-- `generationModes[]` — режимы, которые **этот инстанс объявляет**, с фактической ценой инстанса. Состав задаётся конфигурацией инстанса: приложение без квиз-UI режим `study_learn` в списке **не увидит** (элемент отсутствует, а не помечен `available:false`). Гейт — **присутствие элемента**; `available` у присутствующих элементов всегда `true` и гейтом не является.
+> ⚠️ **Цена хода зависит от МОДЕЛИ, а не от режима генерации** ([ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)). Поэтому:
+> - **`creditCost` без параметра `model` — это ПОТОЛОК:** максимальная цена хода среди **всех моделей, которые инстанс тарифицирует** (включая те, что уже не предлагаются для новых чатов, но обслуживают начатые). Он одинаков у всех элементов `generationModes[]`. Значение выбрано так, чтобы фактическое списание **никогда не превышало показанного**;
+> - **точная цена конкретной модели** — в аддитивном query-параметре **`?model=<id>`** (при передаче `creditCost` каждого режима равен цене этой модели) и в поле `creditCost` chat-строк [`GET /v1/models`](#get-v1models);
+> - неизвестный `model` → `422`.
+
+- `generationModes[]` — режимы, которые **этот инстанс объявляет**, с ценой по правилу выше. Состав задаётся конфигурацией инстанса: приложение без квиз-UI режим `study_learn` в списке **не увидит** (элемент отсутствует, а не помечен `available:false`). Гейт — **присутствие элемента**; `available` у присутствующих элементов всегда `true` и гейтом не является.
 - **Отсутствие режима в списке ≠ запрет:** `POST /v1/chat/v2/run` примет `generationMode=study_learn` и на инстансе, который его не объявляет, — приложение, знающее имя режима, работает.
 - Порядок фиксирован, новые режимы добавляются **в конец**. Клиент обязан **игнорировать неизвестные ему значения `mode`** — появление нового режима не ломает старые сборки приложения.
 - `reasoningLevel` — серверная настройка глубины для режима `reasoning`.
@@ -831,7 +836,7 @@ Steps-view — агрегированные шаги одного message-шаг
 
 ## 19. Preferences
 
-Пользовательские настройки. Источник дефолта `assistantMode` для `/chat/run` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Если строка ещё не создана — возвращаются дефолты (`chat` / `false` / `{}`). Дефолт `notificationsEnabled=false` ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default; iOS включает push через `PATCH` после системного разрешения. Существующие строки `user_preferences` сохраняют ранее сохранённое значение (без backfill).
+Пользовательские настройки. Источник дефолта `assistantMode` для `/chat/run` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Если строка ещё не создана — возвращаются дефолты (`chat` / `false` / `null` / `{}`). Дефолт `notificationsEnabled=false` ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default; iOS включает push через `PATCH` после системного разрешения. Существующие строки `user_preferences` сохраняют ранее сохранённое значение (без backfill).
 
 **Заголовки:** `Authorization: Bearer <JWT>`.
 
@@ -841,6 +846,7 @@ Steps-view — агрегированные шаги одного message-шаг
 |---|---|---|
 | `defaultAssistantMode` | `chat` \| `code` | дефолтный тип ассистента; ортогонален billing_mode |
 | `notificationsEnabled` | bool | единый toggle уведомлений (push-токены — модуль notifications, Спринт 3); дефолт `false` при отсутствии строки ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)) |
+| `defaultVoiceId` | string \| null | голос озвучки по умолчанию ([ADR-100](adr/ADR-100-assistant-speech-output.md)); `null` = голос инстанса. Каталог допустимых значений — [`GET /v1/voices`](#29-озвучка-ответа-speech). Голос **персонажа** этой настройкой не переопределяется |
 | `codeDefaults` | object | дефолты Code-контекста (язык и т.п.); без секретов |
 
 **Коды:** `200`; `401`; `429`; `5xx`.
@@ -848,11 +854,11 @@ Steps-view — агрегированные шаги одного message-шаг
 ### PATCH /v1/preferences
 Частичное обновление (любое подмножество полей); создаёт строку при отсутствии (upsert). Требуется хотя бы одно поле.
 
-**Request:** любое подмножество `{ "defaultAssistantMode": "chat"|"code", "notificationsEnabled": bool, "codeDefaults": object }`. `codeDefaults` — ≤ 8 KB сериализованного JSON, без секретов (ключи вида `key`/`token`/`secret` → `422`).
+**Request:** любое подмножество `{ "defaultAssistantMode": "chat"|"code", "notificationsEnabled": bool, "defaultVoiceId": string|null, "codeDefaults": object }`. `codeDefaults` — ≤ 8 KB сериализованного JSON, без секретов (ключи вида `key`/`token`/`secret` → `422`). `defaultVoiceId` вне каталога `GET /v1/voices` → `422 unknown_voice`; при выключенной на инстансе озвучке любое непустое значение → `422 voice_output_disabled` (уже сохранённое значение при этом продолжает отдаваться в `GET`); `null` возвращает голос инстанса.
 
 **Response (200):** полный актуальный объект настроек (как у `GET`).
 
-**Коды:** `200`; `401`; `422` (ни одного поля / `codeDefaults` > 8 KB / секреты в `codeDefaults` / схема); `429`; `5xx`.
+**Коды:** `200`; `401`; `422` (ни одного поля / `codeDefaults` > 8 KB / секреты в `codeDefaults` / `unknown_voice` / `voice_output_disabled` / схема); `429`; `5xx`.
 
 ---
 
@@ -898,6 +904,17 @@ Steps-view — агрегированные шаги одного message-шаг
 
 То есть на инстансе без рублёвой оплаты цен в ответе нет, и это не отказ: там цены берёт клиент
 из StoreKit.
+
+**Оператор управляет каталогом удалённо** ([ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)):
+
+- **удалённый (архивный) продукт в ответе не появляется** — ни в одной из трёх веток. Уже
+  совершённые покупки и активные подписки при этом продолжают начислять кредиты как прежде;
+- **продукт, заведённый оператором, появляется** в ветках 2 и 3 (каталогом там владеем мы) с
+  `credits` и `title` из настройки и `price`/`currency` = `null`, пока продукт не заведён в панели
+  поставщика. В ветке 1 каталог принадлежит поставщику: там мы уточняем `credits`/`title` уже
+  перечисленных продуктов и **не добавляем** своих строк — позиция без платёжной ссылки была бы
+  некликабельной;
+- `credits` может измениться без обновления приложения — берите значение из ответа, не кэшируйте.
 
 **Response (200) — вариант с рублёвым каталогом:**
 ```json
@@ -971,12 +988,43 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | `files.write` | mutate | записать файл |
 | `files.list` | read | список файлов/директорий |
 | `files.mkdir` | mutate | создать директорию |
+| `files.search` | read | поиск по дереву проекта ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `files.patch` | mutate | точечная правка файла заменой фрагмента — предпочтительна перед `files.write`, который переписывает файл целиком ([ADR-094 §2](adr/ADR-094-code-assistant-tools.md)) |
+| `files.delete` | mutate | удалить файл ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `files.move` | mutate | переместить/переименовать файл ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.status` | read | состояние рабочего дерева ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.diff` | read | диф ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.log` | read | история коммитов ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.commit` | mutate | создать коммит ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.branch` | mutate | создать/переключить ветку ([ADR-094](adr/ADR-094-code-assistant-tools.md), ось `CODE_TOOLS_ENABLED`) |
+| `git.push` | mutate | отправить в удалённый репозиторий; `force` — **отдельное булево поле**, а не часть строки аргументов ([ADR-094 §5](adr/ADR-094-code-assistant-tools.md)) |
 | `calendar.read` | read | прочитать события календаря. Args: `{ start, end, calendarId? }` — `start`/`end` в ISO8601 **datetime** (local, без offset, напр. `"2026-06-11T09:00:00"`), интервал end-exclusive `[start, end)` ([ADR-027](adr/ADR-027-calendar-read-contract-alignment.md)) |
 | `calendar.create_events` | mutate | создать события. `events[].start`/`events[].end` — ISO8601 **datetime** (тот же формат, что `calendar.read`, [ADR-027](adr/ADR-027-calendar-read-contract-alignment.md)) |
 | `reminders.read` | read | прочитать напоминания |
 | `reminders.create` | mutate | создать напоминания |
+| `maps.show_place` | show | показать место на карте. Args: `{ name, latitude, longitude }` — координаты **обязательны** ([ADR-102](adr/ADR-102-mapkit-client-tools.md)) |
+| `maps.geocode` | read | адрес/название → координаты. Args: `{ query, maxResults }` |
+| `maps.reverse_geocode` | read | координаты → адрес. Args: `{ pointKind: "current_location"\|"coordinates", latitude?, longitude? }` |
+| `maps.route` | read | маршрут и время в пути. Args: `{ originKind, originName?, originLatitude?, originLongitude?, destinationName, destinationLatitude, destinationLongitude, transportType: "automobile"\|"walking"\|"transit", departureKind: "now"\|"at", departureTimeLocal? }` |
+| `maps.search_places` | read | поиск мест поблизости. Args: `{ query, centerKind, centerLatitude?, centerLongitude?, radiusMeters, maxResults }` |
+
+> **Инструменты работы с кодом — ось D ([ADR-094](adr/ADR-094-code-assistant-tools.md)).** Десять инструментов (`files.search`/`patch`/`delete`/`move` и все `git.*`) исполняет **приложение**: файлы и репозиторий лежат на машине человека. Предлагаются модели, только когда флаг инстанса `CODE_TOOLS_ENABLED=true` **и** сессия в режиме `assistantMode=code`; дефолт — **выключено**, потому что инструмент, который модель позвала, а клиент исполнить не умеет, оставляет ход незавершённым. На состав `GET /v1/tools` флаг не влияет ([раздел 22](#22-tools-каталог-инструментов)): записи видны до включения — по каталогу клиент и узнаёт, что ему предстоит реализовать.
+> - **Подтверждение задаёт сервер, а не клиент** ([ADR-094 §4](adr/ADR-094-code-assistant-tools.md)): признак `requiresConfirmation` приходит и в каталоге, и в каждом `toolCall`. Выводить его из имени инструмента **запрещено** — догадка ломается сразу: `files.search` только читает, а `git.branch` меняет состояние, и оба начинаются с «безопасного» префикса.
+> - **Читающие инструменты подтверждения не требуют намеренно:** диалог на каждый просмотр файла приучает нажимать «да» не глядя и обесценивает единственный диалог, который важен — перед `git.push` с перезаписью истории.
+> - **`force` у `git.push` — отдельное булево поле**, а не часть строки аргументов: спрятанный в строке флаг человек в диалоге не увидит, а «отправить» и «отправить с перезаписью истории» — разные по последствиям действия.
+> - Песочница путей у этих инструментов снята осознанно (проект лежит там, где лежит), и на `files.read` / `files.write` послабление **не** распространяется — они остаются в песочнице.
 
 > **Календарь — единый контракт диапазона `start`/`end` ([ADR-027](adr/ADR-027-calendar-read-contract-alignment.md)).** `calendar.read` и `calendar.create_events` используют **идентичные** имена (`start`/`end`) и формат (ISO8601 datetime, local, без offset, напр. `"2026-06-11T09:00:00"`); интервал чтения end-exclusive `[start, end)` («весь день» = с `00:00:00` до полуночи следующего дня). **Breaking change `calendar.read` для iOS:** прежние args `startDate`/`endDate` (date-only) заменены на `start`/`end` (datetime) — клиент обязан обновиться. Полная схема — [chat-orchestrator/02-api-contracts.md §Контракт календарных инструментов](modules/chat-orchestrator/02-api-contracts.md#контракт-календарных-инструментов-startend-нормативно-adr-027).
+
+> **Карты — контракт для iOS ([ADR-102](adr/ADR-102-mapkit-client-tools.md)).** Пять инструментов `maps.*` исполняет **приложение** (MapKit/CoreLocation живут только на устройстве); сервер результат **не валидирует** — проверяется лишь размер, поэтому форма ниже нормативна для клиента, а не «рекомендация».
+> - **Координаты — только именованными полями.** Позиционные пары (`[lon, lat]`, `coordinates: [...]`) и строки вида `"55.75,37.62"` запрещены и в аргументах, и в результатах: перепутанный порядок «долгота, широта» — молчаливая ошибка (значения валидны, точка в другом полушарии).
+> - **`current_location` и `now` — явные признаки, а не умолчания.** `centerKind`/`originKind`/`pointKind` (`current_location` \| `coordinates`) и `departureKind` (`now` \| `at`) **обязательны**. Ветку `now` разрешает **приложение** (локальное время устройства) и возвращает разрешённое значение в результате как `departureTimeLocal`; момент отправления и `arrivalTimeLocal` — ISO8601-datetime в **локальном времени без offset**, та же конвенция, что у календарных `start`/`end`.
+> - **Форма результата.** В объекте места первым `name`, затем `address`, затем числа. Единица измерения — **в имени поля** (`distanceMeters`, `travelTimeSeconds`, `radiusMeters`), отдельного `unit` нет. Локализованные строки (`distanceText`, `travelTimeText`, `summaryText`, `originLabel`) формирует **приложение** по локали и системе мер устройства — модель обязана цитировать их дословно, поэтому пропущенная строка портит ответ, а не оформление. Строковые поля ≤ 200 символов, элементов ≤ `maxResults`.
+> - **Пустой список — не ошибка.** «Ничего не нашлось» возвращается пустым `places[]` / `routes[]`, а **не** `error`: ошибка уходит модели как «повтори» и вызывает зацикливание. Отказ отдавайте кодом из фиксированного набора — `location_permission_denied`, `location_permission_not_determined`, `location_unavailable`, `transport_unavailable`, `maps_unavailable`.
+> - **Приватность.** Координаты собственного положения пользователя **не передаются** ни в аргументах, ни в результатах: `current_location` резолвит приложение, наружу идут локализованная подпись и признак точности `locationAccuracy` (`precise` \| `reduced`). У `maps.reverse_geocode` с `pointKind="current_location"` результат несёт адрес, а `latitude`/`longitude` в нём — `null`.
+> - **Гейт инстанса.** Семейство предлагается модели только при `MAPS_TOOLS_ENABLED=true` (дефолт **выключено**); флаг включается лишь там, где реализованы **все пять** исполнителей — частично реализованное семейство оставляет ход незавершённым ([Q-102-1](99-open-questions.md)). На состав `GET /v1/tools` флаг не влияет: записи видны до включения.
+>
+> Полный нормативный контракт (схемы args/result, таблица кодов отказа, инвариант приватности) — [chat-orchestrator/02-api-contracts.md §Контракт инструментов карт](modules/chat-orchestrator/02-api-contracts.md#контракт-инструментов-карт-нормативно-adr-102).
 
 ### Server-side, project-scoped (исполняет backend, требует проекта)
 Инструменты `site.*` (website-builder) — backend исполняет немедленно внутри tool-loop и продолжает диалог с Claude **без** round-trip к iOS. Наружу как `tool_call` **не** отдаются. Предлагаются Claude **только** при наличии `projectId` ([ADR-022](adr/ADR-022-optional-project-and-tool-gating.md)). См. [раздел 10A](#10-website-builder--preview).
@@ -992,7 +1040,7 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 `quiz.generate` тоже исполняет backend без проекта, **но предлагается модели только в режиме `generationMode=study_learn`** ([раздел 4a](#4a-chat-v2--режимы-генерации)): «global» здесь означает «не требует проекта», а не «доступен всегда». На legacy `/v1/chat/run` он не предлагается никогда. Read-only, без audit-мутации, без отдельных списаний. Каталог `GET /v1/tools` при этом перечисляет **все** инструменты, включая те, что в конкретном ходе не предлагались бы ([раздел 22](#22-tools-каталог-инструментов)).
 
 ### Формат
-- **tool_call** (от backend к iOS): `toolCalls = [ { "id": "<uuid>", "name": "<доменное имя, напр. files.read>", "args": { ... } }, ... ]` — **все** client-side вызовы хода ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). `id` — публичный стабильный идентификатор для `/chat/tool-result`. Поле `toolCall` (одиночное) = `toolCalls[0]`, **deprecated** — читайте `toolCalls[]`.
+- **tool_call** (от backend к iOS): `toolCalls = [ { "id": "<uuid>", "name": "<доменное имя, напр. files.read>", "args": { ... }, "requiresConfirmation": <bool> }, ... ]` — **все** client-side вызовы хода ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); `requiresConfirmation` задаёт сервер ([ADR-094 §4](adr/ADR-094-code-assistant-tools.md)), клиент его не выводит из имени. `id` — публичный стабильный идентификатор для `/chat/tool-result`. Поле `toolCall` (одиночное) = `toolCalls[0]`, **deprecated** — читайте `toolCalls[]`.
 - **tool-result** (от iOS к backend, батч): `{ "userId", "sessionId", "results": [ { "toolCallId": "<id>", "result": { ... } }, { "toolCallId": "<id>", "error": { "code", "message" } } ] }`. В каждом элементе ровно одно из `result`/`error`. Backend продолжает диалог только когда собраны результаты на **все** `toolCalls[]` хода (барьер хода). Одиночная форma (`toolCallId` + `result|error` на верхнем уровне) — deprecated, поддерживается.
 - Имена инструментов в публичном контракте — доменные, с точкой (`files.read`). Внутреннее преобразование к формату Anthropic — деталь реализации, iOS её не касается.
 
@@ -1007,6 +1055,7 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 - **Режимы генерации (`mode`):**
   - `credits` — списывается кредит с баланса, генерация на сервисном Anthropic-ключе.
   - `byok` — пользователь приносит свой ключ (Anthropic или OpenAI, [ADR-044](adr/ADR-044-multi-provider-byok.md)); генерация через провайдера ключа; кредиты не списываются.
+- **Озвучка ответа ([раздел 30](#29-озвучка-ответа-speech), [ADR-100](adr/ADR-100-assistant-speech-output.md)):** тарифицируется **отдельно** от хода — `TTS_CREDIT_COST` (дефолт 1 кредит) за озвучку одного ответа. **Платится один раз навсегда** за пару «ответ + голос»: повтор, переустановка приложения и второе устройство стоят `0`. Смена голоса — новая озвучка и новое списание. **Озвучка списывает кредиты и в режиме `byok`** — синтез идёт через наш ключ независимо от ключа пользователя (в отличие от самого хода). Приём **голоса** от пользователя ([ADR-095](adr/ADR-095-voice-messages.md)) по-прежнему **бесплатен** — он входит в цену хода.
 
 ---
 
@@ -1039,7 +1088,7 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | `attachments[]` — страниц в PDF | ≤ 100 | `422 pdf_too_many_pages` |
 | Файл в `POST /v1/media/uploads` | ≤ 10 MB после декодирования | `413 payload_too_large` (**намеренно не `422`** — историческая асимметрия с чатом, статус не меняем ради совместимости) |
 | `result` (`/chat/tool-result`) | ≤ 256 KB | `422` |
-| Документ чата — один ([раздел 29](#29-documents-документы-чата), [ADR-090 §7](adr/ADR-090-chat-documents.md)) | ≤ 256 KB содержимого (байты UTF-8) | `422 document_too_large` |
+| Документ чата — один ([раздел 30](#30-documents-документы-чата), [ADR-090 §7](adr/ADR-090-chat-documents.md)) | ≤ 256 KB содержимого (байты UTF-8) | `422 document_too_large` |
 | Документы чата — число на чат | ≤ 20 шт. (проверяется при создании) | `422 too_many_documents` |
 | Документы чата — сумма на чат | ≤ 1 MB | `422 documents_total_too_large` |
 | `apiKey` (BYOK) | ≤ 4 KB | `422` |
@@ -1049,7 +1098,8 @@ Backend возвращает `status="tool_call"`, iOS исполняет на �
 | Эндпоинт | Лимиты |
 |---|---|
 | `POST /v1/chat/run` | 30 req/min per user · 60 req/min per device · 120 req/min per IP |
-| Прочие `/v1/*` — **и POST, и GET** (общий бакет на пользователя; сюда же входят все маршруты документов, включая `GET …/documents/{documentId}/download`, [раздел 29](#29-documents-документы-чата)) | 60 req/min per user |
+| `POST /v1/chat/speech` | `TTS_RATE_LIMIT_PER_MIN`, дефолт 10 req/min per user (отдельный бакет — [ADR-100](adr/ADR-100-assistant-speech-output.md)) |
+| Прочие `/v1/*` — **и POST, и GET** (общий бакет на пользователя; сюда же входят все маршруты документов, включая `GET …/documents/{documentId}/download`, [раздел 30](#30-documents-документы-чата)) | 60 req/min per user |
 | `/v1/admin/*` | 10 req/min per source IP |
 
 Превышение → `429` (с телом `{ error.code: "rate_limited" }`).
@@ -1118,8 +1168,12 @@ JWKS с публичным ключом (для самопроверки/отл�
 { "tools": [ { "name": "files.read", "description": "...", "mutating": false,
   "execution": "client", "inputSchema": { "type": "object", "properties": { } } } ] }
 ```
-- `name` — доменное имя с точкой. `mutating` (bool) — требует ли audit. `execution` — `"client"` (исполняет iOS) или `"server"` (`site.*` — [ADR-011](adr/ADR-011-server-side-tools.md); `time.now` — [ADR-026](adr/ADR-026-global-server-side-tools-and-time-now.md); `quiz.generate` — [ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md); исполняет backend). `inputSchema` — JSON Schema аргументов инструмента: типы, обязательные поля, ограничения и описания **полей**. Внутренняя метаинформация backend (имена Python-классов, их docstring'и, ссылки на внутренние решения) в схему **не попадает** — ни в этот ответ, ни в определения, уходящие LLM-провайдеру.
-- Возвращает **полный** реестр (не фильтруется ни по `assistantMode`, ни по проекту, ни по `generationMode`). Состав: `files.read/write/list/mkdir`, `calendar.read/create_events`, `reminders.read/create` (client), `site.write_file/preview/list/read/delete` (server, project-scoped), `time.now` (server, global), `quiz.generate` (server, global, предлагается модели только в режиме `study_learn` — [раздел 4a](#4a-chat-v2--режимы-генерации)).
+- `name` — доменное имя с точкой. `mutating` (bool) — требует ли audit. `execution` — `"client"` (исполняет iOS) или `"server"` (`site.*` — [ADR-011](adr/ADR-011-server-side-tools.md); `time.now` — [ADR-026](adr/ADR-026-global-server-side-tools-and-time-now.md); `quiz.generate` — [ADR-064](adr/ADR-064-study-learn-quiz-generation-mode.md); `media.*` — [ADR-068](adr/ADR-068-media-generate-chat-tools.md); `document.*` — [ADR-090](adr/ADR-090-chat-documents.md); исполняет backend). `inputSchema` — JSON Schema аргументов инструмента: типы, обязательные поля, ограничения и описания **полей**. Внутренняя метаинформация backend (имена Python-классов, их docstring'и, ссылки на внутренние решения) в схему **не попадает** — ни в этот ответ, ни в определения, уходящие LLM-провайдеру.
+- Возвращает **полный** реестр — **37 записей**. Каталог не фильтруется ни по `assistantMode`, ни по проекту, ни по `generationMode`, ни по инстанс-флагам `CODE_TOOLS_ENABLED` / `MAPS_TOOLS_ENABLED`: инструмент присутствует в каталоге, даже если модели в этом ходе (или на этом инстансе) не предлагается — клиент по каталогу понимает, что ему предстоит реализовать. Единственное исключение — per-instance денилист семейств `CHAT_DISABLED_TOOL_FAMILIES` ([ADR-081](adr/ADR-081-disabled-tool-families.md)): перечисленные там семейства (`files`/`calendar`/`reminders`/`site`) отсутствуют и в каталоге, и в наборе модели; дефолт — пустой, то есть полный реестр. Состав:
+  - **client:** `files.read/write/list/mkdir`; `files.delete/move/search/patch` и `git.status/diff/log/commit/branch/push` (ось `CODE_TOOLS_ENABLED`, [ADR-094](adr/ADR-094-code-assistant-tools.md)); `calendar.read/create_events`; `reminders.read/create`; `maps.show_place/geocode/reverse_geocode/route/search_places` (ось `MAPS_TOOLS_ENABLED`, [ADR-102](adr/ADR-102-mapkit-client-tools.md), [раздел 13](#13-tool-протокол));
+  - **server, project-scoped:** `site.write_file/preview/list/read/delete`;
+  - **server, global:** `time.now`; `quiz.generate` (предлагается модели только в режиме `study_learn` — [раздел 4a](#4a-chat-v2--режимы-генерации)); `media.generate_image/generate_video/ask_params` ([ADR-068](adr/ADR-068-media-generate-chat-tools.md)); `document.create/list/read/update` ([ADR-090](adr/ADR-090-chat-documents.md)).
+- Нормативный источник состава и числа записей — [chat-orchestrator/02-api-contracts §GET /v1/tools](modules/chat-orchestrator/02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019) (таблица «Полный список»); порядок записей детерминирован, новые инструменты добавляются **в конец** реестра.
 **Коды:** `200`; `401`; `429`.
 
 ---
@@ -1132,8 +1186,8 @@ JWKS с публичным ключом (для самопроверки/отл�
 **Response 200:**
 ```json
 { "models": [
-  { "id": "gpt-4.1", "displayName": "GPT-4.1", "name": "GPT-4.1", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null },
-  { "id": "gpt-4o", "displayName": "GPT-4o", "name": "GPT-4o", "default": false, "provider": "openai", "modality": "chat", "variant": null, "family": null },
+  { "id": "gpt-4.1", "displayName": "GPT-4.1", "name": "GPT-4.1", "default": true, "provider": "openai", "modality": "chat", "variant": null, "family": null, "creditCost": 1 },
+  { "id": "gpt-5", "displayName": "GPT-5", "name": "GPT-5", "default": false, "provider": "openai", "modality": "chat", "variant": null, "family": null, "creditCost": 3 },
   { "id": "fal-ai/nano-banana-pro", "displayName": "Nano Banana Pro", "name": "Nano Banana Pro", "default": true, "provider": "fal", "modality": "photo", "variant": "Text to Image", "family": "Nano-Banana-Pro" },
   { "id": "fal-ai/veo3.1", "displayName": "Veo 3.1", "name": "Veo 3.1", "default": false, "provider": "fal", "modality": "video", "variant": "Text to Video", "family": "veo3.1" }
 ] }
@@ -1143,6 +1197,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 - **`modality` (`chat`\|`photo`\|`video`) — стабильный фильтр ([ADR-087 §5](adr/ADR-087-default-chat-model-gpt-4-1.md)):** значения не переименовываются и не меняют смысла; новое значение может быть только добавлено (отдельным решением), поэтому клиент обязан **игнорировать** строку с неизвестной `modality`, а не падать.
 - **Дефолт чата на OpenAI-инстансах — `gpt-4.1`** ([ADR-087](adr/ADR-087-default-chat-model-gpt-4-1.md)): у `gpt-4o` встроенный guardrail отказывался описывать изображения с людьми. `gpt-4o` остаётся в списке и выбирается явно. **Модель фиксируется на сессию** — сменить её внутри начатого чата нельзя (создайте новый чат); уже начатые чаты продолжаются на своей модели.
 - `provider` (`openai`\|`anthropic`\|`fal`), `variant`/`family` (у chat `null`) — аддитивные поля; старые клиенты игнорируют.
+- **`creditCost`** (аддитивное поле, [ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)) — сколько кредитов спишется за **один завершённый ход** на этой модели. Заполнено у `modality=chat`; у `photo`/`video` — `null` (там цена зависит от параметров запуска, см. `GET /v1/media/models`). Значение точное: именно оно проверяется балансовым гейтом и списывается. Режим генерации (`generationMode`) на цену **не влияет**. Оператор инстанса может изменить цену модели без обновления приложения — не кэшируйте её надолго.
 - Chat без `LLM_PROVIDERS` — встроенный каталог активного провайдера ([ADR-076](adr/ADR-076-builtin-chat-product-catalog.md)) + дефолт первым. Env allowlist добавляет extras. С `LLM_PROVIDERS` — union обоих (нужны оба ключа). Leftover-ключ dual не включает. Пустой `FAL_API_KEY` — без fal-строк.
 **Коды:** `200`; `401`; `429`.
 
@@ -1208,6 +1263,49 @@ JWKS с публичным ключом (для самопроверки/отл�
 
 ---
 
+## 29. Озвучка ответа (Speech)
+
+Озвучка **уже полученного** ответа ассистента. Ход чата не меняется: `POST /v1/chat/run` / `/v1/chat/v2/run` и SSE отдают ровно то же, что раньше. [ADR-100](adr/ADR-100-assistant-speech-output.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#post-v1chatspeech--озвучка-ответа-adr-100).
+
+### GET /v1/voices
+Каталог голосов для экрана настроек. **Auth:** JWT. **Query:** `locale` (как у `/v1/presets` и `/v1/characters`).
+
+```json
+{ "enabled": true, "locale": "ru", "defaultVoiceId": "default_female",
+  "voices": [ { "id": "default_male", "name": "Мужской", "gender": "male" },
+              { "id": "default_female", "name": "Женский", "gender": "female" } ] }
+```
+- `enabled` — включена ли озвучка на инстансе. **По умолчанию выключена на всех инстансах**; при `false` список пуст, `defaultVoiceId: null`, а `POST /v1/chat/speech` отвечает `422 voice_output_disabled`. Клиент прячет и настройку голоса, и кнопку воспроизведения по этому полю.
+- `defaultVoiceId` — что прозвучит у **этого** пользователя в чате без персонажа (его настройка либо голос инстанса). Используется как предвыбранная строка в настройках.
+- В списке — **только выбираемые** голоса. Голоса персонажей закреплены за персонажами, пользователем не меняются и в каталоге отсутствуют.
+- Выбранный `id` сохраняется через `PATCH /v1/preferences` → `defaultVoiceId` (раздел 19). `null` возвращает голос инстанса.
+
+**Коды:** `200`; `401`; `422` (явный `?locale=` вне набора); `429`.
+
+### POST /v1/chat/speech
+Синтез речи по конкретному ответу. **Auth:** JWT; `userId` = `sub`.
+
+```json
+{ "userId": "uuid", "sessionId": "uuid", "stepId": "uuid" }
+```
+- `stepId` — id assistant-шага: то же значение, что пришло в `ChatResponse.stepId` или лежит в `GET /v1/chats/{id}` → `steps[].id`. Адресуется конкретное сообщение, а не «последний ответ».
+- Голос в запросе **не передаётся** — его выбирает сервер: голос персонажа чата, иначе голос пользователя из настроек, иначе голос инстанса.
+
+**Response (200):**
+```json
+{ "stepId": "uuid", "voiceId": "char_vampire_lord", "mediaType": "audio/mpeg",
+  "audio": "<base64>", "truncated": false, "creditsCharged": 1 }
+```
+- `audio` — готовый файл в base64; проигрывается из памяти, отдельная ссылка не нужна.
+- `voiceId` — фактически использованный голос. **Ключ клиентского кэша — пара `(stepId, voiceId)`:** после смены голоса в настройках приложение запрашивает шаг заново и получает новую пару.
+- `truncated: true` — прозвучало начало ответа: длина озвучки ограничена сервером. **Текст ответа при этом полный и не изменён.**
+- `creditsCharged` — сколько списал **этот** вызов. **Повторная озвучка того же ответа тем же голосом — `0`** (платится один раз, навсегда; переустановка приложения и второе устройство ничего не стоят). Смена голоса — новая озвучка и новое списание.
+- Перед синтезом текст приводится к произносимому виду: блоки кода, таблицы, ссылки, эмодзи и разметка удаляются. Это касается **только звука** — история и текст на экране не меняются.
+
+**Коды:** `200`; `401`; `403` (`userId ≠ sub`); `404` `session_not_found` / `step_not_found`; `409` `insufficient_credits`; `422` `voice_output_disabled` (озвучка выключена на инстансе) / `nothing_to_speak` (произносить нечего — например ответ целиком из кода); `429`; `502` (сбой синтезатора); `503` `voice_output_not_configured`; `504` (таймаут синтеза).
+
+---
+
 ## 26. Workspaces (рабочие пространства / «Projects») ([ADR-036](adr/ADR-036-workspaces-implementation.md))
 
 Рабочее пространство = `name` + `description` + кастомные `instructions` (system-prompt проекта) + файлы-знания (контекст для всех чатов проекта) + группировка чатов. iOS отображает «Projects»; API-путь — **`/v1/workspaces`** (слово «project» в API занято website-builder, [ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)). Все эндпоинты — JWT, изоляция по `sub`: чужой/несуществующий → `404`. Биллинг: CRUD/файлы бесплатны; генерация в чате проекта — 1 кредит ([ADR-006](adr/ADR-006-credit-billing-and-subscription-grant.md)). Модуль — [modules/workspaces](modules/workspaces/README.md).
@@ -1248,7 +1346,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 
 ---
 
-## 29. Documents (документы чата)
+## 30. Documents (документы чата)
 
 Решение — [ADR-090](adr/ADR-090-chat-documents.md).
 
@@ -1341,7 +1439,7 @@ Backend нормализует `filename` и в REST, и в вызове мод�
 Отказ инструмента (лимит, недопустимый тип, чужой документ, пустое содержимое у `create`) **не роняет ход**: модель получает машиночитаемую ошибку и может переформулировать. Наружу такой отказ виден в `serverTools[]` со `status="errored"`.
 
 ### Как приложение узнаёт о новом документе
-> **`ChatResponse.documents[]` ([ADR-101](adr/ADR-101-chat-response-documents.md)) — спроектировано, код не написан.** На сегодняшних инстансах поля в ответе ещё нет.
+> **`ChatResponse.documents[]` ([ADR-101](adr/ADR-101-chat-response-documents.md)) — код написан, но ревью не проходил, в `main` не слит и на инстансы не выкачен.** На сегодняшних инстансах поля в ответе ещё нет.
 
 Ход, в котором модель звала `document.create` или `document.update`, вернёт в ответе генерации:
 ```json
@@ -1351,7 +1449,8 @@ Backend нормализует `filename` и в REST, и в вызове мод�
 ```
 - содержимого в элементе **нет** — берите его `GET …/documents/{documentId}` или `/download`;
 - только **изменившие** ход инструменты: `document.read` и `document.list` в список **не** попадают, отказавшие вызовы — тоже;
-- поле привязано к **ходу** (`messageStepId`): документ, созданный на раннем витке tool-loop, придёт и в последующих ответах того же хода, и при сетевом повторе запроса;
+- `mediaType` — одно из четырёх значений (`text/markdown`, `text/plain`, `text/csv`, `application/json`), то же перечисление, что у объекта документа выше;
+- поле привязано к **ходу** (`messageStepId`): документ, созданный на раннем витке tool-loop, придёт и в последующих ответах того же хода, и при сетевом повторе запроса — **в том числе когда в этом же ходе позже тронут ещё один документ**: ответ несёт оба, а не только последний;
 - **одна запись на `documentId`** с последней `version`: ход, создавший и тут же поправивший документ, даёт одну карточку, а не две;
 - `null` — ход ничего не менял (в том числе при `status="blocked"`).
 

@@ -121,6 +121,9 @@ new)
   # Резерв для подписки вне карты — величина МЛАДШЕГО тарифа, а не старшего: опечатка в
   # идентификаторе не должна раздавать годовой пакет.
   setvar ADAPTY_SUBSCRIPTION_TOKENS_GRANT 100
+  # Предвыбранные на пейволле продукты (ADR-098 §11). Признак наш, не поставщика: у broadapps
+  # поля с таким смыслом нет вовсе. Список — те же продукты, что заведены выше.
+  setvar TOKEN_PRODUCTS_DEFAULT 'weekly_9.99_nottrial,year_49.99_nottrial,100_tokens_9.99,250_tokens_19.99,500_tokens_34.99,1000_tokens_59.99,2000_tokens_99.99'
   mkdir -p .secrets && chmod 700 .secrets
   if [ ! -f .secrets/jwt_private.pem ]; then
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out .secrets/jwt_private.pem 2>/dev/null

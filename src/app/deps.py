@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.admin.crm_service import CrmAdminService
+from app.admin.economics_service import AdminEconomicsService
 from app.admin.service import AdminService
 from app.api_gateway.auth import AuthenticatedUser, get_jwt_verifier
 from app.api_gateway.openapi_security import bearer_scheme
@@ -315,6 +316,10 @@ def get_crm_admin_service(session: DbSession) -> CrmAdminService:
     wallet = WalletService(session, audit)
     admin = AdminService(session, wallet, audit)
     return CrmAdminService(session, wallet, audit, admin)
+
+
+def get_admin_economics_service(session: DbSession) -> AdminEconomicsService:
+    return AdminEconomicsService(session)
 
 
 def get_chats_service(session: DbSession) -> ChatsService:

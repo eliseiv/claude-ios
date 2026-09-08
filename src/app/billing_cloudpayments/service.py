@@ -43,6 +43,12 @@ from app.billing_cloudpayments.verify import CloudPaymentsVerifyClient, Creditab
 from app.billing_common.resolve import resolve_user
 from app.config import Settings
 from app.errors import CloudPaymentsWebhookMisconfiguredError
+from app.instance_config import (
+    CHANNEL_CLOUDPAYMENTS,
+    one_time_credits,
+    one_time_product_ids,
+    subscription_credits,
+)
 from app.observability.logging import log_event
 from app.wallet.service import WalletService
 
@@ -342,7 +348,12 @@ class CloudPaymentsWebhookService:
             self._log_payment_skipped(payment, user_id, "unknown_payment_type")
             return "skipped"
 
-        token_products = self._settings.token_products()
+        # ADR-099: классификация обязана смотреть в ТО ЖЕ множество, из которого ниже берётся
+        # сумма. На сырой карте продукт, созданный оператором через admin-поверхность, не
+        # нашёлся бы, был бы переклассифицирован в подписку по имени и начислен из ФОЛБЭКА
+        # КАНАЛА вместо своих `tokens` — классификация по одному источнику, деньги по другому.
+        # На пустом оверлее множество равно ключам TOKEN_PRODUCTS: поведение не меняется.
+        one_time_ids = one_time_product_ids(settings=self._settings)
 
         # ADR-057: the provider may misreport a SUBSCRIPTION product as one_time (observed on
         # avelyra 2026-07-19: week_6.99_nottrial arrived as one_time, was not a configured token
@@ -354,8 +365,8 @@ class CloudPaymentsWebhookService:
         # the amount still comes from server-side config: ADR-054 §6 anti-tamper is unchanged.
         if (
             kind == parser.KIND_TOKENS
-            and payment.product_code not in token_products
-            and parser.classify_product(payment.product_code, None, frozenset(token_products))
+            and payment.product_code not in one_time_ids
+            and parser.classify_product(payment.product_code, None, one_time_ids)
             == parser.KIND_SUBSCRIPTION
         ):
             kind = parser.KIND_SUBSCRIPTION
@@ -372,15 +383,16 @@ class CloudPaymentsWebhookService:
 
         # Amount ONLY from server-side maps keyed by product_code (anti-tamper, ADR-054 §6).
         if kind == parser.KIND_TOKENS:
-            credits = token_products.get(payment.product_code)
-            if credits is None or credits <= 0:
+            resolved = one_time_credits(payment.product_code, settings=self._settings)
+            if resolved is None or resolved <= 0:
                 self._log_payment_skipped(payment, user_id, "unknown_product")
                 return "skipped"
+            credits = resolved
             reason = "cloudpayments_tokens"
         else:
-            credits = (
-                self._settings.cloudpayments_product_tokens().get(payment.product_code)
-                or self._settings.cloudpayments_subscription_tokens_grant
+            # Канал `cloudpayments`: своя пара «карта -> фолбэк», дословно сегодняшняя.
+            credits = subscription_credits(
+                payment.product_code, CHANNEL_CLOUDPAYMENTS, settings=self._settings
             )
             reason = "cloudpayments_subscription"
 

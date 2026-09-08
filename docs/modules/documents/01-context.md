@@ -8,7 +8,7 @@
 - Таблица **`chat_documents`** ([03-data-model §22](../../03-data-model.md), миграция `0027`).
 
 ## Потребители
-- **chat-orchestrator** — исполняет `document.*` как global server-side tools внутри tool-loop (без проекта, без round-trip к устройству) и добавляет строку о документах в системный промт. По [ADR-101](../../adr/ADR-101-chat-response-documents.md) он же собирает поле `ChatResponse.documents[]` (turn-scoped, по образцу `mediaJobs`).
+- **chat-orchestrator** — исполняет `document.*` как global server-side tools внутри tool-loop (без проекта, без round-trip к устройству) и добавляет строку о документах в системный промт. По [ADR-101](../../adr/ADR-101-chat-response-documents.md) он же собирает поле `ChatResponse.documents[]` (turn-scoped; паттерн двух производителей взят у `mediaJobs`, но восстановление по ходу здесь **безусловное** — [ADR-101 §4](../../adr/ADR-101-chat-response-documents.md)).
 - **iOS-приложение** — список документов чата, открытие, скачивание файлом, загрузка своего документа.
 
 ## Соседи (важно не путать)

@@ -8,9 +8,10 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Body, Depends, Header, Request
+from fastapi import APIRouter, Body, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 
+from app import instance_config
 from app.api_gateway.rate_limit import enforce_chat_limits
 from app.chat.orchestrator import ChatOrchestrator, ChatRunOut, ChatStreamEvent, ToolResultIn
 from app.chat.tools import CONFIRM_TOOLS
@@ -24,7 +25,7 @@ from app.deps import (
     get_v2_orchestrator,
     require_owner,
 )
-from app.errors import AppError, RateLimitedError
+from app.errors import AppError, RateLimitedError, ValidationFailedError
 from app.observability.context import set_session_id
 from app.request_logs.service import RequestLogWriter
 from app.schemas.chat import (
@@ -536,13 +537,43 @@ def _to_response(out: ChatRunOut) -> ChatResponse:
         "элемента, а не как значение `available`. Отсутствие режима в списке НЕ означает, что "
         "`/v1/chat/v2/run` его не примет: это гейт объявления, а не поведения. Порядок элементов "
         "фиксирован, новые режимы добавляются в конец — клиент обязан игнорировать неизвестные ему "
-        "значения `mode`. Подписка и баланс здесь не проверяются — это решает `/v1/chat/v2/run`."
+        "значения `mode`. Подписка и баланс здесь не проверяются — это решает `/v1/chat/v2/run`. "
+        "Стоимость хода зависит от модели, а не от режима: без параметра `model` возвращается "
+        "потолок по каталогу инстанса, с параметром — точная цена хода на этой модели; "
+        "модель, которой инстанс не обслуживает, отклоняется."
     ),
 )
-async def chat_v2_capabilities(current: CurrentUser) -> ChatCapabilitiesResponse:
+async def chat_v2_capabilities(
+    current: CurrentUser,
+    model: Annotated[str | None, Query(max_length=200)] = None,
+) -> ChatCapabilitiesResponse:
     _ = current  # endpoint is authenticated but does not need per-user state.
     settings = get_settings()
     provider = settings.llm_provider.strip().lower()
+    # ADR-099 §5.2: у режима больше нет собственной цены — цена стала функцией МОДЕЛИ, а модели
+    # в этом запросе нет. Поле обязано быть определено (его уже читают выпущенные сборки),
+    # поэтому без параметра отдаётся ПОТОЛОК по каталогу: агрегат, который читает клиент, не
+    # имеет права занизить фактическое списание. С параметром отдаётся точная цена этой модели.
+    # Источник цены один и тот же — резолвер `chat_turn_credit_cost`; второго прайс-листа нет.
+    if model is not None:
+        # Неизвестная модель — `422`, а не тихая подстановка общей цены: молча отдать чужое
+        # число значило бы показать клиенту цену, по которой он списан не будет.
+        if model not in settings.allowed_models_union():
+            raise ValidationFailedError(f"model '{model}' is not available on this instance")
+        credit_cost = instance_config.chat_turn_credit_cost(model)
+    else:
+        # ⚠️ Потолок берётся по ПОЛНОМУ известному каталогу, а НЕ по витрине. Модель, снятую
+        # оператором с витрины, уже созданная сессия продолжает обслуживать и тарифицировать
+        # (§4.3, §8) — поэтому максимум по витрине занизил бы агрегат ровно на разницу между
+        # снятой дорогой моделью и оставшейся дешёвой, а норма §4.4 «агрегат НИКОГДА не
+        # занижает» абсолютна. На пустом оверлее витрина равна каталогу и число то же самое.
+        credit_cost = max(
+            (
+                instance_config.chat_turn_credit_cost(model_id)
+                for model_id in settings.allowed_models_union()
+            ),
+            default=settings.chat_credit_cost_general,
+        )
     # ADR-065 §1: the ADVERTISED set, not «every mode the backend understands». A mode outside the
     # instance allowlist is ABSENT from the array — deliberately not `available: false`, because the
     # clients this protects are already-released binaries that may ignore that field. The list is
@@ -558,12 +589,12 @@ async def chat_v2_capabilities(current: CurrentUser) -> ChatCapabilitiesResponse
             GenerationModeCapability(
                 mode=cast(GenerationMode, mode),
                 # Same single bridge as the balance gate and the debit — never a second price.
-                creditCost=settings.chat_generation_credit_cost(mode),
+                creditCost=credit_cost,
                 available=True,
             )
-            for mode in settings.advertised_generation_modes()
+            for mode in instance_config.advertised_generation_modes()
         ],
-        reasoningLevel=settings.resolved_reasoning_level(),
+        reasoningLevel=instance_config.reasoning_level(),
     )
 
 

@@ -228,7 +228,7 @@ sequenceDiagram
 - OpenAPI-схема `cloudpayments_webhook_scheme` (`HTTPBearer`, `scheme_name="cloudPaymentsWebhook"`, `auto_error=False`) — в `src/app/api_gateway/openapi_security.py`.
 - Фабрика `get_cloudpayments_webhook_service` — в `src/app/deps.py`.
 - Модель `CloudPaymentsWebhookEvent` — в `src/app/models/tables.py`.
-- Миграция `0014` — `migrations/versions/…_0014_cloudpayments_webhook_events.py` (`down_revision="0013"`).
+- Миграция `0014` — `migrations/versions/…_0014_cloudpayments_webhook_events.py` (`down_revision="0013_byok_provider"`).
 - Config — `src/app/config.py` (3 новых поля + `cloudpayments_product_tokens()`).
 - Audit — `EVENT_CLOUDPAYMENTS_PAYMENT = "cloudpayments_payment"` в `src/app/audit/service.py`.
 - Регистрация роутера в `src/app/main.py` (`include_router`).
@@ -453,3 +453,35 @@ AuditEvent(user_id=<uuid>, event_type=EVENT_CLOUDPAYMENTS_PAYMENT, payload={
 
 ## Observability
 Каждый вызов `handle()` — **ровно одна** запись `"cloudpayments_webhook_outcome"` (allowlist полей, уровни) — точное ТЗ в [08-observability.md](08-observability.md).
+
+## Источник числа кредитов после [ADR-099](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md)
+
+Число кредитов, начисляемых по продукту, берётся **единым резолвером** в порядке
+**оверлей `admin_products` → env-карта этого канала → фиксированный грант канала**. Оверлей
+заполняется оператором из CRM (`POST`/`PATCH /v1/admin/products`), лежит в БД инстанса и **всегда
+серверный**: анти-тампер не ослабляется — число кредитов по-прежнему **никогда** не приходит из
+тела пользовательского запроса.
+
+- **Пустая таблица оверлея = сегодняшнее поведение бит-в-бит.** Ни один продукт, заведённый в env,
+  не меняет суммы начисления этим выкатом.
+- **Правка применяется не мгновенно:** значение читается из снимка процесса, обновляемого раз в
+  `ADMIN_OVERRIDES_REFRESH_SECONDS` (дефолт 30 с). Окно объявляется оператору полем
+  `effective_after_seconds` admin-контракта.
+- **Архивный продукт (`archived: true`) начисляет как обычно.** Архив снимает продукт **с
+  витрины** приложения и не является запретом операций — иначе он ломал бы уже оплаченное и
+  активные подписки.
+- ⚠️ **После правки величины из CRM правка `.env` по ней ничего не меняет** — оверлей приоритетнее
+  env ([ADR-099 §2](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md)).
+- ⛔ **«Строка оверлея есть» ≠ «оверлей задал число».** Колонки `purchase_kind`/`tokens` —
+  nullable со смыслом «оверлей этого поля не задаёт»
+  ([ADR-099 §6.1](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md)), поэтому оверлей
+  читается, **только если и класс совпал, и `tokens` задан**; иначе резолвер проваливается к карте
+  канала и его фолбэку. Строка, созданная правкой одного `archived`, не несёт числа — и не имеет
+  права обнулить грант: это было бы изменением начисления правкой, его не касавшейся (§2).
+
+У этого модуля **два** пути, и правило к ним применяется раздельно (копировать один на другой
+нельзя): ветка `KIND_TOKENS` — `one_time`-резолвер (`credits ≤ 0` по-прежнему `skipped`), ветка
+`KIND_SUBSCRIPTION` — `subscription`-резолвер (**оверлей → `CLOUDPAYMENTS_PRODUCT_TOKENS` →
+`CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT`**). Классификация платежа по `payment_type` и
+реклассификация [ADR-057](../../adr/ADR-057-cloudpayments-payment-type-mismatch-fallback.md) не меняются:
+резолвер отвечает на вопрос «сколько», а не «какого класса платёж».

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import EVENT_SUBSCRIPTION_CHANGE, AuditEvent, AuditService
 from app.config import get_settings
+from app.instance_config import CHANNEL_STOREKIT, subscription_credits
 from app.models import Subscription
 from app.subscription.storekit import StoreKitVerifier, VerifiedTransaction
 from app.wallet.service import WalletService
@@ -70,9 +71,14 @@ class SubscriptionService:
         # Grant a fixed credit package per period, idempotent by transactionId (ADR-006).
         if active:
             settings = get_settings()
+            # ADR-099 §6: сначала оверлей продукта, при его отсутствии — прежняя фиксированная
+            # величина периода. Аддитивно: у всех env-продуктов оверлея нет, поэтому поведение
+            # остаётся прежним.
             await self._wallet.grant(
                 user_id=user_id,
-                amount=settings.subscription_credits_per_period,
+                amount=subscription_credits(
+                    verified.product_id or None, CHANNEL_STOREKIT, settings=settings
+                ),
                 idempotency_key=f"sub-grant:{verified.transaction_id}",
                 meta={
                     "reason": "subscription_period",

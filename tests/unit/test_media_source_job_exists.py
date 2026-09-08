@@ -18,7 +18,6 @@ from app.chat.tools import TOOL_MEDIA_ASK_PARAMS
 
 def _media(*, exists: bool) -> AsyncMock:
     media = AsyncMock()
-    media.credits_for = lambda m: m.default_credits
     media.job_exists = AsyncMock(return_value=exists)
     return media
 

@@ -95,6 +95,27 @@ class MediaModeSchema(StrictModel):
     )
 
 
+class MediaPriceCellSchema(StrictModel):
+    """Точная цена одной комбинации параметров — то, что спишется на самом деле."""
+
+    resolution: str | None = Field(
+        default=None, description="Качество; `null` — у модели нет такого параметра."
+    )
+    durationSeconds: int | None = Field(
+        default=None, description="Длительность видео в секундах; `null` у image-моделей."
+    )
+    audio: bool | None = Field(
+        default=None,
+        description="Со звуком или без; `null` — модель звук не тарифицирует.",
+    )
+    credits: int = Field(
+        description=(
+            "Кредиты: у image — за ОДНО изображение в этом качестве (итог = × `numImages`); "
+            "у video — полная цена запуска с этими параметрами."
+        )
+    )
+
+
 class MediaModelSchema(StrictModel):
     id: str = Field(description="Идентификатор модели для полей `model` в запросах генерации.")
     title: str = Field(description="Человекочитаемое название модели для UI.")
@@ -139,6 +160,15 @@ class MediaModelSchema(StrictModel):
             "Video: множитель при `generateAudio: true` (Veo → 2, Kling V3 → 1.5). Может быть "
             "дробным — итоговая цена округляется вверх. `null` — звук на цену не влияет (даже "
             "если переключатель в UI есть)."
+        ),
+    )
+    prices: list[MediaPriceCellSchema] = Field(
+        default_factory=list,
+        description=(
+            "Точные цены по комбинациям параметров. Считайте стоимость по этому массиву: он "
+            "точен всегда, тогда как `credits`/`resolutionMultipliers`/`audioMultiplier` — "
+            "агрегат для старых сборок, и он никогда не занижает списание, но может его "
+            "завысить."
         ),
     )
     supportsImageInput: bool = Field(

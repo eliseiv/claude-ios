@@ -28,8 +28,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.errors import SubscriptionRequiredError, ValidationFailedError
+from app.instance_config import one_time_credits
 from app.observability.metrics import token_purchase_total
 from app.policy.engine import SubscriptionStatus
 from app.policy.loader import load_policy_state
@@ -122,12 +122,13 @@ class TokenPurchaseService:
             raise SubscriptionRequiredError("an active subscription is required to buy tokens")
 
     def _credits_for_product(self, product_id: str) -> int:
-        """Resolve credits strictly from server-side TOKEN_PRODUCTS (BR-TP-1, BR-TP-5).
+        """Число кредитов — ТОЛЬКО из серверного источника: оверлей -> TOKEN_PRODUCTS.
 
-        Unknown productId -> 422 (never trust a credit count from the client body).
+        Анти-тампер сохраняется дословно (BR-TP-1, BR-TP-5): значение никогда не приходит из
+        тела пользовательского запроса. Оверлей — тоже серверный источник: он заполняется по
+        admin-ключу, а не пользовательским JWT. Неизвестный продукт по-прежнему `422`.
         """
-        products = get_settings().token_products()
-        credits = products.get(product_id)
+        credits = one_time_credits(product_id)
         if credits is None:
             token_purchase_total.labels(result="unknown_product").inc()
             raise ValidationFailedError("unknown token product")

@@ -22,6 +22,7 @@ import httpx
 from app.billing_cloudpayments.parser import KIND_TOKENS, KIND_UNKNOWN, classify_product
 from app.config import Settings
 from app.errors import UpstreamError, ValidationFailedError
+from app.instance_config import one_time_credits, one_time_product_ids
 from app.observability.logging import log_event
 
 logger = logging.getLogger(__name__)  # == "app.billing_cloudpayments.checkout"
@@ -68,11 +69,18 @@ class CloudPaymentsCheckoutClient:
         issue a link for a product the webhook could later credit. Does NOT size any grant.
         ``unknown`` OR a ``tokens`` product with a non-positive credit value => 422.
         """
-        token_products = self._settings.token_products()
-        kind = classify_product(product_id, None, frozenset(token_products))
+        # ADR-099: тот же overlay-aware источник, что у вебхука. Этот гейт объявляет себя
+        # СИММЕТРИЧНЫМ вебхуку, и симметрия обязана держаться на одном множестве: иначе продукт,
+        # заведённый оператором и у нас, и в панели поставщика, вебхук зачёл бы, а ссылку на
+        # оплату мы бы не выдали. На пустом оверлее оба выражения равны сегодняшним.
+        one_time_ids = one_time_product_ids(settings=self._settings)
+        kind = classify_product(product_id, None, one_time_ids)
         if kind == KIND_UNKNOWN:
             raise ValidationFailedError("unknown_product")
-        if kind == KIND_TOKENS and token_products.get(product_id, 0) <= 0:
+        if (
+            kind == KIND_TOKENS
+            and (one_time_credits(product_id, settings=self._settings) or 0) <= 0
+        ):
             raise ValidationFailedError("unknown_product")
 
     async def list_products(self) -> list[dict[str, Any]] | None:

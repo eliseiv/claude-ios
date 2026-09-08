@@ -21,6 +21,7 @@ from app.admin.service import AdminService
 from app.audit.service import EVENT_CRM_SUBSCRIPTION_GRANT, AuditEvent, AuditService
 from app.config import Settings, get_settings
 from app.errors import InsufficientCreditsError, UserNotFoundError
+from app.instance_config import CHANNEL_MANUAL, known_product_ids, subscription_credits
 from app.media_generation.catalog import KIND_IMAGE, KIND_VIDEO, find_model
 from app.pricing.provider_prices import (
     PROVIDER_FAL,
@@ -37,8 +38,6 @@ from app.schemas.crm_admin import (
     CrmMediaStats,
     CrmPaymentItem,
     CrmPaymentListResponse,
-    CrmProductItem,
-    CrmProductListResponse,
     CrmRequestItem,
     CrmRequestListResponse,
     CrmStatsResponse,
@@ -924,48 +923,6 @@ class CrmAdminService:
             payments_sum_usd=0.0,
         )
 
-    def list_products(self) -> CrmProductListResponse:
-        items: list[CrmProductItem] = []
-        seen: set[str] = set()
-        for product_id, credits in self._settings.token_products().items():
-            if product_id in seen:
-                continue
-            seen.add(product_id)
-            items.append(
-                CrmProductItem(
-                    product_id=product_id,
-                    name=f"{credits} tokens",
-                    price=None,
-                    period=None,
-                )
-            )
-        for product_id in self._settings.cloudpayments_product_tokens():
-            if product_id in seen:
-                continue
-            seen.add(product_id)
-            items.append(
-                CrmProductItem(
-                    product_id=product_id,
-                    name=product_id,
-                    price=None,
-                    period="subscription",
-                )
-            )
-        for entry in self._settings.products_catalog():
-            pid = entry.get("productId") or entry.get("product_id")
-            if not isinstance(pid, str) or pid in seen:
-                continue
-            seen.add(pid)
-            items.append(
-                CrmProductItem(
-                    product_id=pid,
-                    name=str(entry.get("title") or entry.get("name") or pid),
-                    price=str(entry.get("price")) if entry.get("price") is not None else None,
-                    period=str(entry.get("period")) if entry.get("period") is not None else None,
-                )
-            )
-        return CrmProductListResponse(items=items)
-
     async def adjust_tokens(self, user_id: uuid.UUID, amount: int) -> CrmTokensAdjustResponse:
         await self._admin._require_user_exists(user_id)
         if amount == 0:
@@ -1001,15 +958,12 @@ class CrmAdminService:
         grant_id: str,
     ) -> CrmSubscriptionGrantResponse:
         await self._admin._require_user_exists(user_id)
-        known_products = {
-            *self._settings.token_products().keys(),
-            *self._settings.cloudpayments_product_tokens().keys(),
-        }
-        for entry in self._settings.products_catalog():
-            pid = entry.get("productId") or entry.get("product_id")
-            if isinstance(pid, str):
-                known_products.add(pid)
-        if product_id not in known_products:
+        # ADR-099 §6: допустимые product_id — ВЕСЬ объединённый каталог инстанса, включая
+        # созданные оператором и АРХИВНЫЕ. Расширение односторонне безопасно: это
+        # admin-операция, и она получает право выдать план по продукту, по которому инстанс и
+        # так умеет начислять. «Перестал выдаваться» относится к клиенту приложения, а не к
+        # оператору, выполняющему законную операцию.
+        if product_id not in known_product_ids(settings=self._settings):
             raise HTTPException(status_code=400, detail="unknown product_id")
 
         existing = await self._session.scalar(
@@ -1053,8 +1007,11 @@ class CrmAdminService:
                 base = exp
         new_expires = base + datetime.timedelta(days=expires_in_days)
 
-        credits_map = self._settings.cloudpayments_product_tokens()
-        credits = credits_map.get(product_id, self._settings.subscription_credits_per_period)
+        # Пара «карта + фолбэк» у ручной выдачи СВОЯ и не совпадает ни с одним вебхуком:
+        # карта CloudPayments, фолбэк — SUBSCRIPTION_CREDITS_PER_PERIOD. Свести её к каналу
+        # cloudpayments «по смыслу» нельзя: подмена фолбэка изменила бы выданное число кредитов
+        # на инстансе, где эти величины откалиброваны раздельно.
+        credits = subscription_credits(product_id, CHANNEL_MANUAL, settings=self._settings)
 
         await self._session.execute(
             text(

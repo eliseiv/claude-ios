@@ -137,7 +137,7 @@
   - `cloudpayments_product_tokens_raw: str = Field(default="{}", alias="CLOUDPAYMENTS_PRODUCT_TOKENS")`
   - `cloudpayments_subscription_tokens_grant: int = Field(default=1000, alias="CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT")`
   - метод `cloudpayments_product_tokens() -> dict[str, int]` — **точная копия формы** `token_products()`/`adapty_product_tokens()` (`config.py:293`): JSON `{str: positive-int}`, малформед/не-объект → `{}`, `bool` исключить, невалидные пары пропустить (graceful, не крашить процесс).
-- Миграция **`0014`** (`migrations/versions/…_0014_cloudpayments_webhook_events.py`, `down_revision="0013"`): таблица `cloudpayments_webhook_events` + index по `user_id` (DDL — [04-data-model.md](04-data-model.md)). Проверить **single head** (`alembic heads`).
+- Миграция **`0014`** (`migrations/versions/…_0014_cloudpayments_webhook_events.py`, `down_revision="0013_byok_provider"`): таблица `cloudpayments_webhook_events` + index по `user_id` (DDL — [04-data-model.md](04-data-model.md)). Проверить **single head** (`alembic heads`).
 - ORM-модель `CloudPaymentsWebhookEvent` в `src/app/models/tables.py`.
 - Audit: `EVENT_CLOUDPAYMENTS_PAYMENT = "cloudpayments_payment"` в `src/app/audit/service.py`.
 

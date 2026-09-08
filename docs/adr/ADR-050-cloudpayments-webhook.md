@@ -71,7 +71,7 @@
 
 ### 4. Идемпотентность (разведены два механизма — как [ADR-047 §C](ADR-047-adapty-real-payload-format-and-grant-idempotency.md))
 
-- **Дедуп события** по `TransactionId` — **новая таблица `cloudpayments_webhook_events`** (`transaction_id` **UNIQUE/PK**, `user_id`, `product_id`, `kind`, `payload` (санитизированный, §7), `processed_at`). `INSERT ... ON CONFLICT (transaction_id) DO NOTHING RETURNING` в одной транзакции; конфликт → `duplicate` без побочных эффектов. **Миграция `0014`** (`down_revision='0013'`, single head, expand-only).
+- **Дедуп события** по `TransactionId` — **новая таблица `cloudpayments_webhook_events`** (`transaction_id` **UNIQUE/PK**, `user_id`, `product_id`, `kind`, `payload` (санитизированный, §7), `processed_at`). `INSERT ... ON CONFLICT (transaction_id) DO NOTHING RETURNING` в одной транзакции; конфликт → `duplicate` без побочных эффектов. **Миграция `0014`** (`down_revision='0013_byok_provider'`, single head, expand-only).
 - **Идемпотентность гранта** — ledger `idempotency_key = f"cp-txn:{TransactionId}"` (UNIQUE, [ADR-005](ADR-005-idempotency-ledger.md)). Namespace **изолирован** от `adapty-txn:*` / `sub-grant:*` / `admin-sub-grant:*` / token-purchase. `TransactionId` уникален на платёж (продления — новый → начисляют заново) ⇒ один грант на платёж.
 
 ### 5. userId не найден

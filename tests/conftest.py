@@ -218,6 +218,12 @@ async def _engine(_migrated: str):
 
 
 _TABLES = (
+    # Операторские оверлеи экономики и настроек (ADR-099, миграция 0033). FK у них нет, но
+    # усечение обязательно: строка, оставленная одним тестом, меняет ЦЕНУ и НАСТРОЙКИ инстанса
+    # для всех последующих — то есть утечка тут молча переписывает списание в чужом тесте.
+    "admin_products",
+    "admin_tariffs",
+    "admin_settings",
     "request_logs",
     "audit_logs",
     "tool_calls",
@@ -243,6 +249,22 @@ _TABLES = (
     "subscriptions",
     "users",
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_instance_config_snapshot() -> Iterator[None]:
+    """Пустой снимок оверлеев на входе и на выходе КАЖДОГО теста (ADR-099 §2).
+
+    Снимок — глобальное состояние процесса, а не строка БД: пишущая admin-ручка обновляет его
+    сразу после коммита, и без сброса он пережил бы усечение таблиц и продолжил бы отдавать
+    операторскую цену (или снятую с витрины модель) следующему тесту. Форма дефекта та же, что у
+    незачищенной таблицы, но `TRUNCATE` её не лечит.
+    """
+    from app.instance_config import reset_snapshot
+
+    reset_snapshot()
+    yield
+    reset_snapshot()
 
 
 @pytest.fixture

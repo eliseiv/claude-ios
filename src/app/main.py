@@ -48,6 +48,11 @@ from app.api_gateway.routers import (
 from app.config import get_settings
 from app.db import dispose_engine
 from app.errors import AppError
+from app.instance_config import (
+    overrides_refresh_loop,
+    refresh_snapshot_from_pool,
+    reset_snapshot,
+)
 from app.media_generation.reconciler import reconciler_loop
 from app.observability.context import get_request_id
 from app.observability.logging import configure_logging, log_event
@@ -71,15 +76,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reconciler_task = asyncio.create_task(
             reconciler_loop(stop, settings), name="media-reconciler"
         )
+    # ADR-099 §2: снимок операторских оверлеев грузится ДО приёма трафика — иначе первые
+    # запросы обслуживались бы по env-ценам, то есть тихо отменяли бы правку оператора.
+    # Отказ загрузки НЕ мешает старту: пустой снимок = поведение до выката, и это состояние
+    # видно по метрике возраста снимка, а не только по логу.
+    try:
+        await refresh_snapshot_from_pool(settings)
+    except Exception:  # noqa: BLE001 — недоступная БД не должна мешать /health отвечать
+        logger.exception("instance_config_initial_load_failed")
+    # Обновитель запускается ВСЕГДА: величина окна — это окно, а не выключатель. Нулём его
+    # «отключить» нельзя, иначе `effective_after_seconds` объявил бы CRM мгновенное применение
+    # при процессах, которые не обновятся никогда (см. `admin_overrides_refresh_window`).
+    overrides_task: asyncio.Task[None] = asyncio.create_task(
+        overrides_refresh_loop(stop, settings), name="instance-config-refresher"
+    )
     try:
         yield
     finally:
         stop.set()
-        if reconciler_task is not None:
+        for task in (reconciler_task, overrides_task):
+            if task is None:
+                continue
             try:
-                await asyncio.wait_for(reconciler_task, timeout=5.0)
+                await asyncio.wait_for(task, timeout=5.0)
             except (TimeoutError, asyncio.CancelledError):
-                reconciler_task.cancel()
+                task.cancel()
+        reset_snapshot()
         await dispose_engine()
         await close_redis()
 

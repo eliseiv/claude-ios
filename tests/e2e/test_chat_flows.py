@@ -168,7 +168,9 @@ async def test_generation_mode_switching_uses_turn_cost_and_llm_mode(
         settings.chat_credit_cost_research,
         settings.chat_credit_cost_reasoning,
     )
-    settings.chat_credit_cost_general = 1
+    # ADR-099 §5.3: надбавка за режим снята — цена хода стала функцией МОДЕЛИ. Три величины
+    # заведомо РАЗНЫЕ: кейс падает, если списание снова начнёт читать надбавку режима.
+    settings.chat_credit_cost_general = 2
     settings.chat_credit_cost_research = 3
     settings.chat_credit_cost_reasoning = 4
     try:
@@ -193,7 +195,8 @@ async def test_generation_mode_switching_uses_turn_cost_and_llm_mode(
         b1 = r1.json()
         assert b1["status"] == "assistant_message"
         assert b1["usage"]["generationMode"] == "research"
-        assert b1["usage"]["creditsCharged"] == 3
+        # Режим ведёт ПОВЕДЕНИЕ вызова (hosted-поиск, суффикс промта), но не цену.
+        assert b1["usage"]["creditsCharged"] == 2
         assert fake_anthropic.calls[-1]["generation_mode"] == "research"
         assert any(t.get("name") == "web_search" for t in fake_anthropic.calls[-1]["tools"])
         from app.chat.orchestrator import _RESEARCH_INSTRUCTION
@@ -215,7 +218,8 @@ async def test_generation_mode_switching_uses_turn_cost_and_llm_mode(
         b2 = r2.json()
         assert b2["status"] == "assistant_message"
         assert b2["usage"]["generationMode"] == "general"
-        assert b2["usage"]["creditsCharged"] == 1
+        # …и потому оба хода на ОДНОЙ модели стоят одинаково, при разных режимах.
+        assert b2["usage"]["creditsCharged"] == 2
         assert fake_anthropic.calls[-1]["generation_mode"] == "general"
         from app.chat.orchestrator import _RESEARCH_INSTRUCTION as _RESEARCH_SUFFIX
 
@@ -241,8 +245,11 @@ async def test_generation_mode_cost_gates_before_upstream_call(
     fake_anthropic: FakeAnthropicClient,
 ) -> None:
     settings = get_settings()
-    original = settings.chat_credit_cost_reasoning
-    settings.chat_credit_cost_reasoning = 3
+    original = (settings.chat_credit_cost_general, settings.chat_credit_cost_reasoning)
+    # Гейт считает по цене МОДЕЛИ (дефолт строки — `CHAT_CREDIT_COST_GENERAL`). Надбавка режима
+    # выставлена ЗАВЕДОМО МЕНЬШЕЙ баланса: вернись гейт к ней — 2 >= 1 прошло бы, и кейс упал.
+    settings.chat_credit_cost_general = 3
+    settings.chat_credit_cost_reasoning = 1
     try:
         async with db_sessionmaker() as s:
             uid = await seed_user(s, subscription="active", balance=2)
@@ -262,7 +269,7 @@ async def test_generation_mode_cost_gates_before_upstream_call(
         assert r.json()["blockReason"] == "credits_empty"
         assert fake_anthropic.calls == []
     finally:
-        settings.chat_credit_cost_reasoning = original
+        (settings.chat_credit_cost_general, settings.chat_credit_cost_reasoning) = original
 
 
 @pytest.mark.asyncio
@@ -272,8 +279,11 @@ async def test_tool_result_continuation_keeps_original_generation_mode_cost(
     fake_anthropic: FakeAnthropicClient,
 ) -> None:
     settings = get_settings()
-    original = settings.chat_credit_cost_research
-    settings.chat_credit_cost_research = 3
+    original = (settings.chat_credit_cost_general, settings.chat_credit_cost_research)
+    # Цена хода — функция модели и одна на весь ход, включая продолжение через tool-result.
+    # Надбавка режима выставлена ОТЛИЧНОЙ: её возврат уронит кейс.
+    settings.chat_credit_cost_general = 3
+    settings.chat_credit_cost_research = 4
     try:
         async with db_sessionmaker() as s:
             uid = await seed_user(s, subscription="active", balance=5)
@@ -317,9 +327,9 @@ async def test_tool_result_continuation_keeps_original_generation_mode_cost(
             bal = await s.scalar(
                 text("SELECT balance FROM wallets WHERE user_id=:u"), {"u": str(uid)}
             )
-        assert int(bal) == 2
+        assert int(bal) == 2  # ровно ОДИН дебит за ход, по цене модели
     finally:
-        settings.chat_credit_cost_research = original
+        (settings.chat_credit_cost_general, settings.chat_credit_cost_research) = original
 
 
 # --------------------------- AC-2: expired blocks both modes ---------------------------

@@ -26,16 +26,21 @@ from tests.conftest import FakeAnthropicClient, auth_headers, seed_user
 
 _QUIZ_WIRE = "quiz_generate"
 _QUIZ_DOMAIN = "quiz.generate"
-_STUDY_LEARN_PRICE = 4
+# ADR-099 §5.3: цена хода — функция МОДЕЛИ (дефолт строки тарифа = `CHAT_CREDIT_COST_GENERAL`),
+# надбавки за режим больше нет. Env-надбавка выставляется заведомо ДРУГИМ числом, чтобы её
+# возврат ронял кейсы этого файла, а не проходил незамеченным.
+_TURN_PRICE = 4
+_UNREAD_STUDY_LEARN_ENV = 6
 
 
 @pytest.fixture
 def study_learn_price() -> Iterator[int]:
     settings = get_settings()
-    original = settings.chat_credit_cost_study_learn
-    settings.chat_credit_cost_study_learn = _STUDY_LEARN_PRICE
-    yield _STUDY_LEARN_PRICE
-    settings.chat_credit_cost_study_learn = original
+    original = (settings.chat_credit_cost_general, settings.chat_credit_cost_study_learn)
+    settings.chat_credit_cost_general = _TURN_PRICE
+    settings.chat_credit_cost_study_learn = _UNREAD_STUDY_LEARN_ENV
+    yield _TURN_PRICE
+    (settings.chat_credit_cost_general, settings.chat_credit_cost_study_learn) = original
 
 
 def _pool(count: int = 3, *, tag: str = "A") -> dict[str, Any]:
@@ -552,13 +557,17 @@ async def test_capabilities_advertisement_allowlist(
     "advertised_modes", ["general,research,reasoning,study_learn"], indirect=True
 )
 @pytest.mark.asyncio
-async def test_capabilities_lists_study_learn_last_with_the_env_price(
+async def test_capabilities_prices_every_mode_identically_from_the_single_bridge(
     client: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     study_learn_price: int,
     advertised_modes: str,
 ) -> None:
-    """diff: fails if creditCost is hardcoded instead of coming from the single pricing bridge.
+    """diff: падает, если `creditCost` захардкожен или снова стал зависеть от РЕЖИМА.
+
+    ADR-099 §5.2: у режима больше нет собственной цены, поэтому без `?model=` поле равно ПОТОЛКУ
+    по каталогу и ОДИНАКОВО у всех элементов. Фикстура держит `CHAT_CREDIT_COST_STUDY_LEARN`
+    отличным от `_GENERAL`: возврат надбавки за режим развёл бы значения и уронил кейс.
 
     Requires the advertising env (ADR-065 §1): without it the element is absent altogether.
     """
@@ -568,9 +577,7 @@ async def test_capabilities_lists_study_learn_last_with_the_env_price(
     modes = await _capability_modes(client, uid)
 
     assert [m["mode"] for m in modes] == ["general", "research", "reasoning", "study_learn"]
-    study = modes[-1]
-    assert study["creditCost"] == study_learn_price  # follows the env the debit uses
-    assert study["available"] is True
+    assert {m["creditCost"] for m in modes} == {study_learn_price}
     assert all(m["available"] is True for m in modes)
 
 

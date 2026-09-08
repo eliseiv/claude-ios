@@ -228,7 +228,7 @@ CREATE INDEX ix_tool_calls_session ON tool_calls (session_id, created_at);
 ```sql
 CREATE TABLE audit_logs (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id     UUID NULL REFERENCES users(id) ON DELETE CASCADE,
     session_id  UUID REFERENCES chat_sessions(id) ON DELETE SET NULL,
     event_type  TEXT NOT NULL,    -- tool_mutation | billing_debit | policy_decision | byok_change
     payload     JSONB NOT NULL,   -- без секретов/ключей
@@ -238,6 +238,12 @@ CREATE INDEX ix_audit_user_created ON audit_logs (user_id, created_at DESC);
 CREATE INDEX ix_audit_event_type ON audit_logs (event_type, created_at DESC);
 ```
 > Append-only на уровне приложения (нет UPDATE/DELETE из кода). Жёсткий запрет ревизий — потенциальный TD, см. [100-known-tech-debt.md](100-known-tech-debt.md#td-001).
+
+> **`user_id` — NULLABLE (ослаблено миграцией `0033_admin_economics`, [ADR-099 §9](adr/ADR-099-crm-admin-economics-and-instance-settings.md)).** Причина: у операторских правок каталога и настроек инстанса (`admin_product_created`, `admin_tariff_updated`, `admin_setting_updated` и соседние) **субъекта-пользователя нет вовсе** — меняется конфигурация инстанса, а не состояние чьего-то аккаунта. Подставлять сюда «какой-нибудь» `userId` значило бы записать в аудит факт, которого не было.
+>
+> ⚠️ **Обратно `NOT NULL` не ужесточается — и это свойство таблицы, а не текущей волны.** `audit_logs` append-only: к моменту ужесточения в ней уже лежат строки без `user_id`, и вернуть ограничение можно было бы только **удалив** их, то есть уничтожив аудит ровно тех действий, ради видимости которых он и ведётся. Downgrade миграции это ослабление намеренно **не** откатывает.
+>
+> Индекс `ix_audit_user_created (user_id, created_at DESC)` сохраняется: btree просто не индексирует `NULL`-строки в составном ключе как искомые — выборки «события пользователя X» работают как прежде, а операторские правки в них не попадают, что и требуется.
 
 ### 9a. request_logs (ADR-077, миграция `0023`)
 ```sql
@@ -331,11 +337,16 @@ CREATE TABLE user_preferences (
     user_id                UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     default_assistant_mode assistant_mode NOT NULL DEFAULT 'chat',  -- дефолтный тип ассистента (chat|code)
     notifications_enabled  BOOLEAN NOT NULL DEFAULT FALSE,          -- toggle уведомлений (модуль notifications); дефолт FALSE — privacy-by-default, iOS запрашивает системное разрешение сначала ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md))
+    default_voice_id       TEXT,                                    -- миграция 0032_user_default_voice (ADR-100): голос озвучки по умолчанию (id реестра src/app/chat/voices.py, только записи selectable). NULL = голос инстанса (TTS_DEFAULT_VOICE_ID). FK НЕТ — реестр живёт в коде, как у model и character_id; валидация по реестру на PATCH (422 unknown_voice), при VOICE_OUTPUT_ENABLED=false непустое значение → 422 voice_output_disabled. Читается на КАЖДОМ синтезе, на сессии не фиксируется. Голос персонажа стоит выше в резолве и этой настройкой не переопределяется.
     code_defaults          JSONB NOT NULL DEFAULT '{}'::jsonb,      -- дефолты Code-context (язык и т.п.), без секретов
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 > Строка создаётся лениво (upsert при первом GET/PATCH preferences) либо отдаётся дефолтами, если отсутствует. `notifications_enabled` — единый источник настройки уведомлений; регистрация push-токенов — `device_push_tokens` (таблица 17).
+> **`default_voice_id` (миграция `0032_user_default_voice`, expand-only, [ADR-100](adr/ADR-100-assistant-speech-output.md)):** `ALTER TABLE user_preferences ADD COLUMN default_voice_id TEXT` — nullable, без `server_default`, без backfill и без индекса (по голосу не фильтруют; строка читается по PK). Существующие строки остаются `NULL` и звучат голосом инстанса. Внешнего ключа нет — реестр в коде, тот же приём, что у `chat_sessions.model` ([ADR-034](adr/ADR-034-user-model-selection.md)) и `chat_sessions.character_id` ([ADR-097](adr/ADR-097-character-personas.md)); ссылочная целостность держится валидацией на `PATCH`, а не БД. Откат — `DROP COLUMN`.
+> **Порядок миграций.** Две волны идут параллельно и номера уже перераспределены: озвучка ([ADR-100](adr/ADR-100-assistant-speech-output.md)) занимает **`0032_user_default_voice`** (от `0031_chat_character`), оверлеи экономики ([ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)) — **`0033_admin_economics`** (от `0032_user_default_voice`). Инвариант — **single head**, а не конкретный номер: `down_revision` каждой ревизии проставляется по фактическому head на момент записи файла, иначе получаются две головы с общим родителем и `alembic upgrade head` падает на прод-инстансе. Таблицы этих двух миграций не пересекаются, поэтому порядок применения на данные не влияет.
+>
+> ⛔ **Пока волна не приземлилась, её миграция называется в `docs/` ПОЛНЫМ идентификатором ревизии** (`0032_user_default_voice`), **а не коротким номером** (`0032`). Короткий номер — координата в очереди, а не адрес: при двух параллельных волнах он **переезжает** к соседу, а документ, несущий короткий номер, продолжает читаться как верный — ни один гейт на этом не падает, и расхождение всплывает у devops на `alembic upgrade head`. Именно так номер `0033` разъехался по шести документам. Закрытых волн правило не касается: их номера уже приземлились и не двигаются, а переписывать историю ради формы адреса не нужно. **Проверка одной командой:** `grep -rnoE 'миграци[а-я]* \*{0,2}\`0[0-9]{3}\`' docs/` не должна содержать номера незакрытых волн.
 
 ### 13. workspace_projects ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md), [ADR-036](adr/ADR-036-workspaces-implementation.md), модуль `workspaces`)
 > **Поставка 3 (миграция `0011`).** Создаётся вместе с `workspace_files` и `chat_sessions.workspace_project_id`.
@@ -512,7 +523,7 @@ CREATE INDEX ix_auth_identities_user ON auth_identities (user_id);
 ```sql
 ALTER TABLE byok_keys ADD COLUMN provider TEXT NULL;
 ```
-> Мульти-провайдерный BYOK ([ADR-044](adr/ADR-044-multi-provider-byok.md)): провайдер BYOK-ключа (`anthropic`/`openai`) определяется детектором префиксов по самому ключу, независимо от `LLM_PROVIDER`. Expand-only, **без backfill** (легаси-строки → `NULL` → fallback-детект по plaintext на генерации). Цепочка `0012`→`0013`, single head (`down_revision='0012'`). DDL колонки — [§5 byok_keys](#5-byok_keys).
+> Мульти-провайдерный BYOK ([ADR-044](adr/ADR-044-multi-provider-byok.md)): провайдер BYOK-ключа (`anthropic`/`openai`) определяется детектором префиксов по самому ключу, независимо от `LLM_PROVIDER`. Expand-only, **без backfill** (легаси-строки → `NULL` → fallback-детект по plaintext на генерации). Цепочка `0012`→`0013`, single head (`down_revision='0012_auth_identities'`). DDL колонки — [§5 byok_keys](#5-byok_keys).
 
 ## Колонка `media_jobs.moderation` (expand-only, [ADR-086](adr/ADR-086-ugc-moderation.md), модуль `media-generation`)
 ```sql
@@ -541,14 +552,113 @@ ALTER TABLE media_jobs ADD COLUMN moderation JSONB NULL;
 
 **Каскад по `session_id` — следствие выбранного скоупа**, а не оптимизация: документ живёт ровно столько, сколько чат ([ADR-090 §2](adr/ADR-090-chat-documents.md)). Пользователь, которому документ дорог, обязан его скачать; клиент предупреждает при удалении чата с документами.
 
-**`version` — признак изменения для UI, а НЕ механизм конкурентности:** условной проверки при обновлении нет, `If-Match` не читается, `409` не возвращается — два одновременных обновления оба применятся, победит последнее ([modules/documents/02-api-contracts §version](modules/documents/02-api-contracts.md#version--признак-изменения-а-не-механизм-конкурентности)). Полный контракт модуля — [modules/documents](modules/documents/README.md); справочник для интегратора — [API-REFERENCE §29](API-REFERENCE.md#29-documents-документы-чата).
+**`version` — признак изменения для UI, а НЕ механизм конкурентности:** условной проверки при обновлении нет, `If-Match` не читается, `409` не возвращается — два одновременных обновления оба применятся, победит последнее ([modules/documents/02-api-contracts §version](modules/documents/02-api-contracts.md#version--признак-изменения-а-не-механизм-конкурентности)). Полный контракт модуля — [modules/documents](modules/documents/README.md); справочник для интегратора — [API-REFERENCE §30](API-REFERENCE.md#30-documents-документы-чата).
+
+## Таблицы удалённого управления инстансом (миграция `0033_admin_economics`, [ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md), модуль `admin`)
+
+Три **таблицы-оверлея**: они хранят **только то, что оператор изменил** из CRM. Дом дефолтов
+остаётся прежним — env и код (`src/app/config.py`, `src/app/media_generation/catalog.py`,
+`src/app/chat/product_catalog.py`). Порядок разрешения любой величины — **оверлей → env → дефолт
+кода**.
+
+> ⚠️ **Пустые таблицы обязаны воспроизводить поведение до выката бит-в-бит.** Это несущее свойство,
+> а не следствие аккуратности: **backfill и засев запрещены**. Засеянная копия каталога разошлась
+> бы с кодом при первом же добавлении модели, и «ни одно списание не изменилось» пришлось бы
+> доказывать сверкой данных вместо конструкции.
+
+### 23. admin_products (модуль `admin`)
+
+| Колонка | Тип | Ограничения | Смысл |
+|---|---|---|---|
+| `product_id` | `text` | PK | идентификатор продукта в сторе/панели поставщика — вводит **оператор** |
+| `name` | `text` | **NULL** | отображаемое название; `NULL` = «оверлей названия не задаёт» |
+| `purchase_kind` | `text` | **NULL**, CHECK `purchase_kind IS NULL OR purchase_kind IN ('subscription','one_time')` | класс продукта: он же решает, какой путь начисления читает строку; `NULL` = «оверлей класса не задаёт» |
+| `tokens` | `integer` | **NULL**, CHECK `tokens IS NULL OR (purchase_kind='one_time' AND tokens>=1) OR (purchase_kind='subscription' AND tokens>=0)` | кредиты за покупку/период; `NULL` = «оверлей числа не задаёт» |
+| `archived` | `boolean` | NOT NULL, default `false` | снят ли продукт **с витрины** (на начисления не влияет) |
+| `created_at` / `updated_at` | `timestamptz` | NOT NULL, default `now()` | `updated_at` уходит в контракт как признак «строку меняли» |
+
+**Три значимые колонки — nullable, и это несущее свойство таблицы**
+([ADR-099 §6.1](adr/ADR-099-crm-admin-economics-and-instance-settings.md)): оверлей хранит **ровно
+то, что задал оператор**, а `NULL` означает «этого поля оверлей не задаёт» ⇒ читатель берёт значение
+**источника** (env-карта или `PRODUCTS_CATALOG`). Прежняя редакция объявляла все три `NOT NULL`, и
+это делало невозможной архивацию строки, чей источник не несёт `kind`/`credits`, — то есть основного
+класса функции архива. ⚠️ **Читатель обязан сливать строку ПОФИЛДОВО:** «строка оверлея есть» ≠
+«оверлей задал это поле», и безусловная подстановка вернула бы `NULL` там, где источник знает
+значение (для `tokens` это превратило бы продукт в «неизвестный» и обнулило бы грант канала).
+
+**`CHECK` по `tokens` несёт инвариант «число только вместе с классом»:**
+`tokens IS NOT NULL ⇒ purchase_kind IS NOT NULL` (обе не-`NULL` ветки требуют известного класса).
+Комбинация «число без класса» **неписуема** — такой оверлей не прочитал бы ни один резолвер
+начисления, то есть правка была бы принята и не применена.
+
+**Колонки `avatar_tokens` НЕТ** — второй валюты сервис не ведёт; в контракт поле уходит как `null`,
+непустое значение в запросе отвергается `400`. Колонка «на будущее» была бы полем, которое нечем
+заполнить и незачем читать.
+
+⚠️ **Статус на 2026-09-08 (ночь):** DDL выше **нормативен**; миграция `0033_admin_economics` и
+`src/app/models/tables.py` объявляют три колонки `NOT NULL` и приводятся к нему фронтом работ
+[ADR-099 §14](adr/ADR-099-crm-admin-economics-and-instance-settings.md). Правка вносится **в саму
+`0033`** (она не выкачена ни на один инстанс), второй миграции не заводится.
+
+### 24. admin_tariffs (модуль `admin`)
+
+| Колонка | Тип | Ограничения | Смысл |
+|---|---|---|---|
+| `tariff_id` | `text` | PK | **вычислимая координата варианта**: `chat:<provider>:<model>`, `photo:<model>:<res>`, `video:<model>:<res\|na>:<sec>:<audio>` |
+| `tokens` | `integer` | NOT NULL, CHECK `>= 1` | кредиты за одну единицу, объявленную в `unit` контракта |
+| `updated_at` | `timestamptz` | NOT NULL, default `now()` | |
+
+**`CHECK (tokens >= 1)` — защита того же класса, что и env-валидатор `_positive_chat_credit_cost`**
+([ADR-064 §9](adr/ADR-064-study-learn-quiz-generation-mode.md)): цена `0` не даёт ни ошибки старта,
+ни блокировки — балансовый гейт проходит, списание берёт ноль, и генерация тихо становится
+бесплатной. **`integer`, а не `numeric`:** кошелёк целочисленный (`ledger_transactions.amount`),
+дробная цена невыразима, и это объявлено CRM полем `tariff_decimal_places: 0`.
+⚠️ **Нижняя граница `≥ 1` — наша собственная и контрагенту НЕ объявлена** (замороженный контракт
+разрешает в теле `tokens: int≥0`, а `limits` несёт только верхнюю границу), поэтому её нарушение
+отдаётся **`400`** с лейблом `undeclared_bound`, а не `422`
+([ADR-099 §11](adr/ADR-099-crm-admin-economics-and-instance-settings.md)). Верхняя граница
+(`tariff_tokens_max`) и дробность (`tariff_decimal_places`) объявлены и остаются `422` — соседние
+проверки с противоположным кодом, помечены обе.
+
+### 25. admin_settings (модуль `admin`)
+
+| Колонка | Тип | Ограничения | Смысл |
+|---|---|---|---|
+| `setting_id` | `text` | PK | `<группа>.<имя>` — устойчивое имя продуктовой настройки |
+| `value` | `jsonb` | NOT NULL | значение полиморфно по объявленному `type` (`bool`/строка/массив строк) |
+| `updated_at` | `timestamptz` | NOT NULL, default `now()` | |
+
+Строка, которую нельзя применить, при загрузке снимка **игнорируется** с WARNING
+(`admin_override_value_ignored`): оверлей не имеет права уронить инстанс. Игнорируемых исходов
+**два, и они различаются лейблом `reason`, а не поведением** ([ADR-099 §10.0](adr/ADR-099-crm-admin-economics-and-instance-settings.md)):
+**строка-сирота** — `setting_id` снят с этого инстанса, применить её некому (`unknown_id`), и
+**значение не по объявлению** — нарушен `constraints` (`out_of_range`) либо тип/`options`
+(`type_mismatch`). Внешнего ключа у `setting_id` нет (см. ниже), поэтому сирота — **штатное**
+состояние таблицы, а не повреждение данных: реестр настроек зависит от инстанса и от релиза.
+
+**Общее для всех трёх таблиц.** Индексов сверх PK нет — таблицы читаются целиком раз в окно
+обновления снимка и содержат десятки строк. Внешних ключей нет: `product_id` принадлежит стору,
+`tariff_id`/`setting_id` выводятся из реестров в коде — ссылочная целостность держится валидацией
+на входе, как у `chat_sessions.model` ([ADR-034](adr/ADR-034-user-model-selection.md)) и
+`chat_sessions.character_id` ([ADR-097](adr/ADR-097-character-personas.md)). Миграция
+`0033_admin_economics` (single head; `down_revision` — фактический head на момент записи файла) —
+**expand-only**. Кроме трёх новых таблиц ослабляет `NOT NULL` у `audit_logs.user_id`: правка
+каталога, тарифа или настройки субъекта-пользователя не имеет вовсе ([ADR-099 §10](adr/ADR-099-crm-admin-economics-and-instance-settings.md)),
+а подставить сюда чей-то id значило бы приписать операторское действие случайному пользователю.
+Ослабление обратно совместимо и backfill не требует. Откат — `DROP TABLE` трёх таблиц; `NOT NULL`
+обратно **не** возвращается: `audit_logs` append-only, и ужесточение потребовало бы удалить уже
+записанные строки аудита.
 
 ## Инварианты
+- **Оверлей побеждает env, и это единственный порядок разрешения** ([ADR-099 §2](adr/ADR-099-crm-admin-economics-and-instance-settings.md)): значение любой управляемой из CRM величины = строка `admin_products`/`admin_tariffs`/`admin_settings`, при её отсутствии — env, при отсутствии env — дефолт кода. **Названное следствие:** после правки из CRM правка `.env` + рестарт по этой величине **ничего не меняют**; факт наличия оверлея виден оператору как непустой `updated_at` в admin-контракте. Пустые таблицы = поведение до выката бит-в-бит, поэтому засев и backfill этих таблиц запрещены.
+- **Цена никогда не приходит из тела пользовательского запроса** (BR-TP-1, [ADR-015](adr/ADR-015-consumable-token-iap.md); [ADR-054 §6](adr/ADR-054-cloudpayments-webhook-payment-verification.md)) — оверлей заполняется по admin-ключу ([ADR-009](adr/ADR-009-admin-token-auth.md)) и остаётся серверным источником.
+- **Архив продукта — признак ВИТРИНЫ, а не запрет операций:** `admin_products.archived = true` убирает продукт из пользовательского каталога, но **все** пути начисления и ручная выдача плана оператором продолжают по нему работать — иначе архивация ломала бы уже оплаченное ([ADR-099 §6](adr/ADR-099-crm-admin-economics-and-instance-settings.md)).
 - `wallets.balance >= 0` — БД CHECK + проверка в Wallet (двойная защита).
 - **Один возврат на задачу генерации ([ADR-086 §5](adr/ADR-086-ugc-moderation.md)):** обе причины возврата — провал у провайдера и блокировка результата модерацией — используют **один** ключ идемпотентности `media-refund:{jobId}`. Отдельного namespace под модерацию нет намеренно: причины взаимоисключающи (обе терминальны), а общий ключ делает двойное начисление невозможным по построению.
 - **Изоляция website-builder:** `site_files` → `projects` → `users` (FK `ON DELETE CASCADE`); доступ к файлам только через
   проект владельца. `projects.user_id` всегда соответствует существующей строке `users` (lazy-provisioning, [ADR-007](adr/ADR-007-lazy-user-provisioning.md)). Лимиты файла/проекта/числа файлов и path-traversal guard — на уровне приложения ([modules/website-builder/05-security.md](modules/website-builder/05-security.md)).
-- Идемпотентность списания — `ux_ledger_idempotency (user_id, idempotency_key)`. Для credits-debit `idempotency_key` = `messageStepId` (= `chat_steps.message_step_id`/`tool_calls.message_step_id`), единый на пользовательский message-шаг; гарантирует ровно 1 debit на шаг независимо от числа tool-раундов и re-entry. Это **не** `requestId` Gateway.
+- Идемпотентность списания — `ux_ledger_idempotency (user_id, idempotency_key)`. Для credits-debit **хода** `idempotency_key` = `messageStepId` (= `chat_steps.message_step_id`/`tool_calls.message_step_id`), единый на пользовательский message-шаг; гарантирует ровно 1 debit на шаг независимо от числа tool-раундов и re-entry. Это **не** `requestId` Gateway.
+- **Источники `type='debit'` (три, namespace'ы различны):** (а) ход чата — ключ `messageStepId` (см. строку выше); (б) генерация медиа — `media-gen:{jobId}` ([ADR-060 §4](adr/ADR-060-media-generation-fal.md)); (в) **озвучка ответа — `tts:{stepId}:{voiceId}`** ([ADR-100 §9](adr/ADR-100-assistant-speech-output.md)). Ключ озвучки включает голос **намеренно**: повтор той же пары бесплатен навсегда (переустановка приложения, второе устройство, сетевой ретрай), а синтез новым голосом — новая работа поставщика и новое списание. **Контраст порядка помечен с обеих сторон:** (б) списывает **до** работы (она уходит в очередь fal) и потому обязан возвращать `media-refund:{jobId}`; (в) списывает **после** успешного синтеза в той же транзакции и ветки возврата не имеет. Правило одного пути на другой не переносить.
 - `users.trial_used` переключается в `TRUE` ровно один раз (атомарный `UPDATE ... WHERE trial_used = FALSE`).
 - **Двойственность tool-id (ADR-008):** `tool_calls.id` (UUID) — публичный доменный `toolCallId` для iOS-контракта; `tool_calls.provider_tool_use_id` (TEXT, `toolu_...`) — внутренний id для согласованности истории Anthropic. Связь 1:1 в пределах записи. Наружу (`toolCall.id` в ответах API, `/chat/tool-result` request) фигурирует **только** доменный UUID; в `tool_result.tool_use_id` запроса к Anthropic — **только** `provider_tool_use_id`. Реплеемые `chat_steps.payload` хранят raw anthropic id и согласованы с `provider_tool_use_id` по построению.
 - **Порядок шагов сессии (ADR-021):** реконструкция истории (`list_steps`) и поиск следующего шага (`next_step_after`) сортируют `chat_steps` по `seq` (монотонный identity), **НЕ** по `(created_at, id)`. `created_at` — информационный transaction-time timestamp, не порядковый ключ (несколько шагов одной транзакции имеют равный `created_at`; UUID-`id` не монотонный). `seq` гарантирует порядок вставки `tool_use` < `tool_result` в server-side tool-loop (устранён orphan tool_result → Anthropic 400, BUG-5).
@@ -559,7 +669,7 @@ ALTER TABLE media_jobs ADD COLUMN moderation JSONB NULL;
 - **`cloudpayments_webhook_events` — то же исключение:** вебхук broadapps (CloudPayments) НЕ провижинит `users`. `AccountId` (нормализованный к lower → UUID) сначала проверяется по существующим `users`; отсутствующий → `200 {"code":0}` (`user_not_found`), без вставки `users`/`cloudpayments_webhook_events` ([ADR-050](adr/ADR-050-cloudpayments-webhook.md)). FK гарантируется явной проверкой ДО INSERT.
 - **Изоляция расширения (Figma-gap):** `workspace_files` → `workspace_projects` → `users` (BYTEA-контент в `workspace_files`, [ADR-036](adr/ADR-036-workspaces-implementation.md), без FK на `attachments`); `snippets`/`attachments`/`device_push_tokens` → `users` (все FK `ON DELETE CASCADE`). Доступ только владельца (`user_id == sub`). `chat_sessions.workspace_project_id` — `ON DELETE SET NULL` (чат переживает удаление workspace, [ADR-036 §5](adr/ADR-036-workspaces-implementation.md)); `attachments.session_id` — `ON DELETE SET NULL`.
 - **Терминология mode (ADR-012):** `chat_sessions.mode` (enum `chat_mode`) = `billing_mode` (credits|byok, способ оплаты); `chat_sessions.assistant_mode` (enum `assistant_mode`) = тип ассистента (chat|code). Это **разные ортогональные** поля. `chat_sessions.project_id` (TEXT, website-builder) ≠ `chat_sessions.workspace_project_id` (UUID FK, рабочее пространство) ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md)).
-- **Источники credit-tx (ADR-006 + ADR-015 + ADR-029 + ADR-050):** `ledger_transactions.type='credit'` создаётся (а) StoreKit subscription period grant (idempotency = `sub-grant:{transactionId}`), (б) consumable token purchase (idempotency = consumable `transactionId`, `meta.source='token_purchase'`), (в) **Adapty subscription grant** (idempotency = `adapty-txn:{transaction_id}` ([ADR-047](adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md), не `event_id`), `reason='adapty_subscription'`, [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)), (г) **admin subscription grant** (idempotency = `admin-sub-grant:{idempotencyKey}`, [ADR-048](adr/ADR-048-admin-subscription-grant.md)), либо (д) **CloudPayments/broadapps grant** (idempotency = `cp-txn:{transaction_id}`, `reason='cloudpayments_subscription'`\|`'cloudpayments_tokens'`, [ADR-050](adr/ADR-050-cloudpayments-webhook.md)). Все идемпотентны по `ux_ledger_idempotency`. **Инвариант анти-double-grant:** namespace'ы путей **различны** (`sub-grant:*` / `adapty-txn:*` / `admin-sub-grant:*` / `cp-txn:*`), поэтому одна покупка, прошедшая НЕСКОЛЬКО путей, начислится многократно — на одном `userId`/инстансе используется ОДИН путь платежей (RU-путь `cp-txn:*` ↔ avelyra/broadapps; Apple-пути `sub-grant:*`/`adapty-txn:*`); см. [05-security.md](05-security.md), [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)/[ADR-050](adr/ADR-050-cloudpayments-webhook.md). Списание (`type='debit'`) — без изменений (1 кредит = 1 сообщение).
+- **Источники credit-tx (ADR-006 + ADR-015 + ADR-029 + ADR-050):** `ledger_transactions.type='credit'` создаётся (а) StoreKit subscription period grant (idempotency = `sub-grant:{transactionId}`), (б) consumable token purchase (idempotency = consumable `transactionId`, `meta.source='token_purchase'`), (в) **Adapty subscription grant** (idempotency = `adapty-txn:{transaction_id}` ([ADR-047](adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md), не `event_id`), `reason='adapty_subscription'`, [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)), (г) **admin subscription grant** (idempotency = `admin-sub-grant:{idempotencyKey}`, [ADR-048](adr/ADR-048-admin-subscription-grant.md)), либо (д) **CloudPayments/broadapps grant** (idempotency = `cp-txn:{transaction_id}`, `reason='cloudpayments_subscription'`\|`'cloudpayments_tokens'`, [ADR-050](adr/ADR-050-cloudpayments-webhook.md)). Все идемпотентны по `ux_ledger_idempotency`. **Инвариант анти-double-grant:** namespace'ы путей **различны** (`sub-grant:*` / `adapty-txn:*` / `admin-sub-grant:*` / `cp-txn:*`), поэтому одна покупка, прошедшая НЕСКОЛЬКО путей, начислится многократно — на одном `userId`/инстансе используется ОДИН путь платежей (RU-путь `cp-txn:*` ↔ avelyra/broadapps; Apple-пути `sub-grant:*`/`adapty-txn:*`); см. [05-security.md](05-security.md), [ADR-029](adr/ADR-029-adapty-subscription-webhook.md)/[ADR-050](adr/ADR-050-cloudpayments-webhook.md). Списание (`type='debit'`) — три источника (ход чата, генерация медиа, озвучка ответа), см. отдельный инвариант «Источники `type='debit'`» выше.
 
 ## Расширения PostgreSQL
 ```sql

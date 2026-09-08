@@ -371,32 +371,65 @@ def test_handler_degrade_message_is_content_free_too() -> None:
 
 
 # ============================== pricing =====================================================
-def test_study_learn_price_comes_from_its_env_and_defaults_to_two() -> None:
-    assert Settings().chat_generation_credit_cost("study_learn") == 2
-    assert Settings(CHAT_CREDIT_COST_STUDY_LEARN=6).chat_generation_credit_cost("study_learn") == 6
-    # Unknown mode still falls back to the general price (unchanged behaviour).
+def test_study_learn_costs_the_same_as_any_other_mode_on_the_same_model() -> None:
+    """ADR-099 §5.3: надбавка за режим снята — цена хода стала функцией МОДЕЛИ.
+
+    Кейс diff-стойкий: он падает, если резолвер снова начнёт читать
+    `CHAT_CREDIT_COST_STUDY_LEARN` (значение выставлено заведомо отличным от `_GENERAL`), и
+    падает, если `_GENERAL` перестанет быть дефолтом строки тарифа.
+    """
+    from app.instance_config import chat_turn_credit_cost
+    from app.instance_config.snapshot import EMPTY_SNAPSHOT
+
     settings = Settings(CHAT_CREDIT_COST_GENERAL=4, CHAT_CREDIT_COST_STUDY_LEARN=6)
-    assert settings.chat_generation_credit_cost("unknown_mode") == 4
+
+    assert chat_turn_credit_cost(None, settings=settings, snapshot=EMPTY_SNAPSHOT) == 4
+    for model_id in settings.allowed_models_union():
+        assert chat_turn_credit_cost(model_id, settings=settings, snapshot=EMPTY_SNAPSHOT) == 4
+
+
+def test_three_mode_prices_are_left_without_a_consumer_and_that_is_declared() -> None:
+    """ADR-099 §5.1 / TD-038: `_RESEARCH`/`_REASONING`/`_STUDY_LEARN` больше не читает никто.
+
+    Оставить их без пометки нельзя — оператор, поднявший `CHAT_CREDIT_COST_RESEARCH`, не увидел
+    бы ни ошибки, ни эффекта. Кейс проверяет ФАКТ отсутствия потребителя: единственный мост цены
+    возвращает одно и то же при трёх разных надбавках.
+    """
+    from app.instance_config import chat_turn_credit_cost
+    from app.instance_config.snapshot import EMPTY_SNAPSHOT
+
+    flat = Settings(CHAT_CREDIT_COST_GENERAL=3)
+    loaded = Settings(
+        CHAT_CREDIT_COST_GENERAL=3,
+        CHAT_CREDIT_COST_RESEARCH=11,
+        CHAT_CREDIT_COST_REASONING=17,
+        CHAT_CREDIT_COST_STUDY_LEARN=23,
+    )
+
+    assert chat_turn_credit_cost(None, settings=flat, snapshot=EMPTY_SNAPSHOT) == 3
+    assert chat_turn_credit_cost(None, settings=loaded, snapshot=EMPTY_SNAPSHOT) == 3
 
 
 @pytest.mark.parametrize(
-    ("env_name", "mode"),
+    ("env_name", "field_name"),
     [
-        ("CHAT_CREDIT_COST_GENERAL", "general"),
-        ("CHAT_CREDIT_COST_RESEARCH", "research"),
-        ("CHAT_CREDIT_COST_REASONING", "reasoning"),
-        ("CHAT_CREDIT_COST_STUDY_LEARN", "study_learn"),
+        ("CHAT_CREDIT_COST_GENERAL", "chat_credit_cost_general"),
+        ("CHAT_CREDIT_COST_RESEARCH", "chat_credit_cost_research"),
+        ("CHAT_CREDIT_COST_REASONING", "chat_credit_cost_reasoning"),
+        ("CHAT_CREDIT_COST_STUDY_LEARN", "chat_credit_cost_study_learn"),
     ],
 )
 @pytest.mark.parametrize("bad_value", [0, -5])
 def test_every_mode_price_is_clamped_to_one_by_the_shared_validator(
-    env_name: str, mode: str, bad_value: int
+    env_name: str, field_name: str, bad_value: int
 ) -> None:
     # ADR-064 §9 (diff): EVERY CHAT_CREDIT_COST_* field must sit in the SAME positivity validator.
     # Parametrized over all four so the next price added outside the validator fails here — a price
     # left out fails silently in production (no start-up error, no block: the mode becomes free).
+    # ADR-099 §5.1 keeps the validator: `CHAT_CREDIT_COST_GENERAL` is now the tariff-row default,
+    # and a zero there would make EVERY model free instead of one mode.
     settings = Settings(**{env_name: bad_value})
-    assert settings.chat_generation_credit_cost(mode) == 1
+    assert getattr(settings, field_name) == 1
 
 
 # ============================== mode whitelist (continuation boundary) ======================

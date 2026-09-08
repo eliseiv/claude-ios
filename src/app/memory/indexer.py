@@ -9,6 +9,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import instance_config
 from app.config import Settings, get_settings
 from app.db import get_sessionmaker
 from app.memory.embedding import EmbeddingClient, get_embedding_client
@@ -32,7 +33,7 @@ class MemoryIndexer:
         self._settings = settings
 
     async def index_step(self, chat_step_id: uuid.UUID) -> bool:
-        if not self._settings.memory_enabled:
+        if not instance_config.memory_enabled(settings=self._settings):
             return False
         if not self._embedder.configured:
             return False
@@ -129,7 +130,7 @@ class MemoryIndexer:
 
 def schedule_index_turn(session_id: uuid.UUID, message_step_id: uuid.UUID) -> None:
     settings = get_settings()
-    if not settings.memory_enabled:
+    if not instance_config.memory_enabled(settings=settings):
         return
 
     async def _run() -> None:
@@ -149,7 +150,7 @@ def schedule_index_turn(session_id: uuid.UUID, message_step_id: uuid.UUID) -> No
 
 def schedule_delete_from_message_step(session_id: uuid.UUID, message_step_id: uuid.UUID) -> None:
     settings = get_settings()
-    if not settings.memory_enabled:
+    if not instance_config.memory_enabled(settings=settings):
         return
 
     async def _run() -> None:
@@ -168,8 +169,7 @@ def schedule_delete_from_message_step(session_id: uuid.UUID, message_step_id: uu
 
 
 def schedule_delete_session_chunks(session_id: uuid.UUID) -> None:
-    settings = get_settings()
-    if not settings.memory_enabled:
+    if not instance_config.memory_enabled():
         return
 
     async def _run() -> None:

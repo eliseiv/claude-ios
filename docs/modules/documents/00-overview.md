@@ -16,7 +16,7 @@
 - Global server-side tools: `document.create`, `document.list`, `document.read`, `document.update` (исполняет backend в tool-loop, без round-trip к клиенту).
 - Осведомлённость модели: строка со списком `filename (id=…)` в системном промте, когда в сессии есть хотя бы один документ.
 - Лимиты на сессию: размер одного документа, число документов, суммарный размер, срез строки промта.
-- Проекция изменений хода в ответ генерации — поле `documents[]` ([ADR-101](../../adr/ADR-101-chat-response-documents.md), **код не написан**).
+- Проекция изменений хода в ответ генерации — поле `documents[]` ([ADR-101](../../adr/ADR-101-chat-response-documents.md); **код написан, ревью не проходил, в `main` не слит и не выкачен**).
 
 ## Out of scope
 - Бинарные форматы и рендер в PDF/docx на выходе ([Q-090-1](../../99-open-questions.md)).

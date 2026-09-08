@@ -33,6 +33,7 @@ from app.billing_adapty import parser
 from app.billing_adapty.parser import ParsedEvent
 from app.billing_common.resolve import resolve_user
 from app.config import Settings
+from app.instance_config import CHANNEL_ADAPTY, subscription_credits
 from app.models import Subscription
 from app.observability.logging import log_event
 from app.wallet.service import WalletService
@@ -389,6 +390,10 @@ class AdaptyWebhookService:
         )
 
     def _tier_for(self, vendor_product_id: str | None) -> int:
-        """tokens = product-tier map[vendor_product_id] or the fixed fallback grant (ADR-029 §5)."""
-        mapped = self._settings.adapty_product_tokens().get(vendor_product_id or "")
-        return mapped or self._settings.adapty_subscription_tokens_grant
+        """tokens = оверлей продукта -> карта Adapty -> фиксированный фолбэк ЭТОГО канала.
+
+        Пара «карта + фолбэк» у Adapty своя (ADR-029 §5) и с CloudPayments не совпадает:
+        переменные калибруются независимо, и совпадение сегодняшних дефолтов ничего не
+        гарантирует на проде.
+        """
+        return subscription_credits(vendor_product_id, CHANNEL_ADAPTY, settings=self._settings)

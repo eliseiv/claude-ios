@@ -17,10 +17,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, Query, Request
 
+from app import instance_config
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.api_gateway.routers.presets import resolve_presets_locale
 from app.chat.characters import character_catalog
-from app.config import get_settings
 from app.deps import CurrentUser
 from app.errors import RateLimitedError
 from app.schemas.characters import CharactersResponse
@@ -60,15 +60,14 @@ async def list_characters(
 ) -> CharactersResponse:
     if not await enforce_other_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
-    settings = get_settings()
     resolved = resolve_presets_locale(
         query_locale=locale,
         accept_language=accept_language,
-        default_locale=settings.resolved_presets_default_locale(),
+        default_locale=instance_config.presets_default_locale(),
     )
     # The locale is resolved even when the feature is off: `?locale=` outside the set stays a
     # 422 on every instance, and the client gets the same shape either way.
-    enabled = settings.characters_enabled
+    enabled = instance_config.characters_enabled()
     return CharactersResponse.model_validate(
         {
             "enabled": enabled,

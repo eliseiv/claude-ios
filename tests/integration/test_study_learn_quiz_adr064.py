@@ -34,19 +34,28 @@ from tests.conftest import FakeAnthropicClient, auth_headers, seed_user
 _WIRE_NAME = "quiz_generate"
 _DOMAIN_NAME = "quiz.generate"
 
-# A distinctive price: different from general (1) AND from research/reasoning (3), so a debit that
-# used the wrong mode's price is visible instead of accidentally matching.
-_STUDY_LEARN_PRICE = 4
+# ADR-099 §5.3: цена хода стала функцией МОДЕЛИ, надбавки за режим больше нет. Дефолт строки
+# тарифа модели — `CHAT_CREDIT_COST_GENERAL`, и именно он теперь списывается в `study_learn`.
+# Число выбрано отличным и от кодового дефолта (1), и от прежних надбавок (3 / 2), чтобы дебит по
+# чужой величине был виден, а не совпал случайно.
+_TURN_PRICE = 4
+# Надбавка за режим остаётся в env БЕЗ ПОТРЕБИТЕЛЯ (TD-038) и выставляется заведомо ДРУГИМ
+# числом: если резолвер снова начнёт её читать, кейсы этого файла упадут.
+_UNREAD_STUDY_LEARN_ENV = 6
 
 
 @pytest.fixture
 def study_learn_price() -> Iterator[int]:
-    """Force CHAT_CREDIT_COST_STUDY_LEARN to a value no other mode uses (restored after)."""
+    """Цена хода на модели сессии.
+
+    Env-надбавка режима выставлена ОТЛИЧНОЙ и обязана игнорироваться.
+    """
     settings = get_settings()
-    original = settings.chat_credit_cost_study_learn
-    settings.chat_credit_cost_study_learn = _STUDY_LEARN_PRICE
-    yield _STUDY_LEARN_PRICE
-    settings.chat_credit_cost_study_learn = original
+    original = (settings.chat_credit_cost_general, settings.chat_credit_cost_study_learn)
+    settings.chat_credit_cost_general = _TURN_PRICE
+    settings.chat_credit_cost_study_learn = _UNREAD_STUDY_LEARN_ENV
+    yield _TURN_PRICE
+    (settings.chat_credit_cost_general, settings.chat_credit_cost_study_learn) = original
 
 
 def _pool(count: int = 4, *, tag: str = "A") -> dict[str, Any]:

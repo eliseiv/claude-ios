@@ -20,7 +20,7 @@
 2. **Фабрика** — `src/app/chat/llm_client.py`: добавить `llm_client_for(provider: str) -> LLMClient`:
    - `"anthropic"` → `get_anthropic_client()` (тот же синглтон, чтобы conftest-патч `_anthropic_singleton` работал); `"openai"` → существующий `_openai_singleton` (вынести его создание в общий хелпер, чтобы `get_llm_client()` и `llm_client_for` использовали один синглтон); иначе → `ValueError`.
    - `get_llm_client()` рефакторить на делегирование `llm_client_for(active_provider)` — **сигнатуру и поведение не менять** (по-прежнему читает `LLM_PROVIDER`).
-3. **Миграция `0013`** — `migrations/versions/..._0013_byok_keys_provider.py`: `op.add_column("byok_keys", sa.Column("provider", sa.Text(), nullable=True))`; `down_revision="0012"`, single head; downgrade `drop_column`. Без backfill.
+3. **Миграция `0013`** — `migrations/versions/20260619_0013_byok_provider.py` (ревизия `0013_byok_provider`): `op.add_column("byok_keys", sa.Column("provider", sa.Text(), nullable=True))`; `down_revision="0012_auth_identities"`, single head; downgrade `drop_column`. Без backfill.
 4. **Модель** — `src/app/models/tables.py` `BYOKKey`: добавить `provider: Mapped[str | None] = mapped_column(Text, nullable=True)`.
 5. **`BYOKService.set_key`** (`src/app/byok/service.py`):
    - В начале `provider = detect_byok_provider(api_key)`.
