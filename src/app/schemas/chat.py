@@ -539,6 +539,39 @@ class MediaJobRefSchema(StrictModel):
     creditsCharged: int = Field(description="Сколько кредитов списано за эту media-задачу.")
 
 
+# ADR-101: карточка документа чата в ответе хода. Состав ДОСЛОВНО повторяет `_doc_brief()`
+# (`src/app/chat/global_tools.py`), потому что у поля два производителя — аккумулятор вызова и
+# восстановление из сохранённого tool-результата хода, — и второй берёт значение именно оттуда.
+# Содержимого в карточке нет: документ персистентен и адресуем по REST (ADR-101 §2).
+class ChatDocumentRefSchema(StrictModel):
+    """Документ чата, созданный или изменённый в этом ходе."""
+
+    documentId: uuid.UUID = Field(
+        description=(
+            "Идентификатор документа для `GET /v1/chats/{sessionId}/documents/{documentId}` "
+            "и `/download`."
+        )
+    )
+    filename: str = Field(
+        description=(
+            "Фактическое имя файла после нормализации на сервере — показывайте его, а не имя "
+            "из текста ответа модели."
+        )
+    )
+    mediaType: str = Field(
+        description=(
+            "Тип содержимого: `text/markdown`, `text/plain`, `text/csv` или `application/json`."
+        )
+    )
+    size: int = Field(description="Размер содержимого в байтах (UTF-8).")
+    version: int = Field(
+        description=(
+            "Версия документа ПОСЛЕ этого хода. `1` — документ создан; больше — существующий "
+            "документ переписан."
+        )
+    )
+
+
 class ServerToolExecutionSchema(StrictModel):
     """Одно server-side выполнение, выполненное backend за этот вызов /chat/run."""
 
@@ -769,6 +802,18 @@ class ChatResponse(StrictModel):
             "Непустой список — клиент опрашивает `GET /v1/media/jobs/{jobId}` (и/или ждёт push). "
             "Биллинг media отдельный (`media-gen:{jobId}`); ход чата списывается как обычно. "
             "Старые `/v1/media/*` без изменений."
+        ),
+    )
+    documents: list[ChatDocumentRefSchema] | None = Field(
+        default=None,
+        description=(
+            "Документы чата, которые этот **ход** (`messageStepId`) создал или изменил. "
+            "`null` — ход ничего не менял. Наполняют только успешные создание и замена "
+            "содержимого; чтение документа и отказавшие вызовы сюда не попадают. Содержимого в "
+            "элементе нет — его отдают `GET /v1/chats/{sessionId}/documents/{documentId}` и "
+            "`/download`. Одна запись на `documentId` с финальной `version`, даже если ход "
+            "тронул документ дважды. Поле приходит на всех ответах хода, включая повторный "
+            "`/chat/tool-result` и `blocked` с `blockReason=max_tokens`."
         ),
     )
     serverTools: list[ServerToolExecutionSchema] = Field(
