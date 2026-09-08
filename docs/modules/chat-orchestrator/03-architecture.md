@@ -233,7 +233,7 @@ Claude в одном assistant-ходе может вернуть **нескол
 
 | Класс | Реестр | Исполнитель | Проект | Предлагается |
 |---|---|---|---|---|
-| client-side | `files.*`/`calendar.*`/`reminders.*` | iOS (round-trip) | — | по `assistant_mode` ([Q-012-1](../../99-open-questions.md)) |
+| client-side | `files.*`/`calendar.*`/`reminders.*`/`git.*` ([ADR-094](../../adr/ADR-094-code-assistant-tools.md))/`maps.*` ([ADR-102](../../adr/ADR-102-mapkit-client-tools.md)) | iOS (round-trip) | — | по `assistant_mode` ([Q-012-1](../../99-open-questions.md)); `git.*`+code-`files.*` дополнительно по оси D, `maps.*` — по оси E |
 | server-side, project-scoped | `SERVER_SIDE_TOOLS` (`site.*`) | backend в loop | **да** | только при `project_id IS NOT NULL` |
 | **server-side, global** | `GLOBAL_SERVER_SIDE_TOOLS` (`time.now`) | backend в loop | **нет** | **ВСЕГДА** |
 | **server-side, global, режимный** | `GLOBAL_SERVER_SIDE_TOOLS` ∩ `TOOL_GENERATION_MODES` (`quiz.generate`, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) | backend в loop | **нет** | только при эффективном `generationMode = study_learn` (ось C) |
@@ -392,30 +392,40 @@ base(assistant_mode)                                   ADR-012, ADR-081 (сня�
 
 ## Оси гейтинга tool-набора (ADR-022 / ADR-026 / ADR-064)
 
-Набор инструментов, предлагаемый модели на конкретном витке, — **И-композиция трёх ортогональных осей** поверх одного статического реестра (`_ARGS_BY_TOOL`, `tools.py`):
+> **Заголовок сохранён дословно ради устойчивости якоря** — на него ссылаются [01-architecture.md](../../01-architecture.md), [02-api-contracts.md](02-api-contracts.md), [10-generation-modes-implementation.md](10-generation-modes-implementation.md) и разделы этого документа. Осей с тех пор стало **пять**: добавились **D** ([ADR-094](../../adr/ADR-094-code-assistant-tools.md)) и **E** ([ADR-102](../../adr/ADR-102-mapkit-client-tools.md)); ADR в заголовке перечисляют происхождение якоря, а не полный состав осей.
+
+Набор инструментов, предлагаемый модели на конкретном витке, — **И-композиция пяти ортогональных осей** поверх одного статического реестра (`_ARGS_BY_TOOL`, `tools.py`). Плюс ортогональный им per-instance денилист семейств ([ADR-081](../../adr/ADR-081-disabled-tool-families.md)) и инстанс-гейт media ([ADR-072](../../adr/ADR-072-chat-media-tools-instance-gate.md)), которые режут и offer-set, и (денилист) каталог:
 
 | Ось | Признак | Что гейтит | Статус |
 |---|---|---|---|
 | **A** | `chat_sessions.project_id IS NOT NULL` | `SERVER_SIDE_TOOLS` (`site.*`) | реализована ([ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)) |
 | **B** | `assistant_mode` (`chat`/`code`) | client-side реестр | **не реализована** — [Q-012-1](../../99-open-questions.md) Open |
 | **C** | эффективный `generationMode` хода | `TOOL_GENERATION_MODES` (`quiz.generate`) | реализована ([ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) |
+| **D** | `CODE_TOOLS_ENABLED` **и** `assistant_mode=code` | `CODE_TOOLS` (`files.search/patch/delete/move`, `git.*`) | реализована ([ADR-094 §3](../../adr/ADR-094-code-assistant-tools.md)); дефолт **выключено** |
+| **E** | `MAPS_TOOLS_ENABLED` (с `assistant_mode` **не** складывается) | `maps.*` | ([ADR-102 §10](../../adr/ADR-102-mapkit-client-tools.md)); дефолт **выключено** |
 
-**Sweep по всему реестру** (проверка, что ось C не задела соседей — каждый инструмент проверен по всем трём осям):
+**Sweep по всему реестру** (проверка, что новая ось не задела соседей — каждый инструмент проверен по всем пяти осям):
 
-| Инструмент | Ось A (проект) | Ось B (assistant_mode) | Ось C (режим) |
-|---|---|---|---|
-| `files.read` / `files.write` / `files.list` / `files.mkdir` | не гейтит | целевая, не реализована | **не гейтит** |
-| `calendar.read` / `calendar.create_events` | не гейтит | целевая, не реализована | **не гейтит** |
-| `reminders.read` / `reminders.create` | не гейтит | целевая, не реализована | **не гейтит** |
-| `site.write_file` / `site.preview` / `site.list` / `site.read` / `site.delete` | **гейтит** (только при проекте) | целевая, не реализована | **не гейтит** |
-| `time.now` | не гейтит (всегда) | не действует (utility) | **не гейтит** (всегда) |
-| `quiz.generate` | не гейтит (проект не нужен) | не действует | **гейтит: только `study_learn`** |
+| Инструмент | Ось A (проект) | Ось B (assistant_mode) | Ось C (режим) | Ось D (код) | Ось E (карты) |
+|---|---|---|---|---|---|
+| `files.read` / `files.write` / `files.list` / `files.mkdir` | не гейтит | целевая, не реализована | **не гейтит** | не гейтит | не гейтит |
+| `files.search` / `files.patch` / `files.delete` / `files.move` / `git.*` | не гейтит | **гейтит** (только `code`, вместе с осью D) | **не гейтит** | **гейтит: только при `CODE_TOOLS_ENABLED`** | не гейтит |
+| `calendar.read` / `calendar.create_events` | не гейтит | целевая, не реализована | **не гейтит** | не гейтит | не гейтит |
+| `reminders.read` / `reminders.create` | не гейтит | целевая, не реализована | **не гейтит** | не гейтит | не гейтит |
+| `maps.show_place` / `maps.geocode` / `maps.reverse_geocode` / `maps.route` / `maps.search_places` | не гейтит | **не действует** (карты — обычный чат, не режим) | **не гейтит** (все режимы) | не гейтит | **гейтит: только при `MAPS_TOOLS_ENABLED`** |
+| `site.write_file` / `site.preview` / `site.list` / `site.read` / `site.delete` | **гейтит** (только при проекте) | целевая, не реализована | **не гейтит** | не гейтит | не гейтит |
+| `time.now` | не гейтит (всегда) | не действует (utility) | **не гейтит** (всегда) | не гейтит | не гейтит |
+| `quiz.generate` | не гейтит (проект не нужен) | не действует | **гейтит: только `study_learn`** | не гейтит | не гейтит |
+| `media.generate_image` / `media.generate_video` / `media.ask_params` | не гейтит | не действует | **не гейтит** | не гейтит | не гейтит |
+| `document.create` / `document.list` / `document.read` / `document.update` | не гейтит (проект не нужен) | не действует | **не гейтит** | не гейтит | не гейтит |
+
+> `media.*` гейтит отдельный инстанс-флаг `CHAT_MEDIA_TOOLS_ENABLED` ([ADR-072](../../adr/ADR-072-chat-media-tools-instance-gate.md)), не входящий в композицию осей; `files`/`calendar`/`reminders`/`site` дополнительно режет денилист [ADR-081](../../adr/ADR-081-disabled-tool-families.md). `maps` в денилист **не** входит намеренно ([ADR-102 §10](../../adr/ADR-102-mapkit-client-tools.md)): денилист — opt-out, а карты обязаны быть выключены по умолчанию.
 
 **Нормативные инварианты осей:**
 1. **Эффективный режим — одна величина.** Ось C считается по тому же значению, которое уходит провайдеру и в биллинг (`_effective_generation_mode`: v2 = режим запроса/реплей; legacy = `general`, либо `research` при `CHAT_LEGACY_WEB_SEARCH_ENABLED`, [ADR-082](../../adr/ADR-082-legacy-web-search.md)), а не по полю запроса и не по повторному вычислению с другой формулой. Следствие: `quiz.generate` (`study_learn`) на legacy не предлагается.
 2. **Continuation наследует режим.** На `/v1/chat/v2/tool-result` эффективный режим восстанавливается из user-шага хода; поэтому tool-набор витков continuation **совпадает** с набором исходного `/v1/chat/v2/run`. Если восстановление не знает значения `study_learn`, оно молча деградирует к `general` — и тогда на continuation-витке пропадает и цена режима, и `quiz.generate`. Тихий класс ошибок → покрыт diff-тестом ([09-testing.md](09-testing.md#integration--study--learn-квиз-adr-064)).
 3. **Каталог `/v1/tools` осями не параметризуется** ([ADR-019](../../adr/ADR-019-tools-catalog-endpoint.md)): он отдаёт **полный** технический реестр (состав и число — [02-api-contracts.md §GET /v1/tools](02-api-contracts.md#get-v1tools--каталог-инструментов-adr-019)), включая инструменты, которые в текущем ходе не предлагались бы ни по одной оси.
-4. **Гейт ≠ guard.** Ось не защищает от исполнения — она лишь не показывает инструмент модели. На случай, если модель всё же вернёт `tool_use` негейтованного имени, у каждого класса есть свой defensive guard, и они **различаются по последствию**: `site.*` без проекта → `UpstreamError`/`502` (резолв чужого проекта = граница изоляции данных); `quiz.generate` вне режима → tool-result `tool_not_available`, ход выживает (побочных эффектов нет). См. [§Гейтинг site.*](#гейтинг-site-tools-по-наличию-проекта-adr-022) п.4 и [§Режим study_learn](#режим-study_learn-поток-квиза-adr-064).
+4. **Гейт ≠ guard.** Ось не защищает от исполнения — она лишь не показывает инструмент модели. На случай, если модель всё же вернёт `tool_use` негейтованного имени, у класса должен быть свой defensive guard, и guard'ы **различаются по последствию**: `site.*` без проекта → `UpstreamError`/`502` (резолв чужого проекта = граница изоляции данных); `quiz.generate` вне режима → tool-result `tool_not_available`, ход выживает (побочных эффектов нет); семейство из денилиста [ADR-081](../../adr/ADR-081-disabled-tool-families.md) и `media.*` при выключенном флаге → тот же мягкий `tool_not_available`; `maps.*` при выключенной оси E → мягкий `tool_not_available` ([ADR-102 §10](../../adr/ADR-102-mapkit-client-tools.md)) — **обязателен**, потому что без него выключенный флаг не спасал бы от подвисшего хода: клиентский вызов, который приложение не умеет исполнить, оставляет барьер [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) открытым навсегда (ни таймаута, ни сборщика «протухших» вызовов в коде нет). **Контраст, обе стороны помечены:** у оси **D** guard'а **НЕТ** — `offered_code_tool` в оркестраторе не вызывается, поэтому выдуманный `git.push` на инстансе без `CODE_TOOLS_ENABLED` дойдёт до клиента и оставит ход незавершённым ([TD-036](../../100-known-tech-debt.md)). Наличие guard'а у E и его отсутствие у D — не аналогия, а разное фактическое состояние кода; не переносить ни в одну сторону. См. [§Гейтинг site.*](#гейтинг-site-tools-по-наличию-проекта-adr-022) п.4 и [§Режим study_learn](#режим-study_learn-поток-квиза-adr-064).
 
 ## Режим study_learn: поток квиза (ADR-064)
 
