@@ -14,6 +14,7 @@ import dataclasses
 import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -633,6 +634,22 @@ _MEDIA_WIZARD_TEXTS: dict[str, dict[str, str]] = {
 }
 
 
+# Пометка «ход оборвался, ответа не будет». Пишется В ИСТОРИЮ как шаг ассистента, поэтому текст
+# читают ДВОЕ: человек в ленте чата и модель на следующем ходу. Для человека это объяснение
+# пустоты, для модели — закрытие реплики: без неё реплика пользователя остаётся без ответа, и на
+# следующем ходу модель отвечает на неё, а не на новую (прод 2026-09-09, avelyra).
+_TURN_FAILED_TEXTS: dict[str, str] = {
+    "en": "(the answer was not received: the service failed — the message above stays unanswered)",
+    "ru": "(ответ не получен: сбой сервиса — сообщение выше осталось без ответа)",
+}
+
+
+def _turn_failed_text(locale: str | None) -> str:
+    """Пометка на языке клиента; неизвестный язык — английский (как у мастера генерации)."""
+    lang = (locale or "").split("-")[0].split("_")[0].strip().lower()
+    return _TURN_FAILED_TEXTS.get(lang) or _TURN_FAILED_TEXTS["en"]
+
+
 def _language_of(locale: str | None) -> str | None:
     """ISO-639-1 из локали клиента: `ru-RU` → `ru`. Неизвестное → None (автоопределение).
 
@@ -878,7 +895,7 @@ class ToolResultIn:
 class ChatStreamEvent:
     """One SSE event for ``/v1/chat/v2/run/stream`` (ADR-069)."""
 
-    kind: Literal["delta", "done", "error"]
+    kind: Literal["delta", "transcript", "done", "error"]
     text: str = ""
     out: ChatRunOut | None = None
     error_code: str | None = None
@@ -887,6 +904,17 @@ class ChatStreamEvent:
     @classmethod
     def delta(cls, text: str) -> ChatStreamEvent:
         return cls(kind="delta", text=text)
+
+    @classmethod
+    def transcript(cls, text: str) -> ChatStreamEvent:
+        """Расшифровка голосового сообщения — СРАЗУ после распознавания, до вызова модели.
+
+        Распознавание идёт ВНУТРИ хода, отдельной ручки нет, и раньше расшифровка возвращалась
+        только в финальном `done` — то есть человек ждал весь ход целиком, чтобы увидеть
+        собственные слова. Замер на проде: само распознавание около секунды, а ход — около
+        десяти. Событие аддитивно: клиент, о нём не знающий, пропускает неизвестный тип.
+        """
+        return cls(kind="transcript", text=text)
 
     @classmethod
     def done(cls, out: ChatRunOut) -> ChatStreamEvent:
@@ -1194,6 +1222,7 @@ class ChatOrchestrator:
         generation_backend: GenerationBackend = "legacy",
         temporary: bool = False,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_transcript: Callable[[str], Awaitable[None]] | None = None,
         media_selection: dict[str, Any] | None = None,
         memory_search: bool | None = None,
     ) -> ChatRunOut:
@@ -1212,6 +1241,12 @@ class ChatOrchestrator:
             # Язык распознавания — из той же локали, что клиент шлёт для модели.
             locale=_validated_context_value("locale", (context or {}).get("locale")),
         )
+        # Расшифровка уходит клиенту ДО обращения к модели: это единственное место, где она уже
+        # известна, а ход ещё не начался. Отказ обратного вызова ход не роняет — потерянное
+        # событие хуже, чем упавший ответ, только если из-за него падает ответ.
+        if on_transcript is not None and transcript is not None:
+            with suppress(Exception):
+                await on_transcript(transcript)
         out = await self._run_turn(
             user_id=user_id,
             project_id=project_id,
@@ -1574,31 +1609,89 @@ class ChatOrchestrator:
         # mode=byok: resolve plaintext key in-memory + its provider (CO-6, ADR-044 §5).
         api_key, byok_provider = await self._resolve_api_key(user_id, effective_mode)
 
-        return await self._generate_loop(
-            user_id=user_id,
-            session_id=sess.id,
-            message_step_id=message_step_id,
-            mode=effective_mode,
-            billing=_billing_plan(
-                effective_mode,
-                state,
-                credit_amount=generation_credit_cost,
-                expose_credit_amount=use_generation_v2,
-            ),
-            api_key=api_key,
-            byok_provider=byok_provider,
-            system_prompt=system_prompt,
-            # ADR-022 axis A: offer site.* only when the session has a project.
-            has_project=sess.project_id is not None,
-            first_turn_attachments=first_turn,
-            # ADR-034 §4 / ADR-044 / ADR-073: session-fixed model (NULL → None). The effective
-            # model is resolved inside _generate_loop against the right provider's allowlist
-            # (stale-model fallback): credits → session model's provider, byok → key provider.
-            model=sess.model or None,
-            generation_mode=effective_generation_mode,
-            generation_backend=requested_backend,
-            on_text_delta=on_text_delta,
-        )
+        # Ход, упавший ПОСЛЕ записи реплики пользователя, помечается отвеченным с ошибкой.
+        # Шаг пользователя коммитится до сетевого вызова намеренно (соединение с базой не держим
+        # открытым всю генерацию), поэтому откат транзакции его уже не достаёт: реплика остаётся
+        # в истории без ответа, и на СЛЕДУЮЩЕМ ходу модель отвечает на неё, а не на новую.
+        # Прод 2026-09-09, avelyra: «сначала ответил по прошлому запросу, потом опять ошибка».
+        try:
+            return await self._generate_loop(
+                user_id=user_id,
+                session_id=sess.id,
+                message_step_id=message_step_id,
+                mode=effective_mode,
+                billing=_billing_plan(
+                    effective_mode,
+                    state,
+                    credit_amount=generation_credit_cost,
+                    expose_credit_amount=use_generation_v2,
+                ),
+                api_key=api_key,
+                byok_provider=byok_provider,
+                system_prompt=system_prompt,
+                # ADR-022 axis A: offer site.* only when the session has a project.
+                has_project=sess.project_id is not None,
+                first_turn_attachments=first_turn,
+                # ADR-034 §4 / ADR-044 / ADR-073: session-fixed model (NULL → None). The effective
+                # model is resolved inside _generate_loop against the right provider's allowlist
+                # (stale-model fallback): credits → session model's provider, byok → key provider.
+                model=sess.model or None,
+                generation_mode=effective_generation_mode,
+                generation_backend=requested_backend,
+                on_text_delta=on_text_delta,
+            )
+        except Exception as exc:
+            await self._mark_turn_failed(
+                session_id=sess.id,
+                message_step_id=message_step_id,
+                locale=_validated_context_value("locale", (context or {}).get("locale")),
+                reason=type(exc).__name__,
+            )
+            raise
+
+    async def _mark_turn_failed(
+        self,
+        *,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        locale: str | None,
+        reason: str,
+    ) -> None:
+        """Закрыть оборвавшийся ход шагом ассистента с пометкой об ошибке.
+
+        Пишется ТОЛЬКО когда у хода нет ни одного шага ассистента: существующий шаг означает,
+        что ход что-то уже ответил (например, виток с вызовом инструмента), и вторая пометка
+        была бы ложью о состоянии.
+
+        Отдельный `commit` обязателен: объемлющая область при исключении делает `rollback`, и
+        без него пометка исчезла бы вместе с попыткой её поставить. Собственные отказы этой
+        записи ГЛУШАТСЯ и логируются: она — улучшение истории, а не часть ответа, и подменить
+        собой исходную причину отказа не имеет права.
+        """
+        try:
+            if await self._deps.repo.has_assistant_step(session_id, message_step_id):
+                return
+            await self._deps.repo.add_step(
+                session_id=session_id,
+                message_step_id=message_step_id,
+                role="assistant",
+                payload={
+                    "content": [{"type": "text", "text": _turn_failed_text(locale)}],
+                    # Признак для клиента и для диагностики: это не ответ модели, а пометка.
+                    # Имя класса исключения, не его текст: текст цитирует запрос целиком.
+                    "turnFailed": {"reason": reason},
+                },
+            )
+            await self._session.commit()
+        except Exception:
+            log_event(
+                logger,
+                logging.WARNING,
+                "chat_turn_failure_marker_not_written",
+                sessionId=str(session_id),
+                messageStepId=str(message_step_id),
+                reason=reason,
+            )
 
     async def _moderate_turn(self, message: str, attachments: list[AttachmentIn]) -> None:
         """Пре-модерация хода с вложениями (ADR-086 §3). Нарушение → 422 до записи шага.

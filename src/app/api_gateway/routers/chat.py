@@ -754,6 +754,11 @@ def _sse_frame(event: str, data: dict[str, Any]) -> bytes:
 def _stream_event_frame(ev: ChatStreamEvent) -> bytes:
     if ev.kind == "delta":
         return _sse_frame("delta", {"text": ev.text})
+    if ev.kind == "transcript":
+        # Расшифровка голосового сообщения, отданная СРАЗУ после распознавания. Событие
+        # аддитивно: клиент, о нём не знающий, пропускает неизвестный тип и получает ту же
+        # расшифровку в `done`, как и раньше.
+        return _sse_frame("transcript", {"text": ev.text})
     if ev.kind == "done" and ev.out is not None:
         resp = _to_response(ev.out)
         return _sse_frame(
@@ -798,8 +803,11 @@ def _unwrap_exception_group(exc: BaseException) -> BaseException:
     description=(
         "Тот же body/auth/rate-limit, что у `/v1/chat/v2/run`, но ответ — "
         "`text/event-stream` ([ADR-069](../../docs/adr/ADR-069-sse-text-streaming.md)). "
-        "События: `delta` (`{text}`), затем `done` (полный `ChatResponse`); при сбое после "
-        "старта стрима — `error` (`{code,message}`). В `study_learn` дельт нет (анти-спойлер). "
+        "События: `transcript` (`{text}`) — расшифровка голосового вложения, приходит СРАЗУ "
+        "после распознавания и ДО первой `delta`, только для голосового хода; `delta` "
+        "(`{text}`), затем `done` (полный `ChatResponse`); при сбое после старта стрима — "
+        "`error` (`{code,message}`). Та же расшифровка приходит и в `done` — клиент, не "
+        "умеющий `transcript`, ничего не теряет. В `study_learn` дельт нет (анти-спойлер). "
         "JSON `/v2/run` без изменений."
     ),
     responses={
@@ -854,6 +862,9 @@ async def chat_v2_run_stream(
                 async def _on_delta(text: str) -> None:
                     await queue.put(ChatStreamEvent.delta(text))
 
+                async def _on_transcript(text: str) -> None:
+                    await queue.put(ChatStreamEvent.transcript(text))
+
                 media_selection = (
                     body.mediaSelection.model_dump(by_alias=True, mode="json")
                     if body.mediaSelection is not None
@@ -876,6 +887,7 @@ async def chat_v2_run_stream(
                     generation_backend="v2",
                     temporary=body.temporary,
                     on_text_delta=_on_delta,
+                    on_transcript=_on_transcript,
                     media_selection=media_selection,
                     memory_search=body.memorySearch,
                 )

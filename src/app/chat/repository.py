@@ -250,6 +250,27 @@ class ChatRepository:
         )
         return row
 
+    async def has_assistant_step(self, session_id: uuid.UUID, message_step_id: uuid.UUID) -> bool:
+        """Есть ли у ЭТОГО хода хоть один шаг ассистента.
+
+        Нужен ровно для одного решения: помечать ли ход, упавший после записи реплики
+        пользователя. Шаг пользователя коммитится ДО сетевого вызова намеренно — чтобы не держать
+        соединение с базой открытым всю генерацию, — поэтому отказ провайдера оставляет реплику в
+        истории без ответа, и на следующем ходу модель отвечает на неё, а не на новую.
+        Существующий шаг ассистента означает, что ход что-то уже ответил (например, виток с
+        вызовом инструмента), и вторая пометка была бы ложью о состоянии.
+        """
+        found: uuid.UUID | None = await self._session.scalar(
+            select(ChatStep.id)
+            .where(
+                ChatStep.session_id == session_id,
+                ChatStep.message_step_id == message_step_id,
+                ChatStep.role == "assistant",
+            )
+            .limit(1)
+        )
+        return found is not None
+
     async def generation_mode_for_message_step(
         self, session_id: uuid.UUID, message_step_id: uuid.UUID
     ) -> str:
