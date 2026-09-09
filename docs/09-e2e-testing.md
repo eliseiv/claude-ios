@@ -169,8 +169,8 @@ Anthropic; `StoreKit-test` = нужен `STOREKIT_TEST_MODE`; `—` = незав
 | E2E-CRED-5 | `POST /v1/wallet/consume` дважды с одним `requestId`(=`messageStepId`) | одно списание (idempotency ledger) | — |
 | E2E-CRED-6 | `wallet/consume` при balance < amount | отказ, баланс не отрицателен | — |
 
-### 4.4 Blocked-кейсы по всем 8 blockReason (BR-5, ADR-004, AC-2)
-Все `blocked` → **HTTP 200** с машиночитаемым `blockReason`.
+### 4.4 Blocked-кейсы по всем 9 blockReason (BR-5, ADR-004, AC-2)
+Все `blocked` → **HTTP 200** с машиночитаемым `blockReason`. Enum зафиксирован [ADR-004](adr/ADR-004-blocked-http-200.md) и содержит **девять** значений — восемь исходных плюс `max_tokens` ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)); прежняя редакция заголовка называла восемь, тогда как сам документ уже считал девять (см. врезку BLK-7b ниже), и прогон «перечень против enum» показывал полноту при девятом значении, отсутствующем в таблице.
 | ID | blockReason | Состояние для воспроизведения | Зависимость |
 |---|---|---|---|
 | E2E-BLK-1 | `trial_used` | нет подписки, `trial_used=true`, `mode=credits` (см. E2E-TRIAL-2) | — |
@@ -181,6 +181,7 @@ Anthropic; `StoreKit-test` = нужен `STOREKIT_TEST_MODE`; `—` = незав
 | E2E-BLK-6 | `byok_invalid` | активная подписка, `mode=byok`, BYOK ключ `keyStatus=invalid` | StoreKit-test + **Claude** (валидация ключа) |
 | E2E-BLK-7 | `rate_limited` | превысить per-user лимит `/v1/chat/run` (30 req/min дефолт) → **HTTP 429** (gateway rate-limit, стандартный error-формат с `code=rate_limited`, см. E2E-HTTP-5). `rate_limited` — **gateway-concern**, НЕ отражается в `/policy/effective.reasons[]` (policy engine не знает о rate-limit состоянии — см. BLK-7b ниже) | — |
 | E2E-BLK-8 | `policy_denied` | общий fallback — достижим, если есть состояние не покрытое выше; иначе фиксируется как **недостижимый в текущей state-machine** с cross-ref на покрытие unit-тестами state-machine ([06-testing-strategy.md](06-testing-strategy.md)) | — |
+| E2E-BLK-9 | `max_tokens` | обрыв генерации по потолку токенов ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)). **Отдельного прогона не требует — сценарий уже прогоняется как E2E-TOOL-7 (§4.5)**; строка заведена, чтобы девятое значение enum не выпадало из перечня. Отличие от прочих строк таблицы: у `max_tokens` `messageStepId`/`stepId`/`usage` присутствуют и кредит не списывается | **Claude** |
 
 > Если `policy_denied` структурно недостижим из публичного API при текущей state-machine (ADR-002),
 > qa фиксирует это как обоснованное N/A в отчёте e2e (не как провал), со ссылкой на параметрический
@@ -253,7 +254,7 @@ Anthropic; `StoreKit-test` = нужен `STOREKIT_TEST_MODE`; `—` = незав
 - [x] STOREKIT_TEST_MODE реализован по §2; при `false` prod-поведение не изменилось (реальная JWS-верификация, fail-closed). _Evidence: при `false` — fail-closed сохранён; E2E-SUB-5 (bad-sig тестовый JWS) → `422`._
 - [x] Контейнеры подняты, `api` healthy через `/ready`. _Evidence: bring-up `docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d` (см. §3.3); `api` → `service_healthy`._
 - [x] Все сценарии §4 прогнаны против живого сервиса; `Claude`-сценарии — против реального Anthropic; StoreKit — через test-mode. _Evidence: весь §4 зелёный; tool-loop/BYOK-валидация — против реального Anthropic; StoreKit — через HS256 test-mode._
-- [x] Все 8 `blockReason` покрыты (или обоснованное N/A для `policy_denied` с cross-ref на unit-покрытие). _Evidence: 7 blockReason покрыты e2e; `policy_denied` — обоснованный N/A (структурно недостижим из публичного API, cross-ref на параметрический unit-тест state-machine, [06-testing-strategy.md](06-testing-strategy.md))._
+- [x] Все 9 `blockReason` покрыты (или обоснованное N/A для `policy_denied` с cross-ref на unit-покрытие). _Evidence: 8 blockReason покрыты e2e — семь строк §4.4 плюс `max_tokens`, прогнанный как E2E-TOOL-7 (§4.5, «весь §4 зелёный»); `policy_denied` — обоснованный N/A (структурно недостижим из публичного API, cross-ref на параметрический unit-тест state-machine, [06-testing-strategy.md](06-testing-strategy.md))._ **Уточнение факта 2026-09-09 (результат прогона не меняется):** прежняя редакция строки считала enum за восемь значений и потому не относила к нему уже прогнанный `max_tokens`; число приведено к [ADR-004](adr/ADR-004-blocked-http-200.md) + [ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md), состав прогона тот же.
 - [x] Логи прогона проверены на отсутствие секретов (BYOK/JWT/StoreKit/test-payload). _Evidence: leaks=none — plaintext BYOK-ключа, JWT, StoreKit/test-payload в логах нет (redaction-allowlist, [05-security.md](05-security.md))._
 - [x] Итог: сервис работает на 100% без багов; расхождения docs↔поведение отсутствуют. _Evidence: 0 fail по §4; все найденные дефекты были в harness/тестах (`blame:test`), не в сервисе; расхождений docs↔поведение нет._
 

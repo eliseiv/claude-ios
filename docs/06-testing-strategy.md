@@ -72,7 +72,7 @@
 - **Anthropic API, App Store Server API, KMS** — мокаются (respx / fakes). Реальные вызовы только в отдельном `@pytest.mark.external` наборе (вне CI по умолчанию).
 
 ## State-machine тестирование Policy Engine
-Полная таблица переходов из [ADR-002](adr/ADR-002-access-policy-state-machine.md) покрывается параметризованными unit-тестами: декартово произведение {subscription: none/active/expired} × {trial_used: T/F} × {credits: 0/>0} × {byok: disabled/invalid/valid} × {mode: credits/byok} → ожидаемый `allow|blockReason`.
+Полная таблица переходов из [ADR-002](adr/ADR-002-access-policy-state-machine.md) покрывается параметризованными unit-тестами: декартово произведение {subscription: none/active/expired} × {trial_used: T/F} × {credits: 0/>0} × {byok: **missing**/disabled/invalid/valid} × {mode: credits/byok} → ожидаемый `allow|blockReason`. Ось `byok` перечислена по входу [ADR-002](adr/ADR-002-access-policy-state-machine.md) целиком — **четыре** значения; прежняя редакция называла три и при этом объявляла таблицу «полной». Дом перечня — [modules/policy-engine/09-testing.md](modules/policy-engine/09-testing.md), где ось названа так же; расхождение двух списков об одном произведении устранено. Кейс: `tests/unit/test_policy_engine.py::test_state_machine_full_matrix` (произведение строится по `list(ByokState)`, поэтому в прогон входят и расширенные статусы [ADR-016](adr/ADR-016-extended-byok-statuses.md), которых во входе ADR-002 нет).
 
 ## Структура
 ```
