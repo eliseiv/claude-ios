@@ -87,7 +87,7 @@
 Цель: наш JWT-эндпоинт `POST /v1/billing/cloudpayments/checkout` создаёт платёжную ссылку через broadapps; `userId` берётся из JWT (не из тела) → устраняет «потерянные платежи». **Passthrough, без миграции.** Точные детали — [03-architecture.md §Checkout](03-architecture.md), контракт — [02-api-contracts.md](02-api-contracts.md).
 
 ## Фаза C1 — Config + зависимость + схемы + ошибка
-- `src/app/config.py` (рядом с блоком CloudPayments-вебхука, `config.py:155-172`):
+- `src/app/config.py` (рядом с блоком CloudPayments-вебхука, `src/app/config.py`):
   - `cloudpayments_api_base: str = Field(default="https://pay.broadapps.dev/api/v1", alias="CLOUDPAYMENTS_API_BASE")`
   - `cloudpayments_app_id: str = Field(default="", alias="CLOUDPAYMENTS_APP_ID")`
   - `cloudpayments_api_token: str = Field(default="", alias="CLOUDPAYMENTS_API_TOKEN")`
@@ -132,11 +132,11 @@
 > **⚠️ Эти фазы 1–7 ОТМЕНЕНЫ [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md).** Их авторизация (Фаза 2: bearer/401/500-if-unset), классификация паттерном имени и идемпотентность по `TransactionId` (Фаза 4), а также reason'ы `missing_transaction_id`/`missing_product_id`/`invalid_data` **больше не применяются**. Актуальное ТЗ вебхука — **фазы W1–W6 выше**. Раздел сохранён для истории/трассируемости; **backend реализует W1–W6, не 1–7**. Миграция `0014` (Фаза 1) и ORM `CloudPaymentsWebhookEvent` — **уже применены** и переиспользуются W-фазами (колонка `transaction_id` хранит `payment_id`).
 
 ## Фаза 1 — Config + миграция + ORM + audit
-- `src/app/config.py` (рядом с Adapty-блоком, `config.py:138-153`):
+- `src/app/config.py` (рядом с Adapty-блоком, `src/app/config.py`):
   - `cloudpayments_webhook_token: str = Field(default="", alias="CLOUDPAYMENTS_WEBHOOK_TOKEN")`
   - `cloudpayments_product_tokens_raw: str = Field(default="{}", alias="CLOUDPAYMENTS_PRODUCT_TOKENS")`
   - `cloudpayments_subscription_tokens_grant: int = Field(default=1000, alias="CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT")`
-  - метод `cloudpayments_product_tokens() -> dict[str, int]` — **точная копия формы** `token_products()`/`adapty_product_tokens()` (`config.py:293`): JSON `{str: positive-int}`, малформед/не-объект → `{}`, `bool` исключить, невалидные пары пропустить (graceful, не крашить процесс).
+  - метод `cloudpayments_product_tokens() -> dict[str, int]` — **точная копия формы** `token_products()`/`adapty_product_tokens()` (`src/app/config.py`): JSON `{str: positive-int}`, малформед/не-объект → `{}`, `bool` исключить, невалидные пары пропустить (graceful, не крашить процесс).
 - Миграция **`0014`** (`migrations/versions/…_0014_cloudpayments_webhook_events.py`, `down_revision="0013_byok_provider"`): таблица `cloudpayments_webhook_events` + index по `user_id` (DDL — [04-data-model.md](04-data-model.md)). Проверить **single head** (`alembic heads`).
 - ORM-модель `CloudPaymentsWebhookEvent` в `src/app/models/tables.py`.
 - Audit: `EVENT_CLOUDPAYMENTS_PAYMENT = "cloudpayments_payment"` в `src/app/audit/service.py`.

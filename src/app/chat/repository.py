@@ -22,6 +22,9 @@ from app.models import ChatSession, ChatStep, ToolCall
 # Default max length of an auto-generated chat title (chats/03-architecture.md).
 _TITLE_MAX_CHARS = 60
 
+# Optional members of one media job ref (ADR-068 §2). jobId is mandatory and handled separately.
+_MEDIA_JOB_REF_KEYS = ("kind", "status", "model", "creditsCharged")
+
 
 @dataclass(frozen=True)
 class SessionContext:
@@ -43,6 +46,48 @@ def derive_title(message: str, limit: int = _TITLE_MAX_CHARS) -> str | None:
     if not normalized:
         return None
     return normalized[:limit]
+
+
+def _media_job_ref(raw: Any) -> dict[str, Any] | None:
+    """Normalize ONE stored media job ref (ADR-068 §2 shape); ``None`` when it has no ``jobId``.
+
+    A ref without an addressable ``jobId`` is dropped: the client can neither poll
+    ``GET /v1/media/jobs/{jobId}`` for it nor collapse it against a ref of another leg by the key
+    of ADR-103 §2, so it would only add a phantom card.
+    """
+    if not isinstance(raw, dict):
+        return None
+    job_id = raw.get("jobId")
+    if not job_id:
+        return None
+    ref: dict[str, Any] = {"jobId": str(job_id)}
+    for key in _MEDIA_JOB_REF_KEYS:
+        value = raw.get(key)
+        if value is not None:
+            ref[key] = value
+    return ref
+
+
+def _media_wizard_job_ref(raw: Any) -> dict[str, Any] | None:
+    """Job ref of a wizard-submit user step (ADR-070 §3), as stored in ``payload.mediaWizard``.
+
+    The wizard writes the submitted job on the user step itself, so this is the snapshot taken at
+    submit time — ``status`` is ``queued`` by ADR-068 §1, ``model`` comes from the answered wizard.
+    Same shape the history anchor builds from this very source
+    (modules/chats/02-api-contracts.md §``GET /v1/chats/{id}``), so the recovery of ADR-103 §1 is
+    not narrower than the anchor on this path either.
+    """
+    if not isinstance(raw, dict) or not raw.get("jobId"):
+        return None
+    answers = raw.get("answers")
+    return _media_job_ref(
+        {
+            "jobId": raw["jobId"],
+            "kind": raw.get("kind"),
+            "model": answers.get("model") if isinstance(answers, dict) else None,
+            "status": "queued",
+        }
+    )
 
 
 class ChatRepository:
@@ -452,11 +497,14 @@ class ChatRepository:
     ) -> list[dict[str, Any]]:
         """Successful tool ``result`` payloads for ``tool_names`` within ONE turn, seq ASC.
 
-        Turn-scoped fallback for ``ChatResponse.mediaJobs`` (ADR-068): when the current-call
-        accumulator is empty, recover every successful media submit of this ``message_step_id`` so
-        continuations / replay / ``blocked+max_tokens`` still carry the jobs. Errored rounds
-        (``result`` null) are excluded — same SQL null semantics as
-        ``last_tool_result_for_message_step``.
+        Producer 2 of ``ChatResponse.documents`` (ADR-101 §4): recover every successful
+        document.create / document.update of this ``message_step_id`` so continuations / replay /
+        ``blocked+max_tokens`` carry the turn's cards. Errored rounds (``result`` null) are
+        excluded — same SQL null semantics as ``last_tool_result_for_message_step``.
+
+        ``mediaJobs`` does NOT read through here: its recovery may not be narrower than the history
+        anchor (ADR-103 §1), which also reads assistant ``payload.mediaJobs`` and the wizard's user
+        step — see ``media_job_refs_for_message_step``.
         """
         if not tool_names:
             return []
@@ -474,6 +522,59 @@ class ChatRepository:
             )
         ).scalars()
         return [value for value in rows if isinstance(value, dict)]
+
+    async def media_job_refs_for_message_step(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID
+    ) -> list[dict[str, Any]]:
+        """Media job refs already recorded by the steps of ONE turn, ``seq ASC`` (ADR-103 §1).
+
+        Producer 2 of ``ChatResponse.mediaJobs``. The source list is exactly the one normatively
+        fixed for the history anchor (modules/chats/02-api-contracts.md §``GET /v1/chats/{id}``)
+        and may NOT be narrower than it:
+
+        * ``role='tool'`` — successful ``media.generate_image`` / ``media.generate_video`` result
+          (an errored round has a null ``result`` and creates no job, ADR-103 §4);
+        * ``role='assistant'`` — ``payload.mediaJobs`` published by an earlier leg of the turn;
+        * ``role='user'`` — ``payload.mediaWizard.jobId``: the wizard submit (ADR-070 §3) runs
+          BEFORE the LLM and may leave no ``media.generate_*`` tool step at all, so a recovery built
+          on tool results alone would lose exactly the jobs it exists to recover.
+
+        ONE query per turn on ``(session_id, message_step_id)`` — the same read and the same key
+        ADR-101 §4 already spends on ``documents`` (ADR-103 §8). Refs are returned RAW, in step
+        order and without dedup: the fold by ``jobId`` and the ``creditsCharged`` projection rule
+        (ADR-103 §2–3) belong to the response assembly, not to persistence — the history anchor
+        reads the same rows and must NOT inherit the zeroing.
+        """
+        from app.chat.tools import TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO
+
+        generate_tools = {TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO}
+        rows = (
+            await self._session.execute(
+                select(ChatStep.role, ChatStep.payload)
+                .where(
+                    ChatStep.session_id == session_id,
+                    ChatStep.message_step_id == message_step_id,
+                )
+                .order_by(ChatStep.seq.asc())
+            )
+        ).all()
+        refs: list[dict[str, Any]] = []
+        for role, raw_payload in rows:
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
+            ref: dict[str, Any] | None
+            if role == "tool" and payload.get("toolName") in generate_tools:
+                ref = _media_job_ref(payload.get("result"))
+                if ref is not None:
+                    refs.append(ref)
+            elif role == "assistant":
+                jobs = payload.get("mediaJobs")
+                if isinstance(jobs, list):
+                    refs.extend(r for job in jobs if (r := _media_job_ref(job)) is not None)
+            elif role == "user":
+                ref = _media_wizard_job_ref(payload.get("mediaWizard"))
+                if ref is not None:
+                    refs.append(ref)
+        return refs
 
     async def create_tool_call(
         self,

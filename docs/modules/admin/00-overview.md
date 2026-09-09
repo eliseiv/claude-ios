@@ -6,7 +6,7 @@
 
 ## Scope (этот проход)
 - `POST /v1/admin/wallet/grant` — начислить `amount` кредитов пользователю `userId`, идемпотентно по `idempotencyKey`,
-  с обязательным `reason`. Переиспользует существующий `WalletService.grant()` (`src/app/wallet/service.py:174`).
+  с обязательным `reason`. Переиспользует существующий `WalletService.grant()` (`src/app/wallet/service.py`).
 - `GET /v1/admin/wallet/{userId}` — баланс + последние ledger-транзакции (read-only, для саппорта).
 - Изолированная admin-авторизация: `X-Admin-Key` (CRM) / легаси `X-Admin-Token` ([ADR-009](../../adr/ADR-009-admin-token-auth.md)), зависимость `require_admin`.
 - Аудит `admin_grant`, отдельный rate limit, strict validation, size-лимиты.

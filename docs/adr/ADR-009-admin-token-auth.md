@@ -8,7 +8,7 @@
 
 Появляется первый admin-сценарий: операторская/саппорт-функция начисления кредитов пользователю
 (`POST /v1/admin/wallet/grant`), переиспользующая существующий идемпотентный `WalletService.grant()`
-(`src/app/wallet/service.py:174`).
+(`src/app/wallet/service.py`).
 
 До этого ([05-security.md](../05-security.md) §Авторизация) система имела **единственную роль** `user`:
 каждый запрос ограничен ресурсами `sub` из пользовательского JWT (RS256, доверенный issuer, [ADR-007](ADR-007-lazy-user-provisioning.md)).

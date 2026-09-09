@@ -12,16 +12,16 @@
 
 ### Проблема A — обрезка по `max_tokens`
 
-1. `src/app/config.py:35`: `ANTHROPIC_MAX_TOKENS` default **4096**, в prod-`.env` не переопределён. Для генерации кода/файлов (несколько `files.write` с полным содержимым) 4096 output-токенов мало → Claude не успевает закрыть ход, ответ обрезается с `stop_reason="max_tokens"`.
+1. `src/app/config.py`: `ANTHROPIC_MAX_TOKENS` default **4096**, в prod-`.env` не переопределён. Для генерации кода/файлов (несколько `files.write` с полным содержимым) 4096 output-токенов мало → Claude не успевает закрыть ход, ответ обрезается с `stop_reason="max_tokens"`.
 2. `anthropic_client.create_message` — **НЕ** streaming, `max_tokens=self._max_tokens` (4096).
-3. `orchestrator.py:511`: `if result.stop_reason == "tool_use" and result.tool_uses: …` → `_handle_tool_use`; **иначе** (`:529`) → `status="assistant_message"` + биллинг. При `stop_reason="max_tokens"` блоки `tool_use` в `content` **есть**, но `stop_reason != "tool_use"` → ход уходит в else → `assistant_message`, `toolCall=null`, обрезанные `tool_use` молча теряются для клиента (но персистятся в `chat_steps.payload` как **неполные** блоки).
+3. `src/app/chat/orchestrator.py`, ветвление в `_generate_loop`: `if result.stop_reason == "tool_use" and result.tool_uses: …` → `_handle_tool_use`; **иначе** → `status="assistant_message"` + биллинг. При `stop_reason="max_tokens"` блоки `tool_use` в `content` **есть**, но `stop_reason != "tool_use"` → ход уходит в else → `assistant_message`, `toolCall=null`, обрезанные `tool_use` молча теряются для клиента (но персистятся в `chat_steps.payload` как **неполные** блоки).
 4. Неполный `tool_use` (например `files.write` без `content`) **нельзя** исполнять — `input` невалиден; реплеить его в continuation тоже опасно (битый ход в истории Anthropic).
 
 ### Проблема B — параллельные client-side tool-вызовы
 
 Claude в одном assistant-ходе может вернуть **несколько** `tool_use`-блоков (parallel tool use). Это уже поддержано на уровне хранения ([ADR-008](ADR-008-provider-tool-use-id.md): каждый блок → свой `tool_calls` со своим domain id + `provider_tool_use_id`), но **не** на уровне публичного ответа:
 
-1. `orchestrator.py:682-733` (`_handle_tool_use`): цикл `for block in result.tool_uses` персистит `tool_calls` (status=pending) и audit для **каждого** client-side tool_use, но `first_client_out` присваивается **только первому** (`:730` `elif first_client_out is None`). `ChatResponse.toolCall` — **одиночный** → остальные client-side `tool_use` хода **не возвращаются** клиенту.
+1. `_handle_tool_use` (`orchestrator.py`): цикл `for block in result.tool_uses` персистит `tool_calls` (status=pending) и audit для **каждого** client-side tool_use, но `first_client_out` присваивается **только первому** (`elif first_client_out is None`). `ChatResponse.toolCall` — **одиночный** → остальные client-side `tool_use` хода **не возвращаются** клиенту.
 2. `/chat/tool-result` принимает **один** `toolCallId` + `result|error`.
 3. Контракт Anthropic tool-loop: на **каждый** `tool_use` ассистент-хода в следующем витке `messages` обязан быть соответствующий `tool_result` (по `tool_use_id`), иначе → `400 invalid_request_error` → `502`. Поэтому одиночный `toolCall` на мульти-tool ходе **ломает** continuation: iOS физически не может прислать результаты по tool-вызовам, которых не видел, → следующий виток никогда не соберётся корректно.
 

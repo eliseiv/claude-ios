@@ -11,7 +11,7 @@
 Подтверждено живой диагностикой на проде (orvianix): `POST /v1/workspaces/{workspaceProjectId}/files` возвращает `413 {"error":{"code":"payload_too_large","message":"request body exceeds limit"}}` для любого файла, чьё тело запроса превышает ~512 KB (то есть реальный файл крупнее ~375 KB с учётом base64-раздувания ~33%).
 
 **Корневая причина (подтверждена чтением кода):**
-- `src/app/api_gateway/middleware.py` — `SizeLimitMiddleware._limit_for(path)` применяет общий `settings.size_limit_body` (`SIZE_LIMIT_BODY`, дефолт `512*1024` = 512 KB, `config.py:206`) ко **всем** путям и **исключает только** `/v1/chat/run` (точное сравнение `path == self._CHAT_RUN_PATH`), которому отдаёт `attachment_request_body_limit` (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB, `config.py:231-232`).
+- `src/app/api_gateway/middleware.py` — `SizeLimitMiddleware._limit_for(path)` применяет общий `settings.size_limit_body` (`SIZE_LIMIT_BODY`, дефолт `512*1024` = 512 KB, `src/app/config.py`) ко **всем** путям и **исключает только** `/v1/chat/run` (точное сравнение `path == self._CHAT_RUN_PATH`), которому отдаёт `attachment_request_body_limit` (`ATTACHMENT_REQUEST_BODY_LIMIT`, дефолт 12 MB, `src/app/config.py`).
 - Путь загрузки workspace-файлов `/v1/workspaces/{id}/files` под исключение **не попал** → тело режется на 512 KB **в gateway**, до того как отработает `src/app/workspaces/text_extract.py::validate_and_extract`, который по [ADR-036 §4](ADR-036-workspaces-implementation.md) разрешает `WORKSPACE_FILE_MAX_BYTES`=8 MB на файл.
 - Итог: заявленный ADR-036 лимит 8 MB **фактически недостижим** — реальный потолок ~375 KB.
 

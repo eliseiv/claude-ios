@@ -6,7 +6,7 @@
 | Аспект | Значение |
 |---|---|
 | Механизм | статический bearer-секрет `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` |
-| Сравнение | constant-time `hmac.compare_digest` (образец `auth.py:99-134`) |
+| Сравнение | constant-time `hmac.compare_digest` (образец `src/app/api_gateway/auth.py`) |
 | Нет токена / mismatch | `401` (причина не раскрывается) |
 | Секрет не сконфигурирован | `500` (мис-конфигурация) |
 | Изоляция | секрет отдельный от JWT, `ADMIN_API_SECRET`, KMS, `PREVIEW_URL_SECRET` |
@@ -19,4 +19,4 @@
 - НЕ доверяет `customer_user_id` как авторизации действий — это лишь адресат гранта; несуществующий → `200 ignored/user_not_found` (без создания пользователя).
 
 ## Реализация
-Per-route dependency (Depends), не глобальный middleware (глобального auth-middleware нет, `main.py:196-212`). OpenAPI security-схема — http bearer с `auto_error=False` (образец `admin_scheme`).
+Per-route dependency (Depends), не глобальный middleware (глобального auth-middleware нет, `src/app/main.py`). OpenAPI security-схема — http bearer с `auto_error=False` (образец `admin_scheme`).

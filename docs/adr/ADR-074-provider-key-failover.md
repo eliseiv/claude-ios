@@ -9,7 +9,7 @@
   (`_CONTINUATION_ENABLED: Final = False`, `src/app/chat/openai_responses_client.py:77`), поэтому
   переданный state **инертен**: `_usable_previous_response_id` (`:406`) возвращает `None` на каждом
   ходе. Более того, отбор кандидата (`_provider_state_for_attempt`,
-  `src/app/chat/orchestrator.py:527-545`) сверяет **только имя провайдера**, а не **слот ключа**, —
+  `src/app/chat/orchestrator.py`) сверяет **только имя провайдера**, а не **слот ключа**, —
   handle, выпущенный `OPENAI_API_KEY_BACKUP` (второй аккаунт этой же цепочки), ушёл бы кандидату
   основного аккаунта. Именно это, вместе с отсутствием recovery (`clear_provider_state` не зовётся
   на upstream-ошибке), и есть причина, по которой цепочку нельзя просто включить. Сама схема

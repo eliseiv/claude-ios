@@ -273,8 +273,8 @@ generation_backend: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 Сброс нужен при edit/regenerate, max_tokens truncation и при апгрейде legacy-сессии в v2.
 
-⚠️ `clear_provider_state` (`src/app/chat/repository.py:179`) зовётся **только** из этих трёх мест
-(`orchestrator.py:1002`, `:1907`, `:2480`) и **никогда** на upstream-ошибке. Recovery от битого
+⚠️ `clear_provider_state` (`src/app/chat/repository.py`) зовётся **только** из этих трёх мест
+(`orchestrator.py`: `_run_turn`, `_ensure_session_backend`, `_maybe_update_provider_state`) и **никогда** на upstream-ошибке. Recovery от битого
 handle сегодня нет — это одна из четырёх причин, по которым цепочка выключена, и часть работы,
 которую описывает [TD-032](../../100-known-tech-debt.md).
 
@@ -457,7 +457,7 @@ Legacy `/v1/chat/*` не ломается, потому что orchestrator на
 BYOK не сохраняет `provider_state`, потому что пользователь может сменить ключ между ходами, а
 remote response id привязан к аккаунту/ключу у провайдера.
 
-⚠️ **`_provider_state_for_attempt` (`src/app/chat/orchestrator.py:527-545`) сверяет только ИМЯ
+⚠️ **`_provider_state_for_attempt` (`src/app/chat/orchestrator.py`) сверяет только ИМЯ
 провайдера, а не слот ключа.** State, выпущенный резервным аккаунтом (`OPENAI_API_KEY_BACKUP`,
 [ADR-074](../../adr/ADR-074-provider-key-failover.md)), был бы передан кандидату **другого**
 аккаунта. Сегодня передаваемый state **инертен** (`_usable_previous_response_id` возвращает `None`

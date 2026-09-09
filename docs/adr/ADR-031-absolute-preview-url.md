@@ -10,7 +10,7 @@
 
 Репорт iOS-разработчика (прод): при генерации сайта ассистент отдаёт превью-ссылки с **выдуманным хостом** — `https://www.val.town/v1/preview/...`, `https://claude.site/v1/preview/...`.
 
-Корень: `_preview` (`src/app/website/tools.py:168`) строит **относительный** путь:
+Корень: `_preview` (`src/app/website/tools.py`) строит **относительный** путь:
 
 ```python
 url = f"/v1/preview/{project.id}/{signed.token}/{entry}"

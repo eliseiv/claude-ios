@@ -30,7 +30,7 @@ Adapty становится **основным путём биллинга по 
 - Неверный / отсутствующий токен → **401** (без раскрытия причины).
 - Секрет **не задан** в env (`ADAPTY_WEBHOOK_SECRET=""`) → **500** с понятным текстом мис-конфигурации. Пустой секрет **никогда** не матчится (как admin: blank header не аутентифицирует).
 - **Изоляция секрета:** `ADAPTY_WEBHOOK_SECRET` отдельный от пользовательского JWT, admin-секрета (`ADMIN_API_SECRET`), KMS, preview-секрета. Per-instance (мульти-инстанс, [ADR-017](ADR-017-shared-server-traefik-deploy.md)) — у каждого инстанса свой секрет.
-- **Не глобальный middleware**, а per-route dependency (глобального auth-middleware нет, `main.py:196-212`). Эндпоинт исключён из пользовательской JWT-цепочки.
+- **Не глобальный middleware**, а per-route dependency (глобального auth-middleware нет, `src/app/main.py`, `app.include_router(...)`). Эндпоинт исключён из пользовательской JWT-цепочки.
 
 ### 2. Тело запроса — всегда 2xx после авторизации
 
@@ -74,7 +74,7 @@ Adapty становится **основным путём биллинга по 
 
 ### 5. Тир product → tokens (config-хелпер)
 
-JSON-карта env `ADAPTY_PRODUCT_TOKENS` (`{vendor_product_id: tokens}`) по образцу `Settings.token_products()` (`config.py:199`). Если для `vendor_product_id` нет записи в карте — fallback на фиксированный `ADAPTY_SUBSCRIPTION_TOKENS_GRANT` (целое > 0; дефолт 1000). Парсер: только строковые ключи и положительные int-значения (исключая bool); малформед → пустая карта → используется fallback. Имена env финализированы в [07-deployment.md](../07-deployment.md) и [02-tech-stack.md](../02-tech-stack.md).
+JSON-карта env `ADAPTY_PRODUCT_TOKENS` (`{vendor_product_id: tokens}`) по образцу `Settings.token_products()` (`src/app/config.py`). Если для `vendor_product_id` нет записи в карте — fallback на фиксированный `ADAPTY_SUBSCRIPTION_TOKENS_GRANT` (целое > 0; дефолт 1000). Парсер: только строковые ключи и положительные int-значения (исключая bool); малформед → пустая карта → используется fallback. Имена env финализированы в [07-deployment.md](../07-deployment.md) и [02-tech-stack.md](../02-tech-stack.md).
 
 > Почему отдельный `ADAPTY_SUBSCRIPTION_TOKENS_GRANT`, а не reuse `SUBSCRIPTION_CREDITS_PER_PERIOD`: изоляция конфигурации Adapty-пути от StoreKit-`sync`-пути, чтобы операторы могли калибровать гранты независимо и чтобы ретирование StoreKit-`sync` ([Q-029-2](../99-open-questions.md)) не затрагивало Adapty. Дефолты совпадают (1000) для предсказуемости.
 
@@ -86,7 +86,7 @@ JSON-карта env `ADAPTY_PRODUCT_TOKENS` (`{vendor_product_id: tokens}`) по
 2. Если конфликт (ничего не вставлено) → `200 duplicate` (раннее завершение, **ничего не мутируем: нет upsert, нет grant, нет audit**).
 3. Иначе (`applied`):
    - upsert `subscriptions` (по образцу `subscription/service.py:52-68`);
-   - для `started`/`renewed`: `WalletService.grant(user_id=..., amount=<тир>, idempotency_key="adapty-event:{event_id}", reason="adapty_subscription", meta={...})` (`wallet/service.py:174-236`);
+   - для `started`/`renewed`: `WalletService.grant(user_id=..., amount=<тир>, idempotency_key="adapty-event:{event_id}", reason="adapty_subscription", meta={...})` (`src/app/wallet/service.py`);
    - **запись audit `adapty_subscription`** (см. §7) — пишется **только здесь, на `applied`**;
    - запись события (тот же INSERT шага 1) фиксируется.
 4. Commit. **Любой сбой → откат всей транзакции → 500 → Adapty ретраит → чистая переобработка** (на ретрае `event_id` снова свободен, т. к. INSERT откатился; двойного начисления нет — `grant` идемпотентен по `idempotency_key`, а `event_id`-INSERT — единая точка дедупликации).
@@ -95,7 +95,7 @@ JSON-карта env `ADAPTY_PRODUCT_TOKENS` (`{vendor_product_id: tokens}`) по
 
 ### 7. Audit
 
-Новое событие `EVENT_ADAPTY_SUBSCRIPTION = "adapty_subscription"` (`src/app/audit/service.py`). Payload `{adaptyEventId, eventType, status, plan, expiresAt, customerId}` — проходит через `assert_no_secrets` (`audit/service.py:48`). Bearer-секрет в payload не попадает; заголовок `Authorization` уже покрыт redaction-денилистом (`authorization` ∈ `_DENY_SUBSTRINGS`, `redaction.py:15`).
+Новое событие `EVENT_ADAPTY_SUBSCRIPTION = "adapty_subscription"` (`src/app/audit/service.py`). Payload `{adaptyEventId, eventType, status, plan, expiresAt, customerId}` — проходит через `assert_no_secrets` (`src/app/audit/service.py`). Bearer-секрет в payload не попадает; заголовок `Authorization` уже покрыт redaction-денилистом (`authorization` ∈ `_DENY_SUBSTRINGS`, `src/app/observability/redaction.py`).
 
 **Audit пишется ТОЛЬКО на исходе `applied`** (внутри транзакции §6, после успешного дедуп-INSERT и upsert/grant). На `ignored` (любой `reason`, включая `user_not_found` и неизвестный `event_type`) и на `duplicate` audit **НЕ пишется** — это «событие не применено», мутаций нет. Так аудит не засоряется проверочными пингами Adapty и повторными доставками.
 

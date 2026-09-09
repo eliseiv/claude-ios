@@ -10,7 +10,7 @@
 
 Репорт iOS-разработчика: в текущем шейпе нет **идентификатора вызова инструмента**, поэтому клиент не может надёжно **сопоставить** запись из `serverTools[]` с конкретным tool-шагом в истории `/v1/chats/{id}` (например, для прогресс-UI «Claude записал файл», кликабельного к деталям шага). Сопоставление по `toolName` неоднозначно, если за ход один и тот же инструмент вызван несколько раз (несколько `site.write_file` или повторный `time.now`).
 
-Доменный `tool_call.id` (uuid4) для каждого server-side выполнения **уже существует** на стороне backend: orchestrator минтит его (`tool_call_id = uuid.uuid4()`, `orchestrator.py:951`) и уже использует в `complete_tool_call` / `add_step` (он же кладётся в `chat_steps.payload.toolCallId` tool-шага и виден в истории после нормализации [ADR-024](ADR-024-history-payload-domain-normalization.md)). То есть id уже на руках — его просто не клали в элемент `serverTools[]`.
+Доменный `tool_call.id` (uuid4) для каждого server-side выполнения **уже существует** на стороне backend: orchestrator минтит его (`tool_call_id = uuid.uuid4()` в `orchestrator.py`, `_handle_tool_use`) и уже использует в `complete_tool_call` / `add_step` (он же кладётся в `chat_steps.payload.toolCallId` tool-шага и виден в истории после нормализации [ADR-024](ADR-024-history-payload-domain-normalization.md)). То есть id уже на руках — его просто не клали в элемент `serverTools[]`.
 
 ADR immutable → текст [ADR-028](ADR-028-projectid-in-chat-list-and-server-tools-in-chat-response.md) не переписывается; эта аддитивная правка контракта оформляется отдельным малым ADR, как [ADR-027](ADR-027-calendar-read-contract-alignment.md)/[ADR-026](ADR-026-global-server-side-tools-and-time-now.md) расширяли соседние контракты.
 
@@ -36,7 +36,7 @@ ADR immutable → текст [ADR-028](ADR-028-projectid-in-chat-list-and-server
 
 **Формат и обязательность `toolCallId`:**
 - Тип — `uuid` в виде строки (как `toolCalls[].id` / `toolCall.id` в `ChatResponse` — там тоже `str`-uuid доменного формата).
-- **Обязательное** (не nullable): у **каждого** выполненного server-side инструмента всегда есть доменный `tool_call_id` (минтится до исполнения, `orchestrator.py:951`), поэтому отсутствия значения быть не может. В Pydantic-схеме — `str` без `default`.
+- **Обязательное** (не nullable): у **каждого** выполненного server-side инструмента всегда есть доменный `tool_call_id` (минтится до исполнения — `orchestrator.py`, `_handle_tool_use`), поэтому отсутствия значения быть не может. В Pydantic-схеме — `str` без `default`.
 - **Позиция** — `toolCallId` ставится **первым** полем элемента (перед `toolName`), по аналогии с `toolCalls[].id`, который тоже идёт первым. На JSON-семантику порядок не влияет; делается для читаемости Swagger и симметрии с client-side `toolCalls[]`.
 
 **Семантика (нормативно):**
@@ -53,11 +53,11 @@ ADR immutable → текст [ADR-028](ADR-028-projectid-in-chat-list-and-server
 
 Источник — `src/app/chat/orchestrator.py` + маппинг в `src/app/api_gateway/routers/chat.py` + схема `src/app/schemas/chat.py`. Id уже доступен в обоих executor'ах (`tool_call_id: uuid.UUID`), правка — только проброс в аккумулятор и схему:
 
-1. **`ServerToolExecutionOut`** (dataclass, `orchestrator.py:127`) — добавить поле `tool_call_id: uuid.UUID` (рядом с `tool_name`/`status`/`summary`).
+1. **`ServerToolExecutionOut`** (dataclass в `orchestrator.py`) — добавить поле `tool_call_id: uuid.UUID` (рядом с `tool_name`/`status`/`summary`).
 2. **`_execute_server_side_tool`** (`orchestrator.py`, append `~:1061`) — при создании `ServerToolExecutionOut(...)` передать `tool_call_id=tool_call_id` (параметр уже в сигнатуре, уже используется в `complete_tool_call`/`add_step`).
 3. **`_execute_global_server_side_tool`** (`orchestrator.py`, append `~:1124`) — аналогично передать `tool_call_id=tool_call_id`.
-4. **`ServerToolExecutionSchema`** (`schemas/chat.py:237`) — добавить **первым** полем `toolCallId: str` (обязательное, без `default`), описание: доменный uuid4 вызова, совпадает с `toolCallId` tool-шага в `GET /v1/chats/{id}`.
-5. **Маппинг out→schema** (`api_gateway/routers/chat.py:284-287`) — в list-comprehension добавить `toolCallId=str(st.tool_call_id)` (привести uuid к строке, как делают `toolCalls[].id`).
+4. **`ServerToolExecutionSchema`** (`src/app/schemas/chat.py`) — добавить **первым** полем `toolCallId: str` (обязательное, без `default`), описание: доменный uuid4 вызова, совпадает с `toolCallId` tool-шага в `GET /v1/chats/{id}`.
+5. **Маппинг out→schema** (`_to_response`, `src/app/api_gateway/routers/chat.py`) — в list-comprehension добавить `toolCallId=str(st.tool_call_id)` (привести uuid к строке, как делают `toolCalls[].id`).
 6. Никаких изменений билдинга `serverTools[]`, барьера хода, биллинга, истории, миграций БД — не требуется.
 
 > Замечание для qa (информационно, не указание писать тесты): покрыть инвариант `serverTools[i].toolCallId == steps[].payload.toolCallId` соответствующего tool-шага и присутствие/обязательность поля в `serverTools[]` при `assistant_message`/`tool_call`.

@@ -47,7 +47,7 @@
 ```
 grant(userId, amount>0, idempotency_key, meta, reason) -> newBalance, ledgerTxId, idempotentReplay
 ```
-Создаёт `ledger_transactions(type=credit)`, увеличивает баланс. Идемпотентен по `(user_id, idempotency_key)`, пишет audit `billing_credit` (принимает `reason`). Реализация: `src/app/wallet/service.py:174`.
+Создаёт `ledger_transactions(type=credit)`, увеличивает баланс. Идемпотентен по `(user_id, idempotency_key)`, пишет audit `billing_credit` (принимает `reason`). Реализация: `WalletService.grant`, `src/app/wallet/service.py`.
 
 Вызывается:
 - **Subscription** при активации/продлении плана: фиксированный пакет `SUBSCRIPTION_CREDITS_PER_PERIOD` (дефолт 1000) кредитов на период, идемпотентность по `transactionId` периода ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)).

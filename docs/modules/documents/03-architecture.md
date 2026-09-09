@@ -1,6 +1,6 @@
 # Documents — Architecture
 
-Реализация — [ADR-090](../../adr/ADR-090-chat-documents.md); поле ответа хода — [ADR-101](../../adr/ADR-101-chat-response-documents.md) (**код написан, автотестами не покрыт, ревью не проходило, в `main` не слит и не выкачен**).
+Реализация — [ADR-090](../../adr/ADR-090-chat-documents.md); поле ответа хода — [ADR-101](../../adr/ADR-101-chat-response-documents.md) (**код написан, покрыт автотестами, слит в `main` и выкачен на инстансы; ревью не проходило**).
 
 ## Размещение
 - `src/app/documents/service.py` — `DocumentsService` (CRUD + строка контекста), проекция `DocumentView` (ORM наружу не уходит), нормализация имени `_normalize_filename`.
@@ -23,14 +23,14 @@
 
 | Ось гейтирования | Применяется к `document.*`? | Где проверено |
 |---|---|---|
-| Наличие проекта (`site.*`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)) | **нет** — семейство в `GLOBAL_SERVER_SIDE_TOOLS`, флаг `include_server_side` его не трогает | `src/app/chat/tools.py:98-111` |
-| Режим генерации (`TOOL_GENERATION_MODES`, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) | **нет** — в реестре только `quiz.generate` | `src/app/chat/tools.py:134-136` |
-| Per-instance денилист семейств (`CHAT_DISABLED_TOOL_FAMILIES`, [ADR-081](../../adr/ADR-081-disabled-tool-families.md)) | **нет** — `document` отсутствует в `DISABLEABLE_TOOL_FAMILIES`, а неизвестный токен отбрасывается с предупреждением | `src/app/chat/tools.py:114`, `src/app/config.py:1341-1352` |
+| Наличие проекта (`site.*`, [ADR-022](../../adr/ADR-022-optional-project-and-tool-gating.md)) | **нет** — семейство в `GLOBAL_SERVER_SIDE_TOOLS`, флаг `include_server_side` его не трогает | `GLOBAL_SERVER_SIDE_TOOLS`, `src/app/chat/tools.py` |
+| Режим генерации (`TOOL_GENERATION_MODES`, [ADR-064](../../adr/ADR-064-study-learn-quiz-generation-mode.md)) | **нет** — в реестре только `quiz.generate` | `src/app/chat/tools.py` |
+| Per-instance денилист семейств (`CHAT_DISABLED_TOOL_FAMILIES`, [ADR-081](../../adr/ADR-081-disabled-tool-families.md)) | **нет** — `document` отсутствует в `DISABLEABLE_TOOL_FAMILIES`, а неизвестный токен отбрасывается с предупреждением | `src/app/chat/tools.py` (`DISABLEABLE_TOOL_FAMILIES`, `parse_disabled_tool_families`), `src/app/config.py` (`Settings.disabled_tool_families`) |
 | Per-instance выключатель как у медиа (`CHAT_MEDIA_TOOLS_ENABLED`, [ADR-072](../../adr/ADR-072-chat-media-tools-instance-gate.md)) | **нет** — аналога не заводится | [ADR-090 §3](../../adr/ADR-090-chat-documents.md) |
 | Внешний ключ/провайдер (как `FAL_API_KEY` у медиа) | **нет** — зависимости от внешнего сервиса у документов не бывает | [ADR-090 §3](../../adr/ADR-090-chat-documents.md) |
-| `assistantMode` (`chat`/`code`) | **нет** — ось B в коде не реализована ни для одного инструмента ([Q-012-1](../../99-open-questions.md) Open) | `src/app/chat/tools.py:1230-1233` |
+| `assistantMode` (`chat`/`code`) | **нет** — ось B в коде не реализована ни для одного инструмента ([Q-012-1](../../99-open-questions.md) Open) | `src/app/chat/tools.py` |
 
-Единственный «выключенный» путь в коде — `GlobalToolHandlers`, собранный без `DocumentsService`: инструменты отдают tool-result ошибку `documents_not_available`, ход не падает (тот же приём, что у медиа без ключа). В продовой сборке путь недостижим — зависимости всегда передают сервис (`src/app/deps.py:393`, `:402`).
+Единственный «выключенный» путь в коде — `GlobalToolHandlers`, собранный без `DocumentsService`: инструменты отдают tool-result ошибку `documents_not_available`, ход не падает (тот же приём, что у медиа без ключа). В продовой сборке путь недостижим — зависимости всегда передают сервис (все сборки `GlobalToolHandlers` в `src/app/deps.py` передают `documents=get_documents_service(session)`).
 
 ## Отказы вырождаются в tool-result ошибку, а не роняют ход
 
@@ -46,17 +46,17 @@
 
 **Контраст с файлами-знаниями workspace (обе стороны помечены):** файлы-знания инжектируются в контекст **содержимым** (`extracted_text`, turn-0), потому что модель не может их запросить; документы инжектируются **перечнем**, потому что может. Правило одного на другое не переносить.
 
-## Сборка `ChatResponse.documents[]` ([ADR-101](../../adr/ADR-101-chat-response-documents.md); код написан по действующей редакции §4, автотестами не покрыт, не отревьюирован и не выкачен)
-Тот же двухпроизводительный паттерн, что у `mediaJobs` (`src/app/chat/orchestrator.py:2284-2314`), **но с безусловным вторым производителем**:
+## Сборка `ChatResponse.documents[]` ([ADR-101](../../adr/ADR-101-chat-response-documents.md); код написан по действующей редакции §4, покрыт автотестами, слит в `main` и выкачен; ревью не проходило)
+Тот же двухпроизводительный паттерн, что у `mediaJobs` (`ChatOrchestrator._resolve_turn_media_jobs`, `src/app/chat/orchestrator.py`), **но с безусловным вторым производителем**:
 
 1. аккумулятор текущего вызова — успешные результаты `document.create` / `document.update` (append в порядке выполнения, дедупликация — на сборке);
-2. восстановление по ходу: `tool_results_for_message_step(session_id, message_step_id, {document.create, document.update})` (`src/app/chat/repository.py:426-455`; метод уже отбирает успешные и упорядочивает по `seq ASC`). Выполняется **всегда** при непустом `message_step_id`, **а не только когда аккумулятор пуст** ([ADR-101 §4](../../adr/ADR-101-chat-response-documents.md)).
+2. восстановление по ходу: `tool_results_for_message_step(session_id, message_step_id, {document.create, document.update})` (`ChatRepository.tool_results_for_message_step`, `src/app/chat/repository.py`; метод уже отбирает успешные и упорядочивает по `seq ASC`). Выполняется **всегда** при непустом `message_step_id`, **а не только когда аккумулятор пуст** ([ADR-101 §4](../../adr/ADR-101-chat-response-documents.md)).
 
 Источники **сливаются**: сначала восстановленные записи (`seq ASC`), затем записи аккумулятора. Затем — **свёртка last-wins по `documentId`** с сохранением позиции первого появления, и `None`, если список пуст.
 
 **Почему безусловно (иначе ломается гарантия [ADR-101 §3](../../adr/ADR-101-chat-response-documents.md)):** ход может создать документ на витке до hand-off на client-side инструмент, а на `/chat/tool-result` создать второй; при гейте «только когда аккумулятор пуст» непустой аккумулятор второй ноги вытеснил бы первый документ из ответа, тогда как идемпотентный реплей того же хода (аккумулятор пуст) вернул бы оба — один ход отдавал бы два разных ответа. Пересечение источников при слиянии безвредно: свёртка идемпотентна, побеждает значение аккумулятора как самое свежее.
 
-**Контраст с `mediaJobs` (обе стороны помечены):** правило «восстанавливать только при пустом аккумуляторе» на `documents[]` **не переносить** — оно и есть исправляемый дефект. Обратное ограничение снято отдельным решением: [ADR-103](../../adr/ADR-103-media-jobs-turn-scoped-merge.md) (2026-09-08) задал `mediaJobs` ключ `jobId` и безусловное восстановление, поэтому механизм сборки у обоих полей одинаков, а прежняя формулировка «у `mediaJobs` ключа дедупликации нет, безусловное слияние туда не переносить» описывает состояние до него. Различия остаются содержательные: ключ (`documentId` против `jobId`), смысл last-wins (документ в ходе законно меняется и обязан нести финальную `version`; media-задача ставится один раз) и правило `creditsCharged`, которого у документов нет вовсе — они бесплатны ([ADR-103 §3](../../adr/ADR-103-media-jobs-turn-scoped-merge.md)). **Образец в коде на сегодня прежний:** пока [ADR-103](../../adr/ADR-103-media-jobs-turn-scoped-merge.md) не реализован, копировать условие у `mediaJobs` по-прежнему нельзя. Поле выставляется на всех пяти терминальных ногах хода через `_decorate_turn_out` (`src/app/chat/orchestrator.py:2354`) и попадает в ответ единственной точкой сборки `_to_response` (`src/app/api_gateway/routers/chat.py:454`), поэтому появляется сразу на legacy, v2 и SSE-`done`.
+**Контраст с `mediaJobs` (обе стороны помечены):** правило «восстанавливать только при пустом аккумуляторе» на `documents[]` **не переносить** — оно и есть исправляемый дефект. Обратное ограничение снято отдельным решением: [ADR-103](../../adr/ADR-103-media-jobs-turn-scoped-merge.md) (2026-09-08) задал `mediaJobs` ключ `jobId` и безусловное восстановление, поэтому механизм сборки у обоих полей одинаков, а прежняя формулировка «у `mediaJobs` ключа дедупликации нет, безусловное слияние туда не переносить» описывает состояние до него. Различия остаются содержательные: ключ (`documentId` против `jobId`), смысл last-wins (документ в ходе законно меняется и обязан нести финальную `version`; media-задача ставится один раз) и правило `creditsCharged`, которого у документов нет вовсе — они бесплатны ([ADR-103 §3](../../adr/ADR-103-media-jobs-turn-scoped-merge.md)). **Образец в коде приведён к норме:** гейт «только при пустом аккумуляторе» у `mediaJobs` снят ([ADR-103](../../adr/ADR-103-media-jobs-turn-scoped-merge.md) реализован — `src/app/chat/orchestrator.py:2482`; ревью не проходило, в `main` не слито и не выкачено), поэтому копировать образец теперь можно — но копировать следует только МЕХАНИЗМ, а не три названных различия. Поле выставляется на всех **семи** терминальных ногах хода через `_decorate_turn_out` (`src/app/chat/orchestrator.py:2636`) — пять ног генерации плюс **две ноги визарда** ([ADR-103 §6](../../adr/ADR-103-media-jobs-turn-scoped-merge.md): нога промежуточного тапа есть вторая нога ТОГО ЖЕ хода, нога финального сабмита — единственная нога НОВОГО хода) — и попадает в ответ единственной точкой сборки `_to_response` (`src/app/api_gateway/routers/chat.py:456`), поэтому появляется сразу на legacy, v2 и SSE-`done`.
 
 ## Инварианты
 - Документ ≠ `files.*` (устройство пользователя) ≠ `site.*` (сайт) ≠ файл-знание workspace (проект, read-only для модели).

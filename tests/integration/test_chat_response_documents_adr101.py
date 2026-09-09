@@ -20,6 +20,8 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import get_settings
+from app.media_generation.fal_client import FalSubmission
 from tests.conftest import FakeAnthropicClient, auth_headers, seed_user
 
 _MEDIA_TYPES = {"text/markdown", "text/plain", "text/csv", "application/json"}
@@ -461,6 +463,187 @@ async def test_max_tokens_blocked_after_create_still_carries_documents(
     assert body["blockReason"] == "max_tokens"
     assert body["messageStepId"] is not None
     assert [d["filename"] for d in body["documents"]] == ["trunc.md"], body
+
+
+# ==============================================================================================
+# Ноги визарда (§4: терминальных ног СЕМЬ, две из них — визардные)
+# ==============================================================================================
+#
+# Обе ноги визарда (ADR-070) живут в `ChatOrchestrator._handle_media_selection`
+# (`src/app/chat/orchestrator.py`) — ветвь промежуточного тапа (`next_state is not None`) и ветвь
+# финального сабмита — и проходят через ту же единую точку сборки `_decorate_turn_out`, поэтому
+# правило §4 действует на них без изменений. Различие двух ног — в ХОДЕ, которому они принадлежат
+# ([ADR-101 §4, уточнение факта 2026-09-09](../../docs/adr/ADR-101-chat-response-documents.md)):
+# тап сообщает `messageStepId` ТОГО ЖЕ хода и обязан нести его документы, сабмит открывает НОВЫЙ
+# ход и нести документы предыдущего НЕ обязан. Это два РАЗНЫХ инварианта — против недооценки
+# (документ хода выпал из ноги) и против переоценки (в ход затёк чужой документ), — поэтому кейсы
+# раздельные и мутации у них разные: (а) падает, когда нога тапа строит ответ мимо единой точки
+# сборки; (б) падает, когда восстановление перестаёт скоупиться ходом.
+
+
+@pytest.fixture
+def fal_ready(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Media-генерация сконфигурирована: без неё визард отвечает `422` и до ног дело не доходит."""
+    monkeypatch.setenv("FAL_API_KEY", "test-fal-key")
+    monkeypatch.setenv("FAL_QUEUE_BASE", "https://queue.fal.run")
+    get_settings.cache_clear()
+
+    async def _submit(self: object, *, endpoint: str, payload: dict[str, object]) -> FalSubmission:
+        rid = "req_adr101_wizard"
+        return FalSubmission(
+            request_id=rid,
+            status="IN_QUEUE",
+            status_url=f"https://queue.fal.run/{endpoint}/requests/{rid}/status",
+            response_url=f"https://queue.fal.run/{endpoint}/requests/{rid}",
+            queue_position=0,
+        )
+
+    async def _rehost(self: object, url: str) -> str:
+        return url
+
+    monkeypatch.setattr("app.media_generation.fal_client.FalClient.submit", _submit)
+    monkeypatch.setattr("app.media_generation.fal_client.FalClient.rehost_reference_image", _rehost)
+    yield
+    get_settings.cache_clear()
+
+
+async def _turn_with_document_and_wizard(
+    client: AsyncClient, uid: uuid.UUID, fake: FakeAnthropicClient
+) -> dict[str, Any]:
+    """Ход, который СОЗДАЛ документ и тут же открыл визард: общая предпосылка обоих кейсов."""
+    fake.responses = [
+        _create(fake, filename="A", content="aaa", tool_id="toolu_a1"),
+        fake.tool_result(
+            "media.ask_params", {"kind": "image", "prompt": "a dog"}, tool_id="toolu_ask01"
+        ),
+        fake.text_result("выберите модель"),
+    ]
+    r = await client.post(
+        "/v1/chat/v2/run",
+        json={"userId": str(uid), "message": "сделай отчёт и нарисуй собаку", "mode": "credits"},
+        headers=auth_headers(uid),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "assistant_message", body
+    assert [d["filename"] for d in body["documents"]] == ["A.md"], body["documents"]
+    assert body["mediaChoices"] is not None, "предпосылка: визард открыт этим же ходом"
+    return body
+
+
+async def _wizard_tap(
+    client: AsyncClient,
+    uid: uuid.UUID,
+    *,
+    session_id: str,
+    selection_id: str,
+    answers: dict[str, str],
+) -> dict[str, Any]:
+    r = await client.post(
+        "/v1/chat/v2/run",
+        json={
+            "userId": str(uid),
+            "sessionId": session_id,
+            "message": "",
+            "mode": "credits",
+            "mediaSelection": {"selectionId": selection_id, "answers": answers},
+        },
+        headers=auth_headers(uid),
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+@pytest.mark.asyncio
+async def test_wizard_tap_leg_of_the_same_turn_keeps_the_turns_document(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
+    fal_ready: None,
+) -> None:
+    """Промежуточный тап визарда — ВТОРАЯ терминальная нога ТОГО ЖЕ хода, и §4 действует на ней.
+
+    Против НЕДООЦЕНКИ: ход создал документ **A** и открыл визард; тап по карточке патчит tool-шаг
+    `media.ask_params` на месте, своего хода не открывает и отвечает ТЕМ ЖЕ `messageStepId` — то
+    есть клиент видит вторую ногу одного хода. Гарантия §4 («каждый документ хода — на КАЖДОЙ
+    терминальной ноге») и её следствие («все ноги одного хода отдают ОДИН И ТОТ ЖЕ список») обязаны
+    выполняться здесь ровно как на continuation'е. Кейс падает, если нога тапа строит ответ мимо
+    единой точки сборки: до волны ADR-103 она отдавала `null`.
+    """
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s, subscription="active", balance=80)
+
+    first = await _turn_with_document_and_wizard(client, uid, fake_anthropic)
+    choices = first["mediaChoices"]
+
+    tap = await _wizard_tap(
+        client,
+        uid,
+        session_id=first["sessionId"],
+        selection_id=choices["selectionId"],
+        answers={choices["step"]: choices["questions"][0]["options"][0]["value"]},
+    )
+
+    assert tap["status"] == "assistant_message", "нога терминальная"
+    assert tap["messageStepId"] == first["messageStepId"], "предпосылка кейса: ТОТ ЖЕ ход"
+    assert tap["documents"] is not None, "документ хода выпал из ноги тапа — §4 нарушена"
+    assert (
+        tap["documents"] == first["documents"]
+    ), "ноги одного хода не могут отдавать разные списки документов"
+
+
+@pytest.mark.asyncio
+async def test_wizard_submit_opens_a_new_turn_without_the_earlier_turns_document(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_anthropic: FakeAnthropicClient,
+    fal_ready: None,
+) -> None:
+    """Финальный сабмит визарда — единственная нога НОВОГО хода: документов у него нет.
+
+    Против ПЕРЕОЦЕНКИ: сабмит пишет свои user+assistant шаги под СВОИМ `messageStepId`, поэтому
+    документ **A** предыдущего хода в его список попасть не должен — поле скоупится ХОДОМ, а не
+    сессией и не визардом. Три утверждения делают `null` доказательным, а не пустым: сабмит открыл
+    ДРУГОЙ ход (предпосылка), предыдущая нога того же визарда документ ещё несла (значит `null`
+    даёт именно граница хода, а не отсутствие документа), и документ по-прежнему лежит в сессии.
+    Кейс падает, если восстановление перестаёт скоупиться ходом.
+    """
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s, subscription="active", balance=80)
+
+    first = await _turn_with_document_and_wizard(client, uid, fake_anthropic)
+    session_id = first["sessionId"]
+    selection_id = first["mediaChoices"]["selectionId"]
+    document_id = first["documents"][0]["documentId"]
+
+    answers: dict[str, str] = {}
+    intermediate: dict[str, Any] | None = None
+    submit: dict[str, Any] | None = None
+    for _ in range(8):
+        body = await _wizard_tap(
+            client, uid, session_id=session_id, selection_id=selection_id, answers=answers
+        )
+        if body.get("mediaJobs"):
+            submit = body
+            break
+        intermediate = body
+        choices = body["mediaChoices"]
+        answers[choices["step"]] = choices["questions"][0]["options"][0]["value"]
+    assert submit is not None, "визард не дошёл до сабмита"
+    assert intermediate is not None, "промежуточного тапа не было — контраст ног не проверен"
+
+    assert submit["status"] == "assistant_message", "нога терминальная"
+    assert submit["messageStepId"] != first["messageStepId"], "предпосылка кейса: НОВЫЙ ход"
+    assert (
+        intermediate["documents"] == first["documents"]
+    ), "предыдущая нога визарда обязана нести документ хода — иначе `null` ниже ничего не значит"
+    assert submit["documents"] is None, "документ ЧУЖОГО хода затёк в ход сабмита — §4 нарушена"
+
+    listed = await client.get(f"/v1/chats/{session_id}/documents", headers=auth_headers(uid))
+    assert listed.status_code == 200, listed.text
+    assert [d["documentId"] for d in listed.json()["documents"]] == [
+        document_id
+    ], "документ никуда не делся — он просто принадлежит ДРУГОМУ ходу"
 
 
 # ==============================================================================================

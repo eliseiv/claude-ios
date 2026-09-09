@@ -13,8 +13,8 @@
 
 Точки расширения в коде (подтверждено чтением):
 - `src/app/schemas/chat.py::ChatRunRequest` — `StrictModel` (`extra='forbid'`), есть `_check_sizes`; поля `attachments` сейчас **нет** (в коде; в docs-контракте оно описано как ссылочный массив `[{id}]`).
-- `src/app/chat/orchestrator.py:212-217` — user-turn персистится как `chat_steps.payload = {"content":[{"type":"text","text":message}]}`.
-- `orchestrator.py:377-399` (`_build_messages`) — на КАЖДОМ витке tool-loop история реконструируется из сохранённых `chat_steps.payload["content"]` **дословно** (TD-002). Любые блоки в user-turn реплеятся на всех последующих витках.
+- `src/app/chat/orchestrator.py` — user-turn персистится как `chat_steps.payload = {"content":[{"type":"text","text":message}]}`.
+- `_build_messages` (`orchestrator.py`) — на КАЖДОМ витке tool-loop история реконструируется из сохранённых `chat_steps.payload["content"]` **дословно** (TD-002). Любые блоки в user-turn реплеятся на всех последующих витках.
 - `src/app/chat/anthropic_client.py::create_message` — передаёт `messages` как **сырые dict** (`cast(Any, messages)`), не типизированные SDK-параметры. SDK — `anthropic 0.39.0`.
 
 **Эмпирически проверено (uv run):** `anthropic 0.39.0` экспортирует `ImageBlockParam`, но **НЕ** `DocumentBlockParam` — типизированной поддержки `document`-блока в этой версии SDK нет. Поскольку backend передаёт messages как сырые dict (а не типизированные `*BlockParam`), SDK не отвергает `{"type":"document",...}` на уровне типов — он сериализует dict как есть. Совместимость с Anthropic API определяется не SDK-версией, а самим endpoint'ом: PDF-document-блоки в Messages API доступны для актуальных моделей без beta-заголовка. Риск — в отсутствии типизации/валидации на стороне SDK (см. § Consequences, [TD-016](../100-known-tech-debt.md)).

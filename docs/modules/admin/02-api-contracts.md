@@ -57,7 +57,7 @@ JWT не авторизует admin-действия.** Отдельный rate 
 - `idempotentReplay` — `true`, если ключ уже был использован с тем же payload (повторного начисления не было).
 
 ### Правила
-- Переиспользует `WalletService.grant(user_id, amount, idempotency_key, meta, reason)` (`src/app/wallet/service.py:174`)
+- Переиспользует `WalletService.grant(user_id, amount, idempotency_key, meta, reason)` (`src/app/wallet/service.py`)
   — атомарно, идемпотентно по `(user_id, idempotency_key)`, пишет `ledger_transactions(type=credit)` + audit `billing_credit`.
 - **Дополнительно** пишется audit-событие `admin_grant` (actor=admin, `userId`, `amount`, `reason`, `idempotencyKey`,
   `ledgerTxId`) — отдельно от `billing_credit`, фиксирует именно admin-инициацию. **Секрет `X-Admin-Token` в audit не пишется.**
@@ -113,7 +113,7 @@ JWT не авторизует admin-действия.** Отдельный rate 
 
 ### Правила
 - Upsert строки `subscriptions` (PK `user_id`): `status='active'`, `plan`, `expires_at`. Прямая запись через ORM `Subscription`, **без** StoreKit-верификации (в отличие от `/v1/subscription/sync`). Idempotent по PK: повтор перезаписывает те же значения.
-- При эффективной сумме `> 0` — начисление через `WalletService.grant(...)` **как есть** (`src/app/wallet/service.py:174`): атомарно, идемпотентно по `(user_id, idempotency_key)`, ledger `credit` + audit `billing_credit`. Ledger-ключ **производный с namespace**: `admin-sub-grant:{idempotencyKey}` (не коллидирует с `admin/wallet/grant` и `sub-grant:{transaction_id}`).
+- При эффективной сумме `> 0` — начисление через `WalletService.grant(...)` **как есть** (`src/app/wallet/service.py`): атомарно, идемпотентно по `(user_id, idempotency_key)`, ledger `credit` + audit `billing_credit`. Ledger-ключ **производный с namespace**: `admin-sub-grant:{idempotencyKey}` (не коллидирует с `admin/wallet/grant` и `sub-grant:{transaction_id}`).
 - Тот же `idempotencyKey` c **другим** `credits` → `409` (из `WalletService.grant`), активации/начисления нет.
 - **Дополнительно** пишется audit-событие `admin_subscription_grant` (actor=admin, `userId`, `plan`, `status`, `expiresAt`, `creditsGranted`, `idempotencyKey`, `ledgerTxId` при наличии). **Секрет `X-Admin-Token` не логируется/не в audit.**
 - Всё (upsert + grant + оба audit) — в **одной** транзакции запроса.

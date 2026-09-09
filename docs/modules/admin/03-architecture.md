@@ -90,7 +90,7 @@ Admin-grant **не создаёт** пользователей (обоснова
 идентичности — доверенный issuer.
 
 ## Переиспользование Wallet
-- `grant`: вызывается **как есть** (`src/app/wallet/service.py:174`); сигнатура `grant(user_id, amount, idempotency_key, meta, reason)`,
+- `grant`: вызывается **как есть** (`src/app/wallet/service.py`); сигнатура `grant(user_id, amount, idempotency_key, meta, reason)`,
   идемпотентна по `(user_id, idempotency_key)`, пишет ledger credit + audit `billing_credit`. `meta` admin-grant включает
   `{"source": "admin", "reason": reason}` (без секретов).
 - `get_wallet_view`: для `GET /v1/admin/wallet/{userId}`.
@@ -112,7 +112,7 @@ CRM-роутер под тем же `require_admin`); агрегатор — о�
 ширину компонент не проверяет и принял бы `2026-8-1` ([ADR-092 §5](../../adr/ADR-092-crm-daily-costs-endpoint.md)).
 `strptime` сохранён после регулярки — он ловит календарную невалидность (`2026-02-30`).
 Остальные CRM-ручки (`/stats`, `/users`) разбирают свои границы **другой** функцией — `_parse_dt`
-(ISO datetime, `:42-49`), и ужесточение формы её не коснулось.
+(ISO datetime, там же), и ужесточение формы её не коснулось.
 
 **Два SQL, один аккумулятор.**
 

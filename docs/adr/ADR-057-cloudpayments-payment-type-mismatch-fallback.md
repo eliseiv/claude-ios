@@ -32,17 +32,17 @@ INFO    cloudpayments_webhook_outcome result="duplicate" verify="ok"
 
 **Корень бага — рассинхрон конфигурации продукта у провайдера, который наш код не переживает.** Продукт `week_6.99_nottrial` — недельная подписка (так он называется и так продаётся), но broadapps отдаёт по нему `payment_type: "one_time"` (продукт перенастроили из-за временной поломки подписок на стороне провайдера). Дальше срабатывает [ADR-054](ADR-054-cloudpayments-webhook-payment-verification.md) §3 буквально:
 
-1. `payment_type == "one_time"` → класс **токены** (`service.py:247`).
+1. `payment_type == "one_time"` → класс **токены** (`CloudPaymentsWebhookService`, `src/app/billing_cloudpayments/service.py`).
 2. Сумма ищется в `TOKEN_PRODUCTS` — карте **консьюмеблов** (`100_tokens_9.99`, `250_tokens_19.99`, …). Кода `week_6.99_nottrial` там нет и быть не должно.
 3. → `unknown_product` → `return False` → оплаченный платёж потерян.
 
 Что делает баг системным, а не разовым:
 
-- **Нарушен инвариант, который код декларирует сам.** `checkout.validate_product` ([ADR-051](ADR-051-cloudpayments-checkout-payment-link.md) §2, `checkout.py:50-62`) выдаёт ссылку на оплату **только для продукта, который вебхук сможет начислить**, и классифицирует его через `parser.classify_product` — по коду. Для `week_6.99_nottrial` checkout говорит `subscription` и выдаёт ссылку; вебхук говорит `unknown_product` и выбрасывает платёж. Пользователь платит по ссылке, которую мы сами выписали, и не получает ничего.
+- **Нарушен инвариант, который код декларирует сам.** `checkout.validate_product` ([ADR-051](ADR-051-cloudpayments-checkout-payment-link.md) §2, `src/app/billing_cloudpayments/checkout.py`) выдаёт ссылку на оплату **только для продукта, который вебхук сможет начислить**, и классифицирует его через `parser.classify_product` — по коду. Для `week_6.99_nottrial` checkout говорит `subscription` и выдаёт ссылку; вебхук говорит `unknown_product` и выбрасывает платёж. Пользователь платит по ссылке, которую мы сами выписали, и не получает ничего.
 - **[ADR-054](ADR-054-cloudpayments-webhook-payment-verification.md) вывел `classify_product` из пути начисления** («`classify_product` в начислении не используется, остаётся для checkout»), заменив паттерн-эвристику авторитетным `payment_type`. Это было правильно как anti-tamper-решение, но убрало **последнюю страховку** на случай, когда авторитетный источник сам рассинхронизирован.
 - **Регрессия невидима.** Тот же продукт начислял 1000 токенов 03.07 и 17.07 (`kind=subscription` в `cloudpayments_webhook_events`, гранты в леджере). Между 17.07 и 19.07 `payment_type` сменился, и с этого момента каждая покупка подписки теряется.
 
-**Отдельный дефект наблюдаемости, из-за которого инцидент нашёл тестировщик, а не алерт.** Агрегатный исход считался по одному счётчику `credited` (`service.py:219-223`): `credited >= 1 → applied`, иначе `duplicate`. Платёж, **пропущенный** (пп. 1-3), давал `result="duplicate"` при `creditedCount: 0` — в логах это неотличимо от штатной повторной доставки, уровень INFO, ни одного WARNING на агрегате. Реальный сигнал был только в отдельной строке `cloudpayments_payment_skipped`, по которой алерта нет.
+**Отдельный дефект наблюдаемости, из-за которого инцидент нашёл тестировщик, а не алерт.** Агрегатный исход считался по одному счётчику `credited` (`src/app/billing_cloudpayments/service.py`): `credited >= 1 → applied`, иначе `duplicate`. Платёж, **пропущенный** (пп. 1-3), давал `result="duplicate"` при `creditedCount: 0` — в логах это неотличимо от штатной повторной доставки, уровень INFO, ни одного WARNING на агрегате. Реальный сигнал был только в отдельной строке `cloudpayments_payment_skipped`, по которой алерта нет.
 
 ## Decision
 

@@ -5,12 +5,12 @@
 | Зависимость | Что используется | Источник |
 |---|---|---|
 | Auth-образец | constant-time bearer (`hmac.compare_digest`), `auto_error=False` security scheme | `src/app/api_gateway/auth.py:99-134`, `src/app/api_gateway/openapi_security.py` |
-| Wallet | `WalletService.grant(*, user_id, amount, idempotency_key, meta, reason) -> GrantResult` — идемпотентный кредит-грант | `src/app/wallet/service.py:174-236` ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)) |
+| Wallet | `WalletService.grant(*, user_id, amount, idempotency_key, meta, reason) -> GrantResult` — идемпотентный кредит-грант | `src/app/wallet/service.py` ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)) |
 | Subscription | upsert строки `subscriptions` (status/plan/expires_at) | `src/app/subscription/service.py:52-68` |
 | Config | образец JSON-парсинга env-карты `token_products()` | `Settings.token_products()`, `src/app/config.py` |
-| Audit | `AuditService.record`, `assert_no_secrets` | `src/app/audit/service.py:48`, `src/app/observability/redaction.py` |
+| Audit | `AuditService.record`, `assert_no_secrets` | `src/app/audit/service.py`, `src/app/observability/redaction.py` |
 | Policy | читает `subscriptions.status` (active/expired) | [ADR-002](../../adr/ADR-002-access-policy-state-machine.md) |
-| Router registration | `app.include_router(...)`, глобального auth-middleware нет | `src/app/main.py:196-212` |
+| Router registration | `app.include_router(...)`, глобального auth-middleware нет | `src/app/main.py` |
 
 ## Кто вызывает
 - **Adapty (внешний сервис)** — серверный HTTP POST. Не наш iOS-клиент. Аутентификация — статический bearer-секрет, заданный оператором в Adapty UI.

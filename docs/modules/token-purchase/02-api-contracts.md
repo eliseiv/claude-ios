@@ -78,7 +78,7 @@ JWT, владелец = `sub`. Статус: **Реализован (MVP); тр�
 
 ### Признак «по умолчанию» ([ADR-098 §11](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md), пересмотр 2026-09-08)
 - Живёт **у нас**, а не в каталоге поставщика: `TOKEN_PRODUCTS_DEFAULT` — список идентификаторов
-  (JSON-массив либо перечисление через запятую), `src/app/config.py:361`, разбор — `:839`.
+  (JSON-массив либо перечисление через запятую), `src/app/config.py` (`token_products_default_raw`).
   ⚠️ **Прежняя редакция ([ADR-098 §9](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)) объявляла источником поле `is_default` каталога broadapps —
   это отменено:** сверка живого каталога (`novirell`, 2026-09-08) показала, что поля с таким смыслом
   у поставщика **нет ни одного**. Чтение `is_default` из кода убрано; ждать его появления нельзя.
