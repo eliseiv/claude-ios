@@ -26,6 +26,7 @@ import asyncio
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
 
@@ -435,6 +436,39 @@ class SpeechClient:
 # ---------------------------------------------------------------------------------------------
 
 
+@dataclass
+class VoiceTurnBudget:
+    """Величины, нормативно принадлежащие ХОДУ, а не его ноге (ADR-104 §6).
+
+    Заведён потому, что ход с клиентскими инструментами исполняется НЕСКОЛЬКИМИ ногами с одним
+    `turnId`, а синтез создаётся на ногу: всё, что лежало бы в объекте ноги, обнулялось бы на
+    второй и переставало быть потурновым. Форма дефекта одна на три величины, поэтому и носитель
+    один:
+
+    * ``spoken_total`` — совокупный расход `TTS_MAX_CHARS`. На ноге он давал бы фактический
+      потолок «число ног × `TTS_MAX_CHARS`», то есть снимал бы ограничение с нашего счёта у
+      поставщика — ровно то, ради чего потолок единственно и существует.
+    * ``next_segment`` — монотонный номер сегмента ВНУТРИ хода. На ноге пара `(turnId, segment)`
+      переставала бы быть уникальной, а на её уникальности держится упорядоченное проигрывание,
+      которое ADR-104 §11 отдаёт устройству.
+    * ``heard_segments`` — сколько сегментов ХОДА пользователь фактически дослушал; это и есть
+      `spokenSegments` кадра `interrupted` и пометки `payload.interrupted`.
+    * ``capped`` / ``rate_limited`` — «дальше по этому ходу не синтезируем»: оба признака
+      потурновые по той же причине, что и бюджет, который их порождает.
+
+    **Контраст помечен с обеих сторон:** число доставленных сегментов ШАГА (`delivered_segments`
+    ниже) остаётся на ноге и потурновым НЕ становится — это предикат списания синтеза, а единица
+    списания — озвученный assistant-шаг, а не ход (ADR-104 §6). Правило одной величины на другую
+    не переносить.
+    """
+
+    spoken_total: int = 0
+    next_segment: int = 0
+    heard_segments: int = 0
+    capped: bool = False
+    rate_limited: bool = False
+
+
 class VoiceSpeechSink(Protocol):
     """Транспорт кадров звука. Реализуется обработчиком сокета; синтезу о WebSocket знать нечего.
 
@@ -449,6 +483,8 @@ class VoiceSpeechSink(Protocol):
     async def audio_end(self, *, segment: int, truncated: bool) -> None: ...
 
     async def speech_failed(self) -> None: ...
+
+    async def speech_rate_limited(self) -> None: ...
 
 
 class VoiceTurnSpeech:
@@ -479,29 +515,37 @@ class VoiceTurnSpeech:
         settings: Settings,
         voice: Voice,
         sink: VoiceSpeechSink,
+        budget: VoiceTurnBudget,
+        limiter: Callable[[], Awaitable[bool]],
     ) -> None:
         self._client = client
         self._settings = settings
         self._voice = voice
         self._sink = sink
+        # Величины ХОДА живут снаружи и переживают смену ноги (см. `VoiceTurnBudget`).
+        self._budget = budget
+        # Бакет `rl:speech` (`TTS_RATE_LIMIT_PER_MIN`) — тот же, что у `POST /v1/chat/speech`,
+        # потому что защищает он одно и то же: наш счёт у поставщика СИНТЕЗА. Передан колбэком,
+        # а не импортирован: синтезу нечего знать ни о Redis, ни о том, чей это пользователь.
+        self._limiter = limiter
         self._buffer = ""
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
-        self._segment = 0
-        self._spoken_total = 0
         self._delivered = 0
         self._stopped = False
         self._failed = False
-        self._capped = False
 
     # ---- наблюдаемое состояние хода ----
 
     @property
     def delivered_segments(self) -> int:
-        """Сколько сегментов ФАКТИЧЕСКИ дослушано клиентом (отправлен `audio.end`).
+        """Сколько сегментов ЭТОЙ НОГИ доставлено (отправлен `audio.end`).
 
-        Это же число уходит в `interrupted.spokenSegments` и служит предикатом списания синтеза:
-        «хотя бы один сегмент доставлен» (ADR-104 §6).
+        Единица здесь — ШАГ, а не ход, и это не небрежность: величина служит ровно одному
+        предикату — «хотя бы один сегмент этого ШАГА доставлен → синтез шага списывается»
+        (ADR-104 §6), а списание идёт по ключу `tts:{stepId}:{voiceId}`, то есть на шаг.
+        Потурновое число дослушанных сегментов — `VoiceTurnBudget.heard_segments`; оно уходит в
+        `spokenSegments`. Правило одной величины на другую не переносить ни в одну сторону.
         """
         return self._delivered
 
@@ -525,9 +569,13 @@ class VoiceTurnSpeech:
         if self._worker is None:
             self._worker = asyncio.create_task(self._run())
 
+    def _muted(self) -> bool:
+        """Синтез по этому ходу дальше не идёт: прерван, сломан, упёрся в потолок или в бакет."""
+        return self._stopped or self._failed or self._budget.capped or self._budget.rate_limited
+
     def feed_delta(self, text: str) -> None:
         """Принять приращение текста ответа и выпустить готовые сегменты. Не блокирует."""
-        if self._stopped or self._failed or self._capped:
+        if self._muted():
             return
         self._buffer += text
         while True:
@@ -554,7 +602,7 @@ class VoiceTurnSpeech:
         """
         remainder = self._buffer.strip()
         self._buffer = ""
-        if remainder and not self._stopped and not self._failed and not self._capped:
+        if remainder and not self._muted():
             self._queue.put_nowait(remainder)
         self._queue.put_nowait(None)
         if self._worker is not None:
@@ -573,13 +621,13 @@ class VoiceTurnSpeech:
                 # оставшиеся в ней после прерывания, синтезатору не отдаются и не оплачиваются.
                 voice_mode_speech_segments_total.labels(outcome="interrupted").inc()
                 continue
-            if self._failed or self._capped:
+            if self._muted():
                 # У этих сегментов ИСХОДА НЕТ, и метка им не ставится намеренно. Отказ
                 # синтезатора считается ОДИН раз — на сегменте, где он произошёл; исчерпанный
-                # потолок — один раз, на последнем завершённом сегменте (`truncated: true`).
-                # Пометить хвост `upstream_error` значило бы умножить одну аварию на длину
-                # ответа и обесценить алерт, `capped` — сосчитать один потолок много раз, а
-                # `interrupted`/`skipped_empty` — назвать неверную причину.
+                # потолок и исчерпанный бакет — по одному разу на ход. Пометить хвост
+                # `upstream_error` значило бы умножить одну аварию на длину ответа и обесценить
+                # алерт, `capped` — сосчитать один потолок много раз, а `interrupted` /
+                # `skipped_empty` — назвать неверную причину.
                 continue
             await self._speak(item)
 
@@ -590,12 +638,29 @@ class VoiceTurnSpeech:
             # вызывался, произносить было нечего. С отказом поставщика этот исход не сливается.
             voice_mode_speech_segments_total.labels(outcome="skipped_empty").inc()
             return
-        # Потолок СОВОКУПНЫЙ на ход: остаток бюджета, а не длина сегмента. Исчерпан он может
-        # быть только здесь и только один раз — дальше сегменты отбрасывает `_capped` в `_run`.
-        remaining = self._settings.tts_max_chars - self._spoken_total
+        # Потолок СОВОКУПНЫЙ на ход: остаток бюджета, а не длина сегмента. Исчерпание
+        # проверяется ДО `apply_speech_cap` намеренно: при остатке ровно `0` она вернула бы
+        # `('', True)`, пустой текст ушёл бы в ветку «произносить нечего», и метрика получила бы
+        # `skipped_empty` — то есть НЕВЕРНУЮ причину («синтезатор не звали, потому что нечего
+        # произносить» вместо «сработал потолок»), а признак потолка не выставился бы вовсе.
+        remaining = self._settings.tts_max_chars - self._budget.spoken_total
+        if remaining <= 0:
+            self._budget.capped = True
+            return
         spoken, truncated = apply_speech_cap(cleaned, remaining)
-        if not spoken:  # pragma: no cover — apply_speech_cap не возвращает пустое при remaining>0
+        if not spoken:  # pragma: no cover — при remaining > 0 срез не бывает пустым
             voice_mode_speech_segments_total.labels(outcome="skipped_empty").inc()
+            return
+        # Бакет `rl:speech` проверяется ПЕРЕД КАЖДЫМ вызовом поставщика, а не раз на ход: он
+        # ограничивает ЧИСЛО ОБРАЩЕНИЙ к платному синтезатору, и на HTTP-ручке один его вызов и
+        # был одним обращением. Здесь один ход даёт N обращений, поэтому проверка на ход
+        # оставила бы N-1 из них неограниченными — ровно ту дыру, ради которой бакет заведён.
+        # Отказ бакета ход НЕ роняет (ADR-104 §9: сломанный синтезатор стоит молчания, а не
+        # ответа) и гасит синтез до конца хода, а не выборочно: пропуск отдельных сегментов дал
+        # бы речь с дырами, неотличимую для человека от поломки.
+        if not await self._limiter():
+            self._budget.rate_limited = True
+            await self._sink.speech_rate_limited()
             return
         try:
             audio = await self._client.synthesize(text=spoken, voice=self._voice)
@@ -610,8 +675,8 @@ class VoiceTurnSpeech:
             # Прерывание пришло, пока сегмент синтезировался: `audio.end` не отправляется.
             voice_mode_speech_segments_total.labels(outcome="interrupted").inc()
             return
-        segment = self._segment
-        self._segment += 1
+        segment = self._budget.next_segment
+        self._budget.next_segment += 1
         await self._sink.audio_begin(
             segment=segment,
             media_type=self._settings.tts_media_type(),
@@ -620,11 +685,12 @@ class VoiceTurnSpeech:
         await self._sink.audio_chunk(audio)
         await self._sink.audio_end(segment=segment, truncated=truncated)
         self._delivered += 1
-        self._spoken_total += len(spoken)
+        self._budget.heard_segments += 1
+        self._budget.spoken_total += len(spoken)
         if truncated:
             # Синтез прекращается на последнем ЗАВЕРШЁННОМ сегменте; текст при этом остаётся
             # полным и продолжает идти в `delta` и в `done` — обрезается речь, не ответ.
-            self._capped = True
+            self._budget.capped = True
         voice_mode_speech_segments_total.labels(outcome="capped" if truncated else "ok").inc()
 
 

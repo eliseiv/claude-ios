@@ -30,7 +30,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api_gateway.rate_limit import enforce_chat_limits
+from app.api_gateway.rate_limit import enforce_chat_limits, enforce_speech_limits
 from app.audit.service import AuditService
 from app.chat.attachments import AUDIO_MEDIA_TYPES
 from app.chat.orchestrator import (
@@ -41,9 +41,9 @@ from app.chat.orchestrator import (
     _language_of,
 )
 from app.chat.repository import ChatRepository, derive_title
-from app.chat.speech import VoiceTurnSpeech
+from app.chat.speech import VoiceTurnBudget, VoiceTurnSpeech
 from app.chat.transcription import TranscriptionClient
-from app.chat.voice_mode import voice_mode_missing_flags
+from app.chat.voice_mode import voice_mode_available, voice_mode_missing_flags
 from app.chat.voices import Voice, resolve_voice
 from app.config import get_settings
 from app.db import session_scope
@@ -160,6 +160,12 @@ class _VoiceSession:
         self._turn_id: uuid.UUID | None = None
         self._turn_text = ""
         self._turn_speech: VoiceTurnSpeech | None = None
+        # Величины, принадлежащие ХОДУ, а не его ноге: совокупный бюджет `TTS_MAX_CHARS`,
+        # сквозная нумерация сегментов, число дослушанных сегментов хода и признаки «дальше не
+        # синтезируем». Живут ЗДЕСЬ, потому что ход с клиентскими инструментами исполняется
+        # несколькими ногами с одним `turnId`, а синтез создаётся на ногу (ADR-104 §6, §7).
+        # Пересоздаётся ровно там, где начинается НОВЫЙ ход, и переживает ноги continuation.
+        self._turn_budget = VoiceTurnBudget()
         self._interrupt_reason: str | None = None
         # Причина, по которой у ЭТОГО хода не будет звука. Решается ДО первого сегмента
         # (балансовый гейт) или по его концу (произносить оказалось нечего), а отправляется
@@ -479,6 +485,7 @@ class _VoiceSession:
             return
         audio, media_type = bytes(self._utterance), self._utterance_media_type
         rejected = self._utterance_rejected
+        too_long = self._utterance_media_type is not None and self._utterance_too_large()
         self._utterance = bytearray()
         self._utterance_media_type = None
         self._utterance_rejected = False
@@ -492,6 +499,17 @@ class _VoiceSession:
             return
         if rejected:
             # Отказ по потолку уже отправлен на кадре, который его превысил; ход не начинается.
+            return
+        if too_long:
+            # Потолок СЕКУНД переспрашивается здесь, а не только на кадрах звука: клиент,
+            # выдержавший паузу дольше потолка между последним куском и `utterance.end`,
+            # провёл бы реплику мимо ограничения — проверка по часам обязана быть и в точке,
+            # где реплика закрывается.
+            await self._error(
+                code="attachment_too_large",
+                message="utterance exceeds the size or duration limit",
+                scope=SCOPE_TURN,
+            )
             return
         if not await self._claim_turn():
             return
@@ -574,15 +592,29 @@ class _VoiceSession:
         raise TurnInterrupted(
             text=self._turn_text,
             reason=self._interrupt_reason,
-            spoken_segments=(
-                self._turn_speech.delivered_segments if self._turn_speech is not None else 0
-            ),
+            # ЧИСЛО ДОСЛУШАННЫХ СЕГМЕНТОВ ХОДА, а не ноги: пользователь слушал ход целиком, и
+            # ноги continuation для него неразличимы. Предикат СПИСАНИЯ синтеза — другая
+            # величина (`delivered_segments` ноги), единица там шаг; не путать.
+            spoken_segments=self._turn_budget.heard_segments,
         )
 
     # ---- ход ----
 
     def _spawn_turn(self, coro: Coroutine[Any, Any, None]) -> None:
         self._turn_task = asyncio.create_task(coro)
+
+    def _new_turn(self) -> None:
+        """Сбросить состояние НОВОГО хода, включая потурновый бюджет синтеза.
+
+        Вызывается ровно из двух точек — реплики и набранного текста, — и НЕ вызывается на ноге
+        `tool.result`: та продолжает ТОТ ЖЕ ход под тем же `turnId`, и обнуление бюджета там
+        было бы ровно тем дефектом, ради которого бюджет вынесен из объекта ноги.
+        """
+        self._turn_text = ""
+        self._interrupt_reason = None
+        self._speech_skipped = None
+        self._turn_id = None
+        self._turn_budget = VoiceTurnBudget()
 
     async def _turn_from_utterance(
         self,
@@ -602,10 +634,7 @@ class _VoiceSession:
         `turnId` — это `messageStepId` хода, второго пространства идентификаторов не заводится, а
         ход, который не начался, своего `messageStepId` не имеет.
         """
-        self._turn_text = ""
-        self._interrupt_reason = None
-        self._speech_skipped = None
-        self._turn_id = None
+        self._new_turn()
         locale = (context or {}).get("locale")
         try:
             transcript = await TranscriptionClient().transcribe(
@@ -640,10 +669,7 @@ class _VoiceSession:
     async def _turn_from_text(
         self, *, text: str, generation_mode: GenerationMode, context: dict[str, Any] | None
     ) -> None:
-        self._turn_text = ""
-        self._interrupt_reason = None
-        self._speech_skipped = None
-        self._turn_id = None
+        self._new_turn()
         await self._execute_turn(
             message=text, generation_mode=generation_mode, context=context, transcript=None
         )
@@ -705,9 +731,18 @@ class _VoiceSession:
             return
         if not await self._claim_turn():
             return
-        self._turn_id = frame.turnId
+        # `turnId` кадра НЕ принимается: `turnId` — это `messageStepId`, который выпустил
+        # оркестратор и который транспорт уже знает (`_turn_id`). Взять его снаружи значило бы
+        # позволить клиенту переименовать ключ связи, объявленный точным; ход же всё равно
+        # резолвится оркестратором по самим `toolCallId`, а не по этому полю. Поле остаётся в
+        # схеме кадра, потому что контракт обязывает клиента его слать.
+        # `_interrupt_reason` здесь НЕ сбрасывается, и это не пропуск: прерывание — событие
+        # ХОДА, а не ноги. Пользователь, перебивший ход на ноге `tool_call` при пустом
+        # накопителе (генерация тогда не отменяется, ADR-104 §5), получил бы после `tool.result`
+        # ход, закрытый как обычный: без кадра `interrupted` и без пометки `payload.interrupted`.
+        # Сбрасывается только то, что действительно принадлежит ноге: её накопленный текст и
+        # причина, по которой звука не было именно на ней.
         self._turn_text = ""
-        self._interrupt_reason = None
         self._speech_skipped = None
         normalized = [
             ToolResultIn(
@@ -732,11 +767,29 @@ class _VoiceSession:
         self._spawn_turn(self._run_leg(call=_call, started=started, title_source=None))
 
     async def _allow_turn(self) -> bool:
-        """Лимит ХОДОВ (тот же `enforce_chat_limits`) и свежесть JWT.
+        """Ось режима, свежесть JWT и лимит ХОДОВ (тот же `enforce_chat_limits`).
 
         Отказ лимита на уже поднятом сокете — отказ ХОДА: соединение живёт, пользователь вправе
         сказать следующую реплику позже. Лимита СОЕДИНЕНИЙ нет вовсе, поэтому `4429` не вводится.
+
+        **Ось переспрашивается на КАЖДОМ ходе, а не только в рукопожатии.** Её половина
+        `VOICE_INPUT_ENABLED` разрешается через реестр настроек инстанса и меняется из панели НА
+        ЛЕТУ (ADR-104 §8), а обещание там дословно: оператор, снявший голосовой ввод, гасит
+        голосовой режим НЕМЕДЛЕННО. Проверка только в рукопожатии оставляла бы открытый сокет
+        обслуживать ходы неограниченно долго после снятия флага.
         """
+        if not voice_mode_available():
+            # Причину несёт кадр `error`, close-код — КЛАСС случившегося. Классов ровно пять, и
+            # события «ось снята посреди сеанса» среди них нет; ближайший верный по смыслу —
+            # ШТАТНОЕ завершение: сеанс закончился не сбоем и не выселением, а тем, что услуги
+            # на инстансе больше нет. Шестой код не вводится (ADR-104 §9: «ровно пять»).
+            await self._error(
+                code="voice_mode_disabled",
+                message="voice mode was disabled on this instance",
+                scope=SCOPE_SESSION,
+            )
+            await self._close(CLOSE_NORMAL)
+            return False
         try:
             verify_bearer_token(self._ws.headers.get("authorization"))
         except UnauthorizedError:
@@ -828,14 +881,24 @@ class _VoiceSession:
             if speech is not None:
                 speech.interrupt()
                 await speech.finish()
-            await self._error(code=exc.code, message=exc.message, scope=SCOPE_TURN)
+            # `turnId` привязывает отказ к тому же ходу, чьи `transcript` и `delta` клиент уже
+            # получил: он выпущен колбэком `on_turn_start` задолго до отказа, и отправлять
+            # безадресный отказ, когда адрес известен, нечем оправдать.
+            await self._error(
+                code=exc.code, message=exc.message, scope=SCOPE_TURN, turn_id=self._turn_id
+            )
         except Exception:
             outcome = "upstream_error"
             logger.exception("voice_turn_failed")
             if speech is not None:
                 speech.interrupt()
                 await speech.finish()
-            await self._error(code="internal_error", message="internal error", scope=SCOPE_TURN)
+            await self._error(
+                code="internal_error",
+                message="internal error",
+                scope=SCOPE_TURN,
+                turn_id=self._turn_id,
+            )
         finally:
             self._turn_speech = None
             if outcome == "ok" and not self._alive:
@@ -866,6 +929,12 @@ class _VoiceSession:
         `POST /v1/chat/speech` и на сокет не переносится.
         """
         assert self._voice is not None
+        if self._interrupt_reason is not None:
+            # Ход уже перебит: «новых `audio.*` для ЭТОГО хода не будет» (ADR-104 §5) — значит и
+            # на его следующей ноге тоже. Признак прерывания живёт в СЕАНСЕ, а синтез создаётся
+            # на ногу, поэтому наследование нужно выразить явно: иначе нога continuation завела
+            # бы синтез с чистым состоянием и заговорила после того, как её остановили.
+            return None
         if await wallet.current_balance(self._user_id) < self._settings.tts_credit_cost:
             self._speech_skipped = "insufficient_credits"
             return None
@@ -874,9 +943,19 @@ class _VoiceSession:
             settings=self._settings,
             voice=self._voice,
             sink=_SocketSpeechSink(self),
+            # Бюджет, нумерация и счётчик дослушанного — ХОДА, поэтому передаются снаружи и
+            # переживают ноги continuation.
+            budget=self._turn_budget,
+            # Бакет `rl:speech` (`TTS_RATE_LIMIT_PER_MIN`) — тот же, что у `POST /v1/chat/speech`:
+            # он защищает наш счёт у поставщика СИНТЕЗА, а не право пользователя говорить.
+            # Второго бакета под голосовой режим не заводится (ADR-104 §10).
+            limiter=self._speech_limiter,
         )
         speech.start()
         return speech
+
+    async def _speech_limiter(self) -> bool:
+        return await enforce_speech_limits(user_id=self._user_id)
 
     async def _settle_speech(
         self, *, out: ChatRunOut, speech: VoiceTurnSpeech | None, wallet: WalletService
@@ -943,9 +1022,7 @@ class _VoiceSession:
                     "type": "interrupted",
                     "turnId": str(self._turn_id),
                     "reason": self._interrupt_reason,
-                    "spokenSegments": (
-                        self._turn_speech.delivered_segments if self._turn_speech is not None else 0
-                    ),
+                    "spokenSegments": self._turn_budget.heard_segments,
                 }
             )
         response = _to_response(out)
@@ -996,6 +1073,18 @@ class _SocketSpeechSink:
                 "segment": segment,
                 "truncated": truncated,
             }
+        )
+
+    async def speech_rate_limited(self) -> None:
+        # `scope:"speech"` — ход НЕ затронут, звука дальше не будет. Тот же `code`, что у отказа
+        # лимита ХОДА, и различает их именно `scope`: со `scope:"turn"` это «ход не начался», со
+        # `scope:"speech"` — «ход идёт, синтез исчерпал свой бакет». Отдельного кода не
+        # заводится: таблица `error.code` общая, а `scope` для того и объявлен обязательным.
+        await self._session._error(  # noqa: SLF001
+            code="rate_limited",
+            message="speech rate limit exceeded",
+            scope=SCOPE_SPEECH,
+            turn_id=self._session._turn_id,  # noqa: SLF001
         )
 
     async def speech_failed(self) -> None:

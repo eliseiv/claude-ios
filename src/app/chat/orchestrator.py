@@ -2582,6 +2582,29 @@ class ChatOrchestrator:
                 generation_mode=generation_mode,
                 expose_generation_mode=use_generation_v2,
             )
+        except Exception as exc:
+            # Ход, оборвавшийся на ноге CONTINUATION, закрывается той же пометкой, что и на
+            # первой ноге. Инвариант «транспорт можно оборвать в любой момент, ход — нельзя»
+            # свойство ХОДА, а не ноги: шаг пользователя закоммичен ещё первой ногой, поэтому
+            # ход, брошенный здесь, точно так же оставляет реплику БЕЗ ОТВЕТА, и на следующем
+            # ходу модель отвечает на неё (прод avelyra 2026-09-09).
+            #
+            # Правка касается и HTTP-пути `POST /v1/chat/tool-result` — там это поведение было
+            # ПРЕДСУЩЕСТВУЮЩИМ (ветки закрытия хода у continuation не было вовсе). Оставить
+            # рядом закрытым один исход (прерывание) и открытым другой (отказ провайдера)
+            # значило бы зафиксировать асимметрию, которой никто не решал.
+            #
+            # `locale` здесь `None` и другого взять неоткуда: `context` — поле per-message
+            # ПЕРВОЙ ноги, в теле continuation его нет по контракту (ADR-037). Текст пометки
+            # деградирует до английского тем же правилом, что и у мастера генерации; сама
+            # пометка от языка не зависит — от него зависит только её видимая строка.
+            await self._mark_turn_failed(
+                session_id=session_id,
+                message_step_id=message_step_id,
+                locale=None,
+                reason=type(exc).__name__,
+            )
+            raise
 
     @staticmethod
     def _all_already_done_before(resolved: list[tuple[ToolResultIn, ToolCall]]) -> bool:
