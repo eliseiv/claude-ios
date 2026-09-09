@@ -1825,13 +1825,41 @@ class ChatOrchestrator:
             if patched is None:
                 raise ValidationFailedError("unknown mediaSelection.selectionId")
             await self._session.commit()
-            return ChatRunOut(
-                status="assistant_message",
-                session_id=session_id,
-                assistant_message=_media_wizard_text("next", locale),
-                message_step_id=patched.message_step_id,
-                step_id=patched.id,
-                media_choices=media_choices_response(next_state),
+            # An intermediate tap patches the ask_params tool step IN PLACE, so it opens no turn of
+            # its own: it is a SECOND TERMINAL LEG of the turn that opened the wizard and reports
+            # that turn's ``messageStepId``. Every turn-scoped field must therefore be assembled
+            # here by the SAME single rule as on any other leg (ADR-103 §4/§6, ADR-101 §4).
+            # Building the response by hand made this leg answer ``null`` for the jobs, documents
+            # and quiz of a turn whose earlier leg had answered them — one turn, two answers, on
+            # the leg the client reacts to.
+            turn_id = patched.message_step_id
+            return await self._decorate_turn_out(
+                ChatRunOut(
+                    status="assistant_message",
+                    session_id=session_id,
+                    assistant_message=_media_wizard_text("next", locale),
+                    message_step_id=turn_id,
+                    step_id=patched.id,
+                    media_choices=media_choices_response(next_state),
+                ),
+                message_step_id=turn_id,
+                # No tool loop runs on this leg: this call produces no quiz, no job and no document
+                # of its own, so every field comes from recovery over the turn's saved steps.
+                quiz_accumulated=None,
+                media_accumulated=None,
+                # The mode of the TURN, not of this request. A ``mediaSelection`` tap continues an
+                # existing turn exactly like ``/chat/v2/tool-result``, which restores the mode from
+                # the turn's user step for the same reason (ADR-064 §12): the tap need not repeat
+                # ``generationMode``, and reading it off the request would SILENTLY degrade a
+                # study_learn turn to ``general`` and drop its pool from this leg.
+                generation_mode=await self._deps.repo.generation_mode_for_message_step(
+                    session_id, turn_id
+                ),
+                # The freshly built wizard state is already on ``out`` and wins there
+                # (``_with_turn_media_choices`` prefers an already-set field); passing it again
+                # would only re-derive the same value.
+                media_choices_accumulated=None,
+                documents_accumulated=None,
             )
 
         # Wizard complete → one summary bubble + submit (media debit only; no chat debit).
@@ -1920,13 +1948,32 @@ class ChatOrchestrator:
             },
         )
         await self._session.commit()
-        return ChatRunOut(
-            status="assistant_message",
-            session_id=session_id,
-            assistant_message=assistant_text,
+        # The final submit writes its own user+assistant steps under THIS call's
+        # ``message_step_id``, so it is the (single) terminal leg of a NEW turn — but it is a
+        # terminal leg all the same, and the same single assembly point owns every turn-scoped
+        # field on it (ADR-103 §4/§6, ADR-101 §4). ``job_ref`` is passed as the accumulator of THIS
+        # call, so the fold of §2 keeps ONE entry per jobId while §3 keeps the real
+        # ``creditsCharged``: the recovered copies of the very same job (the user step's
+        # ``mediaWizard.jobId`` and the assistant step's ``mediaJobs``) carry 0 and lose to it.
+        return await self._decorate_turn_out(
+            ChatRunOut(
+                status="assistant_message",
+                session_id=session_id,
+                assistant_message=assistant_text,
+                message_step_id=message_step_id,
+                step_id=assistant_step.id,
+                media_jobs=[job_ref],
+            ),
             message_step_id=message_step_id,
-            step_id=assistant_step.id,
-            media_jobs=[job_ref],
+            quiz_accumulated=None,
+            media_accumulated=[job_ref],
+            # This turn's user step was just written with exactly this value (above), so the
+            # request mode IS the turn mode here — no read needed, unlike the tap leg.
+            generation_mode=generation_mode,
+            # The wizard is done: the ask_params step of the ORIGINAL turn was patched to
+            # ``step="done"`` and belongs to another turn anyway, so no picker is re-offered.
+            media_choices_accumulated=None,
+            documents_accumulated=None,
         )
 
     async def run_stream(
