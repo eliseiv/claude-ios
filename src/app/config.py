@@ -372,7 +372,12 @@ class Settings(BaseSettings):
     )
     # Модель распознавания и её таймаут. Провайдер — OpenAI: его ключ есть на каждом инстансе,
     # отдельной интеграции не заводим.
-    transcription_model: str = Field(default="whisper-1", alias="TRANSCRIPTION_MODEL")
+    # Дефолт сменён с `whisper-1` (2026-09-09). Измерено на проде, avelyra, одна и та же
+    # трёхсекундная запись, по два прогона: whisper-1 — 1.10 и 1.20 с; gpt-4o-mini-transcribe —
+    # 0.59 и 0.63 с; gpt-4o-transcribe — 0.68 и 0.86 с. Текст у mini совпал с эталоном точнее
+    # (сохранены запятые, whisper поставил точки). Провайдер здесь ВСЕГДА OpenAI независимо от
+    # `LLM_PROVIDER`, поэтому класс конфигурации у этой настройки один и он проверен целиком.
+    transcription_model: str = Field(default="gpt-4o-mini-transcribe", alias="TRANSCRIPTION_MODEL")
     transcription_timeout_seconds: float = Field(
         default=60.0, alias="TRANSCRIPTION_TIMEOUT_SECONDS"
     )

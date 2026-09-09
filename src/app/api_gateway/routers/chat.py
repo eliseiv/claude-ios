@@ -768,6 +768,30 @@ def _stream_event_frame(ev: ChatStreamEvent) -> bytes:
     raise RuntimeError(f"unknown ChatStreamEvent kind: {ev.kind}")
 
 
+def _unwrap_exception_group(exc: BaseException) -> BaseException:
+    """Достать содержательное исключение из группы, если оно там одно.
+
+    Библиотеки, стримящие через `anyio`/`TaskGroup`, оборачивают отказ в `BaseExceptionGroup`.
+    Группа НЕ является ни `AppError`, ни провайдерской ошибкой, поэтому обработчик `AppError`
+    приложения её не узнаёт и она проваливается в catch-all: осмысленный 502 превращается в
+    500 `unhandled_error`. Разворачиваем рекурсивно и предпочитаем `AppError` — он несёт код и
+    статус, ради которых вся цепочка перевода ошибок и написана.
+
+    Группа с НЕСКОЛЬКИМИ разными исключениями возвращается как есть: выбрать «главное» из
+    нескольких нельзя, а молча взять первое значит соврать о причине.
+    """
+    while isinstance(exc, BaseExceptionGroup):
+        app_errors = [e for e in exc.exceptions if isinstance(e, AppError)]
+        if app_errors:
+            exc = app_errors[0]
+            continue
+        if len(exc.exceptions) == 1:
+            exc = exc.exceptions[0]
+            continue
+        break
+    return exc
+
+
 @router.post(
     "/v2/run/stream",
     summary="Запустить шаг диалога (SSE text stream)",
@@ -864,10 +888,14 @@ async def chat_v2_run_stream(
                 await queue.put(ChatStreamEvent.done(out))
                 break
         except BaseException as exc:
+            # Разворачиваем ДО записи статуса: у группы исключений `status_code` нет, и
+            # неразвёрнутая она даёт 500 в логе запроса при фактическом 502 у причины.
+            unwrapped = _unwrap_exception_group(exc)
             await request_logs.fail(
-                log_id, status_code=exc.status_code if isinstance(exc, AppError) else 500
+                log_id,
+                status_code=unwrapped.status_code if isinstance(unwrapped, AppError) else 500,
             )
-            await queue.put(exc)
+            await queue.put(unwrapped)
         finally:
             await queue.put(None)
 

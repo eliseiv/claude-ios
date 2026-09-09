@@ -63,6 +63,7 @@ from app.chat.openai_client import OpenAIAuthError
 from app.chat.repository import ChatRepository, derive_title
 from app.chat.tools import (
     ARGS_DEGRADE_TOOLS,
+    DOCUMENT_FIELDS_HINT,
     GLOBAL_SERVER_SIDE_TOOLS,
     MAPS_INVALID_ERROR_CODE,
     MAPS_PAIRING_HINT,
@@ -167,6 +168,20 @@ _TIME_NOW_INSTRUCTION = (
     "You do not have built-in knowledge of the current date or time. If the user's request "
     "depends on the current date, time, or day of the week, call the time.now tool to get it; "
     "do not guess."
+)
+
+# Документы (ADR-090). Инструкции в системном промте у них НЕ БЫЛО вовсе — в отличие от медиа,
+# кода, карт и режимов, — и модель узнавала об инструменте только из его описания. На проде это
+# выглядело как «присылает полотно текста в чат, а в файл собирать не хочет»: описание инструмента
+# конкурирует с сильным общим побуждением ответить прямо в реплике, и без строки промта проигрывает.
+_DOCUMENTS_INSTRUCTION = (
+    "When the user asks you to put content INTO A FILE — a document, report, note, table, list, "
+    "summary or export they want to keep, download or send on — call document.create instead of "
+    "pasting the whole text into your reply. Send the FULL content in 'content' and keep your "
+    "visible reply to one short sentence naming what you saved. Field names are camelCase: "
+    "'mediaType', not 'mediatype'; omit it for markdown, or send 'text/plain', 'text/csv' or "
+    "'application/json'. Do not invent a download link or file path — the app shows the stored "
+    "document itself."
 )
 
 # ADR-068 / ADR-070: prefer media.ask_params (catalog-backed taps) when model/quality unclear;
@@ -467,6 +482,8 @@ def _system_prompt_for(
     already have a stored ``character_id`` (an instance where the flag was taken back down).
     ADR-100: the speech hint sits AFTER the character and BEFORE the mode suffix, and only when
     ``VOICE_OUTPUT_ENABLED`` is on and ``assistant_mode != "code"``.
+    ADR-090: the documents instruction is UNCONDITIONAL — the document tools are global
+    server-side and are not switched off by the family denylist, so there is no flag to mirror.
     """
     base = _compose_system_prompt(assistant_mode, instance_config.disabled_tool_families())
     # ADR-094 ось D: указания по работе с кодом добавляются ровно по тому же условию, по которому
@@ -476,6 +493,10 @@ def _system_prompt_for(
         base = f"{base} {_CODE_TOOLS_INSTRUCTION}"
     if instance_config.media_tools_enabled():
         base = f"{base} {_MEDIA_GENERATE_INSTRUCTION}"
+    # Документы доступны ВЕЗДЕ: они глобально-серверные и денилистом семейств не выключаются,
+    # поэтому условия у строки нет — в отличие от осей D и E. Промт при этом меняется у всех
+    # инстансов: это и есть предмет правки, а не побочный эффект.
+    base = f"{base} {_DOCUMENTS_INSTRUCTION}"
     # ADR-102 ось E: как и у оси D, указания добавляются РОВНО по тому условию, по которому
     # предлагаются сами инструменты, — но БЕЗ `assistant_mode`: карты доступны в обычном чате.
     # Флаг выключен → строки нет вовсе, и `system` побайтно совпадает с прежним.
@@ -3351,8 +3372,10 @@ class ChatOrchestrator:
                     degrade_msg = f"{content_free_args_error(exc)}; {PATCH_FORMAT_HINT}"
                 elif tool_name in _DOCUMENT_TOOL_NAMES:
                     # Свой код, а не media-шный: модель по нему понимает, ЧТО переспросить.
+                    # Подсказка о составе и РЕГИСТРЕ полей — по образцу patch и карт: без неё
+                    # модель видит «неверные аргументы» и не знает, чем они неверны.
                     degrade_code = DOCUMENT_INVALID_ERROR_CODE
-                    degrade_msg = content_free_args_error(exc)
+                    degrade_msg = f"{content_free_args_error(exc)}; {DOCUMENT_FIELDS_HINT}"
                 elif tool_name in MAPS_TOOLS:
                     # ADR-102 §8: свой код + постоянная подсказка о ПАРНОСТИ полей — кросс-полевые
                     # правила в JSON Schema не выражаются, и узнать о них модель может только

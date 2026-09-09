@@ -776,7 +776,43 @@ class SiteDeleteArgs(_PathModel):
 TIME_NOW_TZ_MAX_LENGTH = 64
 
 
-class DocumentCreateArgs(_StrictModel):
+class _CaseTolerantKeysModel(_StrictModel):
+    """Строгая модель, прощающая РЕГИСТР и разделитель в ИМЕНИ ключа — но не сам ключ.
+
+    Модель регулярно шлёт `mediatype` или `media_type` вместо `mediaType`. Строгая схема
+    отвергает это как лишний ключ, инструмент падает, и модель тычется вслепую: сообщение
+    `mediatype: extra_forbidden` не говорит, какое имя верное. Прод 2026-09-09, avelyra: шесть
+    отказов `document.create` из семи попыток с одним и тем же текстом, а удалась ровно та
+    попытка, где модель НЕ прислала тип вовсе и сработал дефолт `text/markdown`. Со стороны
+    человека это выглядело как «умеет в md, а в txt не хочет».
+
+    Строгость к НЕИЗВЕСТНЫМ ключам сохранена целиком: сопоставление идёт только с объявленными
+    полями и только по приведённому имени (`нижний регистр` без `_` и `-`), поэтому выдуманный
+    ключ по-прежнему даёт ошибку. Значение не трогаем — это отдельная проверка обработчика.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonicalize_keys(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        canonical = {
+            name.lower().replace("_", "").replace("-", ""): name for name in cls.model_fields
+        }
+        out: dict[str, Any] = {}
+        for key, value in data.items():
+            if not isinstance(key, str) or key in cls.model_fields:
+                out[key] = value
+                continue
+            target = canonical.get(key.lower().replace("_", "").replace("-", ""))
+            # Уже занятое поле не перетираем: `{"mediaType": …, "mediatype": …}` оставляем как
+            # есть, и лишний ключ штатно отвергается — молча выбрать одно из двух значений
+            # значило бы угадать за модель.
+            out[target if target is not None and target not in out else key] = value
+        return out
+
+
+class DocumentCreateArgs(_CaseTolerantKeysModel):
     """Args for document.create (ADR-090 §3).
 
     Все поля НЕОБЯЗАТЕЛЬНЫ, дефолты подставляет обработчик. Причина та же, что у `tz` в
@@ -794,11 +830,11 @@ class DocumentListArgs(_StrictModel):
     """Args for document.list — их нет; строгая модель запрещает лишние ключи."""
 
 
-class DocumentReadArgs(_StrictModel):
+class DocumentReadArgs(_CaseTolerantKeysModel):
     documentId: str | None = None
 
 
-class DocumentUpdateArgs(_StrictModel):
+class DocumentUpdateArgs(_CaseTolerantKeysModel):
     """Args for document.update: содержимое заменяется ЦЕЛИКОМ, патча нет (ADR-090 §3).
 
     Необязательность — по той же причине, что и в create: пропуск аргумента даёт tool-result
@@ -842,6 +878,14 @@ QUIZ_INVALID_ERROR_CODE = "invalid_quiz"
 PATCH_INVALID_ERROR_CODE = "invalid_patch"
 # Content-FREE constraint reminder appended to the degrade message so the model can fix the pool
 # without the message ever carrying quiz text (ADR-064 §5).
+DOCUMENT_FIELDS_HINT = (
+    "document.create accepts exactly filename, mediaType, content; document.update accepts "
+    "documentId, content; document.read accepts documentId. Field names are camelCase: write "
+    "'mediaType', not 'mediatype'. mediaType is optional and must be one of 'text/markdown', "
+    "'text/plain', 'text/csv', 'application/json' — omit it to get markdown"
+)
+
+
 QUIZ_CONSTRAINTS_HINT = (
     f"expected {QUIZ_MIN_QUESTIONS}-{QUIZ_MAX_QUESTIONS} questions, "
     f"{QUIZ_MIN_OPTIONS}-{QUIZ_MAX_OPTIONS} options, 0-based correctIndex < len(options)"
@@ -1315,6 +1359,12 @@ def content_free_args_error(exc: Exception) -> str:
         kind = str(err.get("type", "invalid"))
         if kind == "value_error":
             detail = str(err.get("msg", "")).removeprefix("Value error, ").strip() or kind
+        elif kind == "extra_forbidden":
+            # Сырое `extra_forbidden` не говорит модели, ЧТО исправить: она видит имя своего же
+            # ключа и слово «запрещено», а какое имя верное — нет. Прод 2026-09-09: шесть подряд
+            # отказов `document.create` на ключе `mediatype`, и модель ни разу не догадалась.
+            # Текст остаётся content-free: имена полей — наша схема, не пользовательские данные.
+            detail = "unknown field"
         else:
             detail = kind
         part = f"{location}: {detail}" if location else detail

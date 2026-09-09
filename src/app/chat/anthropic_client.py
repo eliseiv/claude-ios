@@ -406,6 +406,13 @@ class AnthropicClient:
             # only the provider error body is logged, never the api_key or user-content.
             _log_upstream_error(exc, model=model)
             raise UpstreamError("anthropic upstream error") from exc
+        except anthropic.APIError as exc:
+            # Базовый класс замыкает цепочку: ошибку, пришедшую СОБЫТИЕМ ВНУТРИ потока, а не
+            # HTTP-статусом, SDK поднимает голым `APIError`, и перехваты выше её не видят.
+            # Симметрично openai-клиенту: один и тот же отказ провайдера обязан давать 502 и на
+            # обычной ручке, и на потоковой, а не 500 unhandled_error на второй.
+            _log_upstream_error(exc, model=model)
+            raise UpstreamError("anthropic upstream error") from exc
 
         content_blocks: list[dict[str, Any]] = []
         text_parts: list[str] = []
@@ -525,6 +532,13 @@ class AnthropicClient:
             anthropic.APIConnectionError,
             anthropic.APIStatusError,
         ) as exc:
+            _log_upstream_error(exc, model=model)
+            raise UpstreamError("anthropic upstream error") from exc
+        except anthropic.APIError as exc:
+            # Базовый класс замыкает цепочку: ошибку, пришедшую СОБЫТИЕМ ВНУТРИ потока, а не
+            # HTTP-статусом, SDK поднимает голым `APIError`, и перехваты выше её не видят.
+            # Симметрично openai-клиенту: один и тот же отказ провайдера обязан давать 502 и на
+            # обычной ручке, и на потоковой, а не 500 unhandled_error на второй.
             _log_upstream_error(exc, model=model)
             raise UpstreamError("anthropic upstream error") from exc
 

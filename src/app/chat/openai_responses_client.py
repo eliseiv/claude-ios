@@ -637,6 +637,11 @@ class OpenAIResponsesClient(OpenAIClient):
         except openai.APIStatusError as exc:
             _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", None))
             raise UpstreamError("openai upstream error") from exc
+        except openai.APIError as exc:
+            # См. симметричный перехват в stream_message: базовый класс замыкает цепочку, иначе
+            # ошибка, не несущая HTTP-статуса, уходит наружу сырой и становится 500 вместо 502.
+            _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", None))
+            raise UpstreamError("openai upstream error") from exc
 
         return self._parse_responses_result(response, model)
 
@@ -754,6 +759,16 @@ class OpenAIResponsesClient(OpenAIClient):
             yield StreamEvent.completed(result)
             return
         except openai.APIStatusError as exc:
+            _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", None))
+            raise UpstreamError("openai upstream error") from exc
+        except openai.APIError as exc:
+            # БАЗОВЫЙ класс — последним, и он здесь не «на всякий случай».
+            # Ошибку, пришедшую СОБЫТИЕМ ВНУТРИ потока (а не HTTP-статусом), SDK поднимает как
+            # голый `APIError`, а не `APIStatusError`, — то есть ни один из перехватов выше на неё
+            # не срабатывает. Прод 2026-09-09, avelyra: «You have no credits remaining» прилетело
+            # событием потока, ушло наружу сырым и всплыло группой исключений уже в ASGI —
+            # `/v2/run` отдал штатный 503, а `/v2/run/stream` отдал 500 unhandled_error.
+            # Один и тот же отказ провайдера обязан давать один и тот же код на обеих ручках.
             _log_upstream_error(exc, model=model, status_code=getattr(exc, "status_code", None))
             raise UpstreamError("openai upstream error") from exc
 
