@@ -56,8 +56,8 @@ ADR immutable → текст [ADR-028](ADR-028-projectid-in-chat-list-and-server
 1. **`ServerToolExecutionOut`** (dataclass в `orchestrator.py`) — добавить поле `tool_call_id: uuid.UUID` (рядом с `tool_name`/`status`/`summary`).
 2. **`_execute_server_side_tool`** (`orchestrator.py`, append `~:1061`) — при создании `ServerToolExecutionOut(...)` передать `tool_call_id=tool_call_id` (параметр уже в сигнатуре, уже используется в `complete_tool_call`/`add_step`).
 3. **`_execute_global_server_side_tool`** (`orchestrator.py`, append `~:1124`) — аналогично передать `tool_call_id=tool_call_id`.
-4. **`ServerToolExecutionSchema`** (`schemas/chat.py:237`) — добавить **первым** полем `toolCallId: str` (обязательное, без `default`), описание: доменный uuid4 вызова, совпадает с `toolCallId` tool-шага в `GET /v1/chats/{id}`.
-5. **Маппинг out→schema** (`api_gateway/routers/chat.py:284-287`) — в list-comprehension добавить `toolCallId=str(st.tool_call_id)` (привести uuid к строке, как делают `toolCalls[].id`).
+4. **`ServerToolExecutionSchema`** (`src/app/schemas/chat.py`) — добавить **первым** полем `toolCallId: str` (обязательное, без `default`), описание: доменный uuid4 вызова, совпадает с `toolCallId` tool-шага в `GET /v1/chats/{id}`.
+5. **Маппинг out→schema** (`_to_response`, `src/app/api_gateway/routers/chat.py`) — в list-comprehension добавить `toolCallId=str(st.tool_call_id)` (привести uuid к строке, как делают `toolCalls[].id`).
 6. Никаких изменений билдинга `serverTools[]`, барьера хода, биллинга, истории, миграций БД — не требуется.
 
 > Замечание для qa (информационно, не указание писать тесты): покрыть инвариант `serverTools[i].toolCallId == steps[].payload.toolCallId` соответствующего tool-шага и присутствие/обязательность поля в `serverTools[]` при `assistant_message`/`tool_call`.

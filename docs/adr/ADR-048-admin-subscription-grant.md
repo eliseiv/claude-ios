@@ -53,7 +53,7 @@ admin body-size cap (≤ 8 KB), admin rate-limit (дефолт 10 req/min per so
 1. `require_admin` (constant-time compare) + admin rate-limit + admin body-size cap ≤ 8 KB + strict-валидация тела.
 2. Проверка существования `users(userId)` **до** любых записей — переиспользуется `AdminService._require_user_exists` (`404 user_not_found` при отсутствии; admin никогда не создаёт users, [ADR-007](ADR-007-lazy-user-provisioning.md)).
 3. **Upsert `subscriptions`** (по PK `user_id`): `status='active'`, `plan = <plan>`, `expires_at = expiresAt | now()+days`. Прямая запись через ORM-модель `Subscription`, **без** StoreKit-верификации (в отличие от `SubscriptionService.sync`). Upsert естественно идемпотентен по `user_id` (PK): повтор перезаписывает те же значения.
-4. **Опциональное начисление кредитов.** Эффективная сумма = `credits` если задан, иначе `SUBSCRIPTION_CREDITS_PER_PERIOD`. Если сумма `> 0` → `WalletService.grant(...)` **как есть** (`src/app/wallet/service.py:174`) — атомарно, идемпотентно по `(user_id, idempotency_key)`, пишет ledger `credit` + audit `billing_credit`. Идемпотентный ledger-ключ **производный, с namespace**: `f"admin-sub-grant:{idempotencyKey}"` — чтобы человекочитаемый `idempotencyKey` не коллидировал с ключами `admin/wallet/grant` (raw) и реальных периодов (`sub-grant:{transaction_id}`). Если сумма `== 0` — начисление не выполняется.
+4. **Опциональное начисление кредитов.** Эффективная сумма = `credits` если задан, иначе `SUBSCRIPTION_CREDITS_PER_PERIOD`. Если сумма `> 0` → `WalletService.grant(...)` **как есть** (`src/app/wallet/service.py`) — атомарно, идемпотентно по `(user_id, idempotency_key)`, пишет ledger `credit` + audit `billing_credit`. Идемпотентный ledger-ключ **производный, с namespace**: `f"admin-sub-grant:{idempotencyKey}"` — чтобы человекочитаемый `idempotencyKey` не коллидировал с ключами `admin/wallet/grant` (raw) и реальных периодов (`sub-grant:{transaction_id}`). Если сумма `== 0` — начисление не выполняется.
 5. **Audit.** Пишется новое событие `admin_subscription_grant` (actor=`admin`, `userId`, `plan`, `status`, `expiresAt`, `creditsGranted`, `idempotencyKey`, `ledgerTxId` при наличии) — симметрично `admin_grant`; **секрет `X-Admin-Token` в audit/логи не пишется**. При начислении дополнительно есть штатный `billing_credit` (из `WalletService.grant`).
 6. **Одна транзакция.** Upsert + grant + оба audit-события — в рамках сессии запроса (общий `AsyncSession`, коммит один раз, как в существующих admin/subscription путях). Частичного применения нет.
 
@@ -83,7 +83,7 @@ Credit-поля (`newBalance`/`ledgerTxId`/`idempotentReplay`) присутст�
 
 ### 7. Без миграций
 
-Таблица `subscriptions` существует ([03-data-model](../03-data-model.md), `src/app/models/tables.py:69`). Новое событие `admin_subscription_grant` — строковое значение `event_type` (колонка `Text`, без enum-ограничения) → миграция не нужна.
+Таблица `subscriptions` существует ([03-data-model](../03-data-model.md), `Subscription`, `src/app/models/tables.py`). Новое событие `admin_subscription_grant` — строковое значение `event_type` (колонка `Text`, без enum-ограничения) → миграция не нужна.
 
 ## Consequences
 

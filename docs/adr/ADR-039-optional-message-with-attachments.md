@@ -8,7 +8,7 @@
 
 iOS-репорт (прод broadnova): отправка `POST /v1/chat/run` с изображением и **пустым** `message` отклоняется как `422 request validation failed`.
 
-Причина — контракт требует непустой текст: `ChatRunRequest.message: str = Field(min_length=1)` (`src/app/schemas/chat.py:88`). Пользовательский сценарий «отправить только фото/файл без подписи» (распознать картинку, разобрать документ) невозможен, хотя оба провайдера (Anthropic, OpenAI) принимают user-сообщение, состоящее только из image/file-блока без текста.
+Причина — контракт требует непустой текст: `ChatRunRequest.message: str = Field(min_length=1)` (`src/app/schemas/chat.py`). Пользовательский сценарий «отправить только фото/файл без подписи» (распознать картинку, разобрать документ) невозможен, хотя оба провайдера (Anthropic, OpenAI) принимают user-сообщение, состоящее только из image/file-блока без текста.
 
 Текущая сборка turn-0 user-сообщения (`src/app/chat/orchestrator.py`, сборка `user_payload_content` в `run()`) всегда добавляет text-блок:
 

@@ -13,7 +13,7 @@
 
 Точки расширения в коде (подтверждено чтением):
 - `src/app/schemas/chat.py::ChatRunRequest` — `StrictModel` (`extra='forbid'`), есть `_check_sizes`; поля `attachments` сейчас **нет** (в коде; в docs-контракте оно описано как ссылочный массив `[{id}]`).
-- `src/app/chat/orchestrator.py:212-217` — user-turn персистится как `chat_steps.payload = {"content":[{"type":"text","text":message}]}`.
+- `src/app/chat/orchestrator.py` — user-turn персистится как `chat_steps.payload = {"content":[{"type":"text","text":message}]}`.
 - `_build_messages` (`orchestrator.py`) — на КАЖДОМ витке tool-loop история реконструируется из сохранённых `chat_steps.payload["content"]` **дословно** (TD-002). Любые блоки в user-turn реплеятся на всех последующих витках.
 - `src/app/chat/anthropic_client.py::create_message` — передаёт `messages` как **сырые dict** (`cast(Any, messages)`), не типизированные SDK-параметры. SDK — `anthropic 0.39.0`.
 

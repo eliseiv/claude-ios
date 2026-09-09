@@ -7,12 +7,12 @@
   - `adapty_webhook_secret: str = Field(default="", alias="ADAPTY_WEBHOOK_SECRET")`
   - `adapty_product_tokens_raw: str = Field(default="{}", alias="ADAPTY_PRODUCT_TOKENS")`
   - `adapty_subscription_tokens_grant: int = Field(default=1000, alias="ADAPTY_SUBSCRIPTION_TOKENS_GRANT")`
-  - метод `adapty_product_tokens() -> dict[str, int]` по образцу `token_products()` (`config.py:199`): JSON `{str: positive-int}`, малформед → `{}`, bool исключить.
+  - метод `adapty_product_tokens() -> dict[str, int]` по образцу `token_products()` (`src/app/config.py`): JSON `{str: positive-int}`, малформед → `{}`, bool исключить.
 - Миграция **`0008`** (после `0007`): таблица `adapty_webhook_events` (DDL — [04-data-model.md](04-data-model.md)) + index по `user_id`. ORM-модель `AdaptyWebhookEvent` в `src/app/models/tables.py`.
 - Audit: `EVENT_ADAPTY_SUBSCRIPTION = "adapty_subscription"` в `src/app/audit/service.py`.
 
 ## Фаза 2 — Авторизация
-- `require_adapty_webhook` (constant-time bearer, образец `auth.py:99-134`): извлечь токен после `Bearer `, `compare_digest` с `settings.adapty_webhook_secret`; пустой секрет → `500`; mismatch/нет → `401`.
+- `require_adapty_webhook` (constant-time bearer, образец `src/app/api_gateway/auth.py`): извлечь токен после `Bearer `, `compare_digest` с `settings.adapty_webhook_secret`; пустой секрет → `500`; mismatch/нет → `401`.
 - OpenAPI security-схема (http bearer, `auto_error=False`), образец `admin_scheme` (`openapi_security.py`).
 
 ## Фаза 3 — Парсинг + сервис

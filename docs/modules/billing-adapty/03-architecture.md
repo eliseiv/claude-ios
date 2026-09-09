@@ -123,7 +123,7 @@ sequenceDiagram
 ```
 tokens = settings.adapty_product_tokens().get(vendor_product_id) or settings.adapty_subscription_tokens_grant
 ```
-`adapty_product_tokens()` — хелпер `Settings` (`config.py:314`, уже реализован): парсит `ADAPTY_PRODUCT_TOKENS` (JSON `{str: positive-int}`), малформед → `{}`. `adapty_subscription_tokens_grant` — int из `ADAPTY_SUBSCRIPTION_TOKENS_GRANT` (дефолт 1000). `week_6.99_nottrial` оператор может добавить в карту (без деплоя); иначе fallback 1000.
+`adapty_product_tokens()` — хелпер `Settings` (`src/app/config.py`, уже реализован): парсит `ADAPTY_PRODUCT_TOKENS` (JSON `{str: positive-int}`), малформед → `{}`. `adapty_subscription_tokens_grant` — int из `ADAPTY_SUBSCRIPTION_TOKENS_GRANT` (дефолт 1000). `week_6.99_nottrial` оператор может добавить в карту (без деплоя); иначе fallback 1000.
 
 ## Grant (ADR-047 — ключ идемпотентности по transaction_id, НЕ по event_id)
 ```
