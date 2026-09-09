@@ -10,7 +10,7 @@ iOS-репорт (прод broadnova): отправка `POST /v1/chat/run` с �
 
 Причина — контракт требует непустой текст: `ChatRunRequest.message: str = Field(min_length=1)` (`src/app/schemas/chat.py:88`). Пользовательский сценарий «отправить только фото/файл без подписи» (распознать картинку, разобрать документ) невозможен, хотя оба провайдера (Anthropic, OpenAI) принимают user-сообщение, состоящее только из image/file-блока без текста.
 
-Текущая сборка turn-0 user-сообщения (`src/app/chat/orchestrator.py:535-544`) всегда добавляет text-блок:
+Текущая сборка turn-0 user-сообщения (`src/app/chat/orchestrator.py`, сборка `user_payload_content` в `run()`) всегда добавляет text-блок:
 
 ```python
 context_block = _render_context_block(context)
@@ -46,7 +46,7 @@ docs↔код согласованы (дока `02-api-contracts.md` и `API-REF
 
 «Итоговый текст» = результат склейки `message` с context-блоком ADR-037 (§3). Пустым он считается, когда **строка пуста** (`text == ""`); это исчерпывающе покрывает «нет message и нет context-блока». Если message пуст, но context-блок есть — итоговый текст = сам блок (непустой) → text-блок добавляется как обычно.
 
-Псевдокод (заменяет `orchestrator.py:535-544`):
+Псевдокод (заменяет сборку `user_payload_content` в `run()`):
 
 ```python
 context_block = _render_context_block(context)
@@ -99,7 +99,7 @@ def _compose_turn0_text(block: str | None, msg: str) -> str:
 
 - Биллинг неизменен (ADR-006): ход = 1 кредит = 1 завершённое сообщение, независимо от наличия текста.
 - Хранение/replay (ADR-020 §3): персистится `user_payload_content` (text-блок при наличии + плейсхолдеры). При пустом тексте в `chat_steps.payload` сохраняются только плейсхолдеры → корректный replay (`_build_messages` поднимает `payload["content"]` как есть).
-- Авто-заголовок: `derive_title(message)` уже возвращает `None` для пустого/whitespace-only текста (`repository.py:41-43`) → список чатов корректно фолбэчит на preview. Поведение менять не нужно.
+- Авто-заголовок: `derive_title(message)` уже возвращает `None` для пустого/whitespace-only текста (`repository.py`, `derive_title`) → список чатов корректно фолбэчит на preview. Поведение менять не нужно.
 - Миграции БД **нет** (контрактное изменение схемы запроса).
 
 ### §6. Edge-кейсы
