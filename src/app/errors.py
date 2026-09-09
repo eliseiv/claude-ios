@@ -176,6 +176,20 @@ class NothingToSpeakError(ValidationFailedError):
     code = "nothing_to_speak"
 
 
+class VoiceModeDisabledError(ValidationFailedError):
+    """422 voice_mode_disabled: рукопожатие `/v1/chat/voice` до апгрейда (ADR-104 §8).
+
+    Ось СОСТАВНАЯ: снят `VOICE_MODE_ENABLED` ИЛИ любая из половин голоса
+    (`VOICE_INPUT_ENABLED` / `VOICE_OUTPUT_ENABLED`) — сокет, который не слышит или молчит,
+    открывать нельзя. Отдельный код от `voice_output_disabled` намеренно: тот сообщает «озвучка
+    выключена», и приложение по нему прячет КНОПКУ воспроизведения, а этот — «живого диалога на
+    инстансе нет», по нему прячется кнопка голосового РЕЖИМА. Слив их в один код заставил бы
+    приложение угадывать, что именно недоступно.
+    """
+
+    code = "voice_mode_disabled"
+
+
 class StepNotFoundError(NotFoundError):
     """404 step_not_found: `stepId` не найден среди assistant-шагов ЭТОЙ сессии (ADR-100).
 
@@ -372,6 +386,20 @@ class VoiceOutputNotConfiguredError(ServiceUnavailableError):
     """
 
     code = "voice_output_not_configured"
+
+
+class VoiceModeNotConfiguredError(ServiceUnavailableError):
+    """503 voice_mode_not_configured: `OPENAI_API_KEY` пуст (ADR-104 §8).
+
+    Через этот ключ идут ОБЕ половины голосового режима — распознавание реплики (ADR-095) и
+    синтез ответа (ADR-100), — поэтому его отсутствие выключает режим целиком. Отличимо от
+    штатно снятого флага (422 voice_mode_disabled): это мис-конфигурация, которую чинит
+    оператор, а не штатный дефолт. Отдельный код от `voice_output_not_configured` по той же
+    причине, по которой отдельны и флаги: тот говорит «нечем озвучить готовый ответ», этот —
+    «живой диалог на инстансе не поднимется».
+    """
+
+    code = "voice_mode_not_configured"
 
 
 class CloudPaymentsCheckoutNotConfiguredError(ServiceUnavailableError):

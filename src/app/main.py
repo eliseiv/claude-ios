@@ -25,6 +25,7 @@ from app.api_gateway.routers import (
     byok,
     characters,
     chat,
+    chat_voice,
     chats,
     documents,
     health,
@@ -338,6 +339,9 @@ def create_app() -> FastAPI:
     for module in (
         auth,
         chat,
+        # ADR-104: WebSocket `/v1/chat/voice`. Отдельный модуль, а не роут в `chat.py`:
+        # существующие ручки чата не трогаются ни одной строкой, и это проверяемо дифом файла.
+        chat_voice,
         tools,
         memory,
         models,

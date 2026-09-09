@@ -759,6 +759,33 @@ class Settings(BaseSettings):
     tts_audio_format: str = Field(default="mp3", alias="TTS_AUDIO_FORMAT")
     tts_timeout_seconds: float = Field(default=60.0, alias="TTS_TIMEOUT_SECONDS")
 
+    # --- Голосовой режим, WebSocket /v1/chat/voice (ADR-104) ------------------------------
+    # Дефолт false: на действующих инстансах не появляется ни одного нового пути. Ось СОСТАВНАЯ
+    # и требует обеих половин голоса (VOICE_INPUT_ENABLED и VOICE_OUTPUT_ENABLED): сокет, который
+    # не слышит или молчит, включать нельзя. Вычисляется в ОДНОЙ точке —
+    # `app.chat.voice_mode.voice_mode_available()`, а не тремя проверками по месту (ADR-104 §8).
+    # Правится только здесь, в `.env`, с рестартом: в реестре настроек инстанса строка не
+    # объявлена намеренно — вторая конъюнкта VOICE_OUTPUT_ENABLED там тоже не объявлена
+    # (отложена Q-099-5), поэтому панельный переключатель молча ничего бы не менял.
+    voice_mode_enabled: bool = Field(default=False, alias="VOICE_MODE_ENABLED")
+    # Нижняя граница сегмента потокового синтеза. Существует затем, чтобы не синтезировать «Да.»
+    # отдельным вызовом к платному поставщику: сегмент = предложение на растущем буфере, и без
+    # нижней границы короткие реплики дали бы вызов на каждое слово. ВЕРХНЮЮ границу задаёт не
+    # эта переменная, а совокупный на ход TTS_MAX_CHARS. Калибровка — Q-104-1.
+    voice_mode_segment_min_chars: int = Field(default=80, alias="VOICE_MODE_SEGMENT_MIN_CHARS")
+    # Потолок ОДНОЙ входящей реплики в секундах. Отдельный от ATTACHMENT_MAX_BYTES_AUDIO —
+    # действуют оба, что сработает раньше: байты ограничивают трафик, секунды — время
+    # распознавания, и на сильно сжатом кодеке одно не выводится из другого.
+    voice_mode_utterance_max_seconds: float = Field(
+        default=60.0, alias="VOICE_MODE_UTTERANCE_MAX_SECONDS"
+    )
+    # Закрыть сокет, если кадров не было дольше этого времени. ЕДИНСТВЕННАЯ мера против
+    # накопления простаивающих соединений: лимита сокетов на пользователя нет намеренно
+    # (посчитанный в памяти процесса он был бы ложью на многоворкерном деплое, ADR-104 §10).
+    voice_mode_idle_timeout_seconds: float = Field(
+        default=120.0, alias="VOICE_MODE_IDLE_TIMEOUT_SECONDS"
+    )
+
     # --- Observability ---
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     otel_exporter_otlp_endpoint: str = Field(default="", alias="OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -1004,6 +1031,40 @@ class Settings(BaseSettings):
         as the credit-cost guard above does.
         """
         return value if value > 0 else 700
+
+    @field_validator("voice_mode_segment_min_chars")
+    @classmethod
+    def _positive_voice_mode_segment_min_chars(cls, value: int) -> int:
+        """Нижняя граница сегмента обязана быть положительной (ADR-104 §6).
+
+        Тот же приём, что у `_positive_tts_max_chars`: `0`/отрицательное не роняет старт, а
+        деградирует до задокументированного дефолта. Ноль здесь означал бы синтез каждой
+        короткой фразы отдельным платным вызовом — ровно то, против чего переменная заведена.
+        """
+        return value if value > 0 else 80
+
+    @field_validator("voice_mode_utterance_max_seconds")
+    @classmethod
+    def _positive_voice_mode_utterance_seconds(cls, value: float) -> float:
+        """Потолок ОДНОЙ реплики обязан быть положительным (ADR-104 §9).
+
+        `0`/отрицательное отвергало бы любую реплику до первого байта — выключенная фича,
+        выглядящая как поломка. Деградация до задокументированного дефолта вместо падения
+        процесса — та же дисциплина, что у гейтов озвучки выше. Дефолты у двух секундных
+        переменных РАЗНЫЕ (60 и 120), поэтому и валидатора два: общий вернул бы чужое число.
+        """
+        return value if value > 0 else 60.0
+
+    @field_validator("voice_mode_idle_timeout_seconds")
+    @classmethod
+    def _positive_voice_mode_idle_seconds(cls, value: float) -> float:
+        """Idle-таймаут обязан быть положительным (ADR-104 §10).
+
+        `0`/отрицательное закрывало бы сокет сразу после `accept`. Это ЕДИНСТВЕННАЯ мера против
+        накопления простаивающих соединений, поэтому её отключение опечаткой недопустимо ни в
+        одну сторону: деградируем до задокументированных 120 секунд.
+        """
+        return value if value > 0 else 120.0
 
     @field_validator("anthropic_thinking_budget_tokens")
     @classmethod

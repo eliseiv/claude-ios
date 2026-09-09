@@ -61,7 +61,7 @@ from app.chat.llm_client import (
     llm_client_for,
 )
 from app.chat.openai_client import OpenAIAuthError
-from app.chat.repository import ChatRepository, derive_title
+from app.chat.repository import ChatRepository, SessionContext, derive_title
 from app.chat.tools import (
     ARGS_DEGRADE_TOOLS,
     DOCUMENT_FIELDS_HINT,
@@ -978,6 +978,35 @@ class ChatStreamEvent:
         return cls(kind="error", error_code=code, error_message=message)
 
 
+class TurnInterrupted(Exception):  # noqa: N818 — сигнал управления потоком, а не ошибка
+    """Пользователь перебил ассистента в голосовом режиме (ADR-104 §5). НЕ ошибка хода.
+
+    Поднимается обратным вызовом `on_text_delta` обработчика сокета — то есть ровно в той точке,
+    где ход отдаёт очередное приращение текста, и потому останавливает генерацию НЕМЕДЛЕННО, а не
+    на следующем сетевом ожидании. Обрыв соединения на эту роль не годится и был причиной, по
+    которой ADR-104 вообще выбрал WebSocket: отмена задачи приходит как `asyncio.CancelledError`,
+    то есть `BaseException`, мимо ветки закрытия хода (`except Exception`), и оставляет реплику
+    пользователя без ответа — уже случившийся прод-дефект.
+
+    Ловится в `_run_turn` ПЕРЕД `except Exception`, поэтому пометка отказа `turnFailed` на этот
+    путь не попадает: прерывание — не отказ, и пометки у них РАЗНЫЕ (03-architecture §Закрытие
+    хода). Ход при этом доходит до персистентного шага и списывается ПОЛНОСТЬЮ: цена — за
+    message-step, а не за секунды звучания, иначе перебивание, штатное в голосе, стало бы
+    бесплатной генерацией.
+
+    Поднимается ТОЛЬКО когда накоплен хоть один символ текста ассистента. При пустом накопителе
+    генерация не отменяется вовсе (ADR-104 §5, вторая строка таблицы): отмена оставила бы ход без
+    шага ассистента либо потребовала бы писать в историю пустой assistant-шаг, который провайдер
+    отвергает при реплее.
+    """
+
+    def __init__(self, *, text: str, reason: str, spoken_segments: int) -> None:
+        super().__init__("turn interrupted by user")
+        self.text = text
+        self.reason = reason
+        self.spoken_segments = spoken_segments
+
+
 @dataclass(frozen=True)
 class ChatRunOut:
     status: str  # assistant_message | tool_call | blocked
@@ -1284,6 +1313,7 @@ class ChatOrchestrator:
         temporary: bool = False,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
         on_transcript: Callable[[str], Awaitable[None]] | None = None,
+        on_turn_start: Callable[[uuid.UUID], Awaitable[None]] | None = None,
         media_selection: dict[str, Any] | None = None,
         memory_search: bool | None = None,
     ) -> ChatRunOut:
@@ -1295,7 +1325,16 @@ class ChatOrchestrator:
         голосе не знает. Вторая: тело возвращает ответ из НЕСКОЛЬКИХ мест, и проставлять
         расшифровку в каждом значило бы терять её на следующей добавленной ветке — здесь же
         точка одна.
+
+        ``on_turn_start`` (ADR-104 §4) сообщает вызывающему `messageStepId` ДО распознавания —
+        раньше, чем ход что-либо произвёл. Он нужен только транспорту, у которого каждый кадр
+        обязан нести `turnId`, а первый такой кадр (`transcript`) уходит ещё до обращения к
+        модели. Ключ по-прежнему выпускает оркестратор: вызывающий его получает, но не задаёт —
+        иначе биллинговый ключ хода стал бы параметром запроса.
         """
+        message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
+        if on_turn_start is not None:
+            await on_turn_start(message_step_id)
         message, attachments, transcript = await self._transcribe_voice(
             message,
             attachments,
@@ -1327,40 +1366,82 @@ class ChatOrchestrator:
             on_text_delta=on_text_delta,
             media_selection=media_selection,
             memory_search=memory_search,
+            message_step_id=message_step_id,
         )
         return out if transcript is None else dataclasses.replace(out, transcript=transcript)
 
-    async def _run_turn(
+    async def open_session(
         self,
         *,
         user_id: uuid.UUID,
         project_id: str | None,
         session_id: uuid.UUID | None,
-        message: str,
         mode: str,
         assistant_mode: str | None = None,
-        attachments: list[AttachmentIn] | None = None,
         model: str | None = None,
         character_id: str | None = None,
         workspace_project_id: uuid.UUID | None = None,
-        context: dict[str, Any] | None = None,
-        edit_message_step_id: uuid.UUID | None = None,
-        generation_mode: GenerationMode = "general",
-        generation_backend: GenerationBackend = "legacy",
         temporary: bool = False,
-        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
-        media_selection: dict[str, Any] | None = None,
-        memory_search: bool | None = None,
-    ) -> ChatRunOut:
-        message_step_id = uuid.uuid4()  # CO-4b: billing key for this user message-step
-        requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
-        use_generation_v2 = requested_backend == "v2"
-        # ADR-064 §3 / ADR-082: ONE effective mode for prompt, axis-C, provider and price.
-        # Legacy is `general` unless CHAT_LEGACY_WEB_SEARCH_ENABLED lifts it to `research`.
-        # quiz.generate stays study_learn-only, so the axis-C gate still never fires on legacy.
-        effective_generation_mode = _effective_generation_mode(
-            generation_mode, use_generation_v2=use_generation_v2
+    ) -> ChatSession:
+        """Открыть сессию голосового сеанса кадром `start` (ADR-104 §3).
+
+        Существует потому, что `ready {sessionId, voiceId}` уходит СРАЗУ после `start`, а
+        `sessionId` при создании нового чата иначе не существовал бы до конца первого хода —
+        приложение ждало бы `ready`, чтобы начать говорить, и сеанс не начался бы никогда.
+
+        Проверки session-fixed полей — те же самые, что у HTTP-хода: используется общий
+        `_open_session`, второго набора правил валидации не появляется. Заголовок чата здесь
+        `None` (реплики ещё нет) и проставляется по первой реплике сеанса — правило чатов
+        «автозаголовок из первого сообщения» сохранено, просто его применяет вызывающий.
+
+        Backend сессии — `v2`: голосовой ход исполняется тем же путём, что `/v1/chat/v2/run`.
+        """
+        ctx, _ = await self._open_session(
+            user_id=user_id,
+            project_id=project_id,
+            session_id=session_id,
+            mode=mode,
+            assistant_mode=assistant_mode,
+            model=model,
+            character_id=character_id,
+            workspace_project_id=workspace_project_id,
+            title=None,
+            requested_backend="v2",
+            use_generation_v2=True,
+            temporary=temporary,
         )
+        await self._session.commit()
+        return ctx.session
+
+    async def _open_session(
+        self,
+        *,
+        user_id: uuid.UUID,
+        project_id: str | None,
+        session_id: uuid.UUID | None,
+        mode: str,
+        assistant_mode: str | None,
+        model: str | None,
+        character_id: str | None,
+        workspace_project_id: uuid.UUID | None,
+        title: str | None,
+        requested_backend: GenerationBackend,
+        use_generation_v2: bool,
+        temporary: bool,
+    ) -> tuple[SessionContext, Mode]:
+        """Резолв-или-создание сессии со ВСЕМИ проверками session-fixed полей.
+
+        Единственная реализация правила «session-fixed поля принимаются только при СОЗДАНИИ и на
+        resume игнорируются» (ADR-034 §3 / ADR-097 §4 / ADR-036 §3). Вынесено сюда, потому что у
+        неё стало ДВА вызывающих: обычный ход (`_run_turn`) и открытие голосового сеанса
+        (`open_session`, ADR-104 §3 — кадр `start` обязан ответить `ready {sessionId}`, а значит
+        сессия к этому моменту должна существовать). Вторая реализация этих проверок означала бы
+        второй набор правил валидации: голосовой сеанс принимал бы модель или персонажа, которых
+        HTTP-путь отвергает.
+
+        `title` — параметр, а не вывод из сообщения: у голосового `start` сообщения ещё нет.
+        Автозаголовок из первой реплики остаётся правилом чатов и проставляется вызывающим.
+        """
         # ADR-034 §3: resolve the session-fixed model. None (no field) → NULL (= instance default,
         # never substituted in the DB so the row stays "instance default" even if env default
         # changes). The schema guarantees a non-empty value here, so .strip() is safe.
@@ -1417,8 +1498,8 @@ class ChatOrchestrator:
             mode=mode,
             session_id=session_id,
             assistant_mode=resolved_assistant_mode,
-            # Auto-title from the first user message (chats/03); only used for a new session.
-            title=derive_title(message),
+            # Заголовок чата (chats/03); используется только при создании сессии.
+            title=title,
             # ADR-034 §3: session-fixed model; written only at creation, ignored on resume.
             model=resolved_model,
             # ADR-097 §4: session-fixed character; written only at creation (validated just
@@ -1440,6 +1521,58 @@ class ChatOrchestrator:
         )
         # mode is fixed on the session; use the session's stored mode.
         effective_mode = Mode(sess.mode)
+        return ctx, effective_mode
+
+    async def _run_turn(
+        self,
+        *,
+        user_id: uuid.UUID,
+        project_id: str | None,
+        session_id: uuid.UUID | None,
+        message: str,
+        mode: str,
+        assistant_mode: str | None = None,
+        attachments: list[AttachmentIn] | None = None,
+        model: str | None = None,
+        character_id: str | None = None,
+        workspace_project_id: uuid.UUID | None = None,
+        context: dict[str, Any] | None = None,
+        edit_message_step_id: uuid.UUID | None = None,
+        generation_mode: GenerationMode = "general",
+        generation_backend: GenerationBackend = "legacy",
+        temporary: bool = False,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        media_selection: dict[str, Any] | None = None,
+        memory_search: bool | None = None,
+        message_step_id: uuid.UUID | None = None,
+    ) -> ChatRunOut:
+        # CO-4b: billing key for this user message-step. `run()` выпускает его раньше, чтобы
+        # сообщить транспорту (ADR-104 §4) до первого кадра; иных вызывающих у параметра нет.
+        message_step_id = message_step_id if message_step_id is not None else uuid.uuid4()
+        requested_backend: GenerationBackend = "v2" if generation_backend == "v2" else "legacy"
+        use_generation_v2 = requested_backend == "v2"
+        # ADR-064 §3 / ADR-082: ONE effective mode for prompt, axis-C, provider and price.
+        # Legacy is `general` unless CHAT_LEGACY_WEB_SEARCH_ENABLED lifts it to `research`.
+        # quiz.generate stays study_learn-only, so the axis-C gate still never fires on legacy.
+        effective_generation_mode = _effective_generation_mode(
+            generation_mode, use_generation_v2=use_generation_v2
+        )
+        ctx, effective_mode = await self._open_session(
+            user_id=user_id,
+            project_id=project_id,
+            session_id=session_id,
+            mode=mode,
+            assistant_mode=assistant_mode,
+            model=model,
+            character_id=character_id,
+            workspace_project_id=workspace_project_id,
+            # Auto-title from the first user message (chats/03); only used for a new session.
+            title=derive_title(message),
+            requested_backend=requested_backend,
+            use_generation_v2=use_generation_v2,
+            temporary=temporary,
+        )
+        sess = ctx.session
 
         # ADR-070: mediaChoices wizard continuation — no LLM, no chat debit.
         if media_selection is not None:
@@ -1675,18 +1808,19 @@ class ChatOrchestrator:
         # открытым всю генерацию), поэтому откат транзакции его уже не достаёт: реплика остаётся
         # в истории без ответа, и на СЛЕДУЮЩЕМ ходу модель отвечает на неё, а не на новую.
         # Прод 2026-09-09, avelyra: «сначала ответил по прошлому запросу, потом опять ошибка».
+        billing = _billing_plan(
+            effective_mode,
+            state,
+            credit_amount=generation_credit_cost,
+            expose_credit_amount=use_generation_v2,
+        )
         try:
             return await self._generate_loop(
                 user_id=user_id,
                 session_id=sess.id,
                 message_step_id=message_step_id,
                 mode=effective_mode,
-                billing=_billing_plan(
-                    effective_mode,
-                    state,
-                    credit_amount=generation_credit_cost,
-                    expose_credit_amount=use_generation_v2,
-                ),
+                billing=billing,
                 api_key=api_key,
                 byok_provider=byok_provider,
                 system_prompt=system_prompt,
@@ -1701,6 +1835,21 @@ class ChatOrchestrator:
                 generation_backend=requested_backend,
                 on_text_delta=on_text_delta,
             )
+        except TurnInterrupted as interrupted:
+            # ADR-104 §5. Ловится ПЕРЕД `except Exception` намеренно: прерывание — не отказ, и
+            # пометка `turnFailed` на этот путь попасть не имеет права (обе стороны помечены,
+            # 03-architecture §Закрытие хода). Синтез к этому моменту уже прекращён обработчиком
+            # сокета; здесь закрывается сам ХОД — накопленным префиксом, то есть ровно тем, что
+            # человек услышал, и с ПОЛНЫМ списанием: цена — за message-step, а не за секунды.
+            return await self._finalize_interrupted(
+                user_id=user_id,
+                session_id=sess.id,
+                message_step_id=message_step_id,
+                billing=billing,
+                interrupted=interrupted,
+                generation_mode=effective_generation_mode,
+                expose_generation_mode=use_generation_v2,
+            )
         except Exception as exc:
             await self._mark_turn_failed(
                 session_id=sess.id,
@@ -1709,6 +1858,70 @@ class ChatOrchestrator:
                 reason=type(exc).__name__,
             )
             raise
+
+    async def _finalize_interrupted(
+        self,
+        *,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        billing: _BillingPlan,
+        interrupted: TurnInterrupted,
+        generation_mode: str,
+        expose_generation_mode: bool,
+    ) -> ChatRunOut:
+        """Закрыть ход, остановленный пользователем (ADR-104 §5).
+
+        Идёт через ТОТ ЖЕ `_finalize_assistant`, что и обычный конец хода: шаг, аудит, списание,
+        `touch_session` и коммит — одна реализация. Отличий ровно два, и оба нормативны:
+
+        1. **содержимое шага — накопленный ПРЕФИКС**, то есть ровно то, что человек услышал.
+           Блок доменный (`{"type": "text"}`), как у пометки отказа: провайдер-специфичной формы
+           у синтезированного шага нет и быть не может — ответ оборван на полуслове.
+        2. **пометка `payload.interrupted = {reason, spokenSegments}`** — отдельный ключ от
+           `turnFailed`, ни один из другого не выводится. `spokenSegments` — ЧИСЛО дослушанных
+           сегментов, а не массив текстов: произнесённый текст уже целиком лежит в
+           `payload.content` этого же шага, и второй его копии не заводится — она была бы вторым
+           источником одной величины и вторым местом, где лежит пользовательский контент.
+
+        `usage` без токенов НАМЕРЕННО: поток оборван, и провайдер сообщает расход только вместе с
+        завершением. Выдумывать нули — врать о расходе; `creditsCharged` при этом проставляет
+        `_finalize_assistant`, и списание идёт ПОЛНОЕ (обе строки таблицы ADR-104 §5).
+        """
+        usage: dict[str, Any] = {}
+        if expose_generation_mode:
+            usage["generationMode"] = generation_mode
+        out = await self._finalize_assistant(
+            user_id=user_id,
+            session_id=session_id,
+            message_step_id=message_step_id,
+            billing=billing,
+            content_blocks=[{"type": "text", "text": interrupted.text}],
+            text=interrupted.text,
+            usage=usage,
+            server_tools=[],
+            payload_extra={
+                "interrupted": {
+                    "reason": interrupted.reason,
+                    "spokenSegments": interrupted.spoken_segments,
+                }
+            },
+        )
+        # Прерванная нога — ТОЖЕ терминальная нога хода, поэтому проходит общую точку сборки
+        # turn-scoped полей: `done` несёт немодифицированный `ChatResponse` со всеми его
+        # правилами (ADR-104 §2), и `documents[]`/`mediaJobs`/`quiz`, произведённые на более
+        # раннем витке этого же хода, обязаны в нём остаться. Накопителей текущего вызова здесь
+        # нет — они остались в оборванном `_generate_loop`, — поэтому поля восстанавливаются из
+        # сохранённых шагов хода: ровно тот путь, который эта точка и обслуживает.
+        return await self._decorate_turn_out(
+            out,
+            message_step_id=message_step_id,
+            quiz_accumulated=None,
+            media_accumulated=None,
+            generation_mode=generation_mode,
+            media_choices_accumulated=None,
+            documents_accumulated=None,
+        )
 
     async def _mark_turn_failed(
         self,
@@ -2168,6 +2381,7 @@ class ChatOrchestrator:
         session_id: uuid.UUID,
         results: list[ToolResultIn],
         generation_backend: GenerationBackend = "legacy",
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> ChatRunOut:
         """Apply a batch of tool results and continue only when the turn barrier closes (ADR-025).
 
@@ -2324,29 +2538,50 @@ class ChatOrchestrator:
             )
         system_prompt = await self._system_prompt_with_last_media_job(sess.id, system_prompt)
         system_prompt = await self._system_prompt_with_recent_photo(sess.id, system_prompt)
-        return await self._generate_loop(
-            user_id=user_id,
-            session_id=session_id,
-            message_step_id=message_step_id,
-            mode=mode,
-            billing=_billing_plan(
-                mode,
-                state,
-                credit_amount=generation_credit_cost,
-                expose_credit_amount=use_generation_v2,
-            ),
-            api_key=api_key,
-            byok_provider=byok_provider,
-            system_prompt=system_prompt,
-            # ADR-022 axis A: project_id is session-fixed; gate site.* by the session's project.
-            has_project=sess.project_id is not None,
-            # ADR-034 §4 / ADR-044 / ADR-073: session-fixed model; effective model resolved in
-            # _generate_loop against the right provider's allowlist (credits → session provider,
-            # byok → key provider).
-            model=sess.model or None,
-            generation_mode=generation_mode,
-            generation_backend=requested_backend,
+        billing = _billing_plan(
+            mode,
+            state,
+            credit_amount=generation_credit_cost,
+            expose_credit_amount=use_generation_v2,
         )
+        try:
+            return await self._generate_loop(
+                user_id=user_id,
+                session_id=session_id,
+                message_step_id=message_step_id,
+                mode=mode,
+                billing=billing,
+                api_key=api_key,
+                byok_provider=byok_provider,
+                system_prompt=system_prompt,
+                # ADR-022 axis A: project_id is session-fixed; gate site.* by the session's project.
+                has_project=sess.project_id is not None,
+                # ADR-034 §4 / ADR-044 / ADR-073: session-fixed model; effective model resolved in
+                # _generate_loop against the right provider's allowlist (credits → session provider,
+                # byok → key provider).
+                model=sess.model or None,
+                generation_mode=generation_mode,
+                generation_backend=requested_backend,
+                # ADR-104 §7: нога continuation в голосовом режиме звучит так же, как первая —
+                # это сопутствующий текст, который пользователь слышит, пока устройство исполняет
+                # инструмент. Барьер хода при этом не трогается: он свойство ХОДА, а не
+                # транспорта. На HTTP-путях значение `None`, и поведение ручек не меняется.
+                on_text_delta=on_text_delta,
+            )
+        except TurnInterrupted as interrupted:
+            # ADR-104 §5 действует на ЛЮБОЙ ноге хода, а не только на первой: озвучивается и
+            # сопутствующий текст ноги `tool_call`, значит перебить можно и её. Без этой ветки
+            # прерывание ноги continuation уносило бы ход без шага ассистента — ровно та дыра,
+            # ради закрытия которой предикат §5 и написан.
+            return await self._finalize_interrupted(
+                user_id=user_id,
+                session_id=session_id,
+                message_step_id=message_step_id,
+                billing=billing,
+                interrupted=interrupted,
+                generation_mode=generation_mode,
+                expose_generation_mode=use_generation_v2,
+            )
 
     @staticmethod
     def _all_already_done_before(resolved: list[tuple[ToolResultIn, ToolCall]]) -> bool:
@@ -3168,7 +3403,8 @@ class ChatOrchestrator:
                     session_id=session_id,
                     message_step_id=message_step_id,
                     billing=billing,
-                    result=result,
+                    content_blocks=result.content_blocks,
+                    text=result.text,
                     usage=usage,
                     server_tools=server_tools,
                     media_jobs=media_accumulator.jobs or None,
@@ -3260,10 +3496,12 @@ class ChatOrchestrator:
         session_id: uuid.UUID,
         message_step_id: uuid.UUID,
         billing: _BillingPlan,
-        result: LLMResult,
+        content_blocks: list[dict[str, Any]],
+        text: str,
         usage: dict[str, Any],
         server_tools: list[ServerToolExecutionOut],
         media_jobs: list[dict[str, Any]] | None = None,
+        payload_extra: dict[str, Any] | None = None,
     ) -> ChatRunOut:
         # Final assistant_message. The assistant-step + billing (debit or trial flip) + audit are
         # committed together as one short transaction (atomicity per MAJOR-4 / CRITICAL-1).
@@ -3274,9 +3512,14 @@ class ChatOrchestrator:
         # generation anchors without scanning tool steps (iOS cold start).
         if billing.debit_credits and billing.expose_credit_amount:
             usage = {**usage, "creditsCharged": billing.credit_amount}
-        assistant_payload: dict[str, Any] = {"content": result.content_blocks}
+        assistant_payload: dict[str, Any] = {"content": content_blocks}
         if media_jobs:
             assistant_payload["mediaJobs"] = list(media_jobs)
+        # ADR-104 §5: закрывающая пометка хода, если он закрыт НЕ обычным путём. Сегодня это
+        # только `interrupted` (остановлен пользователем в голосовом режиме); `turnFailed`
+        # пишется отдельной точкой (`_mark_turn_failed`) и из этой не выводится.
+        if payload_extra:
+            assistant_payload.update(payload_extra)
         assistant_step = await self._deps.repo.add_step(
             session_id=session_id,
             message_step_id=message_step_id,
@@ -3331,7 +3574,7 @@ class ChatOrchestrator:
         return ChatRunOut(
             status="assistant_message",
             session_id=session_id,
-            assistant_message=result.text,
+            assistant_message=text,
             usage=usage,
             message_step_id=message_step_id,
             step_id=assistant_step.id,

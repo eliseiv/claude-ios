@@ -24,6 +24,7 @@ from app import instance_config
 from app.api_gateway.rate_limit import enforce_other_limits, enforce_speech_limits
 from app.api_gateway.routers.presets import resolve_presets_locale
 from app.chat.speech import SpeechSynthesisService
+from app.chat.voice_mode import voice_mode_available
 from app.chat.voices import resolve_default_voice_id, voice_catalog
 from app.config import get_settings
 from app.deps import CurrentUser, get_preferences_service, get_speech_service, require_owner
@@ -67,7 +68,10 @@ _OUTCOME_BY_ERROR_CODE: dict[str, str] = {
         "список пуст, `defaultVoiceId` равен `null`, и по этому же полю приложение прячет кнопку "
         "воспроизведения. Поле `defaultVoiceId` — голос, который прозвучит у этого пользователя "
         "в чате без персонажа; используйте как предвыбранную строку. Голоса персонажей в каталог "
-        "не входят: они закреплены за персонажем и пользователем не выбираются. Имена отдаются на "
+        "не входят: они закреплены за персонажем и пользователем не выбираются. Поле "
+        "`voiceModeEnabled` сообщает отдельно, доступен ли на инстансе живой голосовой диалог "
+        "(WebSocket `/v1/chat/voice`): по нему прячется кнопка голосового режима, и оно не "
+        "выводится из `enabled`. Имена отдаются на "
         "выбранном языке: приоритет у параметра `locale`, затем заголовок `Accept-Language`, "
         "затем язык по умолчанию для инстанса. Read-only, без состояния."
     ),
@@ -112,6 +116,12 @@ async def list_voices(
             "locale": resolved,
             "defaultVoiceId": default_voice_id,
             "voices": voice_catalog(resolved) if enabled else [],
+            # ADR-104: ось голосового РЕЖИМА отдельна от оси озвучки и вычисляется в одной точке
+            # (составное условие из трёх флагов). Поле присутствует всегда — в том числе при
+            # выключенной озвучке, где оно по построению `false`: приложение обязано отличать
+            # «инстанс не умеет живой диалог» от «бэкенд старее фичи», а отсутствующее поле
+            # неотличимо от второго.
+            "voiceModeEnabled": voice_mode_available(settings=settings),
         }
     )
 

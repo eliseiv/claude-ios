@@ -62,7 +62,10 @@ _TEXT_TYPES = frozenset({"text/plain", "text/markdown", "text/csv", "application
 
 # ADR-095: голосовые сообщения. Класс отдельный от `document`, потому что обрабатывается иначе —
 # запись не доходит до языковой модели вовсе, её заменяет распознанный текст.
-_AUDIO_TYPES = frozenset(
+# ПУБЛИЧНЫЙ: тот же набор — это набор ВХОДА кадра `utterance.begin` голосового режима
+# (ADR-104 §4, «набор ADR-095 §2»). Второго перечня форматов записи не заводится: разойдясь, они
+# дали бы поверхность, где вложение принимается, а живая реплика того же формата — нет.
+AUDIO_MEDIA_TYPES = frozenset(
     {"audio/mp4", "audio/m4a", "audio/mpeg", "audio/wav", "audio/webm", "audio/ogg"}
 )
 
@@ -70,7 +73,7 @@ _ALLOWLIST: dict[str, frozenset[str]] = {
     "image": _IMAGE_TYPES,
     "document": _DOCUMENT_TYPES,
     "text": _TEXT_TYPES,
-    "audio": _AUDIO_TYPES,
+    "audio": AUDIO_MEDIA_TYPES,
 }
 
 # Magic-byte signatures for image/PDF classes. WEBP is "RIFF"...."WEBP" (offset 8).

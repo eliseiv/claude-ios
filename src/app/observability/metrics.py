@@ -156,6 +156,51 @@ speech_synthesis_total = Counter(
 )
 
 
+# ADR-104 §12. Три серии голосового режима; у каждой producer лежит на РАБОЧЕМ пути обработчика
+# сокета, иначе серия была бы объявлена и никогда не заполнена.
+#
+# producer: точка `accept` и точка закрытия сокета (inc/dec); consumer: панель нагрузки,
+# калибровка idle-таймаута (Q-104-1) и вопрос о лимите соединений (Q-104-2).
+voice_mode_connections = Gauge(
+    "voice_mode_connections",
+    "Currently open /v1/chat/voice WebSocket connections (ADR-104).",
+)
+# producer: точка закрытия хода в обработчике сокета; consumer: доля прерванных ходов, алерт на
+# `upstream_error`. Предикат отнесения вычисляется из НАБЛЮДАЕМЫХ фактов пути, не из суждения:
+#   ok             — ход закрыт `done`, status ∈ {assistant_message, tool_call}, прерывания не было;
+#   interrupted    — получен кадр `interrupt`, ход закрыт по ADR-104 §5;
+#   blocked        — status="blocked" (policy, кредиты, max_tokens) — штатный бизнес-исход;
+#   upstream_error — провайдер не вернул результат, ход закрыт пометкой turnFailed — АВАРИЯ;
+#   disconnected   — сокет закрыт до `done`, ход доведён до конца — наблюдение, не авария.
+# Против недооценки: `upstream_error` не сливается с `disconnected` — первое поломка у
+# поставщика, второе штатная мобильная сеть. Против переоценки: `interrupted` — САМЫЙ ЧАСТЫЙ
+# штатный исход голосового режима, и отнесение его к тревожным обесценило бы всю серию: шум
+# внутри класса приучает игнорировать класс, и вместе с шумом перестают замечать `upstream_error`.
+voice_mode_turns_total = Counter(
+    "voice_mode_turns_total",
+    "Voice-mode turn outcomes (ADR-104 §12).",
+    ["outcome"],
+)
+# producer: точка отправки `audio.end` и точка отказа синтеза; consumer: доля `capped` →
+# калибровка потолка и VOICE_MODE_SEGMENT_MIN_CHARS (Q-104-1), алерт на `upstream_error`.
+# Предикат вычисляется из наблюдаемых фактов СЕГМЕНТА, а не хода:
+#   ok             — `audio.end` сегмента отправлен, truncated: false;
+#   capped         — `audio.end` отправлен с truncated: true (совокупный TTS_MAX_CHARS хода);
+#   skipped_empty  — кандидат после чистки пуст, синтезатор НЕ вызывался;
+#   interrupted    — синтез сегмента оборван кадром `interrupt`, `audio.end` НЕ отправлен;
+#   upstream_error — синтезатор отказал на этом сегменте — АВАРИЯ.
+# Против недооценки: `upstream_error` не сливается ни с `skipped_empty` (там синтезатор не звали),
+# ни с `interrupted` (там отмену инициировал пользователь) — только он означает поломку
+# поставщика синтеза, и только по нему строится алерт. Против переоценки: `capped` — ШТАТНЫЙ исход
+# длинного ответа, ровно то, ради чего потолок и существует; `interrupted` — штатный и самый
+# частый. Доля `capped` — продуктовый сигнал (Q-104-1), а не алерт.
+voice_mode_speech_segments_total = Counter(
+    "voice_mode_speech_segments_total",
+    "Voice-mode streaming-synthesis segment outcomes (ADR-104 §12).",
+    ["outcome"],
+)
+
+
 # ADR-099 §10. У каждой метрики назван producer -> consumer; producer лежит на РАБОЧЕМ пути,
 # иначе серия была бы объявлена и никогда не заполнена.
 #

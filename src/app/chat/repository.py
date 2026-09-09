@@ -183,6 +183,23 @@ class ChatRepository:
         await self._session.flush()
         return SessionContext(session=new_session, is_new=True)
 
+    async def set_title_if_absent(self, session: ChatSession, title: str | None) -> None:
+        """Проставить автозаголовок чата, если его ещё нет (chats/03).
+
+        Существует ради ОДНОГО случая — голосового сеанса (ADR-104 §3): там сессия создаётся
+        кадром `start`, когда реплики ещё нет, поэтому `get_or_create_session` получает
+        ``title=None``. Правило «автозаголовок из ПЕРВОГО сообщения» при этом остаётся тем же и
+        той же функцией `derive_title` — меняется лишь момент, когда первое сообщение становится
+        известно. Без этого голосовые чаты приходили бы в список без заголовка.
+
+        Идемпотентно и НЕ переименовывает: непустой заголовок (в том числе заданный
+        пользователем через chats) не трогается.
+        """
+        if session.title or not title:
+            return
+        session.title = title
+        await self._session.flush()
+
     async def touch_session(self, session: ChatSession) -> None:
         session.updated_at = _now()
         await self._session.flush()
