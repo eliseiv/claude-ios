@@ -158,8 +158,23 @@ async def test_failed_speech_debit_does_not_lose_the_auto_title(
     stand.script(*FIVE_SENTENCES)
 
     socket, ready = await stand.session(uid)
-    with caplog.at_level(logging.WARNING):
+    # Захват WARNING делается НЕ через корневой логгер: в полном прогоне до него не доходит
+    # ничего. Два независимых производителя ломают корень — миграция в процессе зовёт
+    # `fileConfig(disable_existing_loggers=True)` и ГАСИТ уже созданные логгеры `app.*` (тот же
+    # обход стоит в четырёх соседних кейсах этого репозитория), а `configure_logging` в lifespan
+    # приложения делает `root.handlers.clear()` и уносит хендлер pytest. Поэтому хендлер
+    # вешается прямо на логгер-эмитент, а его флаг `disabled` снимается явно: так кейс не
+    # зависит ни от одного из двух.
+    target = logging.getLogger("app.api_gateway.routers.chat_voice")
+    was_disabled, was_level = target.disabled, target.level
+    target.disabled = False
+    target.setLevel(logging.WARNING)
+    target.addHandler(caplog.handler)
+    try:
         await socket.turn()
+    finally:
+        target.removeHandler(caplog.handler)
+        target.disabled, target.level = was_disabled, was_level
 
     listing = await stand.http.get("/v1/chats", headers=auth_headers(uid))
     row = next(r for r in listing.json()["items"] if r["id"] == ready["sessionId"])
@@ -373,12 +388,22 @@ async def test_second_socket_on_the_same_session_cannot_start_a_turn(
 
     await socket_a.disconnect()
 
-    with caplog.at_level(logging.WARNING):
+    # Тот же приём, что в кейсе §13.12, и здесь он ВАЖНЕЕ: ассерт проверяет ОТСУТСТВИЕ записи,
+    # а на сломанном захвате отсутствие наступает само собой — кейс прошёл бы, ничего не доказав.
+    target = logging.getLogger("app.api_gateway.routers.chat_voice")
+    was_disabled, was_level = target.disabled, target.level
+    target.disabled = False
+    target.setLevel(logging.WARNING)
+    target.addHandler(caplog.handler)
+    try:
         socket_b = await stand.connect(uid)
         ready_b = await socket_b.start(sessionId=session_id)
         assert ready_b["type"] == "ready"
         await socket_b.begin_utterance(audio=b"second-connection")
         rejected = await socket_b.next()
+    finally:
+        target.removeHandler(caplog.handler)
+        target.disabled, target.level = was_disabled, was_level
 
     assert (rejected["code"], rejected["scope"]) == ("turn_in_progress", "turn")
     denied = [c for c in stand.redis.calls if c["key"] == lock_key and not c["taken"]]
