@@ -1117,39 +1117,48 @@ class _VoiceSession:
         именем `voice_speech_debit_skipped` (consumer — расследование расхождения леджера с
         числом озвученных шагов). Новой серии под неизмеренную частоту не заводится.
         """
-        stage = "speech_finish"
-        try:
-            # Порядок «весь звук шага → списание синтеза → `done`» сохранён: он и делает
-            # невозможным исход «списано, но не доставлено».
-            if speech is not None:
-                await speech.finish()
-            stage = "speech_debit"
-            await self._settle_speech(out=out, speech=speech, wallet=wallet)
-            stage = "title"
-            if title_source is not None:
-                await self._ensure_title(db, title_source)
-            stage = "commit"
+        # Порядок стадий — инвариант («весь звук шага → списание синтеза → `done`»), а вот их
+        # ВЗАИМНАЯ независимость — второе требование §13.12, и одним `try` на всё тело оно НЕ
+        # выполняется: первая же упавшая стадия унесла бы все последующие. Отсюда обход: стадии
+        # перечислены как данные, а изоляция написана ОДИН раз — новая стадия, вставленная в
+        # этот кортеж, наследует её автоматически.
+        stages: tuple[tuple[str, Callable[[], Awaitable[None]]], ...] = (
+            ("speech_finish", lambda: speech.finish() if speech is not None else _noop()),
+            ("speech_debit", lambda: self._settle_speech(out=out, speech=speech, wallet=wallet)),
+            ("title", lambda: self._ensure_title(db, title_source) if title_source else _noop()),
             # Коммит ЯВНЫЙ: выход из `session_scope` через `break` закрывает генератор, не
             # доходя до его коммита, поэтому списание синтеза и заголовок иначе потерялись бы
             # вместе с транзакцией — шаг и списание ХОДА коммитит сам оркестратор, и они уже
             # в базе к этому моменту.
-            await db.commit()
-        except Exception as exc:
-            log_event(
-                logger,
-                logging.WARNING,
-                (
-                    "voice_speech_debit_skipped"
-                    if stage == "speech_debit"
-                    else "voice_turn_postprocess_failed"
-                ),
-                sessionId=str(self._session_id),
-                turnId=str(self._turn_id),
-                stepId=str(out.step_id) if out.step_id is not None else None,
-                voiceId=self._voice.id if self._voice is not None else None,
-                stage=stage,
-                reason=type(exc).__name__,
-            )
+            ("commit", db.commit),
+        )
+        for stage, run in stages:
+            try:
+                await run()
+            except Exception as exc:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    (
+                        "voice_speech_debit_skipped"
+                        if stage == "speech_debit"
+                        else "voice_turn_postprocess_failed"
+                    ),
+                    sessionId=str(self._session_id),
+                    turnId=str(self._turn_id),
+                    stepId=str(out.step_id) if out.step_id is not None else None,
+                    voiceId=self._voice.id if self._voice is not None else None,
+                    stage=stage,
+                    reason=type(exc).__name__,
+                )
+                # Изоляция не полна без ВОССТАНОВЛЕНИЯ ПРИГОДНОСТИ транзакции. `wallet.consume`
+                # роняет её НАМЕРЕННО — вставляет строку леджера и при нехватке баланса
+                # поднимает исключение, чтобы откатить вставку, — поэтому без отката следующая
+                # стадия упала бы по ЧУЖОЙ причине, и это была бы видимость изоляции, а не она.
+                # Откат снимает и незакоммиченную строку леджера: убыток «доставлено, но не
+                # списано» — ровно тот, что §6 уже назвал остаточным риском этого окна.
+                with contextlib.suppress(Exception):
+                    await db.rollback()
 
     async def _acquire_turn_lock(self) -> _TurnLock:
         """Взять межпроцессный признак «по этой сессии идёт ход» (ADR-104 §13.14).
@@ -1394,6 +1403,11 @@ def _parse_json(raw: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("frame must be a JSON object")
     return parsed
+
+
+async def _noop() -> None:
+    """Пустая стадия окна пост-обработки: шага в этом ходе нет, изоляция от этого не меняется."""
+    return None
 
 
 async def _handshake(websocket: WebSocket) -> tuple[uuid.UUID, str | None]:
