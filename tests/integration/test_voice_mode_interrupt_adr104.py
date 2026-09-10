@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from app.observability.metrics import voice_mode_turns_total
 from tests.integration.test_voice_mode_session_adr104 import (
     balance_of,
     chat_steps,
@@ -275,3 +276,93 @@ async def test_an_ordinary_turn_carries_neither_mark(voice_stand: Any) -> None:
     assert "interrupted" not in payload
     assert "turnFailed" not in payload
     assert first_of(frames, "done")["response"]["status"] == "assistant_message"
+
+
+# ---------------------------------------------------------------------------------------------
+# §13.11 — снимок в момент кадра и величина ХОДА
+# ---------------------------------------------------------------------------------------------
+
+
+async def test_interrupted_frame_arrives_in_both_rows_of_the_predicate(
+    voice_stand: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Кадр `interrupted` приходит в ОБЕИХ строках — он подтверждает НАМЕРЕНИЕ, а не отмену.
+
+    Против чтения «`interrupted` = отмена»: в строке «пусто» генерация не отменялась, ответ дошёл
+    целиком и пометки в шаге нет, а кадр всё равно пришёл непосредственно перед `done`, и исход
+    метрики хода — `interrupted`. Падает на реализации, привязавшей кадр к факту отмены.
+    """
+    stand = await voice_stand()
+    uid = await seed_voice_user(stand, balance=100)
+    barrier = interrupt_barrier(monkeypatch)
+    # Дельты идут ПОСЛЕ кадра — без этого кейс зелен и на чтении накопителя при дельте.
+    stand.script(barrier, *FIVE_SENTENCES)
+    before = voice_mode_turns_total.labels(outcome="interrupted")._value.get()  # noqa: SLF001
+
+    socket, ready = await stand.session(uid)
+    await socket.begin_utterance()
+    transcript = await socket.next()
+    await socket.send_frame(
+        {"type": "interrupt", "turnId": transcript["turnId"], "reason": "user_stop"}
+    )
+    frames = await socket.collect_until("done")
+
+    control = [f["type"] for f in frames if f["type"] not in ("__bytes__", "__close__")]
+    assert control[-2:] == ["interrupted", "done"], "кадр приходит непосредственно перед `done`"
+    assert voice_mode_turns_total.labels(outcome="interrupted")._value.get() == (  # noqa: SLF001
+        before + 1
+    )
+    # …и при этом генерация НЕ отменялась: ответ целиком, пометки в шаге нет.
+    answer = first_of(frames, "done")["response"]["assistantMessage"]
+    for sentence in FIVE_SENTENCES:
+        assert sentence.strip() in answer
+    payload = _payload(_assistant_steps(await chat_steps(stand, ready["sessionId"]))[0])
+    assert "interrupted" not in payload
+
+
+async def test_predicate_snapshot_is_a_turn_value_not_a_leg_value(
+    voice_stand: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Предикат считается по ХОДУ, а не по ноге (diff, §13.11).
+
+    Нога `tool_call` уже отдала сопутствующий текст и звук — пользователь его УСЛЫШАЛ; `interrupt`
+    приходит на ноге `continuation` ДО её первой дельты. Ход обязан отмениться на первой же дельте
+    continuation, а шаг — нести `payload.interrupted`.
+
+    Падает на реализации, снимающей предикат с ПОНОЖНОГО накопителя: он на continuation обнулён,
+    предикат дал бы «пусто», и ассистент договорил бы целый новый ответ после того, как его
+    попросили замолчать.
+    """
+    tool_call = ("calendar.read", {"start": "2026-09-10T00:00:00Z", "end": "2026-09-11T00:00:00Z"})
+    stand = await voice_stand()
+    uid = await seed_voice_user(stand, balance=100)
+    stand.script_tool_call([tool_call], "Сейчас посмотрю календарь и сразу отвечу. ")
+
+    socket, ready = await stand.session(uid)
+    first_leg = await socket.turn()
+    tool_done = first_of(first_leg, "done")["response"]
+    assert tool_done["status"] == "tool_call"
+    assert frames_of(first_leg, "audio.end"), "сопутствующий текст ноги tool_call УСЛЫШАН"
+
+    barrier = interrupt_barrier(monkeypatch)
+    stand.script(barrier, *FIVE_SENTENCES)
+    await socket.send_frame(
+        {
+            "type": "tool.result",
+            "turnId": tool_done["messageStepId"],
+            "results": [{"toolCallId": tool_done["toolCalls"][0]["id"], "result": {"ok": True}}],
+        }
+    )
+    await socket.send_frame(
+        {"type": "interrupt", "turnId": tool_done["messageStepId"], "reason": "barge_in"}
+    )
+    second_leg = await socket.collect_until("done")
+
+    answer = first_of(second_leg, "done")["response"]["assistantMessage"] or ""
+    assert FIVE_SENTENCES[-1].strip() not in answer, "нога continuation обязана отмениться"
+    payloads = [
+        _payload(step)
+        for step in _assistant_steps(await chat_steps(stand, ready["sessionId"]))
+        if str(step["message_step_id"]) == tool_done["messageStepId"]
+    ]
+    assert any("interrupted" in p for p in payloads)

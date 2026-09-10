@@ -466,6 +466,11 @@ async def test_start_creates_the_session_before_any_utterance(voice_stand: Any) 
     rows = [row for row in listing.json()["items"] if row["id"] == ready["sessionId"]]
     assert rows, "сессия обязана быть видна сразу после `start`"
     assert rows[0]["title"] is None
+
+    # Шагов нет ни одного, и проверяется это ИСТОРИЕЙ (список чатов шаги не отдаёт вовсе).
+    history = await stand.http.get(f"/v1/chats/{ready['sessionId']}", headers=auth_headers(uid))
+    assert history.status_code == 200, history.text
+    assert history.json()["steps"] == []
     assert await chat_steps(stand, ready["sessionId"]) == []
 
 
@@ -594,6 +599,9 @@ async def test_interrupt_after_done_is_dropped_silently(voice_stand: Any) -> Non
     frames = await socket.turn()
     assert frames_of(frames, "error") == []
     assert first_of(frames, "done")["response"]["status"] == "assistant_message"
+    # Намерение относилось к ЗАКРЫТОМУ ходу и на следующий не переносится: он обычный.
+    assert frames_of(frames, "interrupted") == []
+    assert first_of(frames, "done")["response"]["assistantMessage"] == delta_text(frames)
 
 
 async def test_interrupt_before_the_first_turn_is_dropped_silently(voice_stand: Any) -> None:
@@ -667,37 +675,60 @@ async def test_any_frame_before_start_is_a_session_scoped_validation_error(
     assert ready["type"] == "ready"
 
 
-async def test_input_media_type_set_is_not_the_output_one(voice_stand: Any) -> None:
-    """`mediaType` реплики вне набора ADR-095 §2 → `unsupported_media_type`, соединение живо.
+async def test_media_type_in_the_allowlist_but_not_audio_is_a_turn_refusal(
+    voice_stand: Any,
+) -> None:
+    """Кейс (1): тип ЕСТЬ в общем allowlist вложений, но он не класса `audio`.
 
-    Обратная сторона: тип, существующий ТОЛЬКО на выходе, на вход не принимается — наборы входа
-    и выхода не схлопнуты.
-
-    ⚠️ Норма называет здесь `audio/mpeg`, но он входит в набор ВХОДА ADR-095 §2 (`AUDIO_MEDIA_TYPES`,
-    `src/app/chat/attachments.py:68-70`) и потому на вход принимается штатно; наборы пересекаются.
-    Единственный тип, существующий только на выходе, — `audio/aac` (`TTS_AUDIO_FORMAT=aac`,
-    `src/app/config.py:25-28`), и он отвергается схемой кадра как `validation_error` со
-    `scope:"session"`. Расхождение вынесено `architect`; кейс проверяет сам инвариант — «выходной
-    тип на вход не проходит», — а не имя типа из формулировки.
+    Инвариант — «класс `audio` подмножество общего allowlist, и „не картинка“ недостаточно»:
+    отдельная проверка класса обязана быть, иначе `image/png` открыл бы реплику. Отказ —
+    `unsupported_media_type` со `scope:"turn"`, реплика не открывается, соединение живо.
     """
     stand = await voice_stand()
     uid = await seed_voice_user(stand, balance=100)
 
     socket, _ = await stand.session(uid)
     await socket.send_frame({"type": "utterance.begin", "mediaType": "image/png"})
-    unsupported = await socket.next()
-    assert (unsupported["code"], unsupported["scope"]) == ("unsupported_media_type", "turn")
+    error = await socket.next()
 
-    await socket.send_frame({"type": "utterance.begin", "mediaType": "audio/aac"})
-    output_type = await socket.next()
-    assert output_type["type"] == "error"
-    assert output_type["code"] in {"unsupported_media_type", "validation_error"}
+    assert (error["code"], error["scope"]) == ("unsupported_media_type", "turn")
     assert socket.close_code is None
-
-    # Ни одна из двух отвергнутых реплик сегмента не открыла: бинарный кадр всё ещё «вне сегмента».
+    # Реплика не открылась: следующий бинарный кадр всё ещё «вне сегмента».
     await socket.send_audio(b"stray")
     stray = await socket.next()
     assert (stray["code"], stray["scope"]) == ("unexpected_binary_frame", "session")
+
+
+async def test_media_type_outside_the_allowlist_is_rejected_by_the_frame_schema(
+    voice_stand: Any,
+) -> None:
+    """Кейс (2): типа НЕТ в allowlist вложений вовсе — отвергает СХЕМА кадра.
+
+    Граница между двумя кейсами проходит не по имени типа, а по принадлежности общему allowlist:
+    отсюда другой код и другая область — `validation_error` со `scope:"session"`.
+
+    ⚠️ Формулировка «выходной тип на вход не проходит» была бы НЕВЕРНА: наборы пересекаются —
+    `audio/mpeg` принадлежит обоим (вход — класс `audio` вложений,
+    `src/app/chat/attachments.py:68-70`;
+    выход — таблица форматов синтеза `src/app/config.py:25-28`). Единственный только-выходной тип
+    `audio/aac` в allowlist вложений отсутствует и потому попадает в ЭТОТ кейс, а не в первый.
+    """
+    stand = await voice_stand()
+    uid = await seed_voice_user(stand, balance=100)
+
+    socket, _ = await stand.session(uid)
+    await socket.send_frame({"type": "utterance.begin", "mediaType": "audio/aac"})
+    error = await socket.next()
+
+    assert (error["code"], error["scope"]) == ("validation_error", "session")
+    assert socket.close_code is None
+
+    # Обратная сторона границы: `audio/mpeg` принадлежит ОБОИМ наборам и на вход проходит.
+    stand.transcription.transcripts.append("реплика в mp3")
+    stand.script("Ответ на mp3-реплику. ")
+    frames = await socket.turn(media_type="audio/mpeg")
+    assert first_of(frames, "transcript")["text"] == "реплика в mp3"
+    assert first_of(frames, "done")["response"]["status"] == "assistant_message"
 
 
 # ---------------------------------------------------------------------------------------------
