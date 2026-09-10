@@ -54,6 +54,7 @@ DEFAULT_ENV: dict[str, str] = {
     "VOICE_MODE_IDLE_TIMEOUT_SECONDS": "120",
     "VOICE_MODE_UTTERANCE_MAX_SECONDS": "60",
     "ATTACHMENT_MAX_BYTES_AUDIO": str(10 * 1024 * 1024),
+    "RATE_LIMIT_CHAT_PER_USER": "1000",
     "CHARACTERS_ENABLED": "false",
 }
 
@@ -371,6 +372,58 @@ class SpeechBucket:
 
 
 @dataclass
+class ChatBucket:
+    """Бакет ходов `enforce_chat_limits` с ЖИВЫМ порогом `RATE_LIMIT_CHAT_PER_USER`.
+
+    Нужен там, где предмет кейса — сам порог (§13.16: рукопожатие расходует токен). По
+    умолчанию порог стенда завышен, поэтому прочим кейсам бакет не мешает.
+    """
+
+    taken: int = 0
+
+    async def take(self, **_kwargs: Any) -> bool:
+        from app.config import get_settings
+
+        limit = get_settings().rate_limit_chat_per_user
+        if self.taken >= limit:
+            return False
+        self.taken += 1
+        return True
+
+
+class FakeRedis:
+    """Redis для замка сессии `voice:turn:{sessionId}` (ADR-104 §13.14) — в памяти процесса.
+
+    Заведён потому, что настоящий Redis в тестовой среде недоступен, а обработчик при
+    `RedisError` идёт fail-open: кейс о замке на живом отказе Redis проходил бы по ветке
+    «замок не брался» и НЕ проверял бы ничего — ровно тот ложный зелёный, ради которого норма
+    и написана. Подменяется ВНЕШНЯЯ граница, правило замка остаётся настоящим.
+
+    `calls` фиксирует каждое взятие и его исход, поэтому кейс доказывает, что отказ пришёл ОТ
+    ЗАМКА, а не от fail-open.
+    """
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+        self.calls: list[dict[str, Any]] = []
+
+    async def set(
+        self, key: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> bool | None:
+        taken = not (nx and key in self.store)
+        if taken:
+            self.store[key] = value
+        self.calls.append({"key": key, "nx": nx, "ex": ex, "taken": taken})
+        return True if taken else None
+
+    async def delete(self, key: str) -> int:
+        return 1 if self.store.pop(key, None) is not None else 0
+
+    def held(self, key: str) -> bool:
+        return key in self.store
+
+
+@dataclass
 class VoiceStand:
     """Всё, что кейсу нужно наблюдать и чем управлять."""
 
@@ -379,6 +432,8 @@ class VoiceStand:
     llm: VoiceLLMFake
     speech: SpeechRecorder
     speech_bucket: SpeechBucket
+    chat_bucket: ChatBucket
+    redis: FakeRedis
     transcription: TranscriptionRecorder
     sessionmaker: async_sessionmaker[AsyncSession]
     _sockets: list[VoiceSocket] = field(default_factory=list)
@@ -511,9 +566,15 @@ async def voice_stand(
         deps.get_speech_client.cache_clear()
 
         bucket = SpeechBucket()
+        chat_bucket = ChatBucket()
+        fake_redis = FakeRedis()
 
         async def _allow(**_kwargs: Any) -> bool:
             return True
+
+        # Замок сессии `voice:turn:{sessionId}` обязан браться ПО-НАСТОЯЩЕМУ: на живом отказе
+        # Redis обработчик уходит в fail-open, и кейс о замке не проверял бы ничего.
+        monkeypatch.setattr(chat_voice, "get_redis", lambda: fake_redis)
 
         # Бакет синтеза — ЖИВОЙ (порог из настроек), остальные лимитеры открыты: их пороги
         # предметом голосовых кейсов не являются и задаются кейсом точечно, где нужны.
@@ -526,9 +587,13 @@ async def voice_stand(
 
         for module, name in (
             (rate_limit, "enforce_chat_limits"),
-            (rate_limit, "enforce_other_limits"),
             (chat_router, "enforce_chat_limits"),
             (chat_voice, "enforce_chat_limits"),
+        ):
+            monkeypatch.setattr(module, name, chat_bucket.take)
+
+        for module, name in (
+            (rate_limit, "enforce_other_limits"),
             (voices_router, "enforce_other_limits"),
         ):
             monkeypatch.setattr(module, name, _allow)
@@ -551,6 +616,8 @@ async def voice_stand(
             llm=llm,
             speech=speech,
             speech_bucket=bucket,
+            chat_bucket=chat_bucket,
+            redis=fake_redis,
             transcription=transcription,
             sessionmaker=db_sessionmaker,
         )
