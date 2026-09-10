@@ -24,13 +24,15 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
 from typing import Any
 
+import redis.asyncio as redis
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api_gateway.rate_limit import enforce_chat_limits, enforce_speech_limits
+from app.api_gateway.rate_limit import enforce_chat_limits, enforce_speech_limits, get_redis
 from app.audit.service import AuditService
 from app.chat.attachments import AUDIO_MEDIA_TYPES
 from app.chat.orchestrator import (
@@ -121,6 +123,48 @@ def _envelope(status_code: int, code: str, message: str) -> Any:
     )
 
 
+@dataclass(frozen=True)
+class _TurnLock:
+    """Межпроцессный признак «по этой сессии идёт ход» (ADR-104 §13.14).
+
+    `key is None` означает «снимать нечего»: либо признак не брался (fail-open при недоступном
+    Redis), либо он занят другим процессом и эта нога его не ставила. Снятие идёт в той же
+    точке, где нога закрывается, — иначе замок пережил бы ход, который его завёл.
+    """
+
+    acquired: bool
+    key: str | None
+
+    async def release(self) -> None:
+        if self.key is None:
+            return
+        try:
+            await get_redis().delete(self.key)
+        except redis.RedisError:
+            # Отпустит TTL. Молчим намеренно: недоступность Redis уже залогирована при взятии,
+            # а вторая запись о том же факте засоряла бы журнал на каждом ходе.
+            return
+
+
+@dataclass(frozen=True)
+class _PendingTurn:
+    """Реплика, принятая в очередь ПОСЛЕ прерывания текущего хода (ADR-104 §13.13).
+
+    Глубина очереди — ОДНА реплика, и это следствие §3, а не произвол: ходы строго
+    последовательны, поэтому держать больше одной отложенной бессмысленно — вторая при занятом
+    слоте получает существующий `turn_in_progress`, новых кодов не заводится.
+
+    Живёт в СОЕДИНЕНИИ и переживать его не обязана: обрыв сокета отменяет отложенную реплику
+    вместе с транспортом — звук в полёте теряется и сегодня.
+    """
+
+    audio: bytes | None
+    media_type: str | None
+    text: str | None
+    generation_mode: GenerationMode
+    context: dict[str, Any] | None
+
+
 class _Denied(Exception):
     """Отказ рукопожатия: обычный HTTP до апгрейда."""
 
@@ -183,6 +227,10 @@ class _VoiceSession:
         # ОДНИМ кадром при закрытии хода: раньше `turnId` ещё не выпущен оркестратором, а кадр
         # без него был бы вторым, «безадресным» пространством идентификаторов.
         self._speech_skipped: str | None = None
+        # Очередь глубины 1: реплика, сказанная ПОСЛЕ `interrupt`, пока прерванный ход ещё
+        # закрывается (ADR-104 §13.13). §5 обещает дословно: «устройство вправе начать новую
+        # реплику — она встанет в очередь и пойдёт, как только текущий ход закроется».
+        self._pending: _PendingTurn | None = None
 
     # ---- транспорт ----
 
@@ -522,16 +570,18 @@ class _VoiceSession:
                 scope=SCOPE_TURN,
             )
             return
-        if not await self._claim_turn():
-            return
-        self._spawn_turn(
-            self._turn_from_utterance(
-                audio=audio,
-                media_type=media_type,
-                generation_mode=frame.generationMode,
-                context=frame.context,
-            )
+        pending = _PendingTurn(
+            audio=audio,
+            media_type=media_type,
+            text=None,
+            generation_mode=frame.generationMode,
+            context=frame.context,
         )
+        # Байты реплики, ПРИНЯТОЙ в очередь, переживают решение (они уже сняты в локальную
+        # величину выше); байты ОТКЛОНЁННОЙ — теряются вместе с ней, как и требует контракт.
+        if not await self._claim_turn(pending):
+            return
+        self._spawn_turn(self._start_pending(pending))
 
     async def _on_text_frame(self, payload: dict[str, Any]) -> None:
         try:
@@ -544,27 +594,42 @@ class _VoiceSession:
                 turn_id=self._turn_id,
             )
             return
-        if not await self._claim_turn():
-            return
-        self._spawn_turn(
-            self._turn_from_text(
-                text=frame.text,
-                generation_mode=frame.generationMode,
-                context=frame.context,
-            )
+        pending = _PendingTurn(
+            audio=None,
+            media_type=None,
+            text=frame.text,
+            generation_mode=frame.generationMode,
+            context=frame.context,
         )
+        if not await self._claim_turn(pending):
+            return
+        self._spawn_turn(self._start_pending(pending))
 
-    async def _claim_turn(self) -> bool:
-        """Ходы строго последовательны: второй ход при незакрытом первом отклоняется."""
-        if self._turn_task is not None and not self._turn_task.done():
-            await self._error(
-                code="turn_in_progress",
-                message="a turn of this session is still running",
-                scope=SCOPE_TURN,
-                turn_id=self._turn_id,
-            )
+    async def _claim_turn(self, pending: _PendingTurn) -> bool:
+        """Пустить реплику в работу СЕЙЧАС, отложить её или отказать (ADR-104 §3, §13.13).
+
+        Три исхода, и различает их ровно одно — принято ли по ТЕКУЩЕМУ ходу прерывание:
+
+        * ход не идёт → `True`, реплика стартует немедленно;
+        * ход идёт, прерывание ЭТОГО хода принято, слот очереди свободен → реплика принимается
+          МОЛЧА (кадра отказа нет) и уйдёт в работу, как только ход закроется. Иначе перебить и
+          сразу заговорить — флагманский жест режима — не давал бы ничего до десятков секунд;
+        * во всех прочих случаях → `turn_in_progress`, накопленный звук отбрасывается. Без
+          прерывания правило §3 не меняется, и вторая отложенная реплика тоже получает отказ:
+          глубина очереди — одна.
+        """
+        if self._turn_task is None or self._turn_task.done():
+            return True
+        if self._interrupt_reason is not None and self._pending is None:
+            self._pending = pending
             return False
-        return True
+        await self._error(
+            code="turn_in_progress",
+            message="a turn of this session is still running",
+            scope=SCOPE_TURN,
+            turn_id=self._turn_id,
+        )
+        return False
 
     # ---- прерывание ----
 
@@ -648,6 +713,28 @@ class _VoiceSession:
         self._speech_skipped = None
         self._turn_id = None
         self._turn_budget = VoiceTurnBudget()
+
+    async def _start_pending(self, pending: _PendingTurn) -> None:
+        """Пустить реплику в работу — ОДИН путь для немедленной и для отложенной.
+
+        Отложенная реплика — обычный ход: она проходит `_allow_turn` целиком (ось режима,
+        свежесть JWT, лимит ходов) в момент СТАРТА, а не постановки, и получает свой `turnId`.
+        Прерывание предыдущего хода на неё не переносится — `_new_turn` сбрасывает причину.
+        """
+        if pending.text is not None:
+            await self._turn_from_text(
+                text=pending.text,
+                generation_mode=pending.generation_mode,
+                context=pending.context,
+            )
+            return
+        assert pending.audio is not None and pending.media_type is not None
+        await self._turn_from_utterance(
+            audio=pending.audio,
+            media_type=pending.media_type,
+            generation_mode=pending.generation_mode,
+            context=pending.context,
+        )
 
     async def _turn_from_utterance(
         self,
@@ -762,7 +849,15 @@ class _VoiceSession:
                 turn_id=self._turn_id,
             )
             return
-        if not await self._claim_turn():
+        if self._turn_task is not None and not self._turn_task.done():
+            # Нога continuation — тот же ход, а не второй: очередь §13.13 её не касается, и
+            # отложить её некуда — барьер хода ждёт именно этих результатов.
+            await self._error(
+                code="turn_in_progress",
+                message="a turn of this session is still running",
+                scope=SCOPE_TURN,
+                turn_id=self._turn_id,
+            )
             return
         # `turnId` кадра НЕ принимается: `turnId` — это `messageStepId`, который выпустил
         # оркестратор и который транспорт уже знает (`_turn_id`). Взять его снаружи значило бы
@@ -891,6 +986,21 @@ class _VoiceSession:
         """
         outcome = "ok"
         speech: VoiceTurnSpeech | None = None
+        out: ChatRunOut | None = None
+        # §13.14: межпроцессный признак «по этой сессии идёт ход». `_claim_turn` — быстрый
+        # ЛОКАЛЬНЫЙ рубеж в пределах соединения, этот — второй, по СЕССИИ: §3 выводит
+        # последовательность из свойств сессии, а переподключение с тем же `sessionId` объявлено
+        # штатным и брошенный ход доходит до конца — то есть наложение двух ходов одной сессии
+        # достижимо ДВУМЯ соединениями, где локального поля не хватает по построению.
+        lock = await self._acquire_turn_lock()
+        if not lock.acquired:
+            await self._error(
+                code="turn_in_progress",
+                message="a turn of this session is still running",
+                scope=SCOPE_TURN,
+                turn_id=self._turn_id,
+            )
+            return
         try:
             async for db in session_scope():
                 orchestrator = get_v2_orchestrator(db)
@@ -898,17 +1008,17 @@ class _VoiceSession:
                 speech = await self._prepare_speech(wallet=wallet)
                 self._turn_speech = speech
                 out = await call(orchestrator)
-                # Весь звук шага → списание синтеза → `done`. Порядок — инвариант, а не деталь:
-                # он и делает невозможным исход «списано, но не доставлено».
-                if speech is not None:
-                    await speech.finish()
-                await self._settle_speech(out=out, speech=speech, wallet=wallet)
-                if title_source is not None:
-                    await self._ensure_title(db, title_source)
-                # Коммит ЯВНЫЙ: выход из `session_scope` через `break` закрывает генератор, не
-                # доходя до его коммита, поэтому списание синтеза и заголовок иначе потерялись
-                # бы вместе с транзакцией — шаг и списание хода коммитит сам оркестратор.
-                await db.commit()
+                # ---- ОКНО ПОСТ-ОБРАБОТКИ: от результата оркестратора до кадра `done` ----
+                # Ход СОСТОЯЛСЯ. Всё, что делается здесь, — доводка: весь звук шага, списание
+                # синтеза, автозаголовок, коммит транзакции сокета. Отказ ЛЮБОГО из этих шагов
+                # не имеет права подавить `done` (§13.12): без него у клиента не закрывается
+                # ход — ни `ChatResponse`, ни `usage`, ни нового баланса, — а серия получает
+                # аварию на бизнес-исходе. Правило задано ПРИЗНАКОМ окна, а не перечнем
+                # вызовов: новый `await`, добавленный СЮДА, наследует его автоматически.
+                await self._post_turn(
+                    db=db, out=out, speech=speech, wallet=wallet, title_source=title_source
+                )
+                # ---- КОНЕЦ ОКНА: дальше кадр `done`, и он уходит при любом исходе выше ----
                 outcome = await self._close_turn(out=out)
                 break
         except AppError as exc:
@@ -941,25 +1051,145 @@ class _VoiceSession:
             )
         finally:
             self._turn_speech = None
+            await lock.release()
             if outcome == "ok" and not self._alive:
                 # Сокет закрылся до `done`, ход доведён до конца: наблюдение, а не авария. С
                 # поломкой поставщика этот исход НЕ сливается — потому и только при `ok`:
                 # ушедший клиент не отменяет того, что провайдер отказал.
                 outcome = "disconnected"
-            voice_mode_turns_total.labels(outcome=outcome).inc()
+            # §13.15: единица серии и лога — ХОД, а не нога. Нога, отдавшая `tool_call` без
+            # отказа, ход НЕ закрыла: она попросила устройство, и за ней ожидается continuation
+            # — предикат тот же, что у «завершающего шага» §13.1. Инкремент на такой ноге дал бы
+            # два `ok` вместо одного (искажён знаменатель «доли прерванных ходов») и `ok` +
+            # `upstream_error` там, где ход один (завышен числитель алерта). Лог следует за
+            # метрикой: два источника одной величины разошлись бы.
+            if outcome != "ok" or out is None or out.status != "tool_call":
+                voice_mode_turns_total.labels(outcome=outcome).inc()
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "voice_mode_turn",
+                    sessionId=str(self._session_id),
+                    turnId=str(self._turn_id),
+                    voiceId=self._voice.id if self._voice is not None else None,
+                    outcome=outcome,
+                    answerChars=len(self._turn_text),
+                    segments=speech.delivered_segments if speech is not None else 0,
+                    latencyMs=int((time.monotonic() - started) * 1000),
+                    interruptReason=self._interrupt_reason,
+                )
+            # §13.13: реплика, принятая в очередь, пока этот ход закрывался, уходит в работу
+            # ЗДЕСЬ — тем же путём, что обычная, и со своим `turnId`. Порядок обязателен:
+            # старт только ПОСЛЕ того, как `_turn_task` этой ноги завершается, иначе
+            # `_claim_turn` следующей реплики увидел бы занятый слот.
+            pending, self._pending = self._pending, None
+            if pending is not None and self._alive:
+                self._spawn_turn(self._start_pending(pending))
+
+    async def _post_turn(
+        self,
+        *,
+        db: AsyncSession,
+        out: ChatRunOut,
+        speech: VoiceTurnSpeech | None,
+        wallet: WalletService,
+        title_source: str | None,
+    ) -> None:
+        """Пост-обработка СОСТОЯВШЕГОСЯ хода. Ни один её отказ наружу не выходит (ADR-104 §13.12).
+
+        Окно определено ПРИЗНАКОМ, а не перечнем: всё, что выполняется после получения `out` от
+        оркестратора и до отправки `done`, — доводка уже случившегося. Ход исполнен, ответ у нас
+        в руках, деньги за него посчитаны оркестратором; подавить `done` из-за неудачи доводки
+        значило бы не закрыть у клиента ход, который на сервере состоялся.
+
+        Путь не экзотический и не гипотетический: балансовый гейт синтеза снимается ДО хода, а
+        собственное списание хода уходит ВНУТРИ него — поэтому баланс, равный ровно цене хода,
+        гейт проходит, ходом обнуляется и детерминированно роняет списание синтеза.
+
+        **Клиенту отказ не сообщается, и носители перебраны:** `speech.skipped
+        {insufficient_credits}` означает «звука не будет» — после прозвучавшего звука это ложь о
+        состоявшемся; `error {scope:"speech"}` сообщал бы пользователю о деньгах, которых он не
+        должен (услугу он получил, недостача наша). Ни одна строка закрытой таблицы отказов сюда
+        не подходит, новой не заводится. Исход метрики остаётся `ok`: отдать `upstream_error`
+        бизнес-исходу «кончились деньги» — ровно та переоценка, которую §12 запрещает.
+
+        **Убыток обязан быть наблюдаем:** отказ пишется WARNING-событием, для списания синтеза —
+        именем `voice_speech_debit_skipped` (consumer — расследование расхождения леджера с
+        числом озвученных шагов). Новой серии под неизмеренную частоту не заводится.
+        """
+        stage = "speech_finish"
+        try:
+            # Порядок «весь звук шага → списание синтеза → `done`» сохранён: он и делает
+            # невозможным исход «списано, но не доставлено».
+            if speech is not None:
+                await speech.finish()
+            stage = "speech_debit"
+            await self._settle_speech(out=out, speech=speech, wallet=wallet)
+            stage = "title"
+            if title_source is not None:
+                await self._ensure_title(db, title_source)
+            stage = "commit"
+            # Коммит ЯВНЫЙ: выход из `session_scope` через `break` закрывает генератор, не
+            # доходя до его коммита, поэтому списание синтеза и заголовок иначе потерялись бы
+            # вместе с транзакцией — шаг и списание ХОДА коммитит сам оркестратор, и они уже
+            # в базе к этому моменту.
+            await db.commit()
+        except Exception as exc:
             log_event(
                 logger,
-                logging.INFO,
-                "voice_mode_turn",
+                logging.WARNING,
+                (
+                    "voice_speech_debit_skipped"
+                    if stage == "speech_debit"
+                    else "voice_turn_postprocess_failed"
+                ),
                 sessionId=str(self._session_id),
                 turnId=str(self._turn_id),
+                stepId=str(out.step_id) if out.step_id is not None else None,
                 voiceId=self._voice.id if self._voice is not None else None,
-                outcome=outcome,
-                answerChars=len(self._turn_text),
-                segments=speech.delivered_segments if speech is not None else 0,
-                latencyMs=int((time.monotonic() - started) * 1000),
-                interruptReason=self._interrupt_reason,
+                stage=stage,
+                reason=type(exc).__name__,
             )
+
+    async def _acquire_turn_lock(self) -> _TurnLock:
+        """Взять межпроцессный признак «по этой сессии идёт ход» (ADR-104 §13.14).
+
+        Ключ — на `sessionId`, взятие атомарным `SET … NX EX`. Область замка ровно та же, что у
+        локального `_turn_task`: ИСПОЛНЕНИЕ НОГИ. Ожидание на барьере хода (между
+        `done {status:"tool_call"}` и кадром `tool.result`) замком НЕ покрывается — там сервер
+        не работает, и покрытие этого окна было бы новой семантикой, которой нет и в пределах
+        одного соединения.
+
+        **TTL — страховка от гибели процесса, а не рабочий таймер:** он равен таймауту вызова
+        провайдера этой сессии, новой переменной не вводится. Самолечение обязательно — без него
+        убитый процесс запер бы сессию навсегда, и лекарство оказалось бы хуже болезни.
+
+        **Fail-open при недоступности Redis** — как у всех лимитеров сервиса: отказ Redis не
+        имеет права лишать пользователя голосового режима. Остаточный риск назван прямо: на
+        время недоступности Redis наложение двух ходов одной сессии снова возможно.
+        """
+        if self._session_id is None:  # pragma: no cover — ход без сессии не стартует
+            return _TurnLock(acquired=True, key=None)
+        key = f"voice:turn:{self._session_id}"
+        settings = self._settings
+        provider = settings.credits_provider_for_model(None)
+        ttl = int(
+            settings.anthropic_timeout_seconds
+            if provider == "anthropic"
+            else settings.openai_timeout_seconds
+        )
+        try:
+            taken = await get_redis().set(key, str(id(self)), nx=True, ex=max(ttl, 1))
+        except redis.RedisError as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "voice_turn_lock_unavailable",
+                sessionId=str(self._session_id),
+                error=str(exc),
+            )
+            return _TurnLock(acquired=True, key=None)
+        return _TurnLock(acquired=bool(taken), key=key if taken else None)
 
     async def _prepare_speech(self, *, wallet: WalletService) -> VoiceTurnSpeech | None:
         """Балансовый гейт синтеза ДО первого сегмента (ADR-104 §6, §9).
