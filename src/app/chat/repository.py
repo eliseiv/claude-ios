@@ -312,26 +312,42 @@ class ChatRepository:
         )
         return row
 
-    async def has_assistant_step(self, session_id: uuid.UUID, message_step_id: uuid.UUID) -> bool:
-        """Есть ли у ЭТОГО хода хоть один шаг ассистента.
+    async def has_terminal_assistant_step(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID
+    ) -> bool:
+        """Есть ли у ЭТОГО хода ЗАВЕРШАЮЩИЙ шаг ассистента (ADR-104 §13.1).
 
         Нужен ровно для одного решения: помечать ли ход, упавший после записи реплики
         пользователя. Шаг пользователя коммитится ДО сетевого вызова намеренно — чтобы не держать
         соединение с базой открытым всю генерацию, — поэтому отказ провайдера оставляет реплику в
         истории без ответа, и на следующем ходу модель отвечает на неё, а не на новую.
-        Существующий шаг ассистента означает, что ход что-то уже ответил (например, виток с
-        вызовом инструмента), и вторая пометка была бы ложью о состоянии.
+
+        **Завершающий шаг** — assistant-шаг хода, чей `payload.content` НЕ содержит ни одного
+        блока `tool_use`, либо шаг, уже несущий закрывающую пометку (`turnFailed`/`interrupted`).
+        Предикат вычисляется из персистированного `payload`, а не из состояния процесса.
+
+        **Почему не «есть хоть один шаг».** Шаг с `tool_use` не ОТВЕТИЛ, а ПОПРОСИЛ устройство:
+        за ним по построению ожидается continuation (барьер хода, ADR-025 §B3). Нога `tool_call`
+        такой шаг записывает всегда, поэтому прежний предикат на ноге continuation был истинен
+        ВСЕГДА, и закрывающая пометка там не писалась НИКОГДА — ход, оборвавшийся после запроса
+        инструмента, оставался в истории вообще без ответа.
+
+        **Основание исходного гейта сохранено дословно, а не отменено:** вторая пометка там, где
+        ход уже ответил, была бы ложью о состоянии. Уточнено ТОЛЬКО то, что считать ответом.
+        Отсюда и вторая половина предиката: ход, уже несущий `turnFailed` или `interrupted`,
+        завершён — двух закрывающих шагов у одного хода не бывает.
+
+        **Норма — свойство ХОДА, а не транспорта:** действует одинаково на первой ноге, на ноге
+        continuation, на сокете и на `POST /v1/chat/tool-result`.
         """
-        found: uuid.UUID | None = await self._session.scalar(
-            select(ChatStep.id)
-            .where(
+        rows = await self._session.scalars(
+            select(ChatStep.payload).where(
                 ChatStep.session_id == session_id,
                 ChatStep.message_step_id == message_step_id,
                 ChatStep.role == "assistant",
             )
-            .limit(1)
         )
-        return found is not None
+        return any(_is_terminal_assistant_payload(payload) for payload in rows)
 
     async def generation_mode_for_message_step(
         self, session_id: uuid.UUID, message_step_id: uuid.UUID
@@ -765,6 +781,16 @@ class ChatRepository:
         round's tool step, but the FIRST (smallest seq) assistant step after the anchor is this
         round's step (ASC ``.first()``). Falls back to the latest assistant step (max seq) if the
         anchor tool step is unavailable.
+
+        **Шаг с пометкой `turnFailed` витком НЕ считается и пропускается (ADR-104 §13.1).** Он не
+        ответ модели, а закрывающая пометка отказа: с тех пор как оборвавшаяся continuation стала
+        её оставлять, первый assistant-шаг после якоря может оказаться именно ею. Вернув её как
+        сохранённый виток, реплей отдавал бы клиенту «ход не удался» НАВСЕГДА — повтор того же
+        батча после транзиентного отказа не вызвал бы провайдера больше никогда.
+
+        **Шаг с `interrupted` НЕ пропускается, и это не асимметрия ради удобства:** он несёт
+        настоящий ответ — накопленный префикс, который человек услышал, — и реплей обязан
+        вернуть именно его. Правило одной пометки на другую не переносить.
         """
         anchor_seq = await self._session.scalar(
             select(ChatStep.seq)
@@ -786,9 +812,39 @@ class ChatRepository:
             rows = await self._session.scalars(
                 query.where(ChatStep.seq > anchor_seq).order_by(ChatStep.seq.asc())
             )
-            return rows.first()
+            return _first_non_marker(rows)
         rows = await self._session.scalars(query.order_by(ChatStep.seq.desc()))
-        return rows.first()
+        return _first_non_marker(rows)
+
+
+def _is_terminal_assistant_payload(payload: dict[str, Any] | None) -> bool:
+    """Завершает ли этот assistant-шаг ход (ADR-104 §13.1). Чистая функция над `payload`.
+
+    Единственное определение «у хода уже есть ответ»; второго не заводится — разойдясь, они дали
+    бы поверхность, где ход одновременно закрыт и не закрыт.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("turnFailed") is not None or payload.get("interrupted") is not None:
+        # Закрывающая пометка — сама по себе завершение хода.
+        return True
+    content = payload.get("content")
+    if not isinstance(content, list):
+        # Шаг без разобранного содержимого нечем признать «просьбой к устройству», а значит он
+        # ответ: fail-safe в сторону «не писать вторую пометку».
+        return True
+    return not any(isinstance(block, dict) and block.get("type") == "tool_use" for block in content)
+
+
+def _first_non_marker(rows: Any) -> ChatStep | None:
+    """Первый шаг выборки, не являющийся пометкой `turnFailed` (ADR-104 §13.1)."""
+    for row in rows:
+        payload = row.payload
+        if isinstance(payload, dict) and payload.get("turnFailed") is not None:
+            continue
+        step: ChatStep = row
+        return step
+    return None
 
 
 def _json_or_null(value: dict[str, Any] | None) -> str | None:

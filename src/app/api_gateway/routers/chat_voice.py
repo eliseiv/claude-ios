@@ -975,10 +975,15 @@ class _VoiceSession:
         """
         assert self._voice is not None
         if speech is None or speech.delivered_segments == 0:
-            if speech is not None and not speech.failed and self._interrupt_reason is None:
-                # Пустым оказался ВЕСЬ ход: звука нет вовсе, но ход успешен. `422
-                # nothing_to_speak` — код РУЧКИ синтеза, и на ход он не переносится, иначе
-                # ответ, состоящий из кода, ронял бы диалог.
+            if speech is not None and not speech.had_speakable_text:
+                # `nothing_to_speak` определён контрактом ДОСЛОВНО как «очищенный текст ответа
+                # пуст», и предикат обязан быть именно этим, а не «доставлено ноль сегментов».
+                # Молчание по любой другой причине имеет СВОЮ строку таблицы отказов: бакет
+                # исчерпан → `error {rate_limited, scope:"speech"}`; потолок хода исчерпан
+                # предыдущей ногой → `done.speechTruncated`; прерывание → кадр `interrupted`;
+                # отказ синтезатора → `error {upstream_error, scope:"speech"}`. Отдать им общую
+                # причину значило бы послать клиенту ложное значение из ЗАКРЫТОГО перечня;
+                # третьего значения `reason` при этом не заводится.
                 self._speech_skipped = "nothing_to_speak"
             return
         if out.step_id is None:  # pragma: no cover — шаг существует у любой озвученной ноги
@@ -1030,6 +1035,13 @@ class _VoiceSession:
             {
                 "type": "done",
                 "turnId": str(self._turn_id),
+                # ADR-104 §13.8: свойство ХОДА на момент этого `done` — «озвучено НЕ ВСЁ,
+                # сработал совокупный TTS_MAX_CHARS». Истинно при ОБОИХ способах исчерпания,
+                # включая точное, когда `audio.end.truncated` у всех сегментов остался `false`
+                # и другого носителя признака нет. Из сегментного `truncated` не выводится и
+                # его не выводит. Живёт на КАДРЕ: `ChatResponse` не меняется ни на байт —
+                # транспортный факт не появляется на всех маршрутах генерации разом.
+                "speechTruncated": self._turn_budget.capped,
                 # Немодифицированный `ChatResponse` — тот же объект и та же сериализация, что в
                 # кадре `done` SSE. Своей формы ответа у голосового канала нет: она удвоила бы
                 # правила `toolCalls`/`quiz`/`mediaJobs`/`documents`/`blockReason`.

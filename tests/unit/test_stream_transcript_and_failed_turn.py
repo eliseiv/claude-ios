@@ -130,7 +130,11 @@ class _FakeRepo:
         self._has_assistant = has_assistant
         self.added: list[dict[str, Any]] = []
 
-    async def has_assistant_step(self, _s: uuid.UUID, _m: uuid.UUID) -> bool:
+    async def has_terminal_assistant_step(self, _s: uuid.UUID, _m: uuid.UUID) -> bool:
+        # ADR-104 §13.1: предикат переименован (было `has_assistant_step` — «есть хоть один
+        # шаг», стало «есть ЗАВЕРШАЮЩИЙ шаг»). Утверждение теста НЕ меняется: он по-прежнему
+        # проверяет, что при уже отвеченном ходе пометка не пишется, а при неотвеченном —
+        # пишется. Сменился только СПОСОБ, которым страж адресует величину.
         return self._has_assistant
 
     async def add_step(self, **kwargs: Any) -> Any:

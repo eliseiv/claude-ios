@@ -1943,7 +1943,10 @@ class ChatOrchestrator:
         собой исходную причину отказа не имеет права.
         """
         try:
-            if await self._deps.repo.has_assistant_step(session_id, message_step_id):
+            # ADR-104 §13.1: предикат — «есть ЗАВЕРШАЮЩИЙ шаг ассистента», а не «есть хоть
+            # какой-нибудь». Шаг с `tool_use` не ответил, а попросил устройство, и прежний гейт
+            # на ноге continuation был истинен всегда — пометка там не писалась никогда.
+            if await self._deps.repo.has_terminal_assistant_step(session_id, message_step_id):
                 return
             await self._deps.repo.add_step(
                 session_id=session_id,
