@@ -8,10 +8,11 @@ from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.requests import HTTPConnection
 
 from app.admin.crm_service import CrmAdminService
 from app.admin.economics_service import AdminEconomicsService
@@ -448,8 +449,13 @@ def _is_trusted_proxy(ip: str) -> bool:
     return any(addr in network for network in get_settings().trusted_proxy_networks())
 
 
-def client_ip(request: Request) -> str | None:
+def client_ip(request: HTTPConnection) -> str | None:
     """Resolve the real client IP, respecting a trusted reverse-proxy chain.
+
+    Принимает ``HTTPConnection`` — общего предка ``Request`` и ``WebSocket``: из соединения
+    читаются только ``client`` и ``headers``, одинаковые у обоих. Расширение аннотации, а не
+    второй резолвер для сокета: правило «доверяем XFF только за доверенным прокси» обязано быть
+    одним, иначе рукопожатие WebSocket молча получило бы иную модель угроз (ADR-104 §8).
 
     The API runs behind a reverse-proxy / LB (07-deployment.md), so the socket peer is the
     proxy, not the client. We only honour X-Forwarded-For / X-Real-IP when the immediate peer

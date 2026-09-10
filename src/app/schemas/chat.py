@@ -99,7 +99,7 @@ GenerationMode = Literal["general", "research", "reasoning", "study_learn"]
 # (ADR-065 §1.5) re-orders whatever the operator typed back into this order.
 GENERATION_MODE_ORDER: tuple[str, ...] = get_args(GenerationMode)
 # Mode used when the request omits the field; must always be advertised (ADR-065 §1.3).
-DEFAULT_GENERATION_MODE = "general"
+DEFAULT_GENERATION_MODE: GenerationMode = "general"
 # Fail-closed default of the advertisement allowlist (ADR-065 §1.2): the modes that need no
 # dedicated client UI. `study_learn` requires a quiz renderer, so it is advertised only where an
 # instance opts in explicitly via CHAT_ADVERTISED_GENERATION_MODES.

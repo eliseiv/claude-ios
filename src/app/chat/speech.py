@@ -22,11 +22,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 import openai
 
@@ -36,6 +38,7 @@ from app.chat.voices import PROVIDER_OPENAI, Voice, resolve_voice
 from app.chats.provider_blocks import to_domain_blocks
 from app.config import Settings
 from app.errors import (
+    AppError,
     GatewayTimeoutError,
     InsufficientCreditsError,
     NothingToSpeakError,
@@ -46,6 +49,7 @@ from app.errors import (
     VoiceOutputNotConfiguredError,
 )
 from app.observability.logging import get_logger, log_event
+from app.observability.metrics import voice_mode_speech_segments_total
 from app.preferences.service import PreferencesService
 from app.wallet.service import WalletService
 
@@ -231,6 +235,104 @@ def apply_speech_cap(text: str, max_chars: int) -> tuple[str, bool]:
     return head.strip(), True
 
 
+# ---------------------------------------------------------------------------------------------
+# 1b. Сегментация потока для голосового режима (ADR-104 §6)
+# ---------------------------------------------------------------------------------------------
+# Живёт ЗДЕСЬ, рядом с чисткой и клиентом синтеза, намеренно: «что такое произносимый текст»
+# имеет ровно одну реализацию (`to_spoken_text`), и сегментация обязана применять именно её.
+# Второй набор правил разошёлся бы с первым НЕСЛЫШНО ДЛЯ ТЕСТОВ И СЛЫШНО ДЛЯ ПОЛЬЗОВАТЕЛЯ.
+#
+# Сегмент — ПРЕДЛОЖЕНИЕ на растущем буфере, а не дельта: дельты провайдера приходят кусками
+# произвольной длины, и граница предложения в них ни при чём.
+
+
+def _open_fence(text: str) -> bool:
+    """Осталась ли в тексте НЕЗАКРЫТАЯ ограда блока кода (``` / ~~~).
+
+    Правило совпадения ограды — то же, что у `_strip_fenced_code_blocks` (CommonMark:
+    закрывающая того же символа и не короче открывающей). Второго разбора ограды не заводится:
+    он разошёлся бы с чисткой, и сегмент выпускался бы посреди кода.
+    """
+    fence: str | None = None
+    for line in text.split("\n"):
+        match = _FENCE_RE.match(line.lstrip())
+        if match is None:
+            continue
+        if fence is None:
+            fence = match.group(1)
+            continue
+        closing = match.group(1)
+        if closing[0] == fence[0] and len(closing) >= len(fence):
+            fence = None
+    return fence is not None
+
+
+def _tail_is_table_line(text: str) -> bool:
+    """Заканчивается ли префикс строкой таблицы Markdown.
+
+    Таблица растёт строка за строкой, и срез внутри неё оставил бы половину таблицы в одном
+    сегменте, половину в другом. Чистка удаляет строки таблицы ЦЕЛИКОМ (шаг 3), поэтому
+    «половина таблицы» — это не испорченная речь, а МОЛЧА разное поведение для одного и того же
+    текста в зависимости от того, где его застал срез. Ждём, пока таблица кончится.
+    """
+    last = text.rsplit("\n", 1)[-1].strip()
+    if not last:
+        return False
+    return bool(_TABLE_ROW_RE.match(last)) or bool(_TABLE_DELIMITER_RE.match(last) and "|" in last)
+
+
+def _unclosed_link(text: str) -> bool:
+    """Обрывается ли префикс внутри незакрытой ссылки/картинки Markdown.
+
+    Две формы: незакрытый текст ссылки (`[` без парного `]`) и незакрытый адрес (`](` без `)`).
+    Срез между ними отдал бы синтезатору голую скобку в одном сегменте и голый URL в другом —
+    а чистка (шаг 4) удаляет ссылку только целиком.
+    """
+    if text.count("[") > text.count("]"):
+        return True
+    closing = text.rfind("]")
+    if closing == -1:
+        return False
+    rest = text[closing + 1 :]
+    return rest.startswith("(") and ")" not in rest
+
+
+def _inside_unclosed_construct(prefix: str) -> bool:
+    """Правило (в) ADR-104 §6: срез не внутри незакрытой конструкции.
+
+    Перечень закрываемых конструкций — ограда блока кода, строка таблицы, незакрытая ссылка —
+    ЗАКРЫТ и назван в контракте. Остаточный риск назван прямо и здесь: сегмент, очищенный в
+    отрыве, может отличаться от того же текста, очищенного целиком; правило закрывает ИЗВЕСТНЫЕ
+    конструкции, а не все мыслимые.
+    """
+    return _open_fence(prefix) or _tail_is_table_line(prefix) or _unclosed_link(prefix)
+
+
+def next_speech_segment(buffer: str, min_chars: int) -> tuple[str, str] | None:
+    """Отрезать от растущего буфера очередной сегмент озвучки. `None` — ещё рано (ADR-104 §6).
+
+    Кандидат — НАИБОЛЬШИЙ префикс буфера, который: (а) заканчивается на границе предложения (та
+    же `_SENTENCE_END_RE`, что уже используется потолком, — второй границы предложения в системе
+    не заводится); (б) не короче ``min_chars``; (в) не находится внутри незакрытой конструкции.
+
+    Возвращает пару «сегмент, остаток» СЫРОГО текста: чистка применяется вызывающим, потому что
+    ему нужен ещё и признак «после чистки пусто» (такой сегмент не отправляется и не
+    оплачивается). Функция чистая — её исход зависит только от буфера и порога.
+    """
+    if len(buffer) < min_chars:
+        return None
+    for match in reversed(list(_SENTENCE_END_RE.finditer(buffer))):
+        cut = match.end()
+        if cut < min_chars:
+            # Границы идут по возрастанию, дальше только короче — ждать больше нечего.
+            return None
+        prefix = buffer[:cut]
+        if _inside_unclosed_construct(prefix):
+            continue
+        return prefix, buffer[cut:]
+    return None
+
+
 def assistant_text_of_step(payload: dict[str, Any]) -> str:
     """Текст assistant-шага для озвучки — через тот же read-boundary адаптер, что и история.
 
@@ -327,6 +429,328 @@ class SpeechClient:
             )
             raise UpstreamError("speech provider error") from exc
         return response.content
+
+
+# ---------------------------------------------------------------------------------------------
+# 2b. Потоковый синтез одного хода голосового режима (ADR-104 §6)
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass
+class VoiceTurnBudget:
+    """Величины, нормативно принадлежащие ХОДУ, а не его ноге (ADR-104 §6).
+
+    Заведён потому, что ход с клиентскими инструментами исполняется НЕСКОЛЬКИМИ ногами с одним
+    `turnId`, а синтез создаётся на ногу: всё, что лежало бы в объекте ноги, обнулялось бы на
+    второй и переставало быть потурновым. Форма дефекта одна на три величины, поэтому и носитель
+    один:
+
+    * ``spoken_total`` — совокупный расход `TTS_MAX_CHARS`. На ноге он давал бы фактический
+      потолок «число ног × `TTS_MAX_CHARS`», то есть снимал бы ограничение с нашего счёта у
+      поставщика — ровно то, ради чего потолок единственно и существует.
+    * ``next_segment`` — монотонный номер сегмента ВНУТРИ хода. На ноге пара `(turnId, segment)`
+      переставала бы быть уникальной, а на её уникальности держится упорядоченное проигрывание,
+      которое ADR-104 §11 отдаёт устройству.
+    * ``heard_segments`` — сколько сегментов ХОДА пользователь фактически дослушал; это и есть
+      `spokenSegments` кадра `interrupted` и пометки `payload.interrupted`.
+    * ``capped`` — «потолок хода исчерпан, дальше по этому ходу не синтезируем»: признак
+      потурновый по той же причине, что и бюджет, который его порождает.
+
+    **Признака исчерпанного бакета здесь НЕТ, и это не пропуск.** Единица бакета `rl:speech` —
+    ОЗВУЧЕННЫЙ ШАГ (ADR-104 §13.2), и отказ гасит синтез именно шага: «следующий озвученный шаг
+    просит свой токен заново». Признак живёт на объекте ноги; положив его сюда, мы погасили бы
+    вторую озвучку хода за отказ, случившийся на первой. Единица ГАШЕНИЯ — шаг, единица
+    БЮДЖЕТА — ход, и одна из другой не выводится.
+
+    **Контраст помечен с обеих сторон:** число доставленных сегментов ШАГА (`delivered_segments`
+    ниже) остаётся на ноге и потурновым НЕ становится — это предикат списания синтеза, а единица
+    списания — озвученный assistant-шаг, а не ход (ADR-104 §6). Правило одной величины на другую
+    не переносить.
+    """
+
+    spoken_total: int = 0
+    next_segment: int = 0
+    heard_segments: int = 0
+    capped: bool = False
+
+
+class VoiceSpeechSink(Protocol):
+    """Транспорт кадров звука. Реализуется обработчиком сокета; синтезу о WebSocket знать нечего.
+
+    Разделение не косметическое: сегментация, потолок и тарификация — свойства ХОДА и обязаны
+    быть проверяемы без сокета, а порядок и вид кадров — свойство транспорта.
+    """
+
+    async def audio_begin(self, *, segment: int, media_type: str, voice_id: str) -> None: ...
+
+    async def audio_chunk(self, data: bytes) -> None: ...
+
+    async def audio_end(self, *, segment: int, truncated: bool) -> None: ...
+
+    async def speech_failed(self) -> None: ...
+
+    async def speech_rate_limited(self) -> None: ...
+
+
+class VoiceTurnSpeech:
+    """Озвучка ОДНОГО хода голосового режима по мере генерации (ADR-104 §6).
+
+    Инварианты, каждый из которых проверяем снаружи:
+
+    * **сегмент = предложение на растущем буфере**, не дельта (`next_speech_segment`);
+    * **чистка — та же `to_spoken_text`**, второй реализации «произносимого» не заводится;
+    * **потолок `TTS_MAX_CHARS` — СОВОКУПНЫЙ на ход**, не на сегмент: посегментный перестал бы
+      ограничивать наш счёт у поставщика, ради чего он единственно и существует. Исчерпан →
+      синтез прекращается на последнем ЗАВЕРШЁННОМ сегменте, его `audio.end` несёт
+      ``truncated: true``, а ТЕКСТ при этом остаётся полным и продолжает идти в `delta`/`done`;
+    * **порядок сегментов**: единственный воркер разбирает очередь, поэтому `audio.begin`
+      сегмента N всегда предшествует `audio.begin` сегмента N+1;
+    * **отказ синтезатора хода НЕ роняет**: он гасит только звук (`scope:"speech"`), а
+      `delta`/`done` идут дальше — сломанный синтезатор обязан стоить молчания, а не ответа.
+
+    Класс НЕ трогает кошелёк: момент списания — закрытие озвученного assistant-шага, а `stepId`
+    к этому времени существует только у вызывающего (шаг создаётся в финализации хода). Здесь
+    считается лишь то, от чего списание зависит: доставлен ли хотя бы один сегмент.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: SpeechClient,
+        settings: Settings,
+        voice: Voice,
+        sink: VoiceSpeechSink,
+        budget: VoiceTurnBudget,
+        limiter: Callable[[], Awaitable[bool]],
+    ) -> None:
+        self._client = client
+        self._settings = settings
+        self._voice = voice
+        self._sink = sink
+        # Величины ХОДА живут снаружи и переживают смену ноги (см. `VoiceTurnBudget`).
+        self._budget = budget
+        # Бакет `rl:speech` (`TTS_RATE_LIMIT_PER_MIN`) — тот же, что у `POST /v1/chat/speech`,
+        # потому что защищает он одно и то же: наш счёт у поставщика СИНТЕЗА. Передан колбэком,
+        # а не импортирован: синтезу нечего знать ни о Redis, ни о том, чей это пользователь.
+        self._limiter = limiter
+        self._buffer = ""
+        self._queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._worker: asyncio.Task[None] | None = None
+        self._delivered = 0
+        self._stopped = False
+        self._failed = False
+        # Токен бакета `rl:speech` берётся ОДИН раз на озвученный ШАГ (ADR-104 §13.2), поэтому
+        # признак «уже взят» принадлежит ноге, а не ходу: следующий озвученный шаг просит свой.
+        self._token_taken = False
+        # Бакет исчерпан → синтез ЭТОГО шага погашен целиком. Признак принадлежит ноге, а не
+        # ходу: ADR-104 §13.2 требует, чтобы следующий озвученный шаг просил токен заново.
+        self._rate_limited = False
+        # ВЕСЬ сырой текст ответа этого шага. Копится НЕЗАВИСИМО от того, идёт синтез или
+        # заглушён, потому что служит другому вопросу: не «что озвучить», а «было ли ЧТО
+        # озвучивать». Ответ на него обязан быть одинаков при включённом и выключенном синтезе.
+        self._raw_text = ""
+        # Отдельный от `_buffer`: тот отдаёт сегменты и опустошается по мере озвучки, а этот
+        # обязан помнить шаг целиком — предикат контракта сформулирован над ОТВЕТОМ, а не над
+        # остатком буфера.
+
+    # ---- наблюдаемое состояние хода ----
+
+    @property
+    def delivered_segments(self) -> int:
+        """Сколько сегментов ЭТОЙ НОГИ доставлено (отправлен `audio.end`).
+
+        Единица здесь — ШАГ, а не ход, и это не небрежность: величина служит ровно одному
+        предикату — «хотя бы один сегмент этого ШАГА доставлен → синтез шага списывается»
+        (ADR-104 §6), а списание идёт по ключу `tts:{stepId}:{voiceId}`, то есть на шаг.
+        Потурновое число дослушанных сегментов — `VoiceTurnBudget.heard_segments`; оно уходит в
+        `spokenSegments`. Правило одной величины на другую не переносить ни в одну сторону.
+        """
+        return self._delivered
+
+    @property
+    def failed(self) -> bool:
+        return self._failed
+
+    @property
+    def had_speakable_text(self) -> bool:
+        """Было ли у шага ЧТО произносить: очищенный текст ответа непуст (ADR-104 §13.2).
+
+        Предикат кадра `speech.skipped {reason:"nothing_to_speak"}`, и только его: контракт
+        определяет эту причину дословно как «очищенный текст ответа пуст». Молчание по любой
+        другой причине — исчерпанный бакет, исчерпанный бюджет хода, прерывание, отказ
+        синтезатора — этой причины НЕ получает: у каждой из них своя строка таблицы отказов.
+
+        **Вычисляется над ВСЕМ сырым текстом шага и НЕ зависит от того, работал ли синтез.**
+        Прежняя редакция ставила признак внутри `_speak`, то есть ПОСЛЕ гейта `_muted()`, а
+        `feed_delta` выходит по этому гейту ещё до постановки кандидата в очередь. На второй
+        ноге хода `budget.capped` уже истинен с первой — ни один кандидат до `_speak` не
+        доходил, признак оставался ложным, и клиенту уходило `nothing_to_speak` при НЕПУСТОМ
+        тексте: ровно то ложное значение из закрытого перечня, против которого §13.2 и написан.
+        Величина отвечает на вопрос о ТЕКСТЕ, поэтому и вычисляться обязана из текста, а не из
+        того, сколько кандидатов успел обработать синтез.
+
+        **Чистка — та же единственная `to_spoken_text`**, второй реализации «произносимого» не
+        заводится. Над ответом ЦЕЛИКОМ, а не над отдельными приращениями: дельта провайдера
+        приходит кусками произвольной длины, и фрагмент, пустой после чистки в отрыве (одна
+        ограда блока кода), в составе ответа пустым не является.
+        """
+        return bool(to_spoken_text(self._raw_text))
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    # ---- управление ----
+
+    def start(self) -> None:
+        """Поднять воркер синтеза. Отдельная задача, а не работа внутри `on_text_delta`.
+
+        Синтез сегмента — сетевой вызов на секунду с лишним. Выполненный прямо в обратном вызове
+        дельты, он остановил бы приём дельт от модели: текст переставал бы идти ровно там, где
+        пользователь его ждёт, и потоковость терялась бы ради звука.
+        """
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._run())
+
+    def _muted(self) -> bool:
+        """Синтез по этому ходу дальше не идёт: прерван, сломан, упёрся в потолок или в бакет."""
+        return self._stopped or self._failed or self._rate_limited or self._budget.capped
+
+    def feed_delta(self, text: str) -> None:
+        """Принять приращение текста ответа и выпустить готовые сегменты. Не блокирует."""
+        # ДО гейта: накопитель отвечает на вопрос «было ли что произносить», а он не зависит от
+        # того, замолчал ли синтез. Порядок этих двух строк — инвариант, а не оформление.
+        self._raw_text += text
+        if self._muted():
+            return
+        self._buffer += text
+        while True:
+            split = next_speech_segment(self._buffer, self._settings.voice_mode_segment_min_chars)
+            if split is None:
+                return
+            segment, self._buffer = split
+            self._queue.put_nowait(segment)
+
+    def interrupt(self) -> None:
+        """Прервать синтез немедленно и навсегда для ЭТОГО хода (ADR-104 §5).
+
+        Синтез прекращается ВСЕГДА и немедленно — это ровно то, о чём просил пользователь.
+        Уже синтезированный, но не отправленный сегмент считается `interrupted`: `audio.end` по
+        нему не уходит, и в число дослушанных он не попадает.
+        """
+        self._stopped = True
+
+    async def finish(self) -> None:
+        """Дозвучить остаток буфера последним сегментом и дождаться конца очереди.
+
+        Вызывается при закрытии хода. Ожидание обязательно: списание синтеза идёт ПОСЛЕ всего
+        звука шага, а `done` — после списания, поэтому исхода «списано, но не доставлено» нет.
+        """
+        remainder = self._buffer.strip()
+        self._buffer = ""
+        if remainder and not self._muted():
+            self._queue.put_nowait(remainder)
+        self._queue.put_nowait(None)
+        if self._worker is not None:
+            await self._worker
+            self._worker = None
+
+    # ---- воркер ----
+
+    async def _run(self) -> None:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                return
+            if self._stopped:
+                # Очередь дочитывается до сентинела, но работа больше не делается: сегменты,
+                # оставшиеся в ней после прерывания, синтезатору не отдаются и не оплачиваются.
+                voice_mode_speech_segments_total.labels(outcome="interrupted").inc()
+                continue
+            if self._muted():
+                # У этих сегментов ИСХОДА НЕТ, и метка им не ставится намеренно. Отказ
+                # синтезатора считается ОДИН раз — на сегменте, где он произошёл; исчерпанный
+                # потолок и исчерпанный бакет — по одному разу на ход. Пометить хвост
+                # `upstream_error` значило бы умножить одну аварию на длину ответа и обесценить
+                # алерт, `capped` — сосчитать один потолок много раз, а `interrupted` /
+                # `skipped_empty` — назвать неверную причину.
+                continue
+            await self._speak(item)
+
+    async def _speak(self, raw: str) -> None:
+        cleaned = to_spoken_text(raw)
+        if not cleaned:
+            # Пустой после чистки сегмент не отправляется и не оплачивается: синтезатор НЕ
+            # вызывался, произносить было нечего. С отказом поставщика этот исход не сливается.
+            voice_mode_speech_segments_total.labels(outcome="skipped_empty").inc()
+            return
+        # Потолок СОВОКУПНЫЙ на ход: остаток бюджета, а не длина сегмента. Исчерпание
+        # проверяется ДО `apply_speech_cap` намеренно: при остатке ровно `0` она вернула бы
+        # `('', True)`, пустой текст ушёл бы в ветку «произносить нечего», и метрика получила бы
+        # `skipped_empty` — то есть НЕВЕРНУЮ причину («синтезатор не звали, потому что нечего
+        # произносить» вместо «сработал потолок»), а признак потолка не выставился бы вовсе.
+        remaining = self._settings.tts_max_chars - self._budget.spoken_total
+        if remaining <= 0:
+            # Бюджет ХОДА занят ровно предыдущим сегментом: тот ушёл с `truncated: false`, и
+            # носителя признака на сегменте больше нет. Исход всё равно `capped`, а не
+            # `skipped_empty`: потолок исчерпан именно на ЭТОМ кандидате, и он непуст. Без
+            # инкремента второй способ исчерпания молча выпадал бы из серии, по доле которой
+            # калибруется сам потолок. Инкремент один на ход — дальше гасит признак `capped`.
+            # Клиент узнаёт о потолке из `done.speechTruncated` (ADR-104 §13.8).
+            self._budget.capped = True
+            voice_mode_speech_segments_total.labels(outcome="capped").inc()
+            return
+        spoken, truncated = apply_speech_cap(cleaned, remaining)
+        if not spoken:  # pragma: no cover — при remaining > 0 срез не бывает пустым
+            voice_mode_speech_segments_total.labels(outcome="skipped_empty").inc()
+            return
+        # Бакет `rl:speech` — ОДИН токен на ОЗВУЧЕННЫЙ ШАГ (ADR-104 §13.2), та же единица, что
+        # у ключа списания `tts:{stepId}:{voiceId}`. Инвариант, общий обеим поверхностям: один
+        # токен покупает не больше `TTS_MAX_CHARS` символов, ушедших поставщику. Бакет защищает
+        # наш СЧЁТ, а счёт измеряется символами, — поэтому токен на каждое обращение считал бы
+        # не то, что защищает: ход из девяти сегментов брал бы девять токенов за те же ≤700
+        # символов, за которые кнопка «прослушать» берёт один.
+        # Остальные сегменты этого шага токена не просят: они уже оплачены им и ограничены
+        # сверху совокупным потолком хода. Следующий озвученный шаг просит свой токен заново.
+        # Отказ гасит синтез ЭТОГО ШАГА целиком, а не выборочно (речь с дырами неотличима от
+        # поломки) и ход НЕ роняет: `delta`/`done` идут дальше.
+        if not self._token_taken:
+            if not await self._limiter():
+                self._rate_limited = True
+                voice_mode_speech_segments_total.labels(outcome="rate_limited").inc()
+                await self._sink.speech_rate_limited()
+                return
+            self._token_taken = True
+        try:
+            audio = await self._client.synthesize(text=spoken, voice=self._voice)
+        except AppError:
+            # Отказ синтезатора ход НЕ затрагивает: звук прекращается, `delta`/`done` идут.
+            # Наружу — кадр `error {scope:"speech"}`, а не закрытие сокета.
+            self._failed = True
+            voice_mode_speech_segments_total.labels(outcome="upstream_error").inc()
+            await self._sink.speech_failed()
+            return
+        if self._stopped:
+            # Прерывание пришло, пока сегмент синтезировался: `audio.end` не отправляется.
+            voice_mode_speech_segments_total.labels(outcome="interrupted").inc()
+            return
+        segment = self._budget.next_segment
+        self._budget.next_segment += 1
+        await self._sink.audio_begin(
+            segment=segment,
+            media_type=self._settings.tts_media_type(),
+            voice_id=self._voice.id,
+        )
+        await self._sink.audio_chunk(audio)
+        await self._sink.audio_end(segment=segment, truncated=truncated)
+        self._delivered += 1
+        self._budget.heard_segments += 1
+        self._budget.spoken_total += len(spoken)
+        if truncated:
+            # Синтез прекращается на последнем ЗАВЕРШЁННОМ сегменте; текст при этом остаётся
+            # полным и продолжает идти в `delta` и в `done` — обрезается речь, не ответ.
+            self._budget.capped = True
+        voice_mode_speech_segments_total.labels(outcome="capped" if truncated else "ok").inc()
 
 
 # ---------------------------------------------------------------------------------------------
