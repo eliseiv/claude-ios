@@ -12,10 +12,11 @@
 
 > **Пометка 2026-09-11 ([ADR-105 §B6](ADR-105-provider-failure-input-shape-and-media-deadline.md)), тело не переписано:**
 > утверждение §3 «Poll и background reconciler используют один terminal path» **для
-> согласователя по коду не выполняется**: `reconcile_once` (`src/app/media_generation/reconciler.py`)
-> собирает `MediaGenerationService` без `request_logs`, поэтому `finish_media` для задачи,
-> доведённой согласователем, не вызывается и её строка остаётся `queued`. Норма §3 в силе;
-> исполняет её одна сборка сервиса на оба пути ([ADR-105 §B6](ADR-105-provider-failure-input-shape-and-media-deadline.md)).
+> согласователя по коду не выполнялось** (на `f8f4b37`): `reconcile_once` (`src/app/media_generation/reconciler.py`)
+> собирал `MediaGenerationService` без `request_logs`, поэтому `finish_media` для задачи,
+> доведённой согласователем, не вызывался и её строка оставалась `queued`. Норма §3 в силе;
+> исполняет её одна сборка сервиса на оба пути ([ADR-105 §B6](ADR-105-provider-failure-input-shape-and-media-deadline.md)) —
+> с `cbed6ca` (`deps.build_media_generation_service`).
 
 ## Контекст
 

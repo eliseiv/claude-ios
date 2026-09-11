@@ -1006,6 +1006,23 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
 не потому, что были основания подозревать рост: правило требует пересъёмки от **касания**, а не от
 подозрения.
 
+✅ **Пересъёмка 2026-09-11 (касание волной [ADR-105](ADR-105-provider-failure-input-shape-and-media-deadline.md), дерево `4c89696`): 193.**
+Разность множеств `comm -13` алиасов `src/app/config.py` на `cd0cd63` (187, строка «реализация
+этого ADR» таблицы выше) и на `4c89696` — **+6, выбывших 0**; по коммитам, где имя появилось:
+
+- `MAPS_TOOLS_ENABLED` (`0681acb`, [ADR-102 §10](ADR-102-mapkit-client-tools.md)) — **волна-источник
+  отнесения не внесла, в перечне ниже имени нет**; класс этой пересъёмкой не назначается (решение о
+  составе поверхности — не сверка с кодом), вынесено на решение `architect`: ближайший аналог
+  `CHAT_MEDIA_TOOLS_ENABLED` входит в §8.1 как `chat.media_tools_enabled`;
+- `VOICE_MODE_ENABLED`, `VOICE_MODE_IDLE_TIMEOUT_SECONDS`, `VOICE_MODE_SEGMENT_MIN_CHARS`,
+  `VOICE_MODE_UTTERANCE_MAX_SECONDS` (`989b75f`) — отнесены волной-источником в
+  [ADR-104 §8](ADR-104-voice-mode-websocket.md): `*_IDLE_TIMEOUT_SECONDS` — **(б)** по семейному
+  правилу `*_TIMEOUT_SECONDS`, `SEGMENT_MIN_CHARS` и `UTTERANCE_MAX_SECONDS` — **(в)**, `VOICE_MODE_ENABLED` —
+  кандидат в §8.1 с отложенным включением; в перечень ниже по именам не переносились;
+- `MEDIA_JOB_DEADLINE_SECONDS` (`cbed6ca`) — **(б)**, внесено в перечень ниже.
+
+Команда та же, что названа ниже; сверка — поимённо, а не по числу.
+
 ⚠️ **Замер обязан пересниматься при каждом касании этого раздела, а не наследоваться.** Он протухал
 **трижды за сутки** (`176` → `184` → `186` → `187`), и каждый раз — от параллельной волны, включая
 **нашу собственную**: наследовать его нельзя ни при какой уверенности. Команда пересъёмки одна и та
@@ -1051,6 +1068,8 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
 (SSRF-allowlist), `MODERATION_BASE_URL`, `CLOUDPAYMENTS_API_BASE`, `APPLE_JWKS_URL`,
 `APPLE_OIDC_ISSUER`, `JWT_JWKS_URL`, **любые** `*_TIMEOUT_SECONDS` и `*_MAX_RETRIES`,
 `MODERATION_FAIL_OPEN`, `MEDIA_RECONCILE_INTERVAL_SECONDS`/`MEDIA_RECONCILE_BATCH_SIZE`,
+`MEDIA_JOB_DEADLINE_SECONDS` (внесено волной, вводящей поле, — [ADR-105 §B3](ADR-105-provider-failure-input-shape-and-media-deadline.md),
+`cbed6ca`: сколько сервис опрашивает поставщика по незавершённой задаче, соседка `MEDIA_RECONCILE_*`),
 `LOG_LEVEL`, `DOCS_ENABLED`.
 
 **(в) Ресурсный лимит процесса, TTL или размер страницы:** **все** `SIZE_LIMIT_*`,

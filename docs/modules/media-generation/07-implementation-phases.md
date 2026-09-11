@@ -51,12 +51,18 @@
 8. **Chat:** вызов в `ChatOrchestrator.run` на ходах **с вложениями** — [chat-orchestrator/07-implementation-phases.md](../chat-orchestrator/07-implementation-phases.md).
 9. **Тесты:** [09-testing.md §Модерация UGC](09-testing.md), включая diff-тест порядка «модерация до списания» и проверку недостижимости заблокированных ассетов.
 
-## Phase 8 — Дедлайн задачи и одна сборка сервиса ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), ⏳ спроектирована, код не написан)
+## Phase 8 — Дедлайн задачи и одна сборка сервиса ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), реализована `cbed6ca`)
+
+Код — коммит `cbed6ca` (`src/app/config.py`, `src/app/deps.py`, `src/app/media_generation/{fal_client,reconciler,repository,service}.py`, закомментированная строка в `.env.prod.example`); тесты — `tests/integration/test_media_deadline_adr105.py` (14 функций `test_`). Ревью не проходило.
 
 1. **Config:** `MEDIA_JOB_DEADLINE_SECONDS` (дефолт `21600`, `<= 0` → дефолт). **devops:** закомментированная строка в `.env.prod.example` рядом с `MEDIA_RECONCILE_*`; в живые `.env` не вписывать — действует дефолт кода.
 2. **До выката — по каждому инстансу, только агрегаты:** длительности завершённых задач (запрос [ADR-105 §B3](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)) — максимум больше половины дедлайна поднимает дефолт; число и сумма кредитов незавершённых задач старше дедлайна (запрос [ADR-105 §B9](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)) — это разовый возврат первого тика.
+   **Замер выполнен 2026-09-11** (orchestrator волны, агрегаты по всем 41 инстансу, оба запроса):
+   - **незавершённые задачи старше 6 ч** (первый тик вернёт их кредиты): velunixa — 19 (382 кредита, старейшая 2026-08-30), devsupplyr — 1 (14 кредитов, 2026-09-04), остальные 39 инстансов — 0;
+   - **длительность `completed`:** максимум 2310 с (velunixa; p99.9 там 525 с), у прочих инстансов ≤ 740 с — **кроме** webmoria: одна задача `veo-3.1` с 341590 с (создана 2026-08-07 12:30 UTC, `completed` и `push_sent_at` — 2026-08-11 11:23 UTC). Это не длительность генерации: согласователь появился в коммите `10e78c6` (2026-08-11 10:11 UTC) и доопросил задачу первым тиком, то есть посылка запроса §B3 «`updated_at` у `completed` — длительность плюс не более одного опроса» у задачи, созданной до согласователя, не выполняется;
+   - **решение orchestrator'а волны по замеру:** дефолт `21600` **не поднимается** — без названного артефакта максимум по флоту 2310 с меньше половины дедлайна (10800 с).
 3. **`MediaGenerationService._advance`:** опрос всегда; опрос без конечного состояния у задачи старше дедлайна → `_fail(error="generation did not complete in time")`; событие `media_generation_deadline_exceeded` с `lastObservation` по предикатам ADR; `FalClient._raise_for_status` прикрепляет HTTP-статус к поднимаемому исключению.
-4. **Согласователь:** сервис — той же функцией, что `deps.get_media_generation_service` (с `request_logs` и `moderation`); при пустом `FAL_API_KEY` — только просроченные, без опроса; `media_reconcile_job_error` + `exceptionClass`.
+4. **Согласователь:** сервис — той же функцией, что request-путь (`deps.build_media_generation_service`, с `request_logs` и `moderation`; `deps.get_media_generation_service` — её обёртка-зависимость FastAPI); при пустом `FAL_API_KEY` — только просроченные (`MediaJobsRepository.list_non_terminal(created_before=…)`), без опроса; `media_reconcile_job_error` + `exceptionClass`.
 5. **Тесты:** [09-testing.md §Дедлайн задачи](09-testing.md#integration--дедлайн-задачи-adr-105).
 
 ## Post-MVP (не в этой поставке)

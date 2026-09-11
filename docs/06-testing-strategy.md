@@ -104,10 +104,12 @@ PR не проходит, если: `ruff format --check` fail, `ruff check` fai
 - техническая ошибка сохраняет failed-строку после rollback основного scope;
 - SSE mid-stream error завершает строку failed при transport HTTP 200;
 - media submit создаёт queued/202, poll и reconciler идемпотентно обновляют ту
-  же строку в completed/failed; refund не обнуляет tokens_spent. ⚠️ **Для
-  reconciler это норма, а не факт кода на `f8f4b37`:** `reconcile_once` собирает
-  сервис без `request_logs`, строка остаётся `queued`; кейс «reconciler закрывает
-  строку» обязателен и падает до реализации [ADR-105 §B6](adr/ADR-105-provider-failure-input-shape-and-media-deadline.md);
+  же строку в completed/failed; refund не обнуляет tokens_spent. **Для
+  reconciler — с `cbed6ca`** ([ADR-105 §B6](adr/ADR-105-provider-failure-input-shape-and-media-deadline.md);
+  до него `reconcile_once` собирал сервис без `request_logs`, строка оставалась
+  `queued`); кейс «reconciler закрывает строку» обязателен —
+  `test_reconciler_closes_overdue_job_and_its_request_log_leaves_young_one`
+  (`tests/integration/test_media_deadline_adr105.py`);
 - `provider_cost_usd` остаётся `null`, пока нет проверенного тарификатора;
 - миграция `0023` upgrade/downgrade и индексы проверяются на PostgreSQL.
 
@@ -161,8 +163,10 @@ PR не проходит, если: `ruff format --check` fail, `ruff check` fai
 |---|---|---|
 | **Рендер вложений проверяется через НАСТОЯЩИЙ класс клиента** с подменой транспорта SDK, ассерт — по телу исходящего запроса | integration | Рендер живёт внутри клиента ([ADR-105 §A2](adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)). Фейковый `LLMClient`, которым пользуется большинство тестов оркестратора, заменяет клиента целиком — вместе с единственным местом рендера, и тест на нём зелен при любой форме блоков. Прод-дефект (картинка молча выпала в `OpenAIResponsesClient`) именно так и прошёл мимо набора |
 | **Каждый путь расхождения провайдеров — свой кейс:** кросс-обход в обе стороны, BYOK-ключ чужого провайдера, операторский дефолт модели соседнего провайдера | integration | Три пути сходятся в одном дефекте, но лишь первый проходит через цикл попыток; фикс «пересобрать в цикле попыток» зеленит первый и оставляет два других сломанными |
-| **Предикат дедлайна медиа-задачи — обе половины на ОДНОМ наблюдении:** старше дедлайна ⇒ `failed` + возврат; моложе ⇒ не тронута; старше, но опрос дал `COMPLETED` ⇒ `completed` | integration | Половина (а) без (б) проходит при реализации «любой `5xx` — сразу провал» (переоценка: живая задача провалена); половина (б) без (а) проходит при сегодняшнем коде (задача вечна). Параметризация — по ВСЕМ наблюдениям таблицы модульного плана, а не по двум кодам |
-| **Сквозной путь согласователя** (`reconcile_once` на реальной БД), а не только `GET` | integration | Согласователь собирает сервис сам ([ADR-105 §B6](adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)); кейс только через `GET` не видит ни незакрытой строки `request_logs`, ни пропущенной пост-модерации |
+| **Предикат дедлайна медиа-задачи — обе половины на ОДНОМ наблюдении:** старше дедлайна ⇒ `failed` + возврат; моложе ⇒ не тронута; старше, но опрос дал `COMPLETED` ⇒ `completed` | integration | Половина (а) без (б) проходит при реализации «любой `5xx` — сразу провал» (переоценка: живая задача провалена); половина (б) без (а) проходит на коде до `cbed6ca` (задача вечна). Параметризация — по ВСЕМ наблюдениям таблицы модульного плана, а не по двум кодам |
+| **Сквозной путь согласователя** (`reconcile_once` на реальной БД), а не только `GET` | integration | Сборка сервиса для согласователя — отдельная точка, где зависимость однажды уже выпала (до `cbed6ca` согласователь собирал сервис сам, без `request_logs` и `moderation`; [ADR-105 §B6](adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)); кейс только через `GET` не видит ни незакрытой строки `request_logs`, ни пропущенной пост-модерации |
 | **Diff-тест регрессии** на каждую из четырёх правок: рендер в клиенте, терпимое чтение истории, ветка дедлайна, одна сборка сервиса | integration | Откат каждой правки обязан ронять хотя бы один кейс; иначе набор кодирует то же допущение, что и дефект |
+
+**Реализация (`cbed6ca`).** Кейсы раздела — `tests/unit/test_provider_input_shape_adr105.py`, `tests/integration/test_provider_input_shape_adr105.py` (часть A), `tests/integration/test_media_deadline_adr105.py` (часть B). Тем же коммитом изменены (характер правок этим документом не классифицируется) `tests/unit/test_attachments.py`, `tests/unit/test_openai_client.py`, `tests/unit/test_workspaces.py`, `tests/conftest.py`, `tests/e2e/test_chat_attachments_external.py`, `tests/integration/test_notifications_adr067.py`, `tests/unit/test_voice_input_adr095.py` (`git show --stat cbed6ca`); выполнение diff-тестов регрессии (таблица выше) по дереву не наблюдаемо и этим документом не утверждается.
 
 **Ожидаемые падения при реализации.** Меняются сигнатуры `PreparedAttachments` (`content_blocks` → `parts`), `prepare_attachments` и `WorkspacesService.context_for_session` (снят `provider`), удаляется `WorkspacesService._image_block`. Тест, который строит `PreparedAttachments(content_blocks=…)` или зовёт эти функции с `provider`, падает по сигнатуре, а не по утверждению: если его утверждение на новом коде истинно — это сопровождение стража (адресация меняется, утверждение нет); если утверждение было «блок собран оркестратором под провайдера сессии» — оно отменено нормой, и тест переписывается под новый контракт (зона `qa`).
