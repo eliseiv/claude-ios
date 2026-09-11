@@ -129,7 +129,7 @@ OpenAPI-тексты (`summary`, `description` эндпоинтов, `Field(desc
 | Тег | Endpoint | Security | Описание тега (русский, кратко) |
 |---|---|---|---|
 | `Auth` | `POST /v1/auth/register`, `POST /v1/auth/token`, `POST /v1/auth/refresh`, `GET /v1/auth/jwks` | none | Получение и обновление токена доступа. Точка входа для тестирования. |
-| `Chat` | `POST /v1/chat/run`, `POST /v1/chat/tool-result`, `POST /v1/chat/v2/run`, `POST /v1/chat/v2/tool-result`, `GET /v1/chat/v2/capabilities` | `bearerAuth` | Диалог с ассистентом и tool-loop (вызовы инструментов на устройстве); v2-ручки дополнительно принимают режим генерации на каждый ход. |
+| `Chat` | `POST /v1/chat/run`, `POST /v1/chat/tool-result`, `POST /v1/chat/v2/run`, `POST /v1/chat/v2/tool-result`, `GET /v1/chat/v2/capabilities`, `GET /v1/chat/voice` (WebSocket, описание без Try it out) | `bearerAuth` | Диалог с ассистентом и tool-loop (вызовы инструментов на устройстве); v2-ручки дополнительно принимают режим генерации на каждый ход. |
 | `Tools` | `GET /v1/tools` | `bearerAuth` | Каталог инструментов, доступных в tool-loop. |
 | `Models` | `GET /v1/models` | `bearerAuth` | Каталог доступных моделей активного провайдера для селектора модели ([ADR-034](adr/ADR-034-user-model-selection.md)). |
 | `Presets` | `GET /v1/presets` | `bearerAuth` | Пресеты промтов для чипов на главном экране чата ([ADR-035](adr/ADR-035-prompt-presets-endpoint.md)). |

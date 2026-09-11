@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +34,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api_gateway.openapi_security import bearer_scheme
 from app.api_gateway.rate_limit import enforce_chat_limits, enforce_speech_limits, get_redis
 from app.audit.service import AuditService
 from app.chat.attachments import AUDIO_MEDIA_TYPES
@@ -69,6 +72,7 @@ from app.observability.metrics import voice_mode_connections, voice_mode_turns_t
 from app.preferences.service import PreferencesService
 from app.schemas.chat import GenerationMode
 from app.schemas.voice_frames import (
+    CLIENT_FRAME_TYPES,
     FRAME_INTERRUPT,
     FRAME_PING,
     FRAME_START,
@@ -337,12 +341,19 @@ class _VoiceSession:
         """Обработать управляющий кадр. `True` — соединение закрыто и цикл обязан кончиться."""
         try:
             payload = _parse_json(raw)
+        except _FrameNotObject:
+            # Разбираемый JSON, но не объект (`[…]`, строка, число): прежний текст «not valid
+            # JSON» здесь был бы ложью и отправлял бы разработчика чинить не то.
+            await self._error(
+                code="validation_error", message="frame must be a JSON object", scope=SCOPE_SESSION
+            )
+            return False
         except ValueError:
             await self._error(
                 code="validation_error", message="frame is not valid JSON", scope=SCOPE_SESSION
             )
             return False
-        frame_type = payload.get("type") if isinstance(payload, dict) else None
+        frame_type = payload.get("type")
         if frame_type == FRAME_PING:
             return False
         if frame_type == FRAME_START:
@@ -372,7 +383,7 @@ class _VoiceSession:
             return False
         await self._error(
             code="validation_error",
-            message="unknown frame type",
+            message=_unknown_type_message(payload),
             scope=SCOPE_SESSION,
         )
         return False
@@ -387,9 +398,11 @@ class _VoiceSession:
             return False
         try:
             frame = VoiceStartFrame.model_validate(payload)
-        except ValidationError:
+        except ValidationError as exc:
             await self._error(
-                code="validation_error", message="invalid 'start' frame", scope=SCOPE_SESSION
+                code="validation_error",
+                message=_frame_validation_message(FRAME_START, exc),
+                scope=SCOPE_SESSION,
             )
             return False
         if frame.assistantMode == "code":
@@ -471,10 +484,10 @@ class _VoiceSession:
     async def _on_utterance_begin(self, payload: dict[str, Any]) -> None:
         try:
             frame = VoiceUtteranceBeginFrame.model_validate(payload)
-        except ValidationError:
+        except ValidationError as exc:
             await self._error(
                 code="validation_error",
-                message="invalid 'utterance.begin' frame",
+                message=_frame_validation_message(FRAME_UTTERANCE_BEGIN, exc),
                 scope=SCOPE_SESSION,
             )
             return
@@ -534,10 +547,10 @@ class _VoiceSession:
     async def _on_utterance_end(self, payload: dict[str, Any]) -> None:
         try:
             frame = VoiceUtteranceEndFrame.model_validate(payload)
-        except ValidationError:
+        except ValidationError as exc:
             await self._error(
                 code="validation_error",
-                message="invalid 'utterance.end' frame",
+                message=_frame_validation_message(FRAME_UTTERANCE_END, exc),
                 scope=SCOPE_TURN,
                 turn_id=self._turn_id,
             )
@@ -586,10 +599,10 @@ class _VoiceSession:
     async def _on_text_frame(self, payload: dict[str, Any]) -> None:
         try:
             frame = VoiceTextFrame.model_validate(payload)
-        except ValidationError:
+        except ValidationError as exc:
             await self._error(
                 code="validation_error",
-                message="invalid 'text' frame",
+                message=_frame_validation_message(FRAME_TEXT, exc),
                 scope=SCOPE_TURN,
                 turn_id=self._turn_id,
             )
@@ -636,10 +649,10 @@ class _VoiceSession:
     async def _on_interrupt(self, payload: dict[str, Any]) -> None:
         try:
             frame = VoiceInterruptFrame.model_validate(payload)
-        except ValidationError:
+        except ValidationError as exc:
             await self._error(
                 code="validation_error",
-                message="invalid 'interrupt' frame",
+                message=_frame_validation_message(FRAME_INTERRUPT, exc),
                 scope=SCOPE_TURN,
                 turn_id=self._turn_id,
             )
@@ -841,10 +854,10 @@ class _VoiceSession:
     async def _on_tool_result(self, payload: dict[str, Any]) -> None:
         try:
             frame = VoiceToolResultFrame.model_validate(payload)
-        except ValidationError:
+        except ValidationError as exc:
             await self._error(
                 code="validation_error",
-                message="invalid 'tool.result' frame",
+                message=_frame_validation_message(FRAME_TOOL_RESULT, exc),
                 scope=SCOPE_TURN,
                 turn_id=self._turn_id,
             )
@@ -1396,13 +1409,90 @@ class _SessionNotFound(AppError):
     code = "session_not_found"
 
 
-def _parse_json(raw: str) -> dict[str, Any]:
-    import json
+class _FrameNotObject(ValueError):
+    """Кадр — разбираемый JSON, но не объект. Отдельный класс, чтобы текст отказа не лгал."""
 
+
+def _parse_json(raw: str) -> dict[str, Any]:
     parsed = json.loads(raw)
     if not isinstance(parsed, dict):
-        raise ValueError("frame must be a JSON object")
+        raise _FrameNotObject("frame must be a JSON object")
     return parsed
+
+
+# ---- тексты отказа `validation_error` ----
+#
+# Текст называет, ЧТО не так с кадром: путь до поля и вид нарушения. Без этого разработчик
+# получает «invalid 'start' frame» и не может двинуться дальше (прод-случай), а сервер знает ответ
+# и молчит. ЗНАЧЕНИЯ, присланные клиентом, в текст не попадают НИКОГДА: ошибка валидации
+# читается без `input`, `msg` (он цитирует значение) и `ctx`, а для неизвестного `type`
+# называются допустимые типы, а не присланный.
+
+# Сколько нарушений перечислять в одном тексте. Число нарушений задаёт клиент (тысяча кривых
+# элементов `results[]` — тысяча ошибок), поэтому потолок обязателен; остаток называется числом.
+_MAX_REPORTED_VIOLATIONS = 5
+# Имя ЛИШНЕГО поля — тоже ввод клиента. В текст оно попадает, только если похоже на
+# идентификатор и ограничено по длине; иначе нарушение называется без имени. Проверка применяется
+# к КАЖДОМУ строковому сегменту пути, а не только к лишнему полю: так гарантия не зависит от того,
+# какие ещё места схемы однажды начнут отражать ключи клиента.
+_REPORTABLE_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_EXPECTED_FRAME_TYPES = ", ".join(CLIENT_FRAME_TYPES)
+
+
+def _field_path(loc: tuple[int | str, ...]) -> str | None:
+    """Путь до поля вида `results[0].toolCallId`; `None`, если сегмент нельзя отражать."""
+    path = ""
+    for segment in loc:
+        if isinstance(segment, int):
+            path += f"[{segment}]"
+            continue
+        if not _REPORTABLE_FIELD_NAME.fullmatch(segment):
+            return None
+        path += f".{segment}" if path else segment
+    return path or None
+
+
+def _describe_violation(error: Mapping[str, Any]) -> str:
+    """Одно нарушение схемы: поле и вид. Читаются только `loc` и `type` — никогда значение.
+
+    Вид — функция `type` ошибки pydantic по его ПРИЗНАКУ, а не по перечню известных значений:
+    `missing` — поля нет; `extra_forbidden` — поле лишнее; семейства `*_type`/`*_parsing` —
+    значение не того типа или формата; всё остальное (вне набора, пустое, вне границ) —
+    недопустимое значение.
+    """
+    kind, loc = str(error["type"]), tuple(error["loc"])
+    path = _field_path(loc)
+    if kind == "extra_forbidden":
+        if path is not None:
+            return f"unexpected field '{path}'"
+        parent = _field_path(loc[:-1])
+        return f"unexpected field in '{parent}'" if parent else "unexpected field"
+    if path is None:  # pragma: no cover — пути объявленных полей всегда отражаемы
+        return "invalid field"
+    if kind == "missing":
+        return f"missing required field '{path}'"
+    if kind.endswith(("_type", "_parsing")):
+        return f"field '{path}' has an invalid type or format"
+    return f"field '{path}' has an invalid value"
+
+
+def _frame_validation_message(frame_type: str, exc: ValidationError) -> str:
+    """`message` отказа схемы кадра: `invalid 'start' frame: unexpected field 'userId'; …`.
+
+    `frame_type` — константа обработчика, а не присланное клиентом значение.
+    """
+    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    described = [_describe_violation(error) for error in errors[:_MAX_REPORTED_VIOLATIONS]]
+    rest = len(errors) - len(described)
+    tail = f"; and {rest} more" if rest > 0 else ""
+    return f"invalid '{frame_type}' frame: " + "; ".join(described) + tail
+
+
+def _unknown_type_message(payload: dict[str, Any]) -> str:
+    """Отказ на кадр с неизвестным или отсутствующим `type`: допустимые типы, а не присланный."""
+    if "type" not in payload:
+        return f"missing required field 'type'; expected one of: {_EXPECTED_FRAME_TYPES}"
+    return f"unknown frame type; expected one of: {_EXPECTED_FRAME_TYPES}"
 
 
 async def _noop() -> None:
@@ -1454,9 +1544,75 @@ async def _handshake(websocket: WebSocket) -> tuple[uuid.UUID, str | None]:
     return user.user_id, device_id
 
 
-@router.websocket("/v1/chat/voice")
+VOICE_PATH = "/v1/chat/voice"
+
+
+def voice_openapi_operation() -> dict[str, Any]:
+    """Операция `GET /v1/chat/voice` для OpenAPI — описание, а не маршрут.
+
+    FastAPI WebSocket-маршруты в схему не выводит, и разработчик не находил режим в Swagger
+    (прод-случай). HTTP-маршрута под этот путь НЕ заводится: запрос без Upgrade обязан получать
+    ровно то, что получал. Перечни собираются из тех же констант, что и поведение (поля `start` —
+    из `VoiceStartFrame`, типы кадров — из `CLIENT_FRAME_TYPES`, коды отказов — из классов
+    исключений рукопожатия), поэтому описание не расходится с кодом при следующей правке.
+    Тексты — по-русски, без внутренних ссылок и без имён переменных окружения (08 §R2ter/§R8).
+    """
+    start_fields = ", ".join(f"`{name}`" for name in VoiceStartFrame.model_fields if name != "type")
+    frame_types = ", ".join(f"`{name}`" for name in CLIENT_FRAME_TYPES)
+    description = (
+        "Живой голосовой диалог: приложение шлёт речь, сервер исполняет обычный ход чата и "
+        "озвучивает ответ по мере генерации; пользователь может перебить.\n\n"
+        "**Это WebSocket, а не HTTP-запрос.** Соединение открывается запросом "
+        "`GET /v1/chat/voice` с заголовками `Connection: Upgrade` и `Upgrade: websocket`. "
+        "Кнопка «Try it out» в Swagger WebSocket не откроет — нужен WebSocket-клиент.\n\n"
+        "**Авторизация** — `Authorization: Bearer <accessToken>` в заголовке рукопожатия; "
+        "токен в query-строке не принимается. Отказы до апгрейда приходят обычным HTTP в едином "
+        "конверте ошибки — см. коды ответов.\n\n"
+        f'**Первый кадр** — текстовый JSON `{{"type": "start"}}` с необязательными полями '
+        f"{start_fields}; в ответ приходит `ready` с `sessionId` и `voiceId`. "
+        f"Типы кадров клиента: {frame_types}. Звук реплики — бинарные кадры между "
+        "`utterance.begin` и `utterance.end`.\n\n"
+        "**Кадр не по схеме** — в ответ кадр `error` с кодом `validation_error`: в `message` "
+        "названы поле и вид нарушения, соединение остаётся открытым."
+    )
+    disabled, not_configured = VoiceModeDisabledError, VoiceModeNotConfiguredError
+    return {
+        "tags": ["Chat"],
+        "summary": "Голосовой режим (WebSocket)",
+        "description": description,
+        "operationId": "chat_voice_v1_chat_voice_get",
+        "security": [{bearer_scheme.scheme_name: []}],
+        "responses": {
+            "101": {"description": "Соединение переведено на WebSocket; дальше идут кадры."},
+            str(UnauthorizedError.status_code): {
+                "description": f"`{UnauthorizedError.code}` — нет JWT или он недействителен."
+            },
+            str(disabled.status_code): {
+                "description": (
+                    f"`{disabled.code}` — голосовой режим выключен на инстансе "
+                    "(или выключена любая половина голоса)."
+                )
+            },
+            str(RateLimitedError.status_code): {
+                "description": f"`{RateLimitedError.code}` — превышен лимит частоты ходов."
+            },
+            str(not_configured.status_code): {
+                "description": (
+                    f"`{not_configured.code}` — инстанс не настроен для голосового режима "
+                    "(нет ключа распознавания и синтеза)."
+                )
+            },
+        },
+    }
+
+
+@router.websocket(VOICE_PATH)
 async def chat_voice(websocket: WebSocket) -> None:
-    """Живой голосовой диалог (ADR-104). В OpenAPI не выводится: FastAPI не описывает WebSocket."""
+    """Живой голосовой диалог (ADR-104).
+
+    Сам маршрут FastAPI в OpenAPI не выводит (WebSocket); описание операции дописывается в схему
+    отдельно — `voice_openapi_operation`, подключение в `app.main`.
+    """
     try:
         user_id, device_id = await _handshake(websocket)
     except _Denied as denied:

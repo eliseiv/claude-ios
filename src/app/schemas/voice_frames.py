@@ -10,8 +10,11 @@
 внешнего ввода, а `done` несёт `ChatResponse` целиком и своей схемы не имеет по построению
 (ADR-104 §2).
 
-Эти схемы в OpenAPI не попадают: WebSocket-маршруты FastAPI в схему не выводит. Клиентский вид
-контракта живёт в `docs/API-REFERENCE.md §31`.
+Сами эти схемы в OpenAPI не попадают: WebSocket-маршруты FastAPI в схему не выводит. Операция
+`GET /v1/chat/voice` дописывается в OpenAPI отдельно (`app.api_gateway.routers.chat_voice`,
+`voice_openapi_operation`) — короткое описание рукопожатия и первого кадра, перечень полей `start`
+берётся из `VoiceStartFrame`, а не переписывается. Клиентский вид контракта живёт в
+`docs/API-REFERENCE.md §31`.
 """
 
 from __future__ import annotations
@@ -35,6 +38,18 @@ FRAME_TOOL_RESULT = "tool.result"
 FRAME_PING = "ping"
 # У `ping` схемы нет намеренно: полей у него тоже нет, а объявленная и никем не читаемая
 # модель — мёртвая декларация. Keepalive только сбрасывает отсчёт idle-таймаута.
+
+# Весь закрытый перечень в порядке сценария. Потребители — текст отказа на неизвестный `type`
+# (клиенту называются ДОПУСТИМЫЕ типы, а не присланный) и описание операции в OpenAPI.
+CLIENT_FRAME_TYPES: tuple[str, ...] = (
+    FRAME_START,
+    FRAME_UTTERANCE_BEGIN,
+    FRAME_UTTERANCE_END,
+    FRAME_TEXT,
+    FRAME_INTERRUPT,
+    FRAME_TOOL_RESULT,
+    FRAME_PING,
+)
 
 
 class VoiceStartFrame(StrictModel):

@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -368,8 +369,31 @@ def create_app() -> FastAPI:
     ):
         app.include_router(module.router)
     app.include_router(health.router)
+    _document_voice_mode(app)
 
     return app
+
+
+def _document_voice_mode(app: FastAPI) -> None:
+    """Дописать в OpenAPI операцию `GET /v1/chat/voice` (WebSocket голосового режима).
+
+    FastAPI WebSocket-маршруты в схему не выводит, а HTTP-маршрут под этот путь заводить
+    нельзя: запрос без Upgrade обязан получать ровно то, что получал. Поэтому запись вносится в
+    ГОТОВУЮ схему — штатный приём FastAPI («extending OpenAPI»: подмена `app.openapi`). Обёртка
+    зовёт исходный построитель, который кэширует схему в `app.openapi_schema`, и дописывает путь
+    через `setdefault`: повторные вызовы и сброс кэша идемпотентны, реальные маршруты
+    не затрагиваются.
+    """
+    build = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        schema = build()
+        paths = schema.setdefault("paths", {})
+        paths.setdefault(chat_voice.VOICE_PATH, {"get": chat_voice.voice_openapi_operation()})
+        return schema
+
+    # Штатная точка расширения схемы FastAPI; mypy не различает подмену метода экземпляра.
+    app.openapi = openapi  # type: ignore[method-assign]
 
 
 app = create_app()
