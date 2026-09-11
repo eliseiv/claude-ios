@@ -17,6 +17,7 @@ variants build dedicated apps with the flag overridden via the lru_cached settin
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -92,6 +93,8 @@ _ENDPOINT_TAG = {
     ("/v1/chat/v2/capabilities", "get"): "Chat",
     ("/v1/chat/v2/run", "post"): "Chat",
     ("/v1/chat/v2/tool-result", "post"): "Chat",
+    # WebSocket голосового режима: описание операции, реального HTTP-маршрута нет (08 §R4).
+    ("/v1/chat/voice", "get"): "Chat",
     ("/v1/tools", "get"): "Tools",
     ("/v1/models", "get"): "Models",
     ("/v1/presets", "get"): "Presets",
@@ -639,6 +642,97 @@ def test_all_documented_paths_have_summary_and_description(openapi_schema: dict[
         op = _operation(openapi_schema, path, method)
         assert op.get("summary"), f"{method.upper()} {path} missing summary"
         assert op.get("description"), f"{method.upper()} {path} missing description"
+
+
+# ============================================================================
+# 6b. WebSocket голосового режима виден в Swagger (08 §R4, API-REFERENCE §31).
+#     FastAPI WebSocket-маршруты в схему не выводит; операция дописывается в
+#     готовую схему, а реального HTTP-маршрута под путь нет.
+# ============================================================================
+_VOICE_PATH = "/v1/chat/voice"
+# Имя серверной переменной окружения: ВЕРХНИЙ_РЕГИСТР с подчёркиванием (08 §R8 — запрещено).
+_ENV_NAME = re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b")
+_INTERNAL_REF = re.compile(r"\b(ADR|TD|Q)-\d")
+
+
+def _voice_texts(operation: dict[str, Any]) -> list[str]:
+    texts = [operation["summary"], operation["description"]]
+    texts.extend(resp["description"] for resp in operation["responses"].values())
+    return texts
+
+
+@pytest.mark.asyncio
+async def test_voice_operation_is_served_in_openapi_json(pg_url: str) -> None:
+    """Операция приходит в ОТДАННОМ `/openapi.json`, а не только в `app.openapi()`."""
+    app = _build_app(docs_enabled=True)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.get("/openapi.json")
+    assert r.status_code == 200
+    operation = r.json()["paths"][_VOICE_PATH]["get"]
+    assert operation["tags"] == ["Chat"]
+    assert operation["security"] == [{"bearerAuth": []}]
+    # Операция одна: у пути нет других методов, будто бы существующих по HTTP.
+    assert list(r.json()["paths"][_VOICE_PATH]) == ["get"]
+
+
+def test_voice_operation_describes_handshake_refusals_and_first_frame(
+    openapi_schema: dict[str, Any],
+) -> None:
+    from app.schemas.voice_frames import VoiceStartFrame
+
+    operation = _operation(openapi_schema, _VOICE_PATH, "get")
+    description = operation["description"]
+
+    assert "WebSocket" in description
+    assert "Upgrade: websocket" in description
+    assert "Authorization: Bearer" in description
+    assert "Try it out" in description
+    # Первый кадр — `start` со всеми его полями (перечень берётся из схемы кадра).
+    assert '"type": "start"' in description
+    for name in VoiceStartFrame.model_fields:
+        if name != "type":
+            assert f"`{name}`" in description, name
+    # Отказы до апгрейда — побуквенно из API-REFERENCE §31.
+    responses = operation["responses"]
+    assert {"101", "401", "422", "429", "503"} <= set(responses)
+    assert "voice_mode_disabled" in responses["422"]["description"]
+    assert "voice_mode_not_configured" in responses["503"]["description"]
+
+
+def test_voice_operation_texts_have_no_internal_refs_or_env_names(
+    openapi_schema: dict[str, Any],
+) -> None:
+    operation = _operation(openapi_schema, _VOICE_PATH, "get")
+    for text in _voice_texts(operation):
+        assert not _INTERNAL_REF.search(text), text
+        assert not _ENV_NAME.search(text), text
+
+
+def test_voice_operation_is_added_once(pg_url: str) -> None:
+    """Повторная сборка схемы (в т.ч. после сброса кэша) не дублирует и не теряет запись."""
+    app = _build_app(docs_enabled=True)
+    first = app.openapi()["paths"][_VOICE_PATH]
+    app.openapi_schema = None
+    second = app.openapi()["paths"][_VOICE_PATH]
+    assert first == second
+    assert list(second) == ["get"]
+
+
+@pytest.mark.asyncio
+async def test_voice_path_over_plain_http_is_unchanged(client: AsyncClient) -> None:
+    """HTTP без Upgrade получает то же, что до появления записи в Swagger: маршрута нет.
+
+    Факт снят на коде до правки (f8f4b37): `GET`/`POST /v1/chat/voice` → `404
+    {"detail":"Not Found"}` — и без токена, и с ним. Запись в OpenAPI — описание, а не маршрут.
+    """
+    for headers in ({}, {"Authorization": "Bearer not.a.real.jwt"}):
+        r = await client.get(_VOICE_PATH, headers=headers)
+        assert r.status_code == 404, r.text
+        assert r.json() == {"detail": "Not Found"}
+    r = await client.post(_VOICE_PATH)
+    assert r.status_code == 404
+    assert r.json() == {"detail": "Not Found"}
 
 
 # ============================================================================
