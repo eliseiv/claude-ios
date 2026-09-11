@@ -318,9 +318,11 @@ async def test_reconciler_advances_and_pushes(
             sends.append({"device_token": device_token, "payload": payload})
             return "sent"
 
+    # ADR-105 §B6: the reconciler builds its service with the SAME function as the request path
+    # (`deps.build_media_generation_service`), so its APNs client comes from `deps.get_apns_client`.
     monkeypatch.setattr(
-        "app.media_generation.reconciler.ApnsClient",
-        lambda _settings: _Apns(),
+        "app.deps.get_apns_client",
+        lambda: _Apns(),
     )
 
     async with db_sessionmaker() as s:

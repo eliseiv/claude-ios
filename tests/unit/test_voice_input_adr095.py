@@ -46,7 +46,7 @@ def test_audio_never_reaches_block_assembly() -> None:
     был бы про «битый текст», то есть про несуществующую причину.
     """
     with pytest.raises(UnsupportedMediaTypeError, match="transcribed"):
-        prepare_attachments([_audio()], Settings(), "openai")
+        prepare_attachments([_audio()], Settings())
 
 
 def test_audio_has_its_own_size_ceiling() -> None:

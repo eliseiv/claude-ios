@@ -23,7 +23,12 @@ from typing import Any, Final
 import openai
 
 from app import instance_config
-from app.chat.attachments import PreparedAttachments
+from app.chat.attachments import (
+    PROVIDER_OPENAI,
+    PreparedAttachments,
+    UnrenderableAttachmentError,
+    render_attachment_blocks,
+)
 from app.chat.llm_client import (
     STOP_REASON_END_TURN,
     STOP_REASON_MAX_TOKENS,
@@ -40,6 +45,7 @@ from app.chat.openai_client import (
     _log_upstream_error,
 )
 from app.chat.tools import UnknownToolNameError, openai_tool_function, to_domain_tool_name
+from app.chats.provider_blocks import to_domain_blocks
 from app.errors import UpstreamError, ValidationFailedError
 
 # gpt-4o / gpt-4.1 reject Responses `reasoning.effort` (400 unsupported_parameter).
@@ -208,6 +214,10 @@ class OpenAIResponsesClient(OpenAIClient):
 
         items: list[dict[str, Any]] = []
         text_parts: list[str] = []
+        # ADR-105 §A3.6: the step's form is recognized by the one shared recognizer
+        # (`to_domain_blocks`, ADR-058) — a Chat-Completions message comes back as `text` +
+        # `tool_use` domain blocks (id raw, wire name, input object); typed blocks as they are.
+        domain = to_domain_blocks(blocks)
 
         def flush_text() -> None:
             if text_parts:
@@ -241,29 +251,9 @@ class OpenAIResponsesClient(OpenAIClient):
                 }
             )
 
-        for block in blocks:
-            if block.get("role") == "assistant":
-                content = block.get("content")
-                if isinstance(content, str) and content:
-                    text_parts.append(content)
-                elif isinstance(content, list):
-                    for part in content:
-                        if (
-                            isinstance(part, dict)
-                            and part.get("type") in {"text", "output_text"}
-                            and isinstance(part.get("text"), str)
-                        ):
-                            text_parts.append(part["text"])
-                for tc in block.get("tool_calls") or []:
-                    fn = tc.get("function") if isinstance(tc, dict) else None
-                    if isinstance(fn, dict):
-                        append_function_call(
-                            call_id=tc.get("id"),
-                            name=fn.get("name"),
-                            arguments=fn.get("arguments"),
-                        )
+        for block in domain:
+            if not isinstance(block, dict):
                 continue
-
             block_type = block.get("type")
             if block_type == "text" and isinstance(block.get("text"), str):
                 text_parts.append(block["text"])
@@ -385,22 +375,32 @@ class OpenAIResponsesClient(OpenAIClient):
     def _inject_responses_attachments(
         cls, input_items: list[dict[str, Any]], attachments: PreparedAttachments
     ) -> None:
-        """Inject first-turn attachment content parts into the last Responses user message."""
-        if not attachments.content_blocks:
+        """Render first-turn attachment parts and inject them into the last Responses user message.
+
+        ADR-105 §A2.3: rendered HERE, by the client that sends the call, in the OpenAI form
+        (``render_attachment_blocks(parts, "openai")``) and then mapped to ``input_*`` parts by
+        ``_responses_content_part``. Rendering is TOTAL (§A2.4): a part that maps to no input part
+        raises ``UnrenderableAttachmentError`` before the upstream call — it is never dropped
+        silently (that silent drop is how a failed-over Claude session lost its picture). If there
+        is no user message to extend, the parts form one.
+        """
+        if not attachments.parts:
             return
-        converted = [
-            p
-            for block in attachments.content_blocks
-            if (p := cls._responses_content_part(block, user=True)) is not None
-        ]
-        if not converted:
-            return
+        converted: list[dict[str, Any]] = []
+        for block in render_attachment_blocks(attachments.parts, PROVIDER_OPENAI):
+            part = cls._responses_content_part(block, user=True)
+            if part is None:
+                raise UnrenderableAttachmentError(
+                    f"attachment block {block.get('type')!r} has no Responses input form"
+                )
+            converted.append(part)
         for item in reversed(input_items):
             if item.get("type") == "message" and item.get("role") == "user":
                 content = item.get("content")
                 base = content if isinstance(content, list) else []
                 item["content"] = [*base, *converted]
                 return
+        input_items.append({"type": "message", "role": "user", "content": converted})
 
     @staticmethod
     def _usable_previous_response_id(

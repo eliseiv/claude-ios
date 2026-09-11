@@ -28,6 +28,10 @@ _TTS_MEDIA_TYPE_BY_FORMAT: dict[str, str] = {
 }
 _TTS_DEFAULT_AUDIO_FORMAT = "mp3"
 
+# ADR-105 §B3: default deadline of a media job (6 h). ONE value: the field default and the
+# fallback of a non-positive env both read it, so the two cannot drift apart.
+_DEFAULT_MEDIA_JOB_DEADLINE_SECONDS = 21600
+
 
 def _dedup_nonempty(*values: str) -> tuple[str, ...]:
     """Non-empty values in listing order, without duplicates (ADR-074 key chain).
@@ -473,6 +477,14 @@ class Settings(BaseSettings):
         default=15.0, alias="MEDIA_RECONCILE_INTERVAL_SECONDS"
     )
     media_reconcile_batch_size: int = Field(default=50, alias="MEDIA_RECONCILE_BATCH_SIZE")
+    # ADR-105 §B1/§B3: a paid media job reaches `completed`/`failed` no later than
+    # `created_at + MEDIA_JOB_DEADLINE_SECONDS` (plus one reconciler tick). Past it, a poll that
+    # yields no final state closes the job as `failed` with a refund. Default 6 h — far above the
+    # live generation times (13–20 s image, 90–100 s video). `<= 0` falls back to the default: a
+    # typo in `.env` must not switch the rule off and bring the endless polling back.
+    media_job_deadline_seconds: int = Field(
+        default=_DEFAULT_MEDIA_JOB_DEADLINE_SECONDS, alias="MEDIA_JOB_DEADLINE_SECONDS"
+    )
     # TTL of the HMAC token in GET /v1/media/jobs/{id}/assets/{index}/{token} (ADR-085).
     # After expiry the client re-polls the job and gets a fresh URL. Secret is PREVIEW_URL_SECRET.
     media_download_ttl_seconds: int = Field(default=86400, alias="MEDIA_DOWNLOAD_TTL_SECONDS")
@@ -1019,6 +1031,17 @@ class Settings(BaseSettings):
         becomes free on that instance while the operator keeps paying the provider.
         """
         return value if value > 0 else 1
+
+    @field_validator("media_job_deadline_seconds")
+    @classmethod
+    def _positive_media_job_deadline(cls, value: int) -> int:
+        """The media-job deadline cannot be switched off by a typo (ADR-105 §B3).
+
+        Same technique as ``_positive_tts_credit_cost``: a ``0``/negative env raises no start-up
+        error, so without this guard it would silently disable the rule and bring back the endless
+        polling of a job the provider will never finish — with the user's credits held forever.
+        """
+        return value if value > 0 else _DEFAULT_MEDIA_JOB_DEADLINE_SECONDS
 
     @field_validator("tts_max_chars")
     @classmethod

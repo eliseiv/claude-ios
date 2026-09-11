@@ -22,7 +22,14 @@ import pytest
 from openai.types.chat import ChatCompletionMessageFunctionToolCall
 from openai.types.chat.chat_completion_message_function_tool_call import Function
 
-from app.chat.attachments import PreparedAttachments, prepare_attachments
+from app.chat.attachments import (
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OPENAI,
+    AttachmentPart,
+    PreparedAttachments,
+    prepare_attachments,
+    render_attachment_blocks,
+)
 from app.chat.llm_client import (
     STOP_REASON_END_TURN,
     STOP_REASON_MAX_TOKENS,
@@ -734,6 +741,19 @@ async def test_no_tools_passes_not_given() -> None:
 
 
 # ============================ attachments (OpenAI mapping) ============================
+def _openai_blocks(prepared: PreparedAttachments) -> list[dict[str, Any]]:
+    """OpenAI wire blocks of the prepared parts (ADR-105 §A2: rendered by the client).
+
+    ``prepare_attachments`` no longer takes a provider nor returns provider blocks; the mapping
+    these tests assert lives in ``render_attachment_blocks``, which the OpenAI clients call.
+    """
+    return render_attachment_blocks(prepared.parts, PROVIDER_OPENAI)
+
+
+def _anthropic_blocks(prepared: PreparedAttachments) -> list[dict[str, Any]]:
+    return render_attachment_blocks(prepared.parts, PROVIDER_ANTHROPIC)
+
+
 def _png_b64() -> str:
     import base64
 
@@ -744,9 +764,8 @@ def test_openai_attachment_image_maps_to_image_url_data_uri() -> None:
     prepared = prepare_attachments(
         [AttachmentIn(type="image", mediaType="image/png", filename="p.png", data=_png_b64())],
         get_settings(),
-        provider="openai",
     )
-    block = prepared.content_blocks[0]
+    block = _openai_blocks(prepared)[0]
     assert block["type"] == "image_url"
     assert block["image_url"]["url"].startswith("data:image/png;base64,")
 
@@ -758,9 +777,8 @@ def test_openai_attachment_text_maps_to_text_block() -> None:
     prepared = prepare_attachments(
         [AttachmentIn(type="text", mediaType="text/plain", filename="n.txt", data=data)],
         get_settings(),
-        provider="openai",
     )
-    block = prepared.content_blocks[0]
+    block = _openai_blocks(prepared)[0]
     assert block["type"] == "text"
     assert "hello world" in block["text"]
 
@@ -788,10 +806,10 @@ def test_openai_attachment_pdf_maps_to_native_file_input() -> None:
     att = AttachmentIn(
         type="document", mediaType="application/pdf", filename="doc.pdf", data=pdf_b64
     )
-    prepared = prepare_attachments([att], get_settings(), provider="openai")
+    prepared = prepare_attachments([att], get_settings())
 
-    assert len(prepared.content_blocks) == 1
-    block = prepared.content_blocks[0]
+    assert len(_openai_blocks(prepared)) == 1
+    block = _openai_blocks(prepared)[0]
     assert block["type"] == "file"
     file_part = block["file"]
     assert isinstance(file_part, dict)
@@ -804,7 +822,7 @@ def test_openai_attachment_pdf_maps_to_native_file_input() -> None:
 def test_openai_attachment_pdf_default_filename_when_none() -> None:
     # ADR-041 §3: filename=None -> deterministic default "file" in the file-part.
     att = AttachmentIn(type="document", mediaType="application/pdf", filename=None, data=_pdf_b64())
-    block = prepare_attachments([att], get_settings(), provider="openai").content_blocks[0]
+    block = _openai_blocks(prepare_attachments([att], get_settings()))[0]
     assert block["file"]["filename"] == "file"
 
 
@@ -812,7 +830,7 @@ def test_openai_attachment_pdf_custom_filename_passthrough() -> None:
     att = AttachmentIn(
         type="document", mediaType="application/pdf", filename="report-Q3.pdf", data=_pdf_b64()
     )
-    block = prepare_attachments([att], get_settings(), provider="openai").content_blocks[0]
+    block = _openai_blocks(prepare_attachments([att], get_settings()))[0]
     assert block["file"]["filename"] == "report-Q3.pdf"
 
 
@@ -823,7 +841,7 @@ def test_openai_attachment_pdf_storage_invariant_placeholder_no_base64() -> None
     att = AttachmentIn(
         type="document", mediaType="application/pdf", filename="secret.pdf", data=pdf_b64
     )
-    prepared = prepare_attachments([att], get_settings(), provider="openai")
+    prepared = prepare_attachments([att], get_settings())
 
     assert len(prepared.placeholders) == 1
     ph = prepared.placeholders[0]
@@ -838,9 +856,9 @@ def test_openai_attachment_pdf_storage_invariant_placeholder_no_base64() -> None
 def test_openai_attachment_pdf_file_data_only_in_content_block_not_placeholder() -> None:
     pdf_b64 = _pdf_b64()
     att = AttachmentIn(type="document", mediaType="application/pdf", data=pdf_b64)
-    prepared = prepare_attachments([att], get_settings(), provider="openai")
+    prepared = prepare_attachments([att], get_settings())
     # file_data present in-memory...
-    assert prepared.content_blocks[0]["file"]["file_data"].endswith(pdf_b64)
+    assert _openai_blocks(prepared)[0]["file"]["file_data"].endswith(pdf_b64)
     # ...and absent from the persisted side.
     assert pdf_b64 not in prepared.placeholders[0]["text"]
 
@@ -851,7 +869,7 @@ def test_openai_attachment_encrypted_pdf_still_422() -> None:
         type="document", mediaType="application/pdf", data=_pdf_b64(encrypt="secret")
     )
     with pytest.raises(ValidationFailedError):
-        prepare_attachments([att], get_settings(), provider="openai")
+        prepare_attachments([att], get_settings())
 
 
 def test_openai_attachment_corrupt_pdf_still_422() -> None:
@@ -860,7 +878,7 @@ def test_openai_attachment_corrupt_pdf_still_422() -> None:
     bad = base64.b64encode(b"%PDF-1.4\nnot a real pdf body\n%%EOF").decode("ascii")
     att = AttachmentIn(type="document", mediaType="application/pdf", data=bad)
     with pytest.raises(ValidationFailedError):
-        prepare_attachments([att], get_settings(), provider="openai")
+        prepare_attachments([att], get_settings())
 
 
 def test_openai_attachment_pdf_magic_byte_spoof_still_422() -> None:
@@ -869,7 +887,7 @@ def test_openai_attachment_pdf_magic_byte_spoof_still_422() -> None:
     bad = base64.b64encode(b"%NOTPDF" + b"\x00" * 32).decode("ascii")
     att = AttachmentIn(type="document", mediaType="application/pdf", data=bad)
     with pytest.raises(ValidationFailedError):
-        prepare_attachments([att], get_settings(), provider="openai")
+        prepare_attachments([att], get_settings())
 
 
 def test_openai_attachment_pdf_over_page_limit_still_422() -> None:
@@ -878,7 +896,7 @@ def test_openai_attachment_pdf_over_page_limit_still_422() -> None:
     small = Settings(ATTACHMENT_PDF_MAX_PAGES=2)
     att = AttachmentIn(type="document", mediaType="application/pdf", data=_pdf_b64(3))
     with pytest.raises(ValidationFailedError):
-        prepare_attachments([att], small, provider="openai")
+        prepare_attachments([att], small)
 
 
 def test_openai_attachment_pdf_over_size_limit_still_422() -> None:
@@ -891,7 +909,7 @@ def test_openai_attachment_pdf_over_size_limit_still_422() -> None:
     big_b64 = base64.b64encode(b"\x00" * 4096).decode("ascii")
     att = AttachmentIn(type="document", mediaType="application/pdf", data=big_b64)
     with pytest.raises(ValidationFailedError):
-        prepare_attachments([att], small, provider="openai")
+        prepare_attachments([att], small)
 
 
 # --- ADR-041 §5: Anthropic PDF mapping is UNCHANGED (native document block), regression ---
@@ -901,14 +919,14 @@ def test_anthropic_attachment_pdf_unchanged_native_document_block() -> None:
     att = AttachmentIn(
         type="document", mediaType="application/pdf", filename="doc.pdf", data=pdf_b64
     )
-    prepared = prepare_attachments([att], get_settings(), provider="anthropic")
-    block = prepared.content_blocks[0]
+    prepared = prepare_attachments([att], get_settings())
+    block = _anthropic_blocks(prepared)[0]
     assert block == {
         "type": "document",
         "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64},
     }
     # Symmetric provider-agnostic check: same PDF, openai -> file-input, anthropic -> document.
-    openai_block = prepare_attachments([att], get_settings(), provider="openai").content_blocks[0]
+    openai_block = _openai_blocks(prepare_attachments([att], get_settings()))[0]
     assert openai_block["type"] == "file"
     assert block["type"] == "document"
 
@@ -919,14 +937,13 @@ async def test_pdf_file_part_injected_into_last_user_message() -> None:
     client, fake = _client_with_fake()
     fake.completions.next_completion = _completion(usage=_usage())
     prepared = PreparedAttachments(
-        content_blocks=[
-            {
-                "type": "file",
-                "file": {
-                    "filename": "doc.pdf",
-                    "file_data": "data:application/pdf;base64,JVBERi0=",
-                },
-            }
+        parts=[
+            AttachmentPart(
+                kind="document",
+                media_type="application/pdf",
+                filename="doc.pdf",
+                data="JVBERi0=",
+            )
         ],
         placeholders=[],
     )
@@ -945,7 +962,7 @@ async def test_attachments_injected_into_last_user_message_as_parts() -> None:
     client, fake = _client_with_fake()
     fake.completions.next_completion = _completion(usage=_usage())
     prepared = PreparedAttachments(
-        content_blocks=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}],
+        parts=[AttachmentPart(kind="image", media_type="image/png", filename="p.png", data="AAAA")],
         placeholders=[],
     )
     messages = [NeutralMessage(role="user", content_blocks=[{"type": "text", "text": "look"}])]

@@ -281,13 +281,21 @@ def get_documents_service(session: DbSession) -> DocumentsService:
 get_documents_service_dep = Annotated[DocumentsService, Depends(get_documents_service)]
 
 
-def get_media_generation_service(
-    session: DbSession,
-    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
+def build_media_generation_service(
+    session: AsyncSession, request_logs: RequestLogWriter
 ) -> MediaGenerationService:
-    # ADR-060: the wallet debit and the media_jobs insert must land in ONE transaction, so the
-    # wallet service is built on the same request-scoped session as the repository.
-    # ADR-067: push notifier shares that session so push_sent_at lands with mark_completed.
+    """THE one assembly of ``MediaGenerationService`` — request path AND reconciler (ADR-105 §B6).
+
+    Two hand-written assemblies of one service drifted apart once already: ADR-077 added
+    ``request_logs`` and ADR-086 added ``moderation`` here but not in the older reconciler, so a
+    job the reconciler finished left its ``request_logs`` row ``queued`` forever and a picture it
+    found ready went out WITHOUT post-moderation. A second assembly is forbidden: the next
+    dependency would again land in only one of them.
+
+    ADR-060: the wallet debit and the media_jobs insert must land in ONE transaction, so the
+    wallet service is built on the same session as the repository. ADR-067: the push notifier
+    shares that session so push_sent_at lands with mark_completed.
+    """
     return MediaGenerationService(
         repo=MediaJobsRepository(session),
         fal=get_fal_client(),
@@ -297,6 +305,13 @@ def get_media_generation_service(
         request_logs=request_logs,
         moderation=get_moderation_service(),
     )
+
+
+def get_media_generation_service(
+    session: DbSession,
+    request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
+) -> MediaGenerationService:
+    return build_media_generation_service(session, request_logs)
 
 
 def get_media_templates_service(session: DbSession) -> MediaTemplatesService:

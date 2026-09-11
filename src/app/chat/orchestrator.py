@@ -717,30 +717,26 @@ def _system_prompt_with_workspace(
 def _merge_attachments(
     chat: PreparedAttachments | None, workspace: PreparedAttachments | None
 ) -> PreparedAttachments | None:
-    """Merge workspace knowledge-file blocks with the request's inline attachment blocks (ADR-036).
+    """Merge workspace knowledge-file parts with the request's inline attachment parts (ADR-036).
 
-    Both are injected into the last user turn on the first call only. Workspace context blocks are
+    Both are injected into the last user turn on the first call only. Workspace context parts are
     placed BEFORE the request attachments (project context first). placeholders come only from the
     request attachments (workspace files are never persisted as user-step placeholders — they are
-    re-assembled from workspace_files on a new session's first turn).
+    re-assembled from workspace_files on a new session's first turn). Parts stay NEUTRAL: the
+    client that sends the call renders them in its own form (ADR-105 §A2).
     """
     if chat is None and workspace is None:
         return None
-    chat_blocks = chat.content_blocks if chat is not None else []
+    chat_parts = chat.parts if chat is not None else []
     chat_placeholders = chat.placeholders if chat is not None else []
     # Media image-to-image bridging uses ONLY request images — not workspace knowledge files.
     chat_images = list(chat.images) if chat is not None else []
-    ws_blocks = workspace.content_blocks if workspace is not None else []
+    ws_parts = workspace.parts if workspace is not None else []
     return PreparedAttachments(
-        content_blocks=[*ws_blocks, *chat_blocks],
+        parts=[*ws_parts, *chat_parts],
         placeholders=list(chat_placeholders),
         images=chat_images,
     )
-
-
-def _active_provider() -> str:
-    """Default credits provider (ADR-033 / ADR-073): ``LLM_PROVIDER``, anthropic if unset."""
-    return get_settings().credits_provider_for_model(None)
 
 
 def _credits_llm(*, provider: str, use_generation_v2: bool) -> LLMClient:
@@ -1636,14 +1632,10 @@ class ChatOrchestrator:
         system_prompt = _system_prompt_for(
             sess.assistant_mode, effective_generation_mode, sess.character_id
         )
-        # Credits dual-provider (ADR-073): attachments/workspace follow the SESSION model.
-        # BYOK keeps the instance default provider (same as before ADR-073; generation still
-        # routes by the key in _generate_loop).
-        session_provider = (
-            _active_provider()
-            if sess.mode == Mode.byok.value
-            else get_settings().credits_provider_for_model(sess.model)
-        )
+        # ADR-105 §A1/§A2: attachments and workspace files are assembled as NEUTRAL parts — no
+        # provider is chosen here. The provider of the call is known only to the client that sends
+        # it (cross-provider failover ADR-074, a BYOK key of another provider ADR-044, an operator
+        # default of the neighbouring provider ADR-099 §8), so the client renders them itself.
         if sess.workspace_project_id is not None:
             # Файлы проекта подмешиваются, когда беседа будет собрана ИЗ НАШЕЙ ИСТОРИИ — а в ней
             # их нет: они уходят провайдеру блоками и НИКОГДА не сохраняются (см. ниже, сборка
@@ -1674,7 +1666,7 @@ class ChatOrchestrator:
             needs_files = ctx.is_new or edit_message_step_id is not None or not sess.provider_state
             if needs_files:
                 ws_context = await self._deps.workspaces.context_for_session(
-                    sess.workspace_project_id, user_id, provider=session_provider
+                    sess.workspace_project_id, user_id
                 )
                 if ws_context is not None:
                     system_prompt = _system_prompt_with_workspace(
@@ -1710,12 +1702,12 @@ class ChatOrchestrator:
             if memory_block:
                 system_prompt = f"{system_prompt}\n\n{memory_block}"
 
-        # ADR-020 / ADR-033 §3,§5: validate inline attachments (provider-aware) and split into
-        # (a) the PreparedAttachments handed to the client ONCE on turn 0 — the client builds the
-        # provider content blocks and injects them — and (b) light text placeholders persisted in
-        # chat_steps.payload (provider-agnostic). Raw base64 is NEVER persisted (storage invariant).
-        # Validation runs BEFORE persisting the user step so a bad attachment (incl. PDF-on-OpenAI)
-        # is a clean 422 with no DB write. The shared validation runs before the provider branch.
+        # ADR-020 / ADR-105 §A2: validate inline attachments and split into (a) the neutral
+        # PreparedAttachments handed to the client ONCE on turn 0 — the client that sends the call
+        # renders them in its own provider form and injects them — and (b) light text placeholders
+        # persisted in chat_steps.payload (provider-agnostic). Raw base64 is NEVER persisted
+        # (storage invariant). Validation runs BEFORE persisting the user step so a bad attachment
+        # is a clean 422 with no DB write.
         # ADR-037 §3,§4: build the per-message conversation-settings block from `context` and
         # PREPEND it to the turn-0 user text (block leads, then "\n\n", then the user message). When
         # no valid key survives validation → None → the text is the bare message (unchanged). The
@@ -1735,7 +1727,7 @@ class ChatOrchestrator:
         message_text = _compose_turn0_text(context_block, message)
         prepared: PreparedAttachments | None = None
         if attachments:
-            prepared = prepare_attachments(attachments, get_settings(), session_provider)
+            prepared = prepare_attachments(attachments, get_settings())
         text_blocks: list[dict[str, Any]] = (
             [{"type": "text", "text": message_text}] if message_text else []
         )
@@ -3233,10 +3225,11 @@ class ChatOrchestrator:
         # into every terminal ChatRunOut of this loop so the client sees what ran, regardless of how
         # the turn ended (assistant_message / client tool_call / max_tokens).
         server_tools: list[ServerToolExecutionOut] = []
-        # ADR-020 / ADR-033 §3: the PreparedAttachments are handed to the client on the FIRST
-        # iteration ONLY; the client builds the provider content blocks and injects them into the
-        # last user turn. Subsequent (tool-loop) iterations replay placeholders from chat_steps —
-        # heavy base64 is never re-sent. The reference is consumed after the first call.
+        # ADR-020 / ADR-088 / ADR-105 §A2: the neutral PreparedAttachments are handed to the client
+        # on the FIRST iteration ONLY; every attempt of that call (ADR-074 chain) receives the SAME
+        # neutral parts and its client renders them in its own provider form. Subsequent
+        # (tool-loop) iterations replay placeholders from chat_steps — heavy base64 is never
+        # re-sent. The reference is consumed after the first call.
         turn0_attachments = first_turn_attachments
         # Same-turn image attachments stay available for media tools (upload → image-to-image).
         turn_images = list(first_turn_attachments.images) if first_turn_attachments else []

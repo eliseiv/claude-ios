@@ -53,6 +53,7 @@ from app.media_generation.fal_client import (
     FAL_COMPLETED,
     FAL_FAILED,
     FalClient,
+    upstream_status_of,
 )
 from app.media_generation.repository import (
     STATUS_COMPLETED,
@@ -105,6 +106,24 @@ def _looks_like_provider_content_refusal(error: str) -> bool:
 # == "app.media_generation.service"
 
 _REFUND_REASON = "media_generation_failed"
+
+# ADR-105 §B4: the `error` of a job closed by the deadline. Matches none of
+# `_FAL_CONTENT_POLICY_MARKERS`, so `_fail` does not classify it as a content-policy refusal.
+DEADLINE_EXCEEDED_ERROR = "generation did not complete in time"
+
+# ADR-105 §B5: `lastObservation` — the CAUSE dimension of the deadline event, separate from the
+# consequence (always `failed` + refund). Each value is chosen by a predicate over the facts of the
+# poll, never by judgement; the predicates are mutually exclusive and cover every outcome of §B2
+# step 2.
+OBSERVATION_UPSTREAM_ERROR = "upstream_error"  # key set, FalClient.status/result raised
+OBSERVATION_UPSTREAM_PENDING = "upstream_pending"  # FalClient.status: non-terminal status
+OBSERVATION_MODERATION_UNAVAILABLE = "moderation_unavailable"  # assets in, _moderate_output raised
+OBSERVATION_NOT_CONFIGURED = "not_configured"  # FAL_API_KEY empty — no request went upstream
+OBSERVATION_INTERNAL_ERROR = "internal_error"  # raised outside FalClient and _moderate_output
+
+
+def _now() -> datetime.datetime:
+    return datetime.datetime.now(tz=datetime.UTC)
 
 
 @dataclass(frozen=True)
@@ -497,15 +516,23 @@ class MediaGenerationService:
         )
 
     async def _advance(self, job: MediaJob) -> MediaJobView:
-        """Poll fal once and persist any state transition.
+        """Poll fal once and persist any state transition (ADR-060 §3, ADR-105 §B2).
 
         A ``422`` while polling is a *rejected run*, not a bad poll: fal validates some inputs only
         while executing (a reference image it cannot download, for instance) and then serves that
         verdict from the status/result URL forever. Re-raising it would answer a perfectly valid
         ``GET /v1/media/jobs/{id}`` with ``422``, leave the job non-terminal for good and never
         refund — so it is folded into the normal failure path (terminal ``failed`` + refund) with
-        fal's own wording kept as ``error``. Transient upstream problems (``429``/``502``) still
-        propagate: the job stays non-terminal and the next poll retries.
+        fal's own wording kept as ``error``.
+
+        ADR-105 §B2 — the poll ALWAYS happens, past the deadline too (last chance): a terminal
+        answer is applied exactly as before. When the poll yields NO final state — for ANY reason
+        (an exception of the fal client, a non-terminal status, an unavailable post-moderation, an
+        empty key, an exception of our own code between the poll and the outcome) —
+        ``_close_if_overdue`` decides: a job older than ``MEDIA_JOB_DEADLINE_SECONDS`` is closed as
+        ``failed`` with a refund and the exception does not surface; a younger job is not touched
+        (the exception propagates, a non-terminal status marks it ``running``) — the next poll
+        retries, as before.
         """
         try:
             status = await self._fal.status(status_url=job.status_url, endpoint=job.fal_endpoint)
@@ -516,6 +543,13 @@ class MediaGenerationService:
             # пользователя: он заплатил и не получит результата, значит кредиты возвращаются.
             # Повторять нечего, иначе задача остаётся незавершённой вечно.
             return await self._fail(job, error=exc.message)
+        except Exception as exc:
+            closed = await self._close_if_overdue(
+                job, observation=self._fal_failure_observation(), cause=exc
+            )
+            if closed is None:
+                raise
+            return closed
 
         if status.status == FAL_COMPLETED:
             try:
@@ -524,15 +558,38 @@ class MediaGenerationService:
                 )
             except ValidationFailedError as exc:
                 return await self._fail(job, error=exc.message)
-            result = _normalize_result(body, kind=job.kind)
-            assets = _assets_from_result(result)
+            except Exception as exc:
+                closed = await self._close_if_overdue(
+                    job, observation=self._fal_failure_observation(), cause=exc
+                )
+                if closed is None:
+                    raise
+                return closed
+            try:
+                result = _normalize_result(body, kind=job.kind)
+                assets = _assets_from_result(result)
+            except Exception as exc:
+                closed = await self._close_if_overdue(
+                    job, observation=OBSERVATION_INTERNAL_ERROR, cause=exc
+                )
+                if closed is None:
+                    raise
+                return closed
             if not assets:
                 # COMPLETED with nothing usable is a failed run from the user's point of view.
                 return await self._fail(job, error="generation produced no output")
             # ADR-086 §5: пост-модерация результата. Только image — omni-moderation не принимает
             # видео; у видео-задачи moderation отражает вход (Q-086-2). Проверка ДО mark_completed,
             # чтобы заблокированный ассет никогда не оказался в терминальном completed.
-            output_verdict = await self._moderate_output(job, assets)
+            try:
+                output_verdict = await self._moderate_output(job, assets)
+            except Exception as exc:
+                closed = await self._close_if_overdue(
+                    job, observation=OBSERVATION_MODERATION_UNAVAILABLE, cause=exc
+                )
+                if closed is None:
+                    raise
+                return closed
             if output_verdict is not None and output_verdict.blocked:
                 return await self._blocked_by_moderation(job, verdict=output_verdict)
             await self._repo.mark_completed(
@@ -570,8 +627,59 @@ class MediaGenerationService:
         if status.status in (FAL_FAILED, FAL_CANCELED):
             return await self._fail(job, error=status.error or "generation failed upstream")
 
+        closed = await self._close_if_overdue(job, observation=OBSERVATION_UPSTREAM_PENDING)
+        if closed is not None:
+            return closed
         await self._repo.mark_running(job)
         return MediaJobView(job=job, assets=[])
+
+    def _fal_failure_observation(self) -> str:
+        """``lastObservation`` of a failed ``FalClient.status``/``result`` call (ADR-105 §B5).
+
+        Predicates from the facts of the poll, mutually exclusive: an empty ``FAL_API_KEY`` means no
+        request went upstream at all (``FalClient._headers`` refuses first) ⇒ ``not_configured``;
+        a key is set and the call raised ⇒ ``upstream_error`` — a rejected key (``401``/``403``)
+        included, because that IS an answer from fal.
+        """
+        return OBSERVATION_UPSTREAM_ERROR if self._fal.configured else OBSERVATION_NOT_CONFIGURED
+
+    def _age(self, job: MediaJob) -> datetime.timedelta | None:
+        created_at = job.created_at
+        if created_at is None:
+            return None
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=datetime.UTC)
+        return _now() - created_at
+
+    async def _close_if_overdue(
+        self,
+        job: MediaJob,
+        *,
+        observation: str,
+        cause: BaseException | None = None,
+    ) -> MediaJobView | None:
+        """The deadline branch of ADR-105 §B2: close an overdue job, leave a young one alone.
+
+        Called ONLY when the poll yielded no final state. ``now − created_at >
+        MEDIA_JOB_DEADLINE_SECONDS`` ⇒ ``media_generation_deadline_exceeded`` and ``_fail`` with
+        ``DEADLINE_EXCEEDED_ERROR`` (refund keyed ``media-refund:{jobId}``, ``mark_failed``,
+        ``request_logs.finish_media``) — and the view is returned, so no exception surfaces.
+        Otherwise ``None``: the caller keeps today's behaviour (re-raise / ``mark_running``).
+        """
+        age = self._age(job)
+        if age is None or age.total_seconds() <= self._settings.media_job_deadline_seconds:
+            return None
+        fields: dict[str, Any] = {
+            "jobId": str(job.id),
+            "model": job.model_id,
+            "ageSeconds": int(age.total_seconds()),
+            "lastObservation": observation,
+        }
+        upstream_status = upstream_status_of(cause) if cause is not None else None
+        if upstream_status is not None:
+            fields["upstreamStatus"] = upstream_status
+        log_event(logger, logging.WARNING, "media_generation_deadline_exceeded", **fields)
+        return await self._fail(job, error=DEADLINE_EXCEEDED_ERROR)
 
     async def _moderate_output(
         self, job: MediaJob, assets: list[MediaAsset]

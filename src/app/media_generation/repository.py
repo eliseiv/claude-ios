@@ -187,16 +187,18 @@ class MediaJobsRepository:
         job.updated_at = _now()
         await self._session.flush()
 
-    async def list_non_terminal(self, *, limit: int) -> list[MediaJob]:
+    async def list_non_terminal(
+        self, *, limit: int, created_before: datetime.datetime | None = None
+    ) -> list[MediaJob]:
         """Oldest non-terminal jobs first — for the background reconciler (ADR-067).
 
         Not owner-scoped: the reconciler is a trusted in-process worker that advances every
         stuck job so refunds and media-ready pushes still happen when the client stops polling.
+        ``created_before`` narrows the same selection by age (ADR-105 §B7: with an empty fal key
+        only jobs past the deadline are taken) — served by the partial index on ``created_at``.
         """
-        stmt = (
-            select(MediaJob)
-            .where(MediaJob.status.in_(tuple(NON_TERMINAL_STATUSES)))
-            .order_by(MediaJob.created_at.asc(), MediaJob.id.asc())
-            .limit(limit)
-        )
+        stmt = select(MediaJob).where(MediaJob.status.in_(tuple(NON_TERMINAL_STATUSES)))
+        if created_before is not None:
+            stmt = stmt.where(MediaJob.created_at < created_before)
+        stmt = stmt.order_by(MediaJob.created_at.asc(), MediaJob.id.asc()).limit(limit)
         return list((await self._session.scalars(stmt)).all())

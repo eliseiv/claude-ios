@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 
@@ -48,6 +48,30 @@ _REHOST_ENDPOINT = "storage/rehost"
 # Cap on a reference fetch (the failing still was ~20 MB). Larger than that is not a still
 # Kling can ingest; fail before we debit credits.
 _MAX_REFERENCE_DOWNLOAD_BYTES = 40 * 1024 * 1024
+
+# ADR-105 §B5: the HTTP status of the fal answer an exception was raised for. Before, the status
+# lived only in the `fal_call_outcome` event, and the raised exception did not carry it — so the
+# deadline branch of the service could not say which answer kept a job from finishing.
+_UPSTREAM_STATUS_ATTR = "upstream_status"
+
+_ErrorT = TypeVar("_ErrorT", bound=Exception)
+
+
+def _with_upstream_status(exc: _ErrorT, status: int | None) -> _ErrorT:
+    """Attach the fal HTTP status to the exception being raised (no status → nothing attached)."""
+    if status is not None:
+        setattr(exc, _UPSTREAM_STATUS_ATTR, status)
+    return exc
+
+
+def upstream_status_of(exc: BaseException) -> int | None:
+    """The fal HTTP status an exception was raised for, if it was raised for an HTTP answer.
+
+    ``None`` for a timeout, a dropped connection, a malformed body, a missing key — every failure
+    that had no HTTP answer to speak of (ADR-105 §B5: then the field is not written at all).
+    """
+    value = getattr(exc, _UPSTREAM_STATUS_ATTR, None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 @dataclass(frozen=True)
@@ -326,7 +350,10 @@ class FalClient:
                 falEndpoint=endpoint,
                 upstreamStatus=code,
             )
-            raise MediaGenerationNotConfiguredError("media generation provider rejected the key")
+            raise _with_upstream_status(
+                MediaGenerationNotConfiguredError("media generation provider rejected the key"),
+                code,
+            )
         if code == 422:
             detail = _validation_detail(response)
             log_event(
@@ -337,7 +364,7 @@ class FalClient:
                 reason="upstream_validation",
                 falEndpoint=endpoint,
             )
-            raise ValidationFailedError(detail)
+            raise _with_upstream_status(ValidationFailedError(detail), code)
         if code == 429:
             log_event(
                 logger,
@@ -347,7 +374,9 @@ class FalClient:
                 reason="upstream_rate_limited",
                 falEndpoint=endpoint,
             )
-            raise RateLimitedError("generation provider rate limit exceeded")
+            raise _with_upstream_status(
+                RateLimitedError("generation provider rate limit exceeded"), code
+            )
         if code == 404:
             # Задачи у провайдера больше нет и не будет: fal убирает истёкшие из очереди.
             # Отдельный класс нужен, чтобы согласователь закрыл задачу и вернул кредиты, а не
@@ -361,7 +390,9 @@ class FalClient:
                 falEndpoint=endpoint,
                 upstreamStatus=code,
             )
-            raise UpstreamJobGoneError("generation job no longer exists upstream")
+            raise _with_upstream_status(
+                UpstreamJobGoneError("generation job no longer exists upstream"), code
+            )
         reason = "upstream_payment_required" if code == 402 else "upstream_status"
         raise self._upstream_error(reason, endpoint=endpoint, upstream_status=code)
 
@@ -377,7 +408,9 @@ class FalClient:
             falEndpoint=endpoint,
             upstreamStatus=upstream_status,
         )
-        return UpstreamError("generation provider unavailable")
+        return _with_upstream_status(
+            UpstreamError("generation provider unavailable"), upstream_status
+        )
 
 
 def _validation_detail(response: httpx.Response) -> str:

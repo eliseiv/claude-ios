@@ -8,8 +8,9 @@ its provider-side chain stays off (``_CONTINUATION_ENABLED``, TD-032).
 
 All OpenAI-specific (de)serialization of the wire format lives INSIDE this client (ADR-033 §3):
 - builds OpenAI Chat Completions ``messages`` from the neutral history (system message, assistant
-  ``tool_calls``, ``role=tool`` with ``tool_call_id``) + first-turn attachments (image_url data-URI
-  / text / native ``file`` content-part for PDF — ADR-041, closes TD-023);
+  ``tool_calls``, ``role=tool`` with ``tool_call_id``; an assistant step of a FOREIGN form is
+  translated, ADR-105 §A3) + first-turn attachments rendered here from neutral parts (image_url
+  data-URI / text / native ``file`` content-part for PDF — ADR-041, ADR-105 §A2);
 - serializes tools to ``{type:function,function:{name(underscore),parameters}}``;
 - parses the response: ``finish_reason`` → canonical stop_reason; ``message.tool_calls[]`` → domain
   tool_uses (reverse-mapped name, ``arguments`` JSON parsed to dict; invalid JSON / unknown name →
@@ -31,7 +32,7 @@ from typing import Any
 import openai
 from openai.types.chat import ChatCompletionMessageFunctionToolCall
 
-from app.chat.attachments import PreparedAttachments
+from app.chat.attachments import PROVIDER_OPENAI, PreparedAttachments, render_attachment_blocks
 from app.chat.llm_client import (
     STOP_REASON_END_TURN,
     STOP_REASON_MAX_TOKENS,
@@ -47,6 +48,7 @@ from app.chat.tools import (
     openai_tool_function,
     to_domain_tool_name,
 )
+from app.chats.provider_blocks import is_chat_completions_message, to_domain_blocks
 from app.config import get_settings
 from app.errors import UpstreamError, ValidationFailedError
 from app.observability.logging import get_logger, log_event
@@ -123,19 +125,53 @@ class OpenAIClient:
         )
 
     @staticmethod
-    def _anthropic_blocks_to_openai_content(
-        blocks: list[dict[str, Any]],
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """Defensive cross-shape adapter (not used in production — one provider per instance).
+    def _domain_blocks_to_openai_message(blocks: list[Any]) -> dict[str, Any]:
+        """Chat-Completions assistant message from domain blocks of a FOREIGN step (ADR-105 §A3).
 
-        On an OpenAI instance the persisted blocks are already OpenAI-shaped, so this is only a
-        guard for mixed/foreign blocks: collect text, drop the rest. Returns (text, tool_calls).
+        A foreign step (Anthropic blocks, or the compact Responses blocks) is not a dead path: a
+        Claude session that failed over to OpenAI (ADR-074), a BYOK key replaced with another
+        provider's (ADR-044) or an operator default of the neighbouring provider (ADR-099 §8)
+        replays it here. Translation by the three rules of §A3.4:
+
+        - visible text → the message ``content``;
+        - ``tool_use`` → a ``tool_calls[]`` entry: id VERBATIM (ADR-008), wire name with
+          underscores verbatim (ADR-033 §4), ``input`` object → ``arguments`` JSON string;
+        - anything else (``thinking``, ``reasoning``, hosted-search records, ``annotations``) is
+          dropped — it is neither visible text nor a tool call.
+
+        Dropping a call while keeping its ``role=tool`` result is FORBIDDEN (§A3.5): that is exactly
+        the request Chat Completions rejects by schema, which the former text-only adapter produced.
         """
         text_parts: list[str] = []
-        for b in blocks:
-            if b.get("type") == "text" and isinstance(b.get("text"), str):
-                text_parts.append(b["text"])
-        return "".join(text_parts), []
+        tool_calls: list[dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text" and isinstance(block.get("text"), str):
+                text_parts.append(block["text"])
+            elif block_type == "tool_use":
+                call_id = block.get("id")
+                name = block.get("name")
+                if not isinstance(call_id, str) or not isinstance(name, str):
+                    continue
+                arguments = block.get("input")
+                tool_calls.append(
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(
+                                arguments if isinstance(arguments, dict) else {}
+                            ),
+                        },
+                    }
+                )
+        message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return message
 
     def _build_provider_messages(
         self,
@@ -170,22 +206,20 @@ class OpenAIClient:
         return out
 
     def _assistant_message_from_blocks(self, blocks: list[dict[str, Any]]) -> dict[str, Any]:
-        """Build an OpenAI assistant message from persisted blocks.
+        """Build an OpenAI assistant message from a persisted assistant step of ANY form.
 
-        On an OpenAI instance the persisted assistant block is already the normalized OpenAI
-        assistant message ``{role:"assistant", content, tool_calls}`` (a single dict in the list).
-        Replay it verbatim. As a guard for any foreign/text-only shape, fall back to text-only.
+        The form is recognized by STRUCTURE (ADR-105 §A3.2), through the one shared recognizer of
+        ``app.chats.provider_blocks`` — never by the session's provider. Our own form (the
+        normalized Chat-Completions message ``{role:"assistant", content, tool_calls}``, a single
+        dict in the list) is replayed verbatim, exactly as before (§A3.3). Any other form is read
+        through ``to_domain_blocks`` and translated (``_domain_blocks_to_openai_message``).
         """
-        if len(blocks) == 1 and blocks[0].get("role") == "assistant":
+        if is_chat_completions_message(blocks):
             # Already the OpenAI assistant message (our persisted shape).
             msg = dict(blocks[0])
             msg.setdefault("content", None)
             return msg
-        text, tool_calls = self._anthropic_blocks_to_openai_content(blocks)
-        message: dict[str, Any] = {"role": "assistant", "content": text or None}
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-        return message
+        return self._domain_blocks_to_openai_message(to_domain_blocks(blocks))
 
     def _user_message_from_blocks(self, blocks: list[dict[str, Any]]) -> dict[str, Any]:
         """Build an OpenAI user message from persisted blocks.
@@ -215,14 +249,17 @@ class OpenAIClient:
     def _inject_attachments(
         messages: list[dict[str, Any]], attachments: PreparedAttachments
     ) -> None:
-        """Inject first-turn attachment content parts into the last user message (ADR-020/§5).
+        """Render first-turn attachment parts and inject them into the last user message.
 
-        The OpenAI user content becomes a content-part list: the existing text part(s) followed by
-        the attachment parts (image_url / text / native ``file`` content-part for PDF — ADR-041,
-        closes TD-023). Mutates the last user message in place.
+        ADR-105 §A2.3: the neutral parts are rendered HERE, by the client that sends the call, in
+        the OpenAI form (image_url / text / native ``file`` content-part for PDF — ADR-041). The
+        OpenAI user content becomes a content-part list: the existing text part(s) followed by the
+        attachment parts. Mutates the last user message in place; if there is none the parts form
+        one — a part is never dropped (§A2.4).
         """
-        if not attachments.content_blocks:
+        if not attachments.parts:
             return
+        rendered = render_attachment_blocks(attachments.parts, PROVIDER_OPENAI)
         for m in reversed(messages):
             if m.get("role") == "user":
                 existing = m.get("content")
@@ -232,9 +269,10 @@ class OpenAIClient:
                         parts.append({"type": "text", "text": existing})
                 elif isinstance(existing, list):
                     parts.extend(existing)
-                parts.extend(attachments.content_blocks)
+                parts.extend(rendered)
                 m["content"] = parts
                 return
+        messages.append({"role": "user", "content": list(rendered)})
 
     @staticmethod
     def _normalize_tool_call(

@@ -295,7 +295,7 @@ class FakeAnthropicClient:
     ``create_message`` — ``messages`` is ``list[NeutralMessage]``, ``tools`` are neutral
     (dotted-name) definitions, and first-turn ``attachments`` arrive as a separate kwarg
     (PreparedAttachments). Provider wire serialization lives INSIDE the real client
-    (``AnthropicClient._build_provider_messages`` / ``_serialize_tools`` / attachment injection).
+    (``AnthropicClient._build_provider_messages`` / ``_serialize_tools`` / attachment rendering).
     To keep this fake a faithful double of the real seam, ``create_message`` records BOTH:
     - the neutral kwargs (``messages``/``tools``/``attachments``/``api_key``/``system_prompt``)
       under ``neutral_*`` keys, AND
@@ -501,13 +501,17 @@ class FakeAnthropicClient:
                     "display": settings.resolved_anthropic_thinking_display(),
                 }
             }
-        if attachments is not None and getattr(attachments, "content_blocks", None):
-            # Inject the full attachment blocks into the last user turn — production parity.
+        if attachments is not None and getattr(attachments, "parts", None):
+            # Inject the full attachment blocks into the last user turn — production parity. The
+            # parts are neutral (ADR-105 §A2); render them as the real AnthropicClient does.
+            from app.chat.attachments import PROVIDER_ANTHROPIC, render_attachment_blocks
+
+            rendered = render_attachment_blocks(attachments.parts, PROVIDER_ANTHROPIC)
             for wm in reversed(wire_messages):
                 if wm.get("role") == "user":
                     existing = wm.get("content")
                     base = existing if isinstance(existing, list) else []
-                    wm["content"] = [*base, *attachments.content_blocks]
+                    wm["content"] = [*base, *rendered]
                     break
 
         self.calls.append(

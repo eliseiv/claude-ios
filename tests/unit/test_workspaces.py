@@ -20,7 +20,7 @@ import uuid
 
 import pytest
 
-from app.chat.attachments import PreparedAttachments
+from app.chat.attachments import PreparedAttachments, render_attachment_blocks
 from app.config import Settings
 from app.errors import PayloadTooLargeError, ValidationFailedError
 from app.models import WorkspaceFile
@@ -201,6 +201,15 @@ def _wf(
     )
 
 
+def _blocks(prepared: PreparedAttachments, provider: str) -> list[dict[str, object]]:
+    """Wire blocks of the knowledge-file parts for ``provider`` (ADR-105 §A2).
+
+    The service no longer takes a provider: it yields neutral parts, and the client that sends the
+    call renders them through the one mapping, ``render_attachment_blocks``.
+    """
+    return render_attachment_blocks(prepared.parts, provider)
+
+
 def _svc(**overrides: object) -> WorkspacesService:
     # repository is unused by the pure _build_file_attachments path.
     return WorkspacesService(repo=None, settings=_settings(**overrides))  # type: ignore[arg-type]
@@ -209,9 +218,9 @@ def _svc(**overrides: object) -> WorkspacesService:
 def test_context_truncates_to_max_chars() -> None:
     svc = _svc(WORKSPACE_CONTEXT_MAX_CHARS=10)
     files = [_wf(media_type="text/plain", extracted_text="A" * 100)]
-    prepared = svc._build_file_attachments(files, "anthropic")
+    prepared = svc._build_file_attachments(files)
     assert isinstance(prepared, PreparedAttachments)
-    text_block = prepared.content_blocks[0]["text"]
+    text_block = _blocks(prepared, "anthropic")[0]["text"]
     # The marker prefix plus exactly 10 chars of the body (the budget bounds extracted_text only).
     assert text_block.count("A") == 10
 
@@ -222,9 +231,9 @@ def test_context_drops_later_text_after_budget_exhausted() -> None:
         _wf(media_type="text/plain", extracted_text="AAAAA", created_at=0),
         _wf(media_type="text/plain", extracted_text="BBBBB", created_at=1),
     ]
-    prepared = svc._build_file_attachments(files, "anthropic")
+    prepared = svc._build_file_attachments(files)
     assert prepared is not None
-    joined = "".join(str(b.get("text", "")) for b in prepared.content_blocks)
+    joined = "".join(str(b.get("text", "")) for b in _blocks(prepared, "anthropic"))
     assert "A" in joined
     assert "B" not in joined  # second file dropped — budget already consumed by the first
 
@@ -235,10 +244,10 @@ def test_context_images_not_counted_against_char_budget() -> None:
         _wf(media_type="text/plain", extracted_text="hello"),
         _wf(media_type="image/png", extracted_text=None, content=_PNG),
     ]
-    prepared = svc._build_file_attachments(files, "anthropic")
+    prepared = svc._build_file_attachments(files)
     assert prepared is not None
     # No text budget → text dropped, but the image vision block is still present.
-    types = [b.get("type") for b in prepared.content_blocks]
+    types = [b.get("type") for b in _blocks(prepared, "anthropic")]
     assert "image" in types
     assert "text" not in types
 
@@ -247,14 +256,14 @@ def test_context_image_block_provider_agnostic() -> None:
     svc = _svc()
     files = [_wf(media_type="image/png", extracted_text=None, content=_PNG)]
 
-    anthropic = svc._build_file_attachments(files, "anthropic")
+    anthropic = svc._build_file_attachments(files)
     assert anthropic is not None
-    assert anthropic.content_blocks[0]["type"] == "image"
-    assert anthropic.content_blocks[0]["source"]["type"] == "base64"
+    assert _blocks(anthropic, "anthropic")[0]["type"] == "image"
+    assert _blocks(anthropic, "anthropic")[0]["source"]["type"] == "base64"
 
-    openai = svc._build_file_attachments(files, "openai")
+    openai = svc._build_file_attachments(files)
     assert openai is not None
-    block = openai.content_blocks[0]
+    block = _blocks(openai, "openai")[0]
     assert block["type"] == "image_url"
     assert str(block["image_url"]["url"]).startswith("data:image/png;base64,")
 
@@ -265,9 +274,9 @@ def test_context_pdf_extracted_text_injected_as_text_both_providers() -> None:
     svc = _svc()
     files = [_wf(media_type="application/pdf", extracted_text="page text", content=b"%PDF-")]
     for provider in ("anthropic", "openai"):
-        prepared = svc._build_file_attachments(files, provider)
+        prepared = svc._build_file_attachments(files)
         assert prepared is not None, provider
-        block = prepared.content_blocks[0]
+        block = _blocks(prepared, provider)[0]
         assert block["type"] == "text"
         assert "page text" in str(block["text"])
         assert "[Файл проекта: doc.txt]" in str(block["text"])
@@ -276,6 +285,6 @@ def test_context_pdf_extracted_text_injected_as_text_both_providers() -> None:
 def test_context_no_injectable_files_returns_none() -> None:
     svc = _svc()
     # An image-only file with extracted_text None still yields a block; an empty-text doc does not.
-    assert svc._build_file_attachments([], "anthropic") is None
+    assert svc._build_file_attachments([]) is None
     files = [_wf(media_type="text/plain", extracted_text="")]
-    assert svc._build_file_attachments(files, "anthropic") is None
+    assert svc._build_file_attachments(files) is None

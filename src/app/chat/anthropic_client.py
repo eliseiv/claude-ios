@@ -25,7 +25,7 @@ from typing import Any, cast
 import anthropic
 
 from app import instance_config
-from app.chat.attachments import PreparedAttachments
+from app.chat.attachments import PROVIDER_ANTHROPIC, PreparedAttachments, render_attachment_blocks
 from app.chat.llm_client import (
     STOP_REASON_END_TURN,
     STOP_REASON_MAX_TOKENS,
@@ -41,6 +41,7 @@ from app.chat.tools import (
     to_anthropic_tool_name,
     to_domain_tool_name,
 )
+from app.chats.provider_blocks import to_domain_blocks
 from app.config import get_settings
 from app.errors import UpstreamError, ValidationFailedError
 from app.observability.logging import get_logger, log_event
@@ -99,6 +100,123 @@ def _normalize_block(block: dict[str, Any]) -> dict[str, Any]:
         return {k: block[k] for k in allowed if k in block}
     # Unknown type: don't lose content — drop only known non-wire SDK fields.
     return {k: v for k, v in block.items() if k != "caller"}
+
+
+# ADR-105 §A3.6: block types the Anthropic Messages API DEFINES in its input schema for an
+# assistant turn. A superset of every type this client itself persists (``text``, ``tool_use``,
+# ``thinking``, ``redacted_thinking`` and the hosted-search pair ``server_tool_use`` /
+# ``web_search_tool_result``), so a step of our own form replays unchanged. Anything else in a
+# replayed assistant step is a FOREIGN block (Responses ``reasoning`` / ``web_search_call``) that
+# carries neither visible text nor a tool call and is dropped (§A3.4, third rule).
+_ANTHROPIC_ASSISTANT_INPUT_TYPES: frozenset[str] = frozenset(
+    {
+        "text",
+        "image",
+        "document",
+        "search_result",
+        "tool_use",
+        "tool_result",
+        "thinking",
+        "redacted_thinking",
+        "server_tool_use",
+        "web_search_tool_result",
+        "web_fetch_tool_result",
+        "code_execution_tool_result",
+        "bash_code_execution_tool_result",
+        "text_editor_code_execution_tool_result",
+        "mcp_tool_use",
+        "mcp_tool_result",
+        "container_upload",
+    }
+)
+
+# Blocks Anthropic accepts at the START of an assistant turn to satisfy the extended-thinking rule
+# (ADR-105 §A3.7).
+_THINKING_BLOCK_TYPES: frozenset[str] = frozenset({"thinking", "redacted_thinking"})
+
+
+def _replay_assistant_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Anthropic content of a persisted assistant step of ANY form (ADR-105 §A3).
+
+    The form is recognized by structure through the one shared recognizer ``to_domain_blocks``
+    (ADR-058): a Chat-Completions message becomes ``text`` + ``tool_use`` domain blocks (id raw,
+    wire name, input object — exactly Anthropic's ``tool_use`` shape); typed blocks (our own form,
+    or the compact Responses form) come back as they are. Then blocks the Anthropic input schema
+    does not define are dropped and every kept block is cut to its wire field list
+    (``_BLOCK_WIRE_FIELDS`` — strips ``annotations`` from a Responses ``text``). Our own blocks were
+    normalized by the same function at the persist boundary, so a step of our form replays with
+    the same content as before. No tool call is ever dropped: pairing «call ⇔ result» holds.
+    """
+    domain = to_domain_blocks(blocks)
+    out: list[dict[str, Any]] = []
+    for block in domain:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if not isinstance(block_type, str) or block_type not in _ANTHROPIC_ASSISTANT_INPUT_TYPES:
+            continue
+        normalized = _normalize_block(block)
+        # Nothing to strip ⇒ keep the stored object itself (its key order included): a step of
+        # our own form is replayed bit-for-bit (§A3.3).
+        out.append(block if normalized == block else normalized)
+    return out
+
+
+def _thinking_replayable(wire_messages: list[dict[str, Any]]) -> bool:
+    """May extended thinking be switched on for this request? (ADR-105 §A3.7).
+
+    Anthropic requires that, with ``thinking`` enabled, the LAST assistant turn followed only by
+    ``tool_result`` user turns starts with a thinking block. A turn answered by the other provider
+    (foreign form) has no thinking block and cannot have one, so the attempt must go without
+    ``thinking``. The predicate is the observable fact of the history, both ways: no such trailing
+    tool-result run, or the assistant turn starts with a thinking block ⇒ ``True`` (thinking on, as
+    before); otherwise ⇒ ``False``.
+    """
+    index = len(wire_messages) - 1
+    saw_tool_result = False
+    while index >= 0:
+        message = wire_messages[index]
+        content = message.get("content")
+        if (
+            message.get("role") == "user"
+            and isinstance(content, list)
+            and content
+            and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+        ):
+            saw_tool_result = True
+            index -= 1
+            continue
+        break
+    if not saw_tool_result or index < 0:
+        return True
+    assistant = wire_messages[index]
+    if assistant.get("role") != "assistant":
+        return True
+    content = assistant.get("content")
+    first = content[0] if isinstance(content, list) and content else None
+    return isinstance(first, dict) and first.get("type") in _THINKING_BLOCK_TYPES
+
+
+def _inject_attachment_blocks(
+    wire_messages: list[dict[str, Any]], attachments: PreparedAttachments | None
+) -> None:
+    """Render the turn's neutral parts as Anthropic blocks and add them to the last user turn.
+
+    ADR-105 §A2.3: rendered HERE, by the client that sends the call, with its own provider —
+    whichever provider the session or the caller had in mind. ADR-020: first call only (the
+    orchestrator passes ``attachments`` on the first iteration). Rendering is total; if no user
+    turn exists the blocks form one rather than being dropped (§A2.4).
+    """
+    if attachments is None or not attachments.parts:
+        return
+    blocks = render_attachment_blocks(attachments.parts, PROVIDER_ANTHROPIC)
+    for wm in reversed(wire_messages):
+        if wm.get("role") == "user":
+            existing = wm.get("content")
+            base = existing if isinstance(existing, list) else []
+            wm["content"] = [*base, *blocks]
+            return
+    wire_messages.append({"role": "user", "content": blocks})
 
 
 class AnthropicAuthError(Exception):
@@ -216,17 +334,26 @@ class AnthropicClient:
         """Translate the neutral history into Anthropic wire messages (ADR-033 §3).
 
         Raw dicts are passed through unchanged (external e2e callers build messages directly). For
-        NeutralMessage items: user/assistant replay their wire content blocks verbatim; a tool step
-        becomes an Anthropic ``tool_result`` block carrying the RAW provider id (toolu_..., never a
-        domain UUID — ADR-008/BUG-4) so the continuation history's id pair is consistent.
+        NeutralMessage items: a user step replays its (provider-agnostic) blocks verbatim; an
+        assistant step of ANY form written by any client is read through ``to_domain_blocks`` and
+        cut to the Anthropic input schema (ADR-105 §A3, ``_replay_assistant_blocks``) — our own
+        form comes out as it went in; a tool step becomes an Anthropic ``tool_result`` block
+        carrying the RAW provider id (toolu_... / call_..., never a domain UUID — ADR-008/BUG-4) so
+        the continuation history's id pair is consistent.
         """
         out: list[dict[str, Any]] = []
         for msg in messages:
             if isinstance(msg, dict):
                 out.append(msg)
                 continue
-            if msg.role in ("user", "assistant"):
+            if msg.role == "user":
                 out.append({"role": msg.role, "content": msg.content_blocks})
+            elif msg.role == "assistant":
+                replayed = _replay_assistant_blocks(msg.content_blocks)
+                # A foreign step that carries nothing Anthropic can read (no text, no call) is
+                # left out rather than sent as an empty assistant turn.
+                if replayed or not msg.content_blocks:
+                    out.append({"role": msg.role, "content": replayed})
             elif msg.role == "tool":
                 if msg.error is not None:
                     content = str(msg.error.get("message", "tool error"))
@@ -294,6 +421,63 @@ class AnthropicClient:
             web_search_requests=web_search_requests,
         )
 
+    def _request_kwargs(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        tools: list[dict[str, Any]],
+        wire_messages: list[dict[str, Any]],
+        generation_mode: str,
+    ) -> dict[str, Any]:
+        """Keyword arguments of one Messages call — shared by ``create_message`` and the stream.
+
+        ``research`` appends the hosted web-search tool; ``reasoning`` enables extended thinking
+        through ``extra_body`` UNLESS the history makes thinking impossible (ADR-105 §A3.7: the
+        last assistant turn before trailing ``tool_result`` turns has no thinking block because
+        another provider answered it) — then this attempt goes without ``thinking``.
+        """
+        anthropic_tools = self._serialize_tools(tools)
+        # cache_control on the last tool definition caches the whole tool list + system.
+        cached_tools = [dict(t) for t in anthropic_tools]
+        if cached_tools:
+            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+        if generation_mode == "research":
+            settings = get_settings()
+            cached_tools.append(
+                {
+                    "type": settings.anthropic_web_search_tool_type,
+                    "name": "web_search",
+                    "response_inclusion": "excluded",
+                }
+            )
+
+        extra_body: dict[str, Any] | None = None
+        if generation_mode == "reasoning" and _thinking_replayable(wire_messages):
+            settings = get_settings()
+            budget = min(
+                settings.anthropic_thinking_budget_tokens,
+                max(1, self._max_tokens - 1),
+            )
+            extra_body = {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                    "display": instance_config.anthropic_thinking_display(),
+                }
+            }
+
+        create_kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": self._max_tokens,
+            "system": cast(Any, self._build_system(system_prompt)),
+            "tools": cast(Any, cached_tools),
+            "messages": cast(Any, wire_messages),
+        }
+        if generation_mode in {"research", "reasoning"}:
+            create_kwargs["extra_body"] = extra_body
+        return create_kwargs
+
     async def create_message(
         self,
         *,
@@ -308,10 +492,11 @@ class AnthropicClient:
     ) -> LLMResult:
         """Call Anthropic Messages with optional generation-mode controls.
 
-        Builds the Anthropic wire messages from the neutral history, injects the attachment content
-        blocks (ADR-020) into the LAST user turn on the first call only, serializes tools to the
-        Anthropic format, and parses stop_reason (→ canonical), content blocks (normalized at the
-        persist boundary), usage, text and tool_uses (domain names). api_key: optional per-call
+        Builds the Anthropic wire messages from the neutral history (assistant steps of any form,
+        ADR-105 §A3), renders the neutral attachment parts in the Anthropic form and injects them
+        (ADR-020, ADR-105 §A2) into the LAST user turn on the first call only, serializes tools to
+        the Anthropic format, and parses stop_reason (→ canonical), content blocks (normalized at
+        the persist boundary), usage, text and tool_uses (domain names). api_key: optional per-call
         override (BYOK); None → service key. model (ADR-034 §4): optional model id; None → the
         configured default (``settings.anthropic_model``) — current behavior, unchanged.
 
@@ -338,56 +523,16 @@ class AnthropicClient:
             client = client.with_options(api_key=api_key)
 
         wire_messages = self._build_provider_messages(messages)
-        if attachments is not None and attachments.content_blocks:
-            # ADR-020: inject the FULL attachment blocks into the last user turn for this single
-            # call only (the persisted history holds placeholders, which the orchestrator already
-            # put in the neutral content; here we replace that last user content with full blocks).
-            for wm in reversed(wire_messages):
-                if wm.get("role") == "user":
-                    existing = wm.get("content")
-                    base = existing if isinstance(existing, list) else []
-                    wm["content"] = [*base, *attachments.content_blocks]
-                    break
-
-        anthropic_tools = self._serialize_tools(tools)
-        # cache_control on the last tool definition caches the whole tool list + system.
-        cached_tools = [dict(t) for t in anthropic_tools]
-        if cached_tools:
-            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
-        if generation_mode == "research":
-            settings = get_settings()
-            cached_tools.append(
-                {
-                    "type": settings.anthropic_web_search_tool_type,
-                    "name": "web_search",
-                    "response_inclusion": "excluded",
-                }
-            )
-
-        extra_body: dict[str, Any] | None = None
-        if generation_mode == "reasoning":
-            settings = get_settings()
-            budget = min(
-                settings.anthropic_thinking_budget_tokens,
-                max(1, self._max_tokens - 1),
-            )
-            extra_body = {
-                "thinking": {
-                    "type": "enabled",
-                    "budget_tokens": budget,
-                    "display": instance_config.anthropic_thinking_display(),
-                }
-            }
-
-        create_kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": self._max_tokens,
-            "system": cast(Any, self._build_system(system_prompt)),
-            "tools": cast(Any, cached_tools),
-            "messages": cast(Any, wire_messages),
-        }
-        if generation_mode in {"research", "reasoning"}:
-            create_kwargs["extra_body"] = extra_body
+        # ADR-020 / ADR-105 §A2: the FULL attachment blocks go into the last user turn for this
+        # single call only (the persisted history holds placeholders), rendered in OUR form.
+        _inject_attachment_blocks(wire_messages, attachments)
+        create_kwargs = self._request_kwargs(
+            model=model,
+            system_prompt=system_prompt,
+            tools=tools,
+            wire_messages=wire_messages,
+            generation_mode=generation_mode,
+        )
 
         try:
             message = await client.messages.create(**create_kwargs)
@@ -471,52 +616,14 @@ class AnthropicClient:
             client = client.with_options(api_key=api_key)
 
         wire_messages = self._build_provider_messages(messages)
-        if attachments is not None and attachments.content_blocks:
-            for wm in reversed(wire_messages):
-                if wm.get("role") == "user":
-                    existing = wm.get("content")
-                    base = existing if isinstance(existing, list) else []
-                    wm["content"] = [*base, *attachments.content_blocks]
-                    break
-
-        anthropic_tools = self._serialize_tools(tools)
-        cached_tools = [dict(t) for t in anthropic_tools]
-        if cached_tools:
-            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
-        if generation_mode == "research":
-            settings = get_settings()
-            cached_tools.append(
-                {
-                    "type": settings.anthropic_web_search_tool_type,
-                    "name": "web_search",
-                    "response_inclusion": "excluded",
-                }
-            )
-
-        extra_body: dict[str, Any] | None = None
-        if generation_mode == "reasoning":
-            settings = get_settings()
-            budget = min(
-                settings.anthropic_thinking_budget_tokens,
-                max(1, self._max_tokens - 1),
-            )
-            extra_body = {
-                "thinking": {
-                    "type": "enabled",
-                    "budget_tokens": budget,
-                    "display": instance_config.anthropic_thinking_display(),
-                }
-            }
-
-        create_kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": self._max_tokens,
-            "system": cast(Any, self._build_system(system_prompt)),
-            "tools": cast(Any, cached_tools),
-            "messages": cast(Any, wire_messages),
-        }
-        if generation_mode in {"research", "reasoning"}:
-            create_kwargs["extra_body"] = extra_body
+        _inject_attachment_blocks(wire_messages, attachments)
+        create_kwargs = self._request_kwargs(
+            model=model,
+            system_prompt=system_prompt,
+            tools=tools,
+            wire_messages=wire_messages,
+            generation_mode=generation_mode,
+        )
 
         try:
             async with client.messages.stream(**create_kwargs) as stream:

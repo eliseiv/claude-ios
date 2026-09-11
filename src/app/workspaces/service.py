@@ -3,7 +3,8 @@
 Owner isolation is enforced at the repository (WHERE user_id = sub); a missing/foreign workspace or
 file raises NotFoundError → 404 (workspaces/06-rbac, never reveal foreign existence). The service
 also assembles the model context for the orchestrator (instructions + files) for a workspace chat's
-first turn — provider-agnostic (extracted_text as text; images as vision blocks via the client).
+first turn — provider-agnostic (extracted_text as text parts; images as image parts rendered by the
+client that sends the call, ADR-105 §A2).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import datetime
 import uuid
 from dataclasses import dataclass, field
 
-from app.chat.attachments import PreparedAttachments
+from app.chat.attachments import KIND_IMAGE, KIND_TEXT, AttachmentPart, PreparedAttachments
 from app.config import Settings, get_settings
 from app.errors import NotFoundError, ValidationFailedError
 from app.models import WorkspaceFile, WorkspaceProject
@@ -22,8 +23,8 @@ from app.workspaces.cursor import InvalidCursorError, WorkspaceCursor
 from app.workspaces.repository import WorkspaceListPage, WorkspacesRepository
 from app.workspaces.text_extract import validate_and_extract
 
-# Image mediaTypes are injected as vision blocks (no extracted_text); kept in sync with the
-# attachments allowlist (Q-020-1). Used to branch the per-provider content block in context build.
+# Image mediaTypes are injected as image parts (no extracted_text); kept in sync with the
+# attachments allowlist (Q-020-1). Used to branch image vs text part in context build.
 _IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 
 
@@ -33,9 +34,10 @@ class WorkspaceContext:
 
     - ``instructions``: the project system-prompt to inject AFTER the base assistant_mode prompt
       (empty/None → no injection);
-    - ``attachments``: a PreparedAttachments carrying the knowledge files as provider content blocks
-      (text blocks for document/text via extracted_text; vision blocks for images). None when the
-      workspace has no injectable files. Reuses the same client injection path as chat attachments.
+    - ``attachments``: a PreparedAttachments carrying the knowledge files as NEUTRAL parts
+      (``text`` parts for document/text via extracted_text; ``image`` parts for images). None when
+      the workspace has no injectable files. Reuses the same client rendering and injection path as
+      chat attachments (ADR-105 §A2).
     """
 
     instructions: str | None
@@ -217,46 +219,53 @@ class WorkspacesService:
     # ---- context assembly (orchestrator) ----
 
     async def context_for_session(
-        self, workspace_id: uuid.UUID, user_id: uuid.UUID, *, provider: str
+        self, workspace_id: uuid.UUID, user_id: uuid.UUID
     ) -> WorkspaceContext | None:
         """Assemble (instructions, files) context for a workspace chat's first turn (ADR-036 §3/§6).
 
         Returns None when the workspace no longer exists or is foreign (the session keeps working as
         a plain chat — defensive; the binding was validated at session creation). Otherwise returns
-        the instructions to inject and a PreparedAttachments of the knowledge files:
-        - document/text with non-empty extracted_text → a text block ``[Файл проекта: {filename}]``,
-          truncated collectively to WORKSPACE_CONTEXT_MAX_CHARS (created_at ASC, tail-truncated);
-        - image → a provider vision block (Anthropic image / OpenAI image_url data-URI).
+        the instructions to inject and a PreparedAttachments of the knowledge files as NEUTRAL parts
+        (ADR-105 §A2.2 — no provider is named here; the client that sends the call renders them):
+        - document/text with non-empty extracted_text → a ``text`` part
+          ``[Файл проекта: {filename}]``, truncated collectively to WORKSPACE_CONTEXT_MAX_CHARS
+          (created_at ASC, tail-truncated);
+        - image → an ``image`` part carrying the base64 of the stored bytes.
         Images are NOT counted against the char limit (ADR-036 §6).
         """
         workspace = await self._repo.get_workspace(workspace_id, user_id)
         if workspace is None:
             return None
         files = await self._repo.list_files(workspace_id)
-        attachments = self._build_file_attachments(files, provider)
+        attachments = self._build_file_attachments(files)
         instructions = workspace.instructions or None
         if instructions is None and attachments is None:
             return WorkspaceContext(instructions=None, attachments=None)
         return WorkspaceContext(instructions=instructions, attachments=attachments)
 
-    def _build_file_attachments(
-        self, files: list[WorkspaceFile], provider: str
-    ) -> PreparedAttachments | None:
-        """Build provider content blocks for the knowledge files (ADR-036 §6).
+    def _build_file_attachments(self, files: list[WorkspaceFile]) -> PreparedAttachments | None:
+        """Build neutral attachment parts for the knowledge files (ADR-036 §6, ADR-105 §A2.2).
 
-        Text blocks (document/text) are budget-limited by WORKSPACE_CONTEXT_MAX_CHARS across all
+        Text parts (document/text) are budget-limited by WORKSPACE_CONTEXT_MAX_CHARS across all
         files in created_at order (oldest first); the file that crosses the budget is tail-truncated
-        and later text files are dropped. Images are appended as vision blocks regardless of the
-        char budget. Returns None when there is nothing to inject.
+        and later text files are dropped. Images are appended as image parts regardless of the
+        char budget. Returns None when there is nothing to inject. There is no provider mapping
+        here: the single mapping lives in ``render_attachment_blocks``.
         """
         max_chars = self._settings.workspace_context_max_chars
         used = 0
-        content_blocks: list[dict[str, object]] = []
+        parts: list[AttachmentPart] = []
         for f in files:
             if f.media_type in _IMAGE_TYPES:
-                block = self._image_block(f, provider)
-                if block is not None:
-                    content_blocks.append(block)
+                # Re-encoded once per first turn from the stored BYTEA content.
+                parts.append(
+                    AttachmentPart(
+                        kind=KIND_IMAGE,
+                        media_type=f.media_type,
+                        filename=f.filename,
+                        data=base64.b64encode(f.content).decode("ascii"),
+                    )
+                )
                 continue
             text = f.extracted_text
             if not text:
@@ -266,30 +275,17 @@ class WorkspacesService:
             remaining = max_chars - used
             snippet = text[:remaining]
             used += len(snippet)
-            content_blocks.append(
-                {"type": "text", "text": f"[Файл проекта: {f.filename}]\n{snippet}"}
+            parts.append(
+                AttachmentPart(
+                    kind=KIND_TEXT,
+                    media_type=f.media_type,
+                    filename=f.filename,
+                    text=f"[Файл проекта: {f.filename}]\n{snippet}",
+                )
             )
-        if not content_blocks:
+        if not parts:
             return None
         # placeholders are unused for workspace files (we never persist these as a user step — the
-        # blocks are injected only into the live first-turn request), but PreparedAttachments
+        # parts are injected only into the live first-turn request), but PreparedAttachments
         # requires the field; keep it empty.
-        return PreparedAttachments(content_blocks=content_blocks, placeholders=[])
-
-    @staticmethod
-    def _image_block(f: WorkspaceFile, provider: str) -> dict[str, object] | None:
-        """Provider vision block for an image knowledge file (ADR-036 §6, ADR-033 §5).
-
-        Anthropic: native image block with base64 source. OpenAI: image_url data-URI. The bytes are
-        base64-encoded from the stored BYTEA content (re-encoded once per first turn).
-        """
-        data = base64.b64encode(f.content).decode("ascii")
-        if provider == "openai":
-            return {
-                "type": "image_url",
-                "image_url": {"url": f"data:{f.media_type};base64,{data}"},
-            }
-        return {
-            "type": "image",
-            "source": {"type": "base64", "media_type": f.media_type, "data": data},
-        }
+        return PreparedAttachments(parts=parts, placeholders=[])

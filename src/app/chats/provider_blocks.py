@@ -17,6 +17,14 @@ OpenAI message (including raw ``call_...`` ids, forbidden by ADR-008) and
 This module converts at the SERIALIZATION BOUNDARY only — same discipline as ADR-024/ADR-042:
 the stored payload is never mutated (replay/generation are untouched) and no migration is needed,
 so chats written before the fix render correctly too. Anthropic-shaped content is returned as-is.
+
+ADR-105 §A3.6: this is also the ONE place that recognizes the persisted assistant forms for REPLAY.
+Since cross-provider failover (ADR-074), a BYOK key of another provider (ADR-044) and an operator
+default of the neighbouring provider (ADR-099 §8), one session legitimately carries steps of
+several forms, and every client (``AnthropicClient`` / ``OpenAIClient`` /
+``OpenAIResponsesClient``) reads a foreign step through ``to_domain_blocks``. A second recognizer
+of the same forms must not be written elsewhere — history reads and replay would drift apart
+silently.
 """
 
 from __future__ import annotations
@@ -34,9 +42,22 @@ def to_domain_blocks(content: Any) -> list[Any]:
     """
     if not isinstance(content, list):
         return []
-    if len(content) == 1 and _is_openai_assistant_message(content[0]):
+    if is_chat_completions_message(content):
         return _from_openai_assistant_message(content[0])
     return content
+
+
+def is_chat_completions_message(content: Any) -> bool:
+    """True ⇔ ``content`` is the persisted Chat-Completions assistant message (ADR-105 §A3.2).
+
+    The form is recognized by STRUCTURE — a one-element list holding ``{role:"assistant"}`` without
+    ``type`` — never by the provider of the session: one session can hold several forms. Used by
+    ``to_domain_blocks`` itself and by ``OpenAIClient`` to tell its own form (replayed verbatim)
+    from a foreign one (translated through ``to_domain_blocks``).
+    """
+    return (
+        isinstance(content, list) and len(content) == 1 and _is_openai_assistant_message(content[0])
+    )
 
 
 def _is_openai_assistant_message(block: Any) -> bool:

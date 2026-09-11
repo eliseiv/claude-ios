@@ -15,7 +15,13 @@ import json
 
 import pytest
 
-from app.chat.attachments import _decoded_len_from_base64, prepare_attachments
+from app.chat.attachments import (
+    PROVIDER_ANTHROPIC,
+    PreparedAttachments,
+    _decoded_len_from_base64,
+    prepare_attachments,
+    render_attachment_blocks,
+)
 from app.config import Settings
 from app.errors import ValidationFailedError
 from app.schemas.chat import AttachmentIn
@@ -52,6 +58,15 @@ def _att(
     return AttachmentIn(type=att_type, mediaType=media_type, filename=filename, data=raw)  # type: ignore[arg-type]
 
 
+def _blocks(prepared: PreparedAttachments) -> list[dict[str, object]]:
+    """The Anthropic wire blocks of the prepared parts (ADR-105 §A2: rendered by the client).
+
+    ``prepare_attachments`` no longer returns provider blocks; the Anthropic mapping these tests
+    assert lives in ``render_attachment_blocks``, which ``AnthropicClient`` calls.
+    """
+    return render_attachment_blocks(prepared.parts, PROVIDER_ANTHROPIC)
+
+
 @pytest.fixture
 def settings() -> Settings:
     # Defaults match config.py (image=5MB, document=8MB, total=10MB, count=10, pdf_pages=100).
@@ -74,8 +89,8 @@ def test_image_attachment_maps_to_image_block(
     att = _att("image", media_type, payload, filename="p.img")
     prepared = prepare_attachments([att], settings)
 
-    assert len(prepared.content_blocks) == 1
-    block = prepared.content_blocks[0]
+    assert len(_blocks(prepared)) == 1
+    block = _blocks(prepared)[0]
     assert block["type"] == "image"
     source = block["source"]
     assert isinstance(source, dict)
@@ -90,7 +105,7 @@ def test_pdf_attachment_maps_to_document_dict_block(settings: Settings) -> None:
     att = _att("document", "application/pdf", _pdf_bytes(1), filename="doc.pdf")
     prepared = prepare_attachments([att], settings)
 
-    block = prepared.content_blocks[0]
+    block = _blocks(prepared)[0]
     # TD-016: anthropic 0.39.0 has no DocumentBlockParam -> emitted as the raw wire-format dict.
     assert block == {
         "type": "document",
@@ -105,7 +120,7 @@ def test_pdf_attachment_maps_to_document_dict_block(settings: Settings) -> None:
 def test_pdf_text_is_not_extracted(settings: Settings) -> None:
     # ADR-020: PDF goes natively to a document block; backend never extracts text from it.
     att = _att("document", "application/pdf", _pdf_bytes(1))
-    block = prepare_attachments([att], settings).content_blocks[0]
+    block = _blocks(prepare_attachments([att], settings))[0]
     assert block["type"] == "document"
     assert "text" not in block  # no extracted_text path
 
@@ -120,7 +135,7 @@ def test_text_attachment_maps_to_text_block_with_filename(
 ) -> None:
     content = '{"a":1}' if media_type == "application/json" else "hello, world"
     att = _att("text", media_type, content.encode("utf-8"), filename="notes.txt")
-    block = prepare_attachments([att], settings).content_blocks[0]
+    block = _blocks(prepare_attachments([att], settings))[0]
     assert block["type"] == "text"
     text = block["text"]
     assert isinstance(text, str)
@@ -131,7 +146,7 @@ def test_text_attachment_maps_to_text_block_with_filename(
 
 def test_text_attachment_without_filename_uses_default_name(settings: Settings) -> None:
     att = _att("text", "text/plain", b"body")
-    block = prepare_attachments([att], settings).content_blocks[0]
+    block = _blocks(prepare_attachments([att], settings))[0]
     assert block["text"].startswith("file\n```")
 
 
@@ -189,7 +204,7 @@ def test_json_invalid_payload_rejected(settings: Settings) -> None:
 
 def test_json_valid_payload_accepted(settings: Settings) -> None:
     att = _att("text", "application/json", json.dumps({"k": "v"}).encode("utf-8"))
-    block = prepare_attachments([att], settings).content_blocks[0]
+    block = _blocks(prepare_attachments([att], settings))[0]
     assert block["type"] == "text"
 
 
@@ -268,7 +283,7 @@ def test_pdf_at_page_limit_accepted(settings: Settings) -> None:
     small = Settings(ATTACHMENT_PDF_MAX_PAGES=3)
     att = _att("document", "application/pdf", _pdf_bytes(3))
     prepared = prepare_attachments([att], small)
-    assert prepared.content_blocks[0]["type"] == "document"
+    assert _blocks(prepared)[0]["type"] == "document"
 
 
 def test_encrypted_pdf_rejected(settings: Settings) -> None:
@@ -304,11 +319,12 @@ def test_placeholders_contain_no_base64(settings: Settings) -> None:
 def test_placeholders_count_matches_content_blocks(settings: Settings) -> None:
     atts = [_att("image", "image/png", _PNG), _att("text", "text/plain", b"x")]
     prepared = prepare_attachments(atts, settings)
-    assert len(prepared.placeholders) == len(prepared.content_blocks) == 2
+    assert len(prepared.placeholders) == len(_blocks(prepared)) == 2
 
 
 # ----------------------------- empty list -----------------------------
 def test_empty_attachments_yield_empty(settings: Settings) -> None:
     prepared = prepare_attachments([], settings)
-    assert prepared.content_blocks == []
+    assert prepared.parts == []
+    assert _blocks(prepared) == []
     assert prepared.placeholders == []

@@ -84,9 +84,10 @@ class LLMResult:
 
     - ``stop_reason``: canonical value ({tool_use, max_tokens, end_turn}); the orchestrator never
       sees provider wire stop reasons.
-    - ``content_blocks``: WIRE format of the ACTIVE provider, ALREADY normalized at the persist
-      boundary (per-provider allowlist, ADR-021). Stored verbatim in ``chat_steps.payload`` and
-      replayed by the same client (one provider per instance, ADR-033 §3).
+    - ``content_blocks``: WIRE format of the provider that answered, ALREADY normalized at the
+      persist boundary (per-provider allowlist, ADR-021). Stored verbatim in ``chat_steps.payload``
+      and replayed by whichever client serves a later round — its own form verbatim, a foreign one
+      translated (ADR-105 §A3).
     - ``usage``: neutral token usage.
     - ``text``: concatenated assistant text of this turn.
     - ``tool_uses``: DOMAIN-shaped ``{id(provider raw), name(domain dotted), input(dict)}``. The
@@ -128,8 +129,11 @@ class StreamEvent:
 class NeutralMessage:
     """One step of the provider-neutral history passed to ``LLMClient.create_message`` (ADR-033 §3).
 
-    - role ``user``/``assistant``: ``content_blocks`` are the wire blocks of the active provider
-      from ``chat_steps.payload`` (the client replays them verbatim).
+    - role ``user``: provider-agnostic text blocks + attachment placeholders (ADR-020 §3);
+    - role ``assistant``: ``content_blocks`` from ``chat_steps.payload`` — the wire form of the
+      provider that ANSWERED that round, which need not be the reader's (ADR-074 failover, ADR-044
+      BYOK, ADR-099 §8). Each client replays its own form verbatim and translates a foreign one
+      (ADR-105 §A3, recognized through ``app.chats.provider_blocks.to_domain_blocks``).
     - role ``tool``: ``content_blocks`` is unused; the domain tool-result fields carry the data the
       client needs to build the provider tool message (Anthropic ``tool_result`` block / OpenAI
       ``role=tool`` message). ``provider_tool_use_id`` is the raw provider id (toolu_.../call_...),

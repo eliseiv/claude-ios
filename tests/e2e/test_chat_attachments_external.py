@@ -57,7 +57,11 @@ async def test_real_anthropic_image_pdf_text_in_one_message() -> None:
     live Messages API for the configured model. Skipped: the configured org is disabled.
     """
     from app.chat.anthropic_client import AnthropicClient
-    from app.chat.attachments import prepare_attachments
+    from app.chat.attachments import (
+        PROVIDER_ANTHROPIC,
+        prepare_attachments,
+        render_attachment_blocks,
+    )
     from app.config import get_settings
     from app.schemas.chat import AttachmentIn
 
@@ -77,7 +81,7 @@ async def test_real_anthropic_image_pdf_text_in_one_message() -> None:
 
     user_content = [
         {"type": "text", "text": "Describe the attachments briefly."},
-        *prepared.content_blocks,
+        *render_attachment_blocks(prepared.parts, PROVIDER_ANTHROPIC),
     ]
     messages = [{"role": "user", "content": user_content}]
 
