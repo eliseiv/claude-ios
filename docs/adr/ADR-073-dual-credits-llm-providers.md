@@ -3,6 +3,7 @@
 - **Статус:** Accepted
 - **Дата:** 2026-08-13
 - **Связано:** [ADR-033](ADR-033-llm-provider-abstraction.md), [ADR-034](ADR-034-user-model-selection.md), [ADR-044](ADR-044-multi-provider-byok.md)
+- **Пометка 2026-09-11 ([ADR-105 §A2](ADR-105-provider-failure-input-shape-and-media-deadline.md)), тело ADR не переписано:** фраза §3 «Attachments/workspace на credits идут по провайдеру **сессии**» **пересмотрена** — форму вложений и файлов-знаний определяет **клиент, выполняющий вызов**, а не провайдер сессии: провайдер сессии расходится с провайдером вызова при кросс-обходе ([ADR-074](ADR-074-provider-key-failover.md)) и у сессии с `model IS NULL` при операторском дефолте модели соседнего провайдера ([ADR-099 §8](ADR-099-crm-admin-economics-and-instance-settings.md)). Фраза «История `chat_steps` хранит wire-формат провайдера сессии» (§Контекст, §Последствия) неверна по той же причине — одна сессия может нести несколько форм; реплей — [ADR-105 §A3](ADR-105-provider-failure-input-shape-and-media-deadline.md), [TD-024](../100-known-tech-debt.md). Маршрутизация по модели сессии и запрет смены модели внутри чата **не изменены**.
 
 ## Контекст
 

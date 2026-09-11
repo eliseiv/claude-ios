@@ -271,6 +271,9 @@ CREATE UNIQUE INDEX ux_request_logs_media_job
 ```
 > Одна строка = один backend route call; исключение — асинхронный media submit,
 > где та же строка затем обновляется poll/reconciler до terminal-state.
+> ⚠️ Для reconciler это норма, а не факт кода на `f8f4b37`: `reconcile_once` собирает
+> сервис без `request_logs`, и строка задачи, доведённой согласователем, остаётся `queued`
+> ([ADR-105 §B6](adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).
 > `duration_sec` не хранится и вычисляется как `completed_at-started_at`.
 > `tokens_spent` — credits списания, не input/output LLM tokens.
 > `provider_cost_usd=NULL` означает «не измерено», не ноль.

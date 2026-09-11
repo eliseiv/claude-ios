@@ -51,9 +51,17 @@
 8. **Chat:** вызов в `ChatOrchestrator.run` на ходах **с вложениями** — [chat-orchestrator/07-implementation-phases.md](../chat-orchestrator/07-implementation-phases.md).
 9. **Тесты:** [09-testing.md §Модерация UGC](09-testing.md), включая diff-тест порядка «модерация до списания» и проверку недостижимости заблокированных ассетов.
 
+## Phase 8 — Дедлайн задачи и одна сборка сервиса ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), ⏳ спроектирована, код не написан)
+
+1. **Config:** `MEDIA_JOB_DEADLINE_SECONDS` (дефолт `21600`, `<= 0` → дефолт). **devops:** закомментированная строка в `.env.prod.example` рядом с `MEDIA_RECONCILE_*`; в живые `.env` не вписывать — действует дефолт кода.
+2. **До выката — по каждому инстансу, только агрегаты:** длительности завершённых задач (запрос [ADR-105 §B3](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)) — максимум больше половины дедлайна поднимает дефолт; число и сумма кредитов незавершённых задач старше дедлайна (запрос [ADR-105 §B9](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)) — это разовый возврат первого тика.
+3. **`MediaGenerationService._advance`:** опрос всегда; опрос без конечного состояния у задачи старше дедлайна → `_fail(error="generation did not complete in time")`; событие `media_generation_deadline_exceeded` с `lastObservation` по предикатам ADR; `FalClient._raise_for_status` прикрепляет HTTP-статус к поднимаемому исключению.
+4. **Согласователь:** сервис — той же функцией, что `deps.get_media_generation_service` (с `request_logs` и `moderation`); при пустом `FAL_API_KEY` — только просроченные, без опроса; `media_reconcile_job_error` + `exceptionClass`.
+5. **Тесты:** [09-testing.md §Дедлайн задачи](09-testing.md#integration--дедлайн-задачи-adr-105).
+
 ## Post-MVP (не в этой поставке)
 
-- **Фоновая доводка «зависших» задач** — задача, которую никто не опрашивает, остаётся `queued`/`running` навсегда, и кредиты за тихо провалившуюся генерацию не вернутся до первого опроса ([Q-060-2](../../99-open-questions.md)).
+- ~~**Фоновая доводка «зависших» задач**~~ — **сделано:** фоновый согласователь ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md), закрыл [Q-060-2](../../99-open-questions.md)); предел жизни задачи, на которую провайдер не даёт конечного ответа, — Phase 8 ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).
 - **Собственное хранение ассетов** — сейчас отдаются ссылки CDN провайдера; их срок жизни на его стороне ([Q-060-1](../../99-open-questions.md)).
 - **Второй провайдер** — контракт `/v1/media/*` уже провайдер-агностичен (нормализация результата + реестр), понадобится второй клиент и признак провайдера в реестре.
 - **Генерация как инструмент tool-loop** — чтобы ассистент мог сгенерировать картинку внутри диалога; сейчас это отдельная поверхность.

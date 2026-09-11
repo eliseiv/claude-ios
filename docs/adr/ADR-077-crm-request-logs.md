@@ -10,6 +10,13 @@
 > из доменных таблиц, оставляя `request_logs` источником упавших/незавершённых
 > запросов. Схема, миграция `0023` и writer ниже — в силе без изменений.
 
+> **Пометка 2026-09-11 ([ADR-105 §B6](ADR-105-provider-failure-input-shape-and-media-deadline.md)), тело не переписано:**
+> утверждение §3 «Poll и background reconciler используют один terminal path» **для
+> согласователя по коду не выполняется**: `reconcile_once` (`src/app/media_generation/reconciler.py`)
+> собирает `MediaGenerationService` без `request_logs`, поэтому `finish_media` для задачи,
+> доведённой согласователем, не вызывается и её строка остаётся `queued`. Норма §3 в силе;
+> исполняет её одна сборка сервиса на оба пути ([ADR-105 §B6](ADR-105-provider-failure-input-shape-and-media-deadline.md)).
+
 ## Контекст
 
 `GET /v1/admin/users/{id}/requests` ошибочно трактовал каждую строку

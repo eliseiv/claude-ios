@@ -57,10 +57,12 @@ POST /v1/media/images|videos
 ## Поток опроса
 
 ```
-GET /v1/media/jobs/{jobId}
+GET /v1/media/jobs/{jobId}   (тот же путь _advance — у фонового согласователя, ADR-067)
   ├─ repo.get(job_id, user_id)          → 404 (чужая/нет — неотличимо)
   ├─ status ∈ {completed, failed}?      → ответ из БД, провайдер не дёргается
   └─ fal.status(status_url)
+       ├─ 422 на status/result          → wallet.grant(key=media-refund:{jobId}) → mark_failed (текст fal)
+       ├─ 404 на status (UpstreamJobGoneError) → wallet.grant → mark_failed
        ├─ COMPLETED  → fal.result(response_url) → нормализация
        │                 ├─ нет assets  → трактуем как провал (см. ниже)
        │                 └─ есть assets → ПОСТ-МОДЕРАЦИЯ (только kind=image, ADR-086 §5)
@@ -71,14 +73,24 @@ GET /v1/media/jobs/{jobId}
        │                       ├─ flagged → mark_completed, ассеты выдаются, возврата НЕТ
        │                       └─ passed  → mark_completed (как раньше)
        ├─ FAILED / CANCELED → wallet.grant(key=media-refund:{jobId}) → mark_failed
-       └─ IN_QUEUE / IN_PROGRESS → mark_running
+       ├─ IN_QUEUE / IN_PROGRESS → mark_running          ┐ опрос НЕ дал конечного
+       └─ любое иное исключение (5xx, 429, 401/403,      │ состояния:
+          таймаут, обрыв, битый JSON — на status или     │ ДЕДЛАЙН (ADR-105 §B2)
+          на result; недоступна пост-модерация)          ┘
+             ├─ now − created_at > MEDIA_JOB_DEADLINE_SECONDS
+             │     → media_generation_deadline_exceeded → wallet.grant(key=media-refund:{jobId})
+             │       → mark_failed(error="generation did not complete in time") → 200 failed
+             └─ иначе → как было: mark_running / исключение наверх (клиенту 502/503/429,
+                        согласователю — media_reconcile_job_error), следующий опрос повторит
 ```
 
-Диаграмма выше — **полный** порядок опроса, включая шаг пост-модерации ([ADR-086](../../adr/ADR-086-ugc-moderation.md)).
+Диаграмма выше — **полный** порядок опроса, включая шаг пост-модерации ([ADR-086](../../adr/ADR-086-ugc-moderation.md)), терминальные `422`/`404` на опросе (факт кода: `MediaGenerationService._advance` ловит `ValidationFailedError` и `UpstreamJobGoneError`; `404` — коммит `5ebf963`, в [ADR-060 §3](../../adr/ADR-060-media-generation-fal.md) не значился) и ветку дедлайна **[ADR-105 §B2](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md) (норма; на `f8f4b37` НЕ реализована — сегодня нижняя ветка без дедлайна, и задача, на которую fal не даёт конечного ответа, опрашивается вечно без возврата кредитов)**.
+
+**Дедлайн задачи ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).** Любая строка `media_jobs` достигает `completed`/`failed` не позже `created_at + MEDIA_JOB_DEADLINE_SECONDS` (дефолт `21600`, 6 ч). Предикат двусторонний: **(а)** задача старше дедлайна, опрос не дал конечного состояния по ЛЮБОЙ причине ⇒ `failed` + возврат; **(б)** задача моложе дедлайна правилом не трогается, какой бы ни была ошибка, а задача старше дедлайна, чей опрос дал `COMPLETED` с ассетами или `FAILED`, получает этот исход, а не текст дедлайна (опрос выполняется всегда — «последний шанс»). Мерило — возраст, а не число попыток: частота опроса зависит от клиента, интервала и числа реплик. Значение `<= 0` приводится к дефолту.
 
 **Заблокированный результат не сохраняет ассеты.** `media_jobs.result` пишется как `{"assets": []}` — иначе файл остался бы достижим по signed-URL download-роуту ([ADR-085](../../adr/ADR-085-media-asset-download-proxy.md)), и блокировка была бы декоративной. У `kind=video` пост-модерации нет (провайдер модерации не принимает видео) — вердикт видео-задачи отражает только вход, `stage: "input"` ([Q-086-2](../../99-open-questions.md)).
 
-**Недоступность провайдера модерации на опросе** ведёт себя как транзиентная ошибка апстрима: задача остаётся non-terminal, `mark_completed` не выполняется, следующий опрос (или reconciler, [ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)) доберёт исход. Отдавать ассеты «пока модерация недоступна» запрещено — это и есть fail-open, отвергнутый в [ADR-086 §7](../../adr/ADR-086-ugc-moderation.md); при `MODERATION_FAIL_OPEN=true` (аварийный режим оператора) задача завершается с `moderation.status = "unchecked"`.
+**Недоступность провайдера модерации на опросе** ведёт себя как транзиентная ошибка апстрима: задача остаётся non-terminal, `mark_completed` не выполняется, следующий опрос (или reconciler, [ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)) доберёт исход — **но не позже дедлайна задачи**: по его истечении `failed` с возвратом, ассеты не выдаются ([ADR-105 §B2](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), `lastObservation = moderation_unavailable`). Отдавать ассеты «пока модерация недоступна» запрещено — это и есть fail-open, отвергнутый в [ADR-086 §7](../../adr/ADR-086-ugc-moderation.md); при `MODERATION_FAIL_OPEN=true` (аварийный режим оператора) задача завершается с `moderation.status = "unchecked"`.
 
 `COMPLETED` без пригодного URL трактуется как провал: с точки зрения пользователя разницы между «упало» и «завершилось без результата» нет, а кредиты в обоих случаях должны вернуться.
 
@@ -150,4 +162,10 @@ URL'ы опроса берутся из ответа на сабмит и **пе
 | `media_generation_deleted` | задача убрана из ленты: `jobId`, `model`, статус на момент удаления |
 | `fal_upload_outcome` | референсное изображение сохранено у провайдера: размер, mediaType |
 | `fal_submit_outcome` | сабмит принят провайдером |
-| `fal_call_outcome` | ошибка исходящего вызова: `reason`, `falEndpoint`, `upstreamStatus` |
+| `fal_call_outcome` | ошибка исходящего вызова: `reason`, `falEndpoint`, `upstreamStatus`. **`jobId` нет** — атрибуция к задаче по этому событию невозможна; её даёт `media_reconcile_job_error` |
+| `media_reconcile_job_error` | продвижение задачи согласователем завершилось исключением (WARNING): `jobId`; **+ `exceptionClass`** — имя класса исключения ([ADR-105 §B5](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), норма; на `f8f4b37` поля нет) |
+| `media_generation_deadline_exceeded` | **норма [ADR-105 §B5](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), на `f8f4b37` не реализовано.** Задача доведена до `failed` по дедлайну (WARNING, пишется ветка дедлайна `_advance` перед `_fail`): `jobId`, `model`, `ageSeconds`, `lastObservation` ∈ `upstream_error` \| `upstream_pending` \| `moderation_unavailable` \| `not_configured` \| `internal_error` (предикаты — в ADR), `upstreamStatus` (только когда исключение fal его несёт). Следом — `media_generation_failed` |
+
+## Согласователь: одна сборка сервиса ([ADR-105 §B6](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md))
+
+`reconcile_once` (`src/app/media_generation/reconciler.py`) собирает `MediaGenerationService` **той же функцией и с тем же набором зависимостей**, что `deps.get_media_generation_service` (`repo`, `fal`, `wallet`, `settings`, `push`, `request_logs`, `moderation`). ⚠️ Факт кода на `f8f4b37`: согласователь собирает сервис сам и **без** `request_logs` и `moderation` — строка `request_logs` задачи, доведённой согласователем, остаётся `queued` ([ADR-077 §3](../../adr/ADR-077-crm-request-logs.md) не выполняется), а картинка, готовность которой обнаружил согласователь, выдаётся **без пост-модерации** ([ADR-086 §5](../../adr/ADR-086-ugc-moderation.md) не выполняется). При пустом `FAL_API_KEY` согласователь не опрашивает, но задачи старше дедлайна доводит до `failed` (`lastObservation = not_configured`, [ADR-105 §B7](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)); сегодня `reconcile_once` при пустом ключе возвращает `0` до выборки. Выборка `MediaJobsRepository.list_non_terminal` — по-прежнему старейшие первыми; дедлайн ограничивает сверху, сколько в голове пачки может лежать мёртвых задач.

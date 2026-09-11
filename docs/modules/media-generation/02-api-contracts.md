@@ -307,6 +307,8 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 | `completed` | результат в `assets` (непустой), `error: null`; смотреть `moderation.status` перед показом |
 | `failed` | причина в `error`; `creditsRefunded: true` — кредиты уже вернулись на баланс |
 
+**Задача не висит в `queued`/`running` бесконечно ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md); норма, на `f8f4b37` не реализована).** Если провайдер не довёл задачу до конца за `MEDIA_JOB_DEADLINE_SECONDS` от `createdAt` (дефолт — 6 часов), ближайший опрос (клиентский или фоновый) возвращает `200` со `status: "failed"`, `error: "generation did not complete in time"`, `creditsRefunded: true`. До этого момента кратковременный сбой провайдера на опросе приходит как `502 upstream_error` — задача при этом **не** провалена и не списана заново, опрашивать дальше.
+
 ### Поле `moderation` ([ADR-086 §8](../../adr/ADR-086-ugc-moderation.md))
 
 Присутствует **всегда** и никогда не `null`. Та же схема — и в одиночной задаче, и в каждом элементе ленты `GET /v1/media/jobs` (иначе History показала бы заблокированное).

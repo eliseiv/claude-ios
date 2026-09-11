@@ -5,6 +5,7 @@
 - **Тип:** контрактный ADR (document-as-built + правка вводящих в заблуждение формулировок); **уточняет** [ADR-020](ADR-020-inline-base64-attachments-mvp.md) (тело ADR-020 не переписано — immutability)
 - **Связано:** [ADR-039](ADR-039-optional-message-with-attachments.md) (ход без текста), [ADR-040](ADR-040-edit-message-and-regenerate.md) (`editMessageStepId`), [ADR-041](ADR-041-openai-native-pdf-attachment.md) (PDF на OpenAI), [ADR-071](ADR-071-chat-attachment-refs-and-history-pagination.md) (`attachmentRefs`), [ADR-089](ADR-089-attachment-limits-and-error-taxonomy.md) (лимиты и коды ошибок)
 - **Реализуется в:** [modules/chat-orchestrator](../modules/chat-orchestrator/README.md)
+- **Пометка 2026-09-11 ([ADR-105 §A2](ADR-105-provider-failure-input-shape-and-media-deadline.md)), тело не переписано:** через `first_turn_attachments` провайдеру передаются **нейтральные части** вложений (`PreparedAttachments.parts`), а не собранные content-блоки: блоки рендерит клиент, выполняющий вызов, — на каждой попытке цепочки обхода своим провайдером. Правило «блоки подаются на первом витке хода и затем потребляются» не меняется.
 
 ## Контекст
 

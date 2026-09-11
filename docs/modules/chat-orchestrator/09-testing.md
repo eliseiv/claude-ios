@@ -249,6 +249,39 @@
 - **Тест-детектор карты лимитов:** для **каждого** роута приложения, чьё тело — `ChatRunRequest` или подкласс, `SizeLimitMiddleware._limit_for(path)` возвращает `attachment_request_body_limit`. Добавление нового роута с вложениями без правки карты роняет тест.
 - Числа в OpenAPI-описаниях полей `attachments`/`data` совпадают со значениями `Settings` (тест сравнивает описание со значением конфига, а не с литералом).
 
+## Integration — вход вызова в форме провайдера клиента ([ADR-105](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md))
+
+Норма — [ADR-105 §A](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md). **Главное требование к технике:** рендер вложений живёт ВНУТРИ клиента, поэтому кейсы этого раздела поднимают **настоящие классы** `AnthropicClient`, `OpenAIClient`, `OpenAIResponsesClient` с подменой транспорта SDK (тело исходящего запроса перехватывается на границе HTTP), а не фейковый `LLMClient`: фейк заменяет клиента целиком — и вместе с ним единственное место рендера, то есть зелёный тест на фейке ничего о дефекте не говорит. Ассерт — по **телу исходящего запроса** провайдеру, а не по коду ответа ручки.
+
+**Вложения — каждый путь расхождения, каждое направление, каждый клиент-получатель:**
+
+| Путь | Сессия / инстанс | Первая попытка | Кому уходит вход | Ожидаемое в теле исходящего запроса |
+|---|---|---|---|---|
+| кросс-обход | Claude-сессия, задан `ANTHROPIC_CHAT_FALLBACK_OPENAI_MODEL` | Anthropic → `400` с текстом `credit balance is too low` | `OpenAIResponsesClient` (`/v1/chat/v2/run`) | часть `input_image` с data-URI вложения (**названный прод-дефект**: сегодня части нет) |
+| кросс-обход | то же | то же | `OpenAIClient` (`/v1/chat/run`, `CHAT_LEGACY_WEB_SEARCH_ENABLED=false`) | часть `image_url`; ни одного блока `{"type":"image"}` |
+| кросс-обход, обратно | GPT-сессия, задан `OPENAI_CHAT_FALLBACK_ANTHROPIC_MODEL` | OpenAI → `401` на всех ключах | `AnthropicClient` | блок `{"type":"image","source":{"type":"base64",…}}`; ни одного `image_url` |
+| BYOK | `LLM_PROVIDER=openai`, Anthropic-ключ | — | `AnthropicClient` | блок `image` Anthropic-формы |
+| BYOK | `LLM_PROVIDER=anthropic`, OpenAI-ключ | — | клиент OpenAI (оба эндпоинта) | `image_url` / `input_image` |
+| операторский дефолт | dual-credits, `LLM_PROVIDER=openai`, дефолт модели из панели — Claude, сессия с `model IS NULL` | — | `AnthropicClient` | блок `image` Anthropic-формы |
+
+- **PDF** — те же строки с `document`: `{"type":"document"}` у Anthropic, часть `file` у Chat Completions, `input_file` у Responses.
+- **Файлы-знания workspace** — строки кросс-обхода и BYOK с картинкой проекта вместо inline-вложения: форма — провайдера получателя.
+- **Против переоценки (без смены провайдера):** обычный ход без отказа поставщика — тело запроса к провайдеру сессии **совпадает с эталоном, снятым до реализации** (блоки не продублированы, порядок «файлы проекта → вложения хода» сохранён, `text`-вложение одинаково у всех клиентов). Кейс ловит двойной рендер и лишние части.
+- **Каждая попытка — один набор:** ход с двумя попытками (первая упала) — во второй попытке ровно столько частей вложений, сколько вложений в запросе.
+- **Первый виток хода сохраняется ([ADR-088](../../adr/ADR-088-attachments-per-turn-contract.md)):** после ответа попытки обхода следующий виток tool-loop вложений не несёт — только плейсхолдер.
+- **Тотальность рендера (unit, параметризация класс × клиент):** для каждого класса, принимаемого `prepare_attachments` (кроме `audio`), и каждого из трёх клиентов число wire-частей равно числу вложений; часть неизвестного класса → исключение **до** вызова апстрима, а не молчаливый пропуск.
+- **Diff-тест регрессии (обязателен):** возврат к сборке блоков в оркестраторе под `session_provider` роняет строки 1, 3, 4 и 6 таблицы; возврат молчаливого пропуска в `_inject_responses_attachments` роняет строку 1.
+
+**История — терпимое чтение ([ADR-105 §A3](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).** История собирается реальными строками `chat_steps` (записанными реальными клиентами либо дословными снимками их `content_blocks`), затем реплеится каждым клиентом:
+
+- Anthropic-шаги (`text`, `tool_use`, `thinking`) + tool-шаг → `OpenAIClient`: сообщение `assistant` с `tool_calls` (тот же id, то же wire-имя, `arguments` — JSON входа), следом `role=tool` с тем же `tool_call_id`, `thinking` нет. Кейс падает на сегодняшнем `_anthropic_blocks_to_openai_content` (вызов отбрасывается).
+- Chat-Completions-шаг `{role:"assistant", content, tool_calls}` + tool-шаг → `AnthropicClient`: блоки `text` и `tool_use` (id дословно, `input` — объект), ни одного ключа `role` в блоках, следом `tool_result` с тем же `tool_use_id`.
+- Responses-шаг (`text` с `annotations`, `tool_use`, `reasoning`, `web_search_call`) → `AnthropicClient`: `annotations` сняты, `reasoning`/`web_search_call` отброшены, `tool_use` сохранён.
+- Сессия со смешанной историей (виток Anthropic, затем виток OpenAI) → каждый из трёх клиентов: **парность** «вызов ⇔ результат» соблюдена по всей истории.
+- **Против переоценки:** история своей формы реплеится каждым клиентом **бит-в-бит** как до реализации (эталон).
+- **`thinking` обе стороны:** Anthropic, режим `reasoning`, последний assistant-шаг перед `tool_result` — чужой формы → в запросе нет `thinking`; тот же шаг своей формы с thinking-блоком → `thinking` есть.
+- **Замена BYOK-ключа:** сессия, начатая с Anthropic-ключом, после замены ключа на OpenAI-ключ продолжается ходом, который OpenAI-клиент собирает валидно (вызовы и результаты парны).
+
 ## E2E (AC-4)
 - Полный tool-loop: run → tool_call → tool-result → tool_call → ... → assistant_message (≥2 итерации).
 - **Server-side tool-loop continuation (BUG-5 регресс, live):** website-builder `site.*` multi-round tool-loop с реальным Claude → реконструкция диалога корректна (нет orphan tool_result, нет Anthropic 400/502). Покрывается live e2e website-builder после восстановления org Anthropic (см. memory/deployment-state).

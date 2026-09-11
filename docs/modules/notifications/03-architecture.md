@@ -18,6 +18,7 @@
 ## Media reconciler
 - `src/app/media_generation/reconciler.py`, старт из lifespan при `MEDIA_RECONCILE_INTERVAL_SECONDS > 0`.
 - Выборка non-terminal jobs → тот же `_advance`.
+- **Сборка сервиса и дедлайн — [ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)** (норма; на `f8f4b37` не реализована): сервис собирается той же функцией, что request-путь (сегодня — без `request_logs` и `moderation`); задача, на которую fal не даёт конечного ответа, доводится до `failed` с возвратом не позже `MEDIA_JOB_DEADLINE_SECONDS`; при пустом `FAL_API_KEY` — без опроса. Push по-прежнему только на `completed`. Полное описание — [media-generation/03-architecture.md §Согласователь](../media-generation/03-architecture.md#согласователь-одна-сборка-сервиса-adr-105-b6).
 
 ## Инварианты
 - Токен принадлежит `sub`; один на `(user, device)`.

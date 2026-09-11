@@ -6,6 +6,7 @@
 - Частично супершедит проектные решения прежнего модуля `workspaces` (Спринт 2): **стратегию хранения файлов-знаний** (см. §4) и **зависимость от отложенного модуля `attachments`** ([TD-015](../100-known-tech-debt.md)).
 - Связан с: [ADR-012](ADR-012-assistant-mode-vs-billing-mode.md) (base assistant_mode prompt), [ADR-020](ADR-020-inline-base64-attachments-mvp.md) (inline-base64, извлечение текста), [ADR-033](ADR-033-llm-provider-abstraction.md) (провайдер-агностичная подача), [ADR-006](ADR-006-credit-billing-and-subscription-grant.md) (биллинг), [ADR-010](ADR-010-backend-hosted-preview.md)/[TD-009](../100-known-tech-debt.md) (BYTEA-хранение как у `site_files`), [Q-013-1](../99-open-questions.md) (RAG отложено).
 - Поставка 3 (крупнейшая), 2 под-фазы: **3A — ядро**, **3B — файлы-знания**.
+- **Пометка 2026-09-11 ([ADR-105 §A2](ADR-105-provider-failure-input-shape-and-media-deadline.md)), тело не переписано:** §6 «image → vision-блок… провайдер-агностично через клиент» по коду не выполнялось — `WorkspacesService._image_block` сам строил блок под провайдера, переданного оркестратором (`context_for_session(..., provider=session_provider)`), отдельной копией маппинга. Норма ADR-105: сервис отдаёт нейтральные части, параметр `provider` снят, `_image_block` удаляется, блок рендерит клиент, выполняющий вызов.
 
 ## Context
 
