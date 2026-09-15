@@ -62,7 +62,10 @@ def test_event_constant_sets() -> None:
         | parser.EXPIRING_EVENTS
         | parser.NOOP_EVENTS
         | parser.CONDITIONAL_EVENTS
+        | parser.ONE_TIME_PURCHASE_EVENTS
     )
+    # ADR-106 §E1: the token-pack purchase is a recognised, SEPARATE branch.
+    assert set(parser.ONE_TIME_PURCHASE_EVENTS) == {"non_subscription_purchase"}
 
 
 # --------------------------- classify_event table ---------------------------

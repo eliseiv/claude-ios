@@ -214,6 +214,9 @@ async def test_purchase_uses_table_credits_not_any_body_value(
         def __init__(self) -> None:
             self.granted_amount: int | None = None
 
+        async def has_idempotency_key(self, user_id: uuid.UUID, key: str) -> bool:
+            return False  # a fresh transaction: no row under token-purchase:{T} yet
+
         async def grant(self, **kwargs: Any) -> Any:
             from app.wallet.service import GrantResult
 

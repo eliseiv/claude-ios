@@ -1011,7 +1011,7 @@ class CrmAdminService:
         # карта CloudPayments, фолбэк — SUBSCRIPTION_CREDITS_PER_PERIOD. Свести её к каналу
         # cloudpayments «по смыслу» нельзя: подмена фолбэка изменила бы выданное число кредитов
         # на инстансе, где эти величины откалиброваны раздельно.
-        credits = subscription_credits(product_id, CHANNEL_MANUAL, settings=self._settings)
+        credits = subscription_credits(product_id, CHANNEL_MANUAL, settings=self._settings).amount
 
         await self._session.execute(
             text(

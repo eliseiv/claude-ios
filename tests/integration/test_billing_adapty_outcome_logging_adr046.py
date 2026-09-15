@@ -356,6 +356,9 @@ async def test_record_contains_no_raw_payload_or_bearer_secret(
         "customerUserId",
         "resolvedVia",
         "resolvedUserId",
+        # ADR-106 §B3: which identifier resolved the user (+ profileId on that branch).
+        "resolvedFrom",
+        "profileId",
         "requestId",
         "sessionId",
         "userId",

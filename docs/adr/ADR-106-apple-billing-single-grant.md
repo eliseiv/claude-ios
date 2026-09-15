@@ -8,7 +8,7 @@
 - **Не пересматривает:** [ADR-005](ADR-005-idempotency-ledger.md) (механизм `ux_ledger_idempotency` и правило «тот же ключ + другая сумма → конфликт» у `WalletService.grant`), [ADR-099 §6](ADR-099-crm-admin-economics-and-instance-settings.md) (порядок «оверлей → карта канала → фолбэк канала» и суммы), [Q-015-1](../99-open-questions.md) (требование подписки у `POST /v1/tokens/purchase`), [ADR-054](ADR-054-cloudpayments-webhook-payment-verification.md) (RU-путь, ключ `cp-txn:`).
 - **Закрывает:** [Q-055-1](../99-open-questions.md), [Q-029-1](../99-open-questions.md); [TD-020](../100-known-tech-debt.md), [TD-021](../100-known-tech-debt.md) (с выкатом кода). **Заводит:** [TD-054](../100-known-tech-debt.md) (возвраты Apple), [TD-055](../100-known-tech-debt.md) (отметка незаведённого продукта в CRM).
 - Миграции: **нет**. Новых env: **нет**.
-- **Реализация не выполнена** (на дату принятия — docs-only) — задача `backend` + `qa`.
+- **Реализовано** в ветке `fix/billing-single-grant` (код и тесты — коммит поверх `a7a2fd6`; новые кейсы — `tests/integration/test_billing_single_grant_adr106.py`). Ревью не проходило.
 
 ## Контекст
 

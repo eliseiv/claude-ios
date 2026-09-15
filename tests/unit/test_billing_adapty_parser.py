@@ -191,6 +191,8 @@ def test_known_events_set_contents() -> None:
         "subscription_renewal_cancelled",
         "trial_renewal_cancelled",
         "access_level_updated",
+        # ADR-106 §E1: token-pack purchase via the webhook.
+        "non_subscription_purchase",
     }
     assert set(parser.GRANTING_EVENTS) == {
         "trial_started",

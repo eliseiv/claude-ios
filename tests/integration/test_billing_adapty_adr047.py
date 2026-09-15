@@ -10,7 +10,7 @@ client).
 Covers the ADR-047 §8.4 test oriented invariants:
 - one real purchase = three events (trial_started + access_level_updated(premium,active) +
   trial_renewal_cancelled) sharing ONE transaction_id but distinct profile_event_id -> EXACTLY ONE
-  ledger grant (key ``adapty-txn:{transaction_id}``), subscription active, expires_at from
+  ledger grant (key ``sub-grant:{transaction_id}``, ADR-106), subscription active, expires_at from
   ``subscription_expires_at``;
 - ``profile_event_id`` (incl. a bare int) is the event id; the real payload no longer 200/ignores
   on ``missing_event_id``;
@@ -28,6 +28,7 @@ Covers the ADR-047 §8.4 test oriented invariants:
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import uuid
@@ -98,6 +99,11 @@ async def adapty_client(
     rate_limit.enforce_other_limits = orig_other  # type: ignore[assignment]
     get_settings.cache_clear()
 
+
+# A period end later than any row seeded by ``seed_user`` (now + 24h): keeps an event non-stale.
+_LATER_THAN_SEEDED_ROW = (
+    datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=30)
+).isoformat()
 
 # --------------------------- payload builders (real Adapty wire form) ---------------------------
 
@@ -271,12 +277,13 @@ async def test_real_purchase_three_events_grant_once(
     exp = await _sub_expires(db_sessionmaker, uid)
     assert exp is not None and (exp.year, exp.month, exp.day) == (2026, 7, 7)
 
-    # EXACTLY ONE ledger grant despite two granting-events; keyed by adapty-txn:{transaction_id}.
+    # EXACTLY ONE ledger grant despite two granting-events; keyed by sub-grant:{transaction_id}
+    # (ADR-106 §A: the period key shared with StoreKit sync).
     ledger = await _ledger_rows(db_sessionmaker, uid)
     assert len(ledger) == 1, ledger
     assert ledger[0]["type"] == "credit"
     assert ledger[0]["amount"] == _WEEK_TOKENS
-    assert ledger[0]["idempotency_key"] == f"adapty-txn:{_TXN}"
+    assert ledger[0]["idempotency_key"] == f"sub-grant:{_TXN}"
     assert ledger[0]["meta"]["transactionId"] == str(_TXN)
     # Balance == exactly the tariff (single grant).
     assert await _balance(db_sessionmaker, uid) == _WEEK_TOKENS
@@ -411,6 +418,9 @@ async def test_access_level_updated_inactive_expires(
         event_type="access_level_updated",
         user_id=uid,
         is_active=False,
+        # Not stale (ADR-106 §C1): the seeded active row expires in +24h, so the event's period
+        # must end later for the expiry to concern the CURRENT period.
+        subscription_expires_at=_LATER_THAN_SEEDED_ROW,
     )
     assert await _post(adapty_client, body) == {"result": "applied"}
     sub = await _subscription(db_sessionmaker, uid)
@@ -510,7 +520,7 @@ async def test_renewal_new_txn_grants_again(
     ledger = await _ledger_rows(db_sessionmaker, uid)
     assert len(ledger) == 2, ledger
     keys = {row["idempotency_key"] for row in ledger}
-    assert keys == {"adapty-txn:1000", "adapty-txn:2000"}
+    assert keys == {"sub-grant:1000", "sub-grant:2000"}
     # Two grants of the mapped tier.
     assert await _balance(db_sessionmaker, uid) == 2 * _WEEK_TOKENS
 
@@ -522,9 +532,9 @@ async def test_renewal_new_txn_grants_again(
 async def test_missing_customer_user_id_with_profile_id(
     adapty_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    # The pre-Adapty.identify payload carries only profile_id (no customer_user_id). Now that the
-    # event id parses from profile_event_id, the reason is missing_customer_user_id (NOT
-    # missing_event_id). No DB mutations.
+    # The pre-Adapty.identify payload carries only profile_id (no customer_user_id). ADR-106 §B:
+    # profile_id is now an identifier resolved through resolve_user; an unresolvable one yields
+    # user_not_found (missing_customer_user_id = NO identifier at all). No DB mutations.
     r = await adapty_client.post(
         _URL,
         content=_event(
@@ -537,7 +547,7 @@ async def test_missing_customer_user_id_with_profile_id(
         headers=_auth(),
     )
     assert r.status_code == 200, r.text
-    assert r.json() == {"result": "ignored", "reason": "missing_customer_user_id"}
+    assert r.json() == {"result": "ignored", "reason": "user_not_found"}
 
 
 @pytest.mark.asyncio

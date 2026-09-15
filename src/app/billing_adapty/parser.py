@@ -26,12 +26,21 @@ GRANTING_EVENTS = frozenset({"trial_started", "subscription_started", "subscript
 EXPIRING_EVENTS = frozenset({"subscription_expired", "subscription_cancelled"})
 NOOP_EVENTS = frozenset({"subscription_renewal_cancelled", "trial_renewal_cancelled"})
 CONDITIONAL_EVENTS = frozenset({"access_level_updated"})
-KNOWN_EVENTS = GRANTING_EVENTS | EXPIRING_EVENTS | NOOP_EVENTS | CONDITIONAL_EVENTS
+# ADR-106 §E1: token-pack purchase — a SEPARATE branch (no subscriptions, no subscription grant).
+ONE_TIME_PURCHASE_EVENTS = frozenset({"non_subscription_purchase"})
+KNOWN_EVENTS = (
+    GRANTING_EVENTS | EXPIRING_EVENTS | NOOP_EVENTS | CONDITIONAL_EVENTS | ONE_TIME_PURCHASE_EVENTS
+)
 
 # Event semantics (the output of ``classify_event``).
 SEM_GRANTING = "granting"
 SEM_EXPIRING = "expiring"
 SEM_NOOP = "noop"
+SEM_ONE_TIME_PURCHASE = "one_time_purchase"
+
+# Which identifier resolved the user (ADR-106 §B3).
+RESOLVED_FROM_CUSTOMER_USER_ID = "customer_user_id"
+RESOLVED_FROM_PROFILE_ID = "profile_id"
 
 # The access level that counts as "premium access granted" for a conditional access_level_updated.
 ACCESS_LEVEL_PREMIUM = "premium"
@@ -39,11 +48,11 @@ ACCESS_LEVEL_PREMIUM = "premium"
 
 @dataclass(frozen=True)
 class ParsedEvent:
-    """A defensively parsed Adapty event. ``customer_user_id`` is already a validated UUID."""
+    """A defensively parsed Adapty event. Identifiers are already validated UUIDs (or ``None``)."""
 
     event_id: str
     event_type: str
-    customer_user_id: uuid.UUID
+    customer_user_id: uuid.UUID | None
     vendor_product_id: str | None
     expires_at: datetime.datetime | None
     transaction_id: str | None
@@ -51,6 +60,9 @@ class ParsedEvent:
     is_active: bool | None
     access_level_id: str | None
     will_renew: bool | None
+    # ADR-106 §B: Adapty profile_id and the identifier the user was resolved by.
+    profile_id: uuid.UUID | None = None
+    resolved_from: str = RESOLVED_FROM_CUSTOMER_USER_ID
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -125,6 +137,20 @@ def parse_customer_user_id(body: dict[str, Any]) -> uuid.UUID | None:
         props.get("customer_user_id"),
         body.get("user_id"),
     )
+    if raw is None:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
+def parse_profile_id(body: dict[str, Any]) -> uuid.UUID | None:
+    """Adapty ``profile_id`` (ADR-106 §B1): ``profile_id`` -> ``profile.profile_id`` ->
+    ``event_properties.profile_id``; absent or not a UUID -> None."""
+    profile = _as_dict(body.get("profile"))
+    props = _as_dict(body.get("event_properties"))
+    raw = _first_str(body.get("profile_id"), profile.get("profile_id"), props.get("profile_id"))
     if raw is None:
         return None
     try:
@@ -211,6 +237,8 @@ def classify_event(event: ParsedEvent) -> str:
     ``is_active``) -> noop (do NOT revoke access).
     """
     event_type = event.event_type
+    if event_type in ONE_TIME_PURCHASE_EVENTS:
+        return SEM_ONE_TIME_PURCHASE
     if event_type in GRANTING_EVENTS:
         return SEM_GRANTING
     if event_type in EXPIRING_EVENTS:

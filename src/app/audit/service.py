@@ -26,6 +26,8 @@ EVENT_BYOK_CHANGE = "byok_change"
 EVENT_SUBSCRIPTION_CHANGE = "subscription_change"
 EVENT_ADAPTY_SUBSCRIPTION = "adapty_subscription"
 EVENT_CLOUDPAYMENTS_PAYMENT = "cloudpayments_payment"
+# ADR-106 §D3: период подписки начислен из фолбэка канала по незаведённому продукту.
+EVENT_SUBSCRIPTION_PRODUCT_UNMAPPED = "subscription_product_unmapped"
 EVENT_CHAT_STEP = "chat_step"
 EVENT_TOOL_CALL_INITIATED = "tool_call_initiated"
 EVENT_TOOL_CALL_COMPLETED = "tool_call_completed"

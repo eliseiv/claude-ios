@@ -239,7 +239,7 @@ async def test_device_id_resolves_and_credits_linked_user(
     assert await _event_user_ids(db_sessionmaker, "evt-incident") == [str(_U)]
     assert await _subscription(db_sessionmaker, _U) == ("active", _WEEK_PRODUCT)
     assert await _balance(db_sessionmaker, _U) == _WEEK_TOKENS
-    assert await _ledger_keys(db_sessionmaker, _U) == ["adapty-txn:410003298316682"]
+    assert await _ledger_keys(db_sessionmaker, _U) == ["sub-grant:410003298316682"]  # ADR-106 §A
     audits = await _audit_rows(db_sessionmaker, _U)
     assert len(audits) == 1
     # The audit payload preserves the ORIGINAL Adapty identifier (D) for tracing.
@@ -263,7 +263,7 @@ async def test_device_resolved_grant_idempotent_same_txn(
     db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     # Two DISTINCT granting events (distinct profile_event_id) sharing ONE transaction_id, both
-    # device-resolved -> exactly ONE grant on U (adapty-txn idempotency unchanged by ADR-055).
+    # device-resolved -> exactly ONE grant on U (period-key idempotency unchanged by ADR-055).
     async with db_sessionmaker() as s:
         await seed_user(s, user_id=_U)
     await _seed_device(db_sessionmaker, device_id=str(_D), user_id=_U)
@@ -283,7 +283,7 @@ async def test_device_resolved_grant_idempotent_same_txn(
     await adapty_service._session.commit()
 
     # One grant despite two granting-events (same txn); balance == a single tier.
-    assert await _ledger_keys(db_sessionmaker, _U) == ["adapty-txn:410003298316682"]
+    assert await _ledger_keys(db_sessionmaker, _U) == ["sub-grant:410003298316682"]  # ADR-106 §A
     assert await _balance(db_sessionmaker, _U) == _WEEK_TOKENS
 
 
@@ -309,7 +309,7 @@ async def test_device_resolved_duplicate_event_id_no_mutation_keeps_resolve_fiel
 
     assert second.result == "duplicate"
     assert await _balance(db_sessionmaker, _U) == _WEEK_TOKENS  # unchanged on replay
-    assert await _ledger_keys(db_sessionmaker, _U) == ["adapty-txn:410003298316682"]
+    assert await _ledger_keys(db_sessionmaker, _U) == ["sub-grant:410003298316682"]  # ADR-106 §A
     fields = _rendered(_outcomes(caplog)[0])
     assert fields["result"] == "duplicate"
     assert fields["resolvedVia"] == "device_id"

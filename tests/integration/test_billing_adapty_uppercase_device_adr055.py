@@ -189,7 +189,7 @@ async def test_uppercase_device_credits_linked_user(
     assert await _event_user_ids(db_sessionmaker, "evt-upper") == [str(_U)]
     assert await _subscription(db_sessionmaker, _U) == ("active", _WEEK_PRODUCT)
     assert await _balance(db_sessionmaker, _U) == _WEEK_TOKENS
-    assert await _ledger_keys(db_sessionmaker, _U) == ["adapty-txn:410003298316682"]
+    assert await _ledger_keys(db_sessionmaker, _U) == ["sub-grant:410003298316682"]  # ADR-106 §A
     # Audit preserves the ORIGINAL Adapty identifier (canonical lowercase UUID) for tracing.
     assert await _audit_customer_ids(db_sessionmaker, _U) == [str(_D)]
 

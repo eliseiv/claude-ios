@@ -41,10 +41,12 @@ from app.audit.service import EVENT_CLOUDPAYMENTS_PAYMENT, AuditEvent, AuditServ
 from app.billing_cloudpayments import parser, verify
 from app.billing_cloudpayments.verify import CloudPaymentsVerifyClient, CreditablePayment
 from app.billing_common.resolve import resolve_user
+from app.billing_common.single_grant import signal_unmapped_product
 from app.config import Settings
 from app.errors import CloudPaymentsWebhookMisconfiguredError
 from app.instance_config import (
     CHANNEL_CLOUDPAYMENTS,
+    is_product_unmapped,
     one_time_credits,
     one_time_product_ids,
     subscription_credits,
@@ -382,6 +384,7 @@ class CloudPaymentsWebhookService:
             )
 
         # Amount ONLY from server-side maps keyed by product_code (anti-tamper, ADR-054 §6).
+        unmapped = False
         if kind == parser.KIND_TOKENS:
             resolved = one_time_credits(payment.product_code, settings=self._settings)
             if resolved is None or resolved <= 0:
@@ -391,10 +394,15 @@ class CloudPaymentsWebhookService:
             reason = "cloudpayments_tokens"
         else:
             # Канал `cloudpayments`: своя пара «карта -> фолбэк», дословно сегодняшняя.
-            credits = subscription_credits(
+            sub_credits = subscription_credits(
                 payment.product_code, CHANNEL_CLOUDPAYMENTS, settings=self._settings
             )
+            credits = sub_credits.amount
             reason = "cloudpayments_subscription"
+            # ADR-106 §D2: a period from the channel fallback = the product is not configured.
+            unmapped = is_product_unmapped(
+                payment.product_code, CHANNEL_CLOUDPAYMENTS, sub_credits, settings=self._settings
+            )
 
         try:
             # Event-delivery dedup keyed by broadapps payment_id (stored in transaction_id column).
@@ -436,7 +444,7 @@ class CloudPaymentsWebhookService:
                 sub_status = "active"
                 await self._upsert_subscription(user_id, plan, expires_at)
 
-            await self._wallet.grant(
+            granted = await self._wallet.grant(
                 user_id=user_id,
                 amount=credits,
                 idempotency_key=f"cp-txn:{payment.payment_id}",
@@ -447,6 +455,16 @@ class CloudPaymentsWebhookService:
                     "kind": kind,
                 },
             )
+            if unmapped and not granted.idempotent_replay:
+                await signal_unmapped_product(
+                    self._audit,
+                    logger,
+                    user_id=user_id,
+                    channel=CHANNEL_CLOUDPAYMENTS,
+                    product_id=payment.product_code,
+                    amount=credits,
+                    transaction_id=payment.payment_id,
+                )
             await self._audit.record(
                 AuditEvent(
                     user_id=user_id,

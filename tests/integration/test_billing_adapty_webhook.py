@@ -18,6 +18,7 @@ Contract invariants under test (02-api-contracts.md):
 
 from __future__ import annotations
 
+import datetime
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -392,6 +393,10 @@ async def test_subscription_renewed_applies_and_grants(
         event_type="subscription_renewed",
         user_id=uid,
         vendor_product_id="pro_monthly",
+        # A renewal ends LATER than the current row (+24h): not stale (ADR-106 §C1).
+        expires_at=(
+            datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=30)
+        ).isoformat(),
     )
     r = await adapty_client.post(_URL, content=json.dumps(body).encode(), headers=_auth())
     assert r.status_code == 200, r.text

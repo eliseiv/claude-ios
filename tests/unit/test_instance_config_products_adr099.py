@@ -19,6 +19,9 @@ from app.instance_config.products import (
     CHANNEL_CLOUDPAYMENTS,
     CHANNEL_MANUAL,
     CHANNEL_STOREKIT,
+    CREDITS_SOURCE_CHANNEL_FALLBACK,
+    CREDITS_SOURCE_CHANNEL_MAP,
+    CREDITS_SOURCE_OVERLAY,
     PURCHASE_KIND_ONE_TIME,
     PURCHASE_KIND_SUBSCRIPTION,
     SOURCE_ADAPTY,
@@ -29,6 +32,7 @@ from app.instance_config.products import (
     catalog_rows,
     find_product,
     is_archived,
+    is_product_unmapped,
     known_product_ids,
     one_time_credits,
     operator_created_rows,
@@ -135,10 +139,9 @@ def test_an_unmapped_product_falls_back_to_the_fallback_of_its_own_channel(
 
     Кейс обязан падать при подмене одного фолбэка другим — числа в фикстуре различны.
     """
-    assert (
-        subscription_credits(_UNMAPPED, channel, settings=_settings(), snapshot=EMPTY_SNAPSHOT)
-        == expected
-    )
+    assert subscription_credits(
+        _UNMAPPED, channel, settings=_settings(), snapshot=EMPTY_SNAPSHOT
+    ) == (expected, CREDITS_SOURCE_CHANNEL_FALLBACK)
 
 
 @pytest.mark.parametrize(
@@ -153,10 +156,9 @@ def test_an_unmapped_product_falls_back_to_the_fallback_of_its_own_channel(
 def test_a_mapped_product_is_granted_by_the_map_of_its_own_channel(
     channel: str, product_id: str, expected: int
 ) -> None:
-    assert (
-        subscription_credits(product_id, channel, settings=_settings(), snapshot=EMPTY_SNAPSHOT)
-        == expected
-    )
+    assert subscription_credits(
+        product_id, channel, settings=_settings(), snapshot=EMPTY_SNAPSHOT
+    ) == (expected, CREDITS_SOURCE_CHANNEL_MAP)
 
 
 def test_manual_grant_of_a_token_product_uses_the_period_fallback_not_the_cloudpayments_one() -> (
@@ -172,7 +174,7 @@ def test_manual_grant_of_a_token_product_uses_the_period_fallback_not_the_cloudp
 
     granted = subscription_credits(
         _ONE_TIME_ID, CHANNEL_MANUAL, settings=settings, snapshot=EMPTY_SNAPSHOT
-    )
+    ).amount
 
     assert granted == _PERIOD_FALLBACK
     assert granted != _CP_FALLBACK  # diff: подмена фолбэка была бы видна
@@ -182,11 +184,15 @@ def test_storekit_subscription_knows_no_product_and_keeps_the_fixed_grant() -> N
     settings = _settings()
 
     assert (
-        subscription_credits(None, CHANNEL_STOREKIT, settings=settings, snapshot=EMPTY_SNAPSHOT)
+        subscription_credits(
+            None, CHANNEL_STOREKIT, settings=settings, snapshot=EMPTY_SNAPSHOT
+        ).amount
         == _PERIOD_FALLBACK
     )
     assert (
-        subscription_credits("", CHANNEL_STOREKIT, settings=settings, snapshot=EMPTY_SNAPSHOT)
+        subscription_credits(
+            "", CHANNEL_STOREKIT, settings=settings, snapshot=EMPTY_SNAPSHOT
+        ).amount
         == _PERIOD_FALLBACK
     )
 
@@ -197,7 +203,10 @@ def test_storekit_subscription_knows_no_product_and_keeps_the_fixed_grant() -> N
 def test_a_subscription_overlay_wins_over_every_channel_map_and_fallback(channel: str) -> None:
     snapshot = _overlay(_UNMAPPED, tokens=9001)
 
-    assert subscription_credits(_UNMAPPED, channel, settings=_settings(), snapshot=snapshot) == 9001
+    assert subscription_credits(_UNMAPPED, channel, settings=_settings(), snapshot=snapshot) == (
+        9001,
+        CREDITS_SOURCE_OVERLAY,
+    )
 
 
 def test_a_one_time_overlay_never_grants_on_a_subscription_path() -> None:
@@ -205,7 +214,9 @@ def test_a_one_time_overlay_never_grants_on_a_subscription_path() -> None:
     snapshot = _overlay(_UNMAPPED, tokens=9001, kind=PURCHASE_KIND_ONE_TIME)
 
     assert (
-        subscription_credits(_UNMAPPED, CHANNEL_ADAPTY, settings=_settings(), snapshot=snapshot)
+        subscription_credits(
+            _UNMAPPED, CHANNEL_ADAPTY, settings=_settings(), snapshot=snapshot
+        ).amount
         == _ADAPTY_FALLBACK
     )
 
@@ -334,7 +345,7 @@ def test_archived_is_a_property_of_the_product_and_does_not_touch_granting() -> 
     assert (
         subscription_credits(
             _CLOUDPAYMENTS_ID, CHANNEL_CLOUDPAYMENTS, settings=settings, snapshot=snapshot
-        )
+        ).amount
         == 888
     )
     assert _CLOUDPAYMENTS_ID in known_product_ids(settings=settings, snapshot=snapshot)
@@ -377,3 +388,69 @@ def test_is_archived_is_false_for_a_product_without_an_overlay() -> None:
 
 def test_find_product_returns_none_for_an_unknown_identifier() -> None:
     assert find_product("no.such", settings=_settings(), snapshot=EMPTY_SNAPSHOT) is None
+
+
+# ============== ADR-106 §D2: «продукт не заведён» — функция пары (канал, источник) ==============
+@pytest.mark.parametrize("channel", [CHANNEL_ADAPTY, CHANNEL_CLOUDPAYMENTS])
+def test_a_webhook_channel_fallback_is_an_unmapped_product(channel: str) -> None:
+    """(а) против недооценки: фолбэк канала с картой = продукта нет ни в оверлее, ни в карте."""
+    settings = _settings()
+    credits = subscription_credits(_UNMAPPED, channel, settings=settings, snapshot=EMPTY_SNAPSHOT)
+
+    assert credits.source == CREDITS_SOURCE_CHANNEL_FALLBACK
+    assert is_product_unmapped(
+        _UNMAPPED, channel, credits, settings=settings, snapshot=EMPTY_SNAPSHOT
+    )
+
+
+@pytest.mark.parametrize(
+    ("channel", "product_id", "snapshot"),
+    [
+        (CHANNEL_ADAPTY, _ADAPTY_ID, EMPTY_SNAPSHOT),
+        (CHANNEL_CLOUDPAYMENTS, _CLOUDPAYMENTS_ID, EMPTY_SNAPSHOT),
+        (CHANNEL_ADAPTY, _UNMAPPED, _overlay(_UNMAPPED, tokens=9001)),
+        (CHANNEL_STOREKIT, _UNMAPPED, _overlay(_UNMAPPED, tokens=9001)),
+    ],
+)
+def test_a_map_or_overlay_amount_is_never_unmapped(
+    channel: str, product_id: str, snapshot: InstanceConfigSnapshot
+) -> None:
+    """(б) против переоценки: сумма из карты или оверлея сигнала не даёт."""
+    settings = _settings()
+    credits = subscription_credits(product_id, channel, settings=settings, snapshot=snapshot)
+
+    assert credits.source != CREDITS_SOURCE_CHANNEL_FALLBACK
+    assert not is_product_unmapped(
+        product_id, channel, credits, settings=settings, snapshot=snapshot
+    )
+
+
+def test_storekit_fallback_is_unmapped_only_for_a_product_the_instance_does_not_know() -> None:
+    """У StoreKit карты нет: фолбэк — штатная сумма; сигнал только вне объединённого каталога."""
+    settings = _settings()
+    known = subscription_credits(
+        _ADAPTY_ID, CHANNEL_STOREKIT, settings=settings, snapshot=EMPTY_SNAPSHOT
+    )
+    unknown = subscription_credits(
+        _UNMAPPED, CHANNEL_STOREKIT, settings=settings, snapshot=EMPTY_SNAPSHOT
+    )
+
+    assert known.source == unknown.source == CREDITS_SOURCE_CHANNEL_FALLBACK
+    assert not is_product_unmapped(
+        _ADAPTY_ID, CHANNEL_STOREKIT, known, settings=settings, snapshot=EMPTY_SNAPSHOT
+    )
+    assert is_product_unmapped(
+        _UNMAPPED, CHANNEL_STOREKIT, unknown, settings=settings, snapshot=EMPTY_SNAPSHOT
+    )
+
+
+def test_manual_is_never_unmapped() -> None:
+    settings = _settings()
+    credits = subscription_credits(
+        _ONE_TIME_ID, CHANNEL_MANUAL, settings=settings, snapshot=EMPTY_SNAPSHOT
+    )
+
+    assert credits.source == CREDITS_SOURCE_CHANNEL_FALLBACK
+    assert not is_product_unmapped(
+        _ONE_TIME_ID, CHANNEL_MANUAL, credits, settings=settings, snapshot=EMPTY_SNAPSHOT
+    )

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.config import Settings, get_settings
 from app.instance_config.snapshot import InstanceConfigSnapshot, get_snapshot
@@ -35,6 +35,11 @@ CHANNEL_CLOUDPAYMENTS = "cloudpayments"
 CHANNEL_ADAPTY = "adapty"
 CHANNEL_MANUAL = "manual"
 CHANNEL_STOREKIT = "storekit"
+
+# ADR-106 §D1: источник суммы периода подписки. Порядок и суммы ADR-099 §6 не меняются.
+CREDITS_SOURCE_OVERLAY = "overlay"
+CREDITS_SOURCE_CHANNEL_MAP = "channel_map"
+CREDITS_SOURCE_CHANNEL_FALLBACK = "channel_fallback"
 
 SOURCE_TOKEN_PRODUCTS = "token_products"
 SOURCE_ADAPTY = "adapty_product_tokens"
@@ -265,18 +270,27 @@ def one_time_product_ids(
     return frozenset(ids)
 
 
+class SubscriptionCredits(NamedTuple):
+    """Сумма периода подписки и её источник (ADR-106 §D1)."""
+
+    amount: int
+    source: str
+
+
 def subscription_credits(
     product_id: str | None,
     channel: str,
     *,
     settings: Settings | None = None,
     snapshot: InstanceConfigSnapshot | None = None,
-) -> int:
+) -> SubscriptionCredits:
     """Кредиты за период подписки: оверлей → карта КАНАЛА → фолбэк ЭТОГО ЖЕ канала.
 
     Пара «карта + фолбэк» выбирается каналом, а не «по смыслу»: у ручной выдачи плана карта
     CloudPayments, но фолбэк — ``SUBSCRIPTION_CREDITS_PER_PERIOD``, и подмена переменной
     изменила бы выданное число кредитов на инстансе, где эти величины откалиброваны раздельно.
+    Вместе с суммой возвращается источник (ADR-106 §D1) — по нему вызывающий решает, заведён ли
+    продукт (``is_product_unmapped``).
     """
     cfg = settings or get_settings()
     snap = snapshot if snapshot is not None else get_snapshot()
@@ -289,17 +303,53 @@ def subscription_credits(
             and overlay.purchase_kind == PURCHASE_KIND_SUBSCRIPTION
             and overlay.tokens is not None
         ):
-            return overlay.tokens
+            return SubscriptionCredits(overlay.tokens, CREDITS_SOURCE_OVERLAY)
     key = product_id or ""
     if channel == CHANNEL_CLOUDPAYMENTS:
-        return cfg.cloudpayments_product_tokens().get(key) or (
-            cfg.cloudpayments_subscription_tokens_grant
+        return _map_or_fallback(
+            cfg.cloudpayments_product_tokens().get(key), cfg.cloudpayments_subscription_tokens_grant
         )
     if channel == CHANNEL_ADAPTY:
-        return cfg.adapty_product_tokens().get(key) or cfg.adapty_subscription_tokens_grant
+        return _map_or_fallback(
+            cfg.adapty_product_tokens().get(key), cfg.adapty_subscription_tokens_grant
+        )
     if channel == CHANNEL_MANUAL:
-        return cfg.cloudpayments_product_tokens().get(key) or cfg.subscription_credits_per_period
-    return cfg.subscription_credits_per_period
+        return _map_or_fallback(
+            cfg.cloudpayments_product_tokens().get(key), cfg.subscription_credits_per_period
+        )
+    return SubscriptionCredits(cfg.subscription_credits_per_period, CREDITS_SOURCE_CHANNEL_FALLBACK)
+
+
+def _map_or_fallback(mapped: int | None, fallback: int) -> SubscriptionCredits:
+    # `or`, а не `is None`: пустое (нулевое) значение карты и прежде проваливалось к фолбэку.
+    if mapped:
+        return SubscriptionCredits(mapped, CREDITS_SOURCE_CHANNEL_MAP)
+    return SubscriptionCredits(fallback, CREDITS_SOURCE_CHANNEL_FALLBACK)
+
+
+def is_product_unmapped(
+    product_id: str | None,
+    channel: str,
+    credits: SubscriptionCredits,
+    *,
+    settings: Settings | None = None,
+    snapshot: InstanceConfigSnapshot | None = None,
+) -> bool:
+    """Предикат «продукт подписки не заведён» — функция пары (канал, источник), ADR-106 §D2.
+
+    ``adapty``/``cloudpayments``: сумма из фолбэка канала. ``storekit``: фолбэк — штатная сумма
+    канала без карты, поэтому сигнал только когда инстанс не знает продукт вовсе. ``manual``:
+    никогда (продукт проверяется по каталогу до выдачи).
+    """
+    if credits.source != CREDITS_SOURCE_CHANNEL_FALLBACK:
+        return False
+    if channel in (CHANNEL_ADAPTY, CHANNEL_CLOUDPAYMENTS):
+        return True
+    if channel == CHANNEL_STOREKIT:
+        return (
+            not product_id or find_product(product_id, settings=settings, snapshot=snapshot) is None
+        )
+    return False
 
 
 def is_archived(

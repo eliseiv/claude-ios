@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.billing_common.single_grant import grant_once
 from app.errors import SubscriptionRequiredError, ValidationFailedError
 from app.instance_config import one_time_credits
 from app.observability.metrics import token_purchase_total
@@ -81,10 +82,16 @@ class TokenPurchaseService:
 
         credits = self._credits_for_product(verified.product_id)
 
-        result = await self._wallet.grant(
+        # The key is SHARED with the Adapty `non_subscription_purchase` webhook (ADR-106 §E2): a
+        # taken key — even with a different amount (overlay changed between channels) — means
+        # «already credited», never 409 (§A3).
+        key = f"{_IDEMPOTENCY_PREFIX}{verified.transaction_id}"
+        result = await grant_once(
+            self._wallet,
             user_id=user_id,
             amount=credits,
-            idempotency_key=f"{_IDEMPOTENCY_PREFIX}{verified.transaction_id}",
+            idempotency_key=key,
+            check_keys=(key,),
             meta={
                 "source": TOKEN_PURCHASE_SOURCE,
                 "productId": verified.product_id,
@@ -93,15 +100,18 @@ class TokenPurchaseService:
             reason=_GRANT_REASON,
         )
 
-        # Idempotent replay: the transaction was already processed; nothing new was credited
-        # (credits_added=0), balance is the current unchanged value (BR-TP-2, contract §32).
-        credits_added = 0 if result.idempotent_replay else credits
-        token_purchase_total.labels(
-            result="replay" if result.idempotent_replay else "granted"
-        ).inc()
-
+        # Replay: the transaction was already credited (by this path or the webhook); nothing
+        # new was credited (credits_added=0), balance is the current value (BR-TP-2, contract §32).
+        if result is None:
+            token_purchase_total.labels(result="replay").inc()
+            return PurchaseResult(
+                credits_added=0,
+                new_balance=await self._wallet.current_balance(user_id),
+                transaction_id=verified.transaction_id,
+            )
+        token_purchase_total.labels(result="granted").inc()
         return PurchaseResult(
-            credits_added=credits_added,
+            credits_added=credits,
             new_balance=result.new_balance,
             transaction_id=verified.transaction_id,
         )

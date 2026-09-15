@@ -40,6 +40,8 @@ class VerifiedTransaction:
     expires_at: datetime.datetime | None
     revoked: bool
     environment: str
+    # ADR-106 §C4: Apple заменил транзакцию более высоким уровнем — неактивна наравне с отзывом.
+    upgraded: bool = False
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -230,6 +232,8 @@ class StoreKitVerifier:
         )
         revocation_ms = payload.get("revocationDate")
         revoked = revocation_ms is not None
+        # Строго JSON-true: строка "false" не должна стать апгрейдом.
+        upgraded = payload.get("isUpgraded") is True
 
         if "transactionId" not in payload:
             raise ValidationFailedError("StoreKit transaction missing transactionId")
@@ -243,6 +247,7 @@ class StoreKitVerifier:
             expires_at=expires_at,
             revoked=revoked,
             environment=environment,
+            upgraded=upgraded,
         )
 
 
