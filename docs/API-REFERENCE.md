@@ -423,11 +423,11 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 | `expiresAt` | string (ISO8601) \| null | срок действия |
 | `plan` | string \| null | план |
 
-Идемпотентно по `transactionId` периода: повторный sync той же транзакции не начисляет кредиты повторно. Refund/revocation → `isSubscribed=false`.
+Идемпотентно по периоду: грант пишется под ключом `sub-grant:{transactionId}`, **общим с вебхуком Adapty** ([ADR-106](adr/ADR-106-apple-billing-single-grant.md) §A) — ни повторный `sync`, ни транзакция, уже зачисленная вебхуком, кредиты повторно не начисляют (и не дают `409`, даже если суммы каналов различаются). Refund/revocation и транзакция, заменённая апгрейдом (`isUpgraded`), → `isSubscribed=false`. **Устаревшая транзакция** (её срок раньше срока активной подписки пользователя) подписку не переписывает: ответ — текущее состояние подписки ([ADR-106](adr/ADR-106-apple-billing-single-grant.md) §C).
 
 **Коды:** `200`; `401`; `403`; `422` (невалидная/поддельная транзакция — подписка не меняется); `429`; `502/5xx` (ошибка App Store API).
 
-> **Сосуществование с Adapty ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)):** `/v1/subscription/sync` **остаётся рабочим**, но источник истины по подпискам теперь — Adapty-вебхук (§7a). Клиент использует **ОДИН** путь подписок: на Adapty-сборке iOS **не** вызывает `sync` (иначе двойное начисление — разные idempotency-ключи).
+> **Сосуществование с Adapty ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md), [ADR-106](adr/ADR-106-apple-billing-single-grant.md)):** `/v1/subscription/sync` **остаётся рабочим** рядом с Adapty-вебхуком (§7a). Двойного начисления между ними нет: оба пишут грант периода под одним ключом `sub-grant:{transactionId}`. Прежнее требование «на Adapty-сборке iOS не вызывает `sync`» **снято**.
 
 ---
 
@@ -438,7 +438,7 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 
 **Авторизация:** `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` (статический секрет, constant-time). **Adapty НЕ подписывает payload** (нет HMAC). Неверный/нет токена → `401`; секрет не сконфигурирован → `500`.
 
-**Тело:** читается **сырым**, **без Pydantic-валидации** (Adapty при сохранении вебхука шлёт проверочный пинг с пустым/неполным телом и не сохранит вебхук без `2xx`). Распознаваемые поля (дефенсивно, по версиям Adapty): `event_id`‖`id`; `event_type` (→lower); `customer_user_id`‖`profile.customer_user_id`‖`user_id` (= наш `userId` UUID); `vendor_product_id` (из `event_properties.*`/корня); `expires_at` (опц.).
+**Тело:** читается **сырым**, **без Pydantic-валидации** (Adapty при сохранении вебхука шлёт проверочный пинг с пустым/неполным телом и не сохранит вебхук без `2xx`). Распознаваемые поля (дефенсивно, по версиям Adapty; полный порядок источников — [modules/billing-adapty/03-architecture.md](modules/billing-adapty/03-architecture.md)): `profile_event_id`‖`event_id`‖`id`; `event_type` (→lower); `customer_user_id` и `profile_id` (UUID; адресат резолвится по `customer_user_id`, затем по `profile_id`, [ADR-055](adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md), [ADR-106](adr/ADR-106-apple-billing-single-grant.md) §B); `vendor_product_id`; `subscription_expires_at`; `transaction_id`/`original_transaction_id`; `is_active`/`access_level_id`/`will_renew`.
 
 **После успешной авторизации любое тело → `2xx`** (Adapty ретраит не-2xx бесконечно). Тело ответа `{result, reason?, event_type?}`:
 
@@ -446,14 +446,15 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 |---|---|---|
 | 401 | — | нет/неверный bearer |
 | 500 | — | секрет не задан **или** реальный внутренний сбой (БД) → Adapty ретраит |
-| 200 | `ignored` (`reason`: `empty_body`/`invalid_json`/`not_an_object`/`missing_event_id`/`missing_customer_user_id`/`user_not_found`) | кривой/неполный payload или неизвестный пользователь |
+| 200 | `ignored` (`reason`: `empty_body`/`invalid_json`/`not_an_object`/`missing_event_id`/`missing_customer_user_id`/`user_not_found`) | кривой/неполный payload; нет ни `customer_user_id`, ни `profile_id` (`missing_customer_user_id`); ни один не найден (`user_not_found`) |
+| 200 | `ignored` (`reason`: `missing_transaction_id`/`unknown_product`) | `non_subscription_purchase` без `transaction_id` либо с продуктом, которого нет в каталоге разовых покупок инстанса ([ADR-106](adr/ADR-106-apple-billing-single-grant.md) §E) — деньги взяты, кредиты не начислены, WARNING в логе |
 | 200 | `ignored` (+ `event_type` эхо) | неизвестный `event_type` |
 | 200 | `duplicate` | повтор `event_id` |
 | 200 | `applied` | событие применено |
 
-**События (реальный формат Adapty, ADR-047):** GRANTING (`trial_started`/`subscription_started`/`subscription_renewed`/`access_level_updated`@`is_active=true,premium`) → `subscriptions.status=active` (+`plan`,`expiresAt` из `subscription_expires_at`) + грант кредитов по тиру; EXPIRING (`subscription_expired`/`subscription_cancelled`/`access_level_updated`@`is_active=false`) → `status=expired`, кредиты не трогаются; NOOP (`subscription_renewal_cancelled`/`trial_renewal_cancelled`) → доступ НЕ отзывается, кредиты не трогаются.
+**События (реальный формат Adapty, ADR-047):** GRANTING (`trial_started`/`subscription_started`/`subscription_renewed`/`access_level_updated`@`is_active=true,premium`) → `subscriptions.status=active` (+`plan`,`expiresAt` из `subscription_expires_at`) + грант кредитов по тиру; EXPIRING (`subscription_expired`/`subscription_cancelled`/`access_level_updated`@`is_active=false`) → `status=expired`, кредиты не трогаются; NOOP (`subscription_renewal_cancelled`/`trial_renewal_cancelled`) → доступ НЕ отзывается, кредиты не трогаются. Событие, чей срок **раньше** срока активной подписки, подписку не меняет ([ADR-106](adr/ADR-106-apple-billing-single-grant.md) §C). **`non_subscription_purchase`** ([ADR-106](adr/ADR-106-apple-billing-single-grant.md) §E) → пакет токенов: число кредитов — только из серверного каталога разовых покупок (оверлей → `TOKEN_PRODUCTS`), подписка не трогается и **не требуется**. Возвраты (`*_refunded`) не обрабатываются — `ignored` с эхом типа ([TD-054](100-known-tech-debt.md)).
 
-**Идемпотентность (ADR-047):** дедуп события — UNIQUE `adapty_webhook_events.event_id` (=`profile_event_id`); грант — **один на период** через ledger `adapty-txn:{transaction_id}` (не по `event_id`: одна покупка = несколько событий с одним `transaction_id`). Одна транзакция; сбой → откат → `5xx` → ретрай Adapty → чистая переобработка. Детали — [modules/billing-adapty/02-api-contracts.md](modules/billing-adapty/02-api-contracts.md).
+**Идемпотентность (ADR-047, [ADR-106](adr/ADR-106-apple-billing-single-grant.md) §A/§E):** дедуп события — UNIQUE `adapty_webhook_events.event_id` (=`profile_event_id`); грант подписки — **один на период по любому каналу** через ledger `sub-grant:{transaction_id}` (общий с `POST /v1/subscription/sync`; без `transaction_id` — `adapty-txn:{original_transaction_id}`); пакет токенов — один на покупку через `token-purchase:{transaction_id}` (общий с `POST /v1/tokens/purchase`). Уже начисленный период/покупка — `applied` без второго гранта. Одна транзакция; сбой → откат → `5xx` → ретрай Adapty → чистая переобработка. Детали — [modules/billing-adapty/02-api-contracts.md](modules/billing-adapty/02-api-contracts.md).
 
 ---
 
@@ -879,12 +880,12 @@ Steps-view — агрегированные шаги одного message-шаг
 | `userId` | string (uuid) | = `sub` JWT |
 | `transaction` | object | подписанный StoreKit **consumable** payload (JWS / App Store Server API). **Не логируется** (redaction) |
 
-**Поведение:** сначала сервер проверяет **активную подписку** пользователя ([Q-015-1](99-open-questions.md) = вариант B) — нет активной подписки → `403 subscription_required`, начисление не происходит. Затем верифицирует транзакцию (общий с subscription verifier, включая `STOREKIT_TEST_MODE` для e2e), извлекает `transactionId` и `productId`, разрешает число кредитов через server-side маппинг `TOKEN_PRODUCTS` (клиент не задаёт количество кредитов) и начисляет их как `credit`-транзакцию идемпотентно по `transactionId` (`meta.source=token_purchase`). Повтор той же транзакции не начисляет повторно.
+**Поведение:** сначала сервер проверяет **активную подписку** пользователя ([Q-015-1](99-open-questions.md) = вариант B) — нет активной подписки → `403 subscription_required`, начисление не происходит. Затем верифицирует транзакцию (общий с subscription verifier, включая `STOREKIT_TEST_MODE` для e2e), извлекает `transactionId` и `productId`, разрешает число кредитов через server-side каталог (оверлей → `TOKEN_PRODUCTS`; клиент не задаёт количество кредитов) и начисляет их как `credit`-транзакцию идемпотентно под ключом `token-purchase:{transactionId}` (`meta.source=token_purchase`). Повтор той же транзакции не начисляет повторно. **Тот же пакет может начислить вебхук Adapty `non_subscription_purchase`** под тем же ключом ([ADR-106](adr/ADR-106-apple-billing-single-grant.md) §E): тогда здесь `creditsAdded=0`. Вебхук подписку **не** требует, поэтому пользователь без подписки получит от этого endpoint `403 subscription_required`, даже если вебхук кредиты уже зачислил.
 
 **Response (200):**
 | Поле | Тип | Прим. |
 |---|---|---|
-| `creditsAdded` | int | начислено кредитов за эту покупку; `0` при идемпотентном повторе (уже обработанная транзакция) |
+| `creditsAdded` | int | начислено кредитов за эту покупку; `0` при идемпотентном повторе (уже обработанная транзакция, в том числе зачисленная вебхуком Adapty) |
 | `newBalance` | int | баланс после начисления |
 | `transactionId` | string | идентификатор обработанной StoreKit-транзакции |
 

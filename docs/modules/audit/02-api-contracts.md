@@ -31,3 +31,4 @@ AuditEvent = {
 | `tool_call_initiated` / `tool_call_completed` | Orchestrator | — |
 | `admin_grant` | Admin (начисление кредитов оператором; actor=admin, reason, без секрета) | — |
 | `admin_subscription_grant` | Admin (ручная активация/продление подписки; actor=admin, plan/status/expiresAt/creditsGranted, без секрета; [ADR-048](../../adr/ADR-048-admin-subscription-grant.md)) | — |
+| `subscription_product_unmapped` | Subscription / billing-adapty / billing-cloudpayments — грант периода по продукту, чья сумма взята из фолбэка канала (`channel`, `productId`, `amount`, `transactionId`); пишется только при созданной строке гранта; [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §D | — |

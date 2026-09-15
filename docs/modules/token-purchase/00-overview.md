@@ -14,7 +14,7 @@
 
 ## Бизнес-правила
 - BR-TP-1: число кредитов определяется **server-side** по `productId` (`TOKEN_PRODUCTS`), не из тела клиента (анти-подделка количества).
-- BR-TP-2: grant идемпотентен по consumable `transactionId` (`ux_ledger_idempotency`); повторная отправка не начисляет повторно ([ADR-005](../../adr/ADR-005-idempotency-ledger.md)).
+- BR-TP-2: grant идемпотентен по ключу `token-purchase:{transactionId}` (`ux_ledger_idempotency`); повторная отправка не начисляет повторно ([ADR-005](../../adr/ADR-005-idempotency-ledger.md)). Ключ **общий** с вебхуком Adapty `non_subscription_purchase` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E): покупка, уже зачисленная вебхуком, даёт `creditsAdded=0`.
 - BR-TP-3: `ledger_transactions.meta.source = "token_purchase"`, `meta.productId` — для аудита/истории; отличает от subscription grant.
-- BR-TP-4: **покупка требует активной подписки** ([Q-015-1](../../99-open-questions.md) Closed = вариант B): policy-guard `subscription.status == active` **до** grant; нет активной подписки → `403 subscription_required`, ledger не пишется. Покупка = докупка сверх месячного пакета подписки. [ADR-002](../../adr/ADR-002-access-policy-state-machine.md) без изменений.
+- BR-TP-4: **покупка через этот endpoint требует активной подписки** ([Q-015-1](../../99-open-questions.md) Closed = вариант B): policy-guard `subscription.status == active` **до** grant; нет активной подписки → `403 subscription_required`, ledger не пишется. Покупка = докупка сверх месячного пакета подписки. [ADR-002](../../adr/ADR-002-access-policy-state-machine.md) без изменений. ⚠️ **Контраст:** вебхук Adapty начисляет тот же пакет **без** проверки подписки — осознанное отличие канала ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E3); пользователь без подписки может получить кредиты вебхуком при `403` здесь.
 - BR-TP-5: неизвестный `productId` → `422`; невалидная/поддельная транзакция → `422`/`400` (как subscription).

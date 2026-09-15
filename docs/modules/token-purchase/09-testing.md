@@ -38,3 +38,12 @@
 - Продукта нет ни в env, ни в оверлее → **`422`** (BR-TP-1 не ослаблен оверлеем).
 - `archived: true` → продукт **исчезает из `GET /v1/tokens/products`** (ветки 2 и 3), но покупка по нему **начисляет** как прежде.
 - В ветке живого рублёвого каталога созданный оператором продукт **не появляется**; `credits`/`title` уже перечисленного продукта — из оверлея.
+
+## Одна оплата — одно начисление ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md))
+
+Кейсы вебхука — [billing-adapty/09-testing.md](../billing-adapty/09-testing.md#одна-оплата--одно-начисление-adr-106).
+
+- Вебхук Adapty `non_subscription_purchase` по `T` → `POST /v1/tokens/purchase` по `T` (подписчик) → одна строка ledger, ответ `creditsAdded=0`, `newBalance` включает пакет.
+- `POST /v1/tokens/purchase` по `T` → вебхук по `T` → одна строка, вебхук `applied`.
+- Строка под `token-purchase:{T}` с **другой** суммой (оверлей изменён между каналами) → `POST /v1/tokens/purchase` отвечает `200` с `creditsAdded=0`, не `409`.
+- Пользователь без подписки: вебхук по `T` начислил пакет; `POST /v1/tokens/purchase` по `T` → прежний `403 subscription_required`, баланс не изменился повторно.

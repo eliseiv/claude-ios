@@ -4,6 +4,7 @@
 - Дата: 2026-06-30
 - Связано: расширяет [ADR-029](ADR-029-adapty-subscription-webhook.md) (Adapty subscription webhook); адресует **часть** [Q-029-3](../99-open-questions.md) (наблюдаемость, **не** маппинг событий); [05-security.md §Логирование](../05-security.md#логирование-безопасное), [05-security.md §Adapty webhook-авторизация](../05-security.md).
 - Тип: implementation-ADR (только наблюдаемость; контракт, биллинг, схема данных, маппинг событий — без изменений).
+- **Пересмотр 2026-09-15 → [ADR-106 §B,§E](ADR-106-apple-billing-single-grant.md):** таблица уровней дополнена причинами `missing_transaction_id` и `unknown_product` (обе **WARNING** — деньги взяты, начисления нет); allowlist дополнен полями `resolvedFrom`, `profileId` и — только на ветке покупки пакета — `productId`, `transactionId`. Уровни существующих исходов **не изменены**. Тело не переписано (immutability).
 
 ## Контекст
 

@@ -5,6 +5,7 @@
 - Связано: дополняет и **исправляет** [ADR-029](ADR-029-adapty-subscription-webhook.md) (Adapty subscription webhook) в части §3 (парсинг), §4 (маппинг событий), §5/§6 (идемпотентность гранта); опирается на наблюдаемость [ADR-046](ADR-046-adapty-webhook-outcome-logging.md); адресует маппинг-часть [Q-029-3](../99-open-questions.md); [ADR-005](ADR-005-idempotency-ledger.md) (идемпотентность ledger), [ADR-006](ADR-006-credit-billing-and-subscription-grant.md) (грант кредитов).
 - Тип: implementation/bugfix-ADR (исправляет «слепой» парсер ADR-029; контракт `POST /v1/billing/adapty/webhook`, HTTP-семантика, схема БД — **без изменений**; **без миграции**).
 - Модуль: [modules/billing-adapty/](../modules/billing-adapty/README.md)
+- **Пересмотр 2026-09-15 → [ADR-106 §A](ADR-106-apple-billing-single-grant.md):** при настоящем `transaction_id` ключ гранта — `sub-grant:{transaction_id}` (общий со StoreKit `sync`) вместо `adapty-txn:`; ключ `adapty-txn:{фолбэк}` сохраняется только для фолбэка `original_transaction_id` ‖ `event_id`. Правило «`transaction_id` первичен» и разведение дедупа события с идемпотентностью гранта **не изменены**. Тело не переписано (immutability).
 
 ## Контекст
 

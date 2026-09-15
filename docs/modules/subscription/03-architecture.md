@@ -4,22 +4,25 @@
 1. Принять `transaction` payload.
 2. Верифицировать:
    - Проверка JWS-подписи Apple (цепочка сертификатов) и/или запрос статуса через App Store Server API.
-   - Извлечь `productId` (plan), `expiresDate`, `transactionId`, состояние (active/expired/revoked).
+   - Извлечь `productId` (plan), `expiresDate`, `transactionId`, состояние (active/expired/revoked/upgraded).
 3. Нормализовать статус:
-   - `expiresDate > now()` и не revoked → `active`.
+   - `expiresDate > now()`, не revoked и не `isUpgraded` → `active` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §C4).
    - иначе → `expired`.
-4. Upsert `subscriptions(user_id, status, plan, expires_at, updated_at)`.
-5. Если переход в `active` и новый период (по transactionId, идемпотентно) → Wallet.grant фикс. пакета `SUBSCRIPTION_CREDITS_PER_PERIOD` (дефолт 1000) кредитов ([ADR-006](../../adr/ADR-006-credit-billing-and-subscription-grant.md)).
-6. Audit `subscription_change`.
-7. Вернуть `{isSubscribed, expiresAt, plan}`.
+4. **Предикат устаревания** ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §C1): строка есть, `status=active`, её `expires_at` позже `expiresDate` транзакции → `stale`: шаг 5 пропускается.
+5. Upsert `subscriptions(user_id, status, plan, expires_at, updated_at)` (только если не `stale`).
+6. Если транзакция `active` → проверить `sub-grant:{transactionId}` и `adapty-txn:{transactionId}` (`has_idempotency_key`); нет ни одного → Wallet.grant под `sub-grant:{transactionId}`; занятый ключ с другой суммой — исход «уже начислено», не `409` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §A). Сумма — `subscription_credits(productId, storekit)`; фолбэк по продукту вне каталога → WARNING + audit `subscription_product_unmapped` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §D).
+7. Audit `subscription_change` (+ `stale`, `upgraded`).
+8. Вернуть `{isSubscribed, expiresAt, plan}` — при `stale` из строки `subscriptions`, иначе из транзакции.
 
 ```mermaid
 flowchart LR
     R[sync request] --> V[verify JWS / App Store API]
     V -->|valid| N[normalize status]
     V -->|invalid| E[422]
-    N --> U[upsert subscriptions]
-    U --> G{active & new period?}
+    N --> S{stale?}
+    S -->|no| U[upsert subscriptions]
+    S -->|yes| G
+    U --> G{active & period key free?}
     G -->|yes| GR[Wallet.grant]
     G -->|no| A[audit]
     GR --> A
@@ -34,7 +37,8 @@ flowchart LR
 - Начисляется при активации **или продлении** (новый период) подписки.
 
 ## Идемпотентность grant
-- По `transactionId` периода (в meta ledger, `idempotency_key`) — повторный sync той же транзакции/периода не начисляет повторно (ADR-005).
+- Ключ `sub-grant:{transactionId}` — **общий с вебхуком Adapty** ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §A); до гранта проверяется и исторический ключ вебхука `adapty-txn:{transactionId}`. Повторный sync, как и транзакция, уже зачисленная вебхуком, не начисляет повторно (ADR-005). Уникальность — в пределах `userId` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §A5).
+- ⚠️ **Контраст с `WalletService.grant`:** сам `grant` на тот же ключ с другой суммой поднимает `ConflictError` (`409`, [ADR-005](../../adr/ADR-005-idempotency-ledger.md)) — это правило **не меняется**; `sync` на ключе периода обязан трактовать такой исход как «уже начислено» и отвечать `200`.
 
 ## Окружения
 - Sandbox и production App Store endpoints — переключение через config ([Q-007-1]).

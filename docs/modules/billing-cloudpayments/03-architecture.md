@@ -485,3 +485,5 @@ AuditEvent(user_id=<uuid>, event_type=EVENT_CLOUDPAYMENTS_PAYMENT, payload={
 `CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT`**). Классификация платежа по `payment_type` и
 реклассификация [ADR-057](../../adr/ADR-057-cloudpayments-payment-type-mismatch-fallback.md) не меняются:
 резолвер отвечает на вопрос «сколько», а не «какого класса платёж».
+
+**Незаведённый продукт ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §D).** Резолвер `subscription`-ветки возвращает и источник суммы; источник — фолбэк `CLOUDPAYMENTS_SUBSCRIPTION_TOKENS_GRANT` и грант создал строку → WARNING и событие аудита `subscription_product_unmapped` (`channel="cloudpayments"`, `productId`, `amount`, `transactionId`=`payment_id`). Начисление не блокируется; ключ `cp-txn:` и классификация платежа не меняются.

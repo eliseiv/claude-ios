@@ -1,6 +1,6 @@
 # billing-adapty / 08 — Observability (логирование исхода вебхука)
 
-Реализует [ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md); **[ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md) добавляет поля `resolvedVia`/`resolvedUserId`** (см. §«Дополнение ADR-055» ниже). Точное ТЗ для backend — без додумывания. Расширяет [03-architecture.md](03-architecture.md); HTTP-семантику, начисление, `KNOWN_EVENTS`, контракт `AdaptyWebhookResponse` и схему данных **не меняет**.
+Реализует [ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md); **[ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md) добавляет поля `resolvedVia`/`resolvedUserId`** (см. §«Дополнение ADR-055» ниже); **[ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) добавляет поля `resolvedFrom`/`profileId`, ветку пакета и причины `missing_transaction_id`/`unknown_product`, а точку `missing_customer_user_id` переносит после попытки резолва по `profile_id`** (см. §«Дополнение ADR-106» в конце; при расхождении с таблицами выше действует он). Точное ТЗ для backend — без додумывания. Расширяет [03-architecture.md](03-architecture.md); HTTP-семантику, начисление, `KNOWN_EVENTS`, контракт `AdaptyWebhookResponse` и схему данных **не меняет**.
 
 ## Цель
 
@@ -166,3 +166,20 @@ Stage 3 меняется с `_user_exists` на общий `resolve_user` (devic
 - `customerUserId` — строка UUID, не объект.
 - В записи **нет** сырого payload и bearer-секрета (проверить отсутствие `Authorization`/тела).
 - HTTP-ответ и код не изменились относительно [02-api-contracts.md](02-api-contracts.md) (логирование — побочный эффект).
+
+## Дополнение [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) — идентификатор резолва, ветка пакета, незаведённый продукт
+
+Уровни существующих исходов **не меняются**. Изменения:
+
+| Поле / исход | Значение |
+|---|---|
+| `resolvedFrom` | `"customer_user_id"` \| `"profile_id"` — каким идентификатором резолвнут пользователь. Присутствует там же, где `resolvedVia`; на `user_not_found` и ранних `ignored` — опущено |
+| `profileId` | Adapty `profile_id` (`str(uuid)`), когда резолв шёл по нему (в т. ч. на `user_not_found` этой ветки). Внутренний псевдонимный идентификатор Adapty, не PII |
+| `customerUserId` | прежний смысл: только `customer_user_id` из тела; при резолве по `profile_id` отсутствует, если `customer_user_id` не пришёл |
+| `productId`, `transactionId` | **только** на ветке `non_subscription_purchase` (`applied`, `duplicate`, `missing_transaction_id`, `unknown_product`) — что распарсено; без них оператор не восстановит покупку вручную. Не PII |
+| `ignored` / `missing_transaction_id` | **WARNING** — деньги взяты, начисления нет |
+| `ignored` / `unknown_product` | **WARNING** — то же |
+
+Вне `adapty_webhook_outcome` — отдельная запись **WARNING `subscription_product_unmapped`** (`channel`, `productId`, `amount`, `transactionId`), когда сумма периода взята из фолбэка канала и грант фактически создал строку ledger; предикат по каналам — [ADR-106 §D](../../adr/ADR-106-apple-billing-single-grant.md). Повтор и «период уже начислен» записи не дают.
+
+**Ориентиры qa:** только `profile_id` → `applied` с `resolvedFrom="profile_id"` и `profileId`; оба поля и `customer_user_id` резолвнут → `resolvedFrom="customer_user_id"`, `profileId` отсутствует; `missing_transaction_id`/`unknown_product` → ровно одна запись WARNING с `productId`/`transactionId`, где распарсены.

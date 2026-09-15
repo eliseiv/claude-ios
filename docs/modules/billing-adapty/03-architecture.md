@@ -1,6 +1,6 @@
 # billing-adapty / 03 — Architecture
 
-Реализует [ADR-029](../../adr/ADR-029-adapty-subscription-webhook.md); **парсинг реального формата, маппинг событий и идемпотентность гранта — [ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)** (заменяет §«Дефенсивный парсинг», §«Маппинг событий», §«Grant» ниже); **резолв пользователя `customer_user_id`→`userId` (deviceId→userId через `auth_devices`) — [ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)** (заменяет Stage 3 `_user_exists`). Ниже — детали для backend.
+Реализует [ADR-029](../../adr/ADR-029-adapty-subscription-webhook.md); **парсинг реального формата, маппинг событий и идемпотентность гранта — [ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)** (заменяет §«Дефенсивный парсинг», §«Маппинг событий», §«Grant» ниже); **резолв пользователя `customer_user_id`→`userId` (deviceId→userId через `auth_devices`) — [ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)** (заменяет Stage 3 `_user_exists`); **общий ключ гранта периода, резолв по `profile_id`, устаревшие события, незаведённый продукт, `non_subscription_purchase` — [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md)** (§«ADR-106» ниже; при расхождении с разделами выше действует он). Ниже — детали для backend.
 
 ## Файлы (фактическая раскладка)
 - `src/app/billing_adapty/__init__.py`
@@ -26,26 +26,35 @@ sequenceDiagram
     R->>R: constant-time compare (401 / 500-if-unset)
     R->>R: raw = await request.body()  (без Pydantic)
     R->>S: handle(raw)
-    S->>S: parse: empty/json/object/event_id/customer_user_id
-    alt любая невалидность
+    S->>S: parse: empty/json/object/event_id/customer_user_id/profile_id
+    alt любая невалидность или нет ни customer_user_id, ни profile_id
         S-->>R: 200 ignored/<reason>
-    else customer_user_id есть
-        S->>DB: resolve_user(X): users → auth_devices.device_id (ADR-055)
-        alt X не в users и не в auth_devices
+    else идентификатор есть
+        S->>DB: resolve_user(customer_user_id), иначе resolve_user(profile_id) (ADR-055, ADR-106 §B)
+        alt ни один не резолвнут
             S-->>R: 200 ignored/user_not_found
-        else резолвнут → resolved_user_id, resolved_via
+        else резолвнут → resolved_user_id, resolved_via, resolved_from
         end
+    end
+    opt non_subscription_purchase (ADR-106 §E)
+        S->>S: нет transaction_id → 200 ignored/missing_transaction_id, one_time_credits(vendor_product_id) is None → 200 ignored/unknown_product
     end
     alt валидное событие (после резолва)
         S->>DB: BEGIN
         S->>DB: INSERT adapty_webhook_events ON CONFLICT(event_id) DO NOTHING RETURNING event_id
         alt конфликт (дубликат) — RETURNING пуст
-            Note over S,DB: мутаций нет (никакого audit/grant/upsert); транзакция фиксируется без изменений
+            Note over S,DB: мутаций нет (никакого audit/grant/upsert), транзакция фиксируется без изменений
             S-->>R: 200 duplicate
         else вставлено
-            S->>DB: classify_event → upsert subscriptions (active|expired) | noop (без изменений)
-            opt GRANTING (trial/started/renewed/access_level@premium)
-                S->>DB: WalletService.grant(idem="adapty-txn:{transaction_id}")
+            alt подписочное событие
+                S->>DB: classify_event → stale? (ADR-106 §C) → upsert subscriptions (active|expired) | без изменений (noop или stale)
+                opt GRANTING (trial/started/renewed/access_level@premium)
+                    S->>DB: has_idempotency_key(sub-grant:{T}) / (adapty-txn:{T}) → есть: гранта нет
+                    S->>DB: иначе WalletService.grant(idem="sub-grant:{T}", без transaction_id — "adapty-txn:{fallback}")
+                    Note over S,DB: занятый ключ с другой суммой = «уже начислено», не ошибка (ADR-106 §A3), фолбэк суммы → WARNING + audit subscription_product_unmapped (§D)
+                end
+            else non_subscription_purchase (ADR-106 §E)
+                S->>DB: WalletService.grant(idem="token-purchase:{transaction_id}") — subscriptions не трогаются
             end
             S->>DB: audit adapty_subscription (assert_no_secrets)
             S->>DB: COMMIT
@@ -73,9 +82,11 @@ sequenceDiagram
 | не-JSON | 200 | `ignored` | `invalid_json` |
 | JSON не объект | 200 | `ignored` | `not_an_object` |
 | нет `event_id` | 200 | `ignored` | `missing_event_id` |
-| нет `customer_user_id` (или не UUID) | 200 | `ignored` | `missing_customer_user_id` |
-| пользователь не найден | 200 | `ignored` | `user_not_found` |
+| нет ни `customer_user_id` (UUID), ни `profile_id` (UUID) | 200 | `ignored` | `missing_customer_user_id` |
+| идентификатор есть, ни один не резолвнут | 200 | `ignored` | `user_not_found` |
 | неизвестный `event_type` | 200 | `ignored` | (+ `event_type` эхо) |
+| `non_subscription_purchase` без `transaction_id` | 200 | `ignored` | `missing_transaction_id` |
+| `non_subscription_purchase`, продукт не разовый в каталоге / `vendor_product_id` нет | 200 | `ignored` | `unknown_product` |
 | дубликат `event_id` | 200 | `duplicate` | — |
 | валидное событие | 200 | `applied` | — |
 | внутренний сбой (БД и т. п.) | 500 | — | — |
@@ -86,7 +97,8 @@ sequenceDiagram
 
 - `event_id = profile_event_id ‖ ep.profile_event_id ‖ event_id ‖ id` (**NEW: `profile_event_id` первым**)
 - `event_type = (event_type ‖ event ‖ ep.event_type ‖ type).lower()` (дефенсивно, wire-структура не подтверждена 100%)
-- `customer_user_id = customer_user_id ‖ profile.customer_user_id ‖ ep.customer_user_id ‖ user_id` → UUID. Не-UUID/нет → `ignored/missing_customer_user_id` (сейчас — норма, iOS ещё не вызвал `Adapty.identify`).
+- `customer_user_id = customer_user_id ‖ profile.customer_user_id ‖ ep.customer_user_id ‖ user_id` → UUID. Не-UUID/нет → идентификатор отсутствует.
+- `profile_id = profile_id ‖ profile.profile_id ‖ ep.profile_id` → UUID; не-UUID/нет → отсутствует (**[ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §B**). Нет ни `customer_user_id`, ни `profile_id` → `ignored/missing_customer_user_id`.
 - `vendor_product_id = ep.vendor_product_id ‖ ep.product_id ‖ vendor_product_id ‖ product_id`
 - `expires_at = ep.subscription_expires_at ‖ ep.expires_at ‖ subscription_expires_at ‖ expires_at ‖ profile.expires_at` (ISO8601→tz-aware; нераспарсиваемое→`None`, **NEW: `subscription_expires_at` первым**)
 - `transaction_id = ep.transaction_id ‖ transaction_id` (**NEW**, →str)
@@ -95,7 +107,7 @@ sequenceDiagram
 - `access_level_id = ep.access_level_id ‖ access_level_id` (**NEW**)
 - `will_renew = ep.will_renew ‖ will_renew` (**NEW**, bool|None; **audit/лог only, в БД НЕ хранится**)
 
-`ParsedEvent` расширяется новыми полями (`transaction_id`, `original_transaction_id`, `is_active`, `access_level_id`, `will_renew`).
+`ParsedEvent` расширяется новыми полями (`transaction_id`, `original_transaction_id`, `is_active`, `access_level_id`, `will_renew`); [ADR-106 §B](../../adr/ADR-106-apple-billing-single-grant.md) — `profile_id` и идентификатор, по которому пользователь резолвнут.
 
 ## Маппинг событий (ADR-047 — ЗАМЕНЯЕТ ADR-029 §4; диспетчер `classify_event(ParsedEvent) -> Semantics`)
 
@@ -109,7 +121,8 @@ sequenceDiagram
 | `access_level_updated` + `is_active=false` | EXPIRING | `expired` | нет |
 | `subscription_renewal_cancelled` / `trial_renewal_cancelled` | **NOOP** | **без изменений** (доступ сохраняется) | нет |
 | `access_level_updated` + `is_active=true` + не-`premium` / `is_active=None` | NOOP | без изменений | нет |
-| прочее (∉ `KNOWN_EVENTS`) | UNKNOWN | — | `200 ignored` (+эхо `event_type`) |
+| `non_subscription_purchase` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E) | покупка пакета | **не трогается** | **да** — пакет по `one_time_credits`, ключ `token-purchase:{transaction_id}` |
+| прочее (∉ распознаваемых; в т. ч. `*_refunded` — [TD-054](../../100-known-tech-debt.md)) | UNKNOWN | — | `200 ignored` (+эхо `event_type`) |
 
 `KNOWN_EVENTS = GRANTING_EVENTS ∪ EXPIRING_EVENTS ∪ NOOP_EVENTS ∪ {access_level_updated}`. NOOP-событие **записывается** в `adapty_webhook_events` (дедуп) + audit, но **без** мутации `subscriptions` и без гранта (доступ при отмене автопродления НЕ отзывается).
 
@@ -120,12 +133,14 @@ sequenceDiagram
 Сбой на любом шаге → ROLLBACK → 500 → Adapty ретраит. На ретрае `event_id` свободен (INSERT откатился) ⇒ чистая переобработка; `grant` дополнительно идемпотентен по txn-ключу (ниже).
 
 ## Тир product → tokens
+> Действующий резолвер — `subscription_credits(pid, adapty)`: **оверлей → карта → фолбэк** (§«Источник числа кредитов после ADR-099» ниже); с [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §D он возвращает и источник суммы. Формула ниже — исходная редакция ADR-029.
 ```
 tokens = settings.adapty_product_tokens().get(vendor_product_id) or settings.adapty_subscription_tokens_grant
 ```
 `adapty_product_tokens()` — хелпер `Settings` (`src/app/config.py`, уже реализован): парсит `ADAPTY_PRODUCT_TOKENS` (JSON `{str: positive-int}`), малформед → `{}`. `adapty_subscription_tokens_grant` — int из `ADAPTY_SUBSCRIPTION_TOKENS_GRANT` (дефолт 1000). `week_6.99_nottrial` оператор может добавить в карту (без деплоя); иначе fallback 1000.
 
 ## Grant (ADR-047 — ключ идемпотентности по transaction_id, НЕ по event_id)
+> ⚠️ **Ключ пересмотрен [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §A:** при настоящем `transaction_id` грант пишется под `sub-grant:{transaction_id}` (общим со StoreKit `sync`), до гранта проверяются `sub-grant:{T}` и `adapty-txn:{T}`; блок ниже — редакция ADR-047 и действует только для фолбэка без `transaction_id`. Актуальная норма — §«ADR-106» ниже.
 ```
 txn = event.transaction_id or event.original_transaction_id or event.event_id
 WalletService.grant(
@@ -140,7 +155,7 @@ WalletService.grant(
 **`transaction_id` первичен** (уникален на период → продления начисляют заново; несколько событий одного периода → один грант). `original_transaction_id` — fallback (постоянен на цепочку, НЕ первичен — иначе продления без кредитов). `event_id` — крайний fallback (вырожденный случай без transaction id). Только для granting-событий. Подробности и обоснование — [ADR-047 §C](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md).
 
 ## Observability (логирование исхода, [ADR-046](../../adr/ADR-046-adapty-webhook-outcome-logging.md))
-Каждый вызов `handle()` пишет **ровно одну** структурную запись `"adapty_webhook_outcome"` в сервисе (`log_event`, образец `app.chat.orchestrator`): allowlist полей `result`/`reason`/`eventType`/`eventId`/`customerUserId`, уровни `INFO`/`WARNING`/`DEBUG` по исходу (`user_not_found`/`missing_customer_user_id`/unknown-type → WARNING как «потенциально потерянное начисление»). Точное ТЗ backend (сигнатуры, decision-таблица, точки вызова, PII-allowlist) — [08-observability.md](08-observability.md). HTTP-семантика/начисление/`KNOWN_EVENTS`/контракт не меняются.
+Каждый вызов `handle()` пишет **ровно одну** структурную запись `"adapty_webhook_outcome"` в сервисе (`log_event`, образец `app.chat.orchestrator`): allowlist полей `result`/`reason`/`eventType`/`eventId`/`customerUserId` (+`resolvedVia`/`resolvedUserId` ADR-055; +`resolvedFrom`/`profileId`, на ветке пакета `productId`/`transactionId` — [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md)), уровни `INFO`/`WARNING`/`DEBUG` по исходу (`user_not_found`/`missing_customer_user_id`/unknown-type/`missing_transaction_id`/`unknown_product` → WARNING как «потенциально потерянное начисление»). Точное ТЗ backend (сигнатуры, decision-таблица, точки вызова, PII-allowlist) — [08-observability.md](08-observability.md). HTTP-семантика/начисление/`KNOWN_EVENTS`/контракт не меняются.
 
 ## Audit
 Новое `EVENT_ADAPTY_SUBSCRIPTION = "adapty_subscription"` в `src/app/audit/service.py`.
@@ -181,6 +196,21 @@ AuditEvent(user_id=<uuid>, event_type=EVENT_ADAPTY_SUBSCRIPTION, payload={
   канала и его фолбэку. Строка, созданная правкой одного `archived`, не несёт числа — и не имеет
   права обнулить грант: это было бы изменением начисления правкой, его не касавшейся (§2).
 
-Для этого модуля путь — `subscription`: тир `vendor_product_id → tokens` резолвится как
-**оверлей → `ADAPTY_PRODUCT_TOKENS` → `ADAPTY_SUBSCRIPTION_TOKENS_GRANT`**. Ключ идемпотентности
-гранта, дефенсивный парсинг и матрица ответов не меняются.
+Для этого модуля путей два: подписочные события — `subscription`-резолвер
+(**оверлей → `ADAPTY_PRODUCT_TOKENS` → `ADAPTY_SUBSCRIPTION_TOKENS_GRANT`**), `non_subscription_purchase` —
+`one_time`-резолвер (**оверлей `one_time` → `TOKEN_PRODUCTS`**, [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E). ADR-099 ключ идемпотентности,
+парсинг и матрицу ответов не менял; их меняет [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md).
+
+## ADR-106 — одна оплата Apple — одно начисление ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md))
+
+Норма этого раздела действует поверх разделов выше; тело ADR — источник, здесь — точки реализации.
+
+**Резолв (Stage 2–3 `handle()`).** `parse_profile_id(body)` → `uuid.UUID | None` (источники — §«Дефенсивный парсинг»). Порядок: `customer_user_id` → `resolve_user`; не найден или отсутствует → `profile_id` → тот же `resolve_user`; ни одного идентификатора → `ignored/missing_customer_user_id`; идентификатор был, ни один не резолвнут → `ignored/user_not_found`. Второго резолвера нет. Лог: `resolvedFrom` ∈ `customer_user_id` \| `profile_id` (там же, где `resolvedVia`), `profileId` — когда шла ветка `profile_id`; `customerUserId` — только значение `customer_user_id`. Audit `adapty_subscription`: `resolvedFrom`, `customerId` = идентификатор, по которому резолвнут пользователь.
+
+**Ветка `non_subscription_purchase` (после резолва, до дедуп-`INSERT`).** 1) `transaction_id` нет → `ignored/missing_transaction_id`. 2) `credits = one_time_credits(vendor_product_id)`; `vendor_product_id` нет или `None` → `ignored/unknown_product`. Оба — без записей в БД, WARNING, в логе `productId`/`transactionId` (что распарсено). 3) Дедуп-`INSERT` (`duplicate` — как у всех событий). 4) Грант `token-purchase:{transaction_id}`, `reason="token_purchase"`, `meta={source:"token_purchase", productId, transactionId, eventType}`; `subscriptions` не трогаются; проверка подписки **не** выполняется. 5) Audit `adapty_subscription` с `semantics="one_time_purchase"`, `productId`, `transactionId`, `resolvedFrom`; лог `applied` с `productId`/`transactionId`.
+
+**Грант подписочного периода.** `T = transaction_id`. Есть `T` → проверить `has_idempotency_key(sub-grant:{T})` и `has_idempotency_key(adapty-txn:{T})`; есть хоть один → гранта нет. Иначе `grant(idempotency_key="sub-grant:{T}", reason="adapty_subscription", meta={transactionId, eventType, vendorProductId})`. Нет `T` → прежний ключ `adapty-txn:{original_transaction_id ‖ event_id}` с проверкой только его. **Гонка с `sync`:** если `grant` встретил под ключом строку `credit` с другой суммой (`ConflictError`), событие завершается `applied` без гранта — не-`2xx` недопустим ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §A3).
+
+**Предикат устаревания** `stale := row.status = active ∧ row.expires_at ≠ NULL ∧ event.expires_at ≠ NULL ∧ event.expires_at < row.expires_at`. GRANTING и EXPIRING при `stale` строку не меняют; NOOP при `stale` не пишет `will_renew`; в audit — `stale: true`. Грант GRANTING при `stale` решается ключом периода.
+
+**Незаведённый продукт.** Сумма GRANTING — `subscription_credits(pid, adapty)` с источником; источник `channel_fallback` и грант фактически создал строку → WARNING `subscription_product_unmapped` (`channel="adapty"`, `productId`, `amount`, `transactionId`) + audit `subscription_product_unmapped` в той же транзакции. Начисление не блокируется.

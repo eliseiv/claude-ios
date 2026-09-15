@@ -4,6 +4,7 @@
 - Дата: 2026-05-21
 - Связанные: [ADR-002](ADR-002-access-policy-state-machine.md), [ADR-005](ADR-005-idempotency-ledger.md)
 - Закрывает: [Q-004-1](../99-open-questions.md), [Q-006-1](../99-open-questions.md)
+- **Пересмотр 2026-09-15 → [ADR-106 §A](ADR-106-apple-billing-single-grant.md):** ключ `sub-grant:{transactionId}` из §2 больше не принадлежит одному `sync` — под ним же пишет грант периода вебхук Adapty при настоящем `transaction_id`; до гранта проверяется и исторический `adapty-txn:{transactionId}`, а занятый ключ означает «период уже начислен» независимо от суммы. Правило «1 кредит = 1 сообщение» и фиксированный пакет §2 **не изменены**. Тело не переписано (immutability).
 
 ## Context
 

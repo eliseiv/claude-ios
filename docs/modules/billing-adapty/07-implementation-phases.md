@@ -22,7 +22,7 @@
 
 ## Фаза 4 — Транзакция
 - Одна транзакция: `INSERT adapty_webhook_events ... ON CONFLICT (event_id) DO NOTHING RETURNING event_id` → пусто ⇒ `duplicate`; иначе upsert `subscriptions` (active|expired) + (для granting) `WalletService.grant(...)` + audit. Commit. Сбой → ROLLBACK → 500.
-- **⚠ Ключ гранта и маппинг событий ОБНОВЛЕНЫ в Фазе 8 ([ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)):** грант идемпотентен по `adapty-txn:{transaction_id}` (НЕ `adapty-event:{event_id}`); семантика — `classify_event` (GRANTING/EXPIRING/NOOP), а не `event_type ∈ {started,renewed}`. Реализовывать по Фазе 8.
+- **⚠ Ключ гранта и маппинг событий ОБНОВЛЕНЫ в Фазе 8 ([ADR-047](../../adr/ADR-047-adapty-real-payload-format-and-grant-idempotency.md)):** грант идемпотентен по `adapty-txn:{transaction_id}` (НЕ `adapty-event:{event_id}`); семантика — `classify_event` (GRANTING/EXPIRING/NOOP), а не `event_type ∈ {started,renewed}`. Реализовывать по Фазе 8, ключ — с учётом Фазы 9 ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md)).
 
 ## Фаза 5 — Router + регистрация
 - `POST /v1/billing/adapty/webhook`: сырое тело (`await request.body()`), без Pydantic body-модели; per-route bearer Depends; матрица ответов (точные коды — [02-api-contracts.md](02-api-contracts.md)).
@@ -76,7 +76,7 @@
   - `SEM_NOOP`: **НЕ** вызывать `_upsert_subscription`, **НЕ** вызывать `_grant`; audit(`semantics="noop"`, текущий status подписки если читаем, иначе `null`). Результат всё равно `applied` (событие записано).
   - Передавать `semantics` в `_upsert_subscription` (или развести логику явно по семантике, не по `event_type ∈ GRANTING_EVENTS`).
 - **`_upsert_subscription()`**: ветвление по `semantics` (granting → active+plan+expires_at; expiring → expired). NOOP сюда не заходит.
-- **`_grant()`**: ключ идемпотентности `f"adapty-txn:{txn}"`, где `txn = event.transaction_id or event.original_transaction_id or event.event_id`. `meta` → `{"transactionId": txn, "eventType": event.event_type, "vendorProductId": event.vendor_product_id}`.
+- **`_grant()`**: ключ идемпотентности `f"adapty-txn:{txn}"`, где `txn = event.transaction_id or event.original_transaction_id or event.event_id`. **Пересмотрено Фазой 9 ([ADR-106 §A](../../adr/ADR-106-apple-billing-single-grant.md)):** при настоящем `transaction_id` — `sub-grant:{transaction_id}` с проверкой `adapty-txn:{T}`; `adapty-txn:` остаётся только для фолбэка. `meta` → `{"transactionId": txn, "eventType": event.event_type, "vendorProductId": event.vendor_product_id}`.
 - **Audit payload**: добавить `semantics`, `transactionId` (=txn), `willRenew` (=`event.will_renew`).
 
 ### 8.3 — Что НЕ трогать
@@ -88,13 +88,36 @@
 
 ### 8.4 — Тестовые ориентиры (для qa, в дополнение к Фазе 3-5)
 - `parse_event_id` ← `profile_event_id` (в т.ч. число `int`); fallback `event_id`/`id`.
-- Реальный payload (три события одной покупки): `trial_started` + `access_level_updated`(is_active=true,premium) → **ровно ОДИН** ledger-грант (ключ `adapty-txn:{transaction_id}`), подписка `active`, `expires_at` из `subscription_expires_at`.
+- Реальный payload (три события одной покупки): `trial_started` + `access_level_updated`(is_active=true,premium) → **ровно ОДИН** ledger-грант (ключ `adapty-txn:{transaction_id}`; после Фазы 9 — `sub-grant:{transaction_id}`), подписка `active`, `expires_at` из `subscription_expires_at`.
 - `subscription_renewal_cancelled` / `trial_renewal_cancelled` → подписка/баланс **не изменились**, событие записано, audit `semantics=noop`.
 - `access_level_updated` is_active=false → `expired`, баланс не изменился.
 - Идемпотентность: два granting-события одного `transaction_id`, но разные `profile_event_id` → один грант; повтор того же `profile_event_id` → `duplicate`.
 - Продление (`subscription_renewed` с новым `transaction_id`, тем же `original_transaction_id`) → **новый** грант (НЕ схлопывается).
-- `customer_user_id` отсутствует (только `profile_id`) → `ignored/missing_customer_user_id` (после фикса парсера — не `missing_event_id`).
+- `customer_user_id` отсутствует (только `profile_id`) → `ignored/missing_customer_user_id` (после фикса парсера — не `missing_event_id`). **Отменено Фазой 9 ([ADR-106 §B](../../adr/ADR-106-apple-billing-single-grant.md)):** `profile_id`, найденный резолвом, даёт `applied`.
 - Тариф: `week_6.99_nottrial` в `ADAPTY_PRODUCT_TOKENS` → точное число; вне карты → fallback 1000.
+
+## Фаза 9 — Одна оплата — одно начисление ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md))
+
+Без миграции и новых env. Контракт ответа (`{result, reason?, event_type?}`) не меняется, добавлены две причины. Норма — [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md); точки реализации — [03-architecture.md §ADR-106](03-architecture.md#adr-106--одна-оплата-apple--одно-начисление-adr-106).
+
+### 9.1 — `src/app/billing_adapty/parser.py`
+- NEW `parse_profile_id(body) -> uuid.UUID | None`: `profile_id` → `profile.profile_id` → `event_properties.profile_id`; не-UUID → `None`.
+- `non_subscription_purchase` — распознаваемое событие отдельной ветки (не GRANTING: `subscriptions` и подписочный грант не участвуют).
+
+### 9.2 — `src/app/billing_adapty/service.py`
+- Stage 2–3: резолв `customer_user_id`, затем `profile_id` (тот же `resolve_user`); `missing_customer_user_id` — нет ни одного; `user_not_found` — ни один не резолвнут. Лог `resolvedFrom`/`profileId`, audit `resolvedFrom`.
+- Ветка `non_subscription_purchase` до дедуп-`INSERT`: `missing_transaction_id` → `unknown_product` (оба WARNING, без записей); затем дедуп → грант `token-purchase:{transaction_id}` по `one_time_credits` без проверки подписки → audit `semantics="one_time_purchase"`.
+- `_grant`: при `transaction_id` — ключ `sub-grant:{T}`, проверка `sub-grant:{T}`/`adapty-txn:{T}` через `WalletService.has_idempotency_key`; конфликт суммы под занятым ключом → `applied` без гранта.
+- `_upsert_subscription` / `_read_subscription`: предикат устаревания — строку не менять (GRANTING/EXPIRING), `will_renew` не писать (NOOP); audit `stale: true`.
+- `_tier_for`: источник суммы; `channel_fallback` и созданная строка гранта → WARNING + audit `subscription_product_unmapped`.
+- `_level_for`: `missing_transaction_id`, `unknown_product` → WARNING.
+
+### 9.3 — Что НЕ трогать
+- Авторизацию, сырое тело, дедуп по `profile_event_id`, классификацию GRANTING/EXPIRING/NOOP, `resolve_user` (порядок ветвей), контракт `WalletService.grant`.
+- Историческое: ретроактивных начислений и списаний нет (решение владельца №1 [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md)).
+
+### 9.4 — Тестовые ориентиры
+- Полный перечень — [09-testing.md §ADR-106](09-testing.md#одна-оплата--одно-начисление-adr-106).
 
 ## Фаза 6 — Deployment (devops, после backend)
 - Завести env `ADAPTY_WEBHOOK_SECRET` (per-instance, secret manager), `ADAPTY_PRODUCT_TOKENS`, `ADAPTY_SUBSCRIPTION_TOKENS_GRANT` — см. [07-deployment.md](../../07-deployment.md). Внести в prod-checklist (high-entropy секрет, разный на инстанс).

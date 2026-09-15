@@ -4,6 +4,7 @@
 - Дата: 2026-06-12
 - Связано: [ADR-006](ADR-006-credit-billing-and-subscription-grant.md) (грант кредитов на период подписки), [ADR-005](ADR-005-idempotency-ledger.md) (идемпотентность ledger), [ADR-009](ADR-009-admin-token-auth.md) (образец статической bearer-авторизации, constant-time), [ADR-015](ADR-015-consumable-token-iap.md) (consumable token IAP — НЕ через Adapty), [ADR-017](ADR-017-shared-server-traefik-deploy.md) (per-instance секреты), [ADR-002](ADR-002-access-policy-state-machine.md) (состояние подписки в Policy).
 - Модуль: [modules/billing-adapty/](../modules/billing-adapty/README.md)
+- **Пересмотр 2026-09-15 → [ADR-106](ADR-106-apple-billing-single-grant.md):** граница «consumable-пакеты не через Adapty» снята (§E: `non_subscription_purchase`); мера «клиент использует ОДИН путь подписок» заменена защитой кодом — общий ключ периода `sub-grant:` (§A); грант по устаревшему событию не сдвигает срок подписки назад (§C). Ключ `adapty-event:{event_id}` из §6 был заменён ещё [ADR-047 §C](ADR-047-adapty-real-payload-format-and-grant-idempotency.md). Тело не переписано (immutability).
 
 ## Контекст
 

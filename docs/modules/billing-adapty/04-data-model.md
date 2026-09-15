@@ -7,7 +7,7 @@
 | Колонка | Тип | Ограничения | Назначение |
 |---|---|---|---|
 | `event_id` | `text` | **PRIMARY KEY** (= UNIQUE) | внешний идентификатор события Adapty — **значение `profile_event_id`** (ADR-047, не `event_id`/`id`); точка дедупа **доставки события** |
-| `user_id` | `uuid` | `NOT NULL`, FK `users(id) ON DELETE CASCADE` | целевой пользователь (`customer_user_id`) |
+| `user_id` | `uuid` | `NOT NULL`, FK `users(id) ON DELETE CASCADE` | **резолвнутый** получатель (по `customer_user_id` или `profile_id` через `resolve_user`, [ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md), [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §B) |
 | `event_type` | `text` | `NOT NULL` | нормализованный (`lower`) тип события |
 | `payload` | `jsonb` | `NOT NULL` | распарсенный объект события (для аудита/диагностики) |
 | `processed_at` | `timestamptz` | `NOT NULL DEFAULT now()` | момент обработки |
@@ -30,10 +30,11 @@ CREATE INDEX ix_adapty_webhook_events_user_id ON adapty_webhook_events (user_id)
 - Index по `user_id` — для будущих выборок «события пользователя» (диагностика). На MVP запросов по нему в горячем пути нет.
 
 ## Затронутые существующие таблицы (без изменения схемы)
-- `subscriptions` — upsert по `user_id` (status `active|expired`, plan, expires_at) для granting/expiring; **NOOP-события подписку НЕ трогают** (ADR-047). Схема: `src/app/models/tables.py:69-87`, enum `subscription_status` ∈ `none|active|expired`.
-- `ledger_transactions` — грант кредитов идемпотентно по `(user_id, idempotency_key="adapty-txn:{transaction_id ‖ original_transaction_id ‖ event_id}")` (**ADR-047 — ключ по transaction_id, не по event_id**; [ADR-005](../../adr/ADR-005-idempotency-ledger.md)). Один грант на период покупки. Схема не меняется.
+- `subscriptions` — upsert по `user_id` (status `active|expired`, plan, expires_at) для granting/expiring; **NOOP-события подписку НЕ трогают** (ADR-047); **устаревшее событие строку не меняет** ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §C); `non_subscription_purchase` её не читает и не пишет. Схема: `src/app/models/tables.py:69-87`, enum `subscription_status` ∈ `none|active|expired`.
+- `ledger_transactions` — грант идемпотентно по `(user_id, idempotency_key)` ([ADR-005](../../adr/ADR-005-idempotency-ledger.md)): подписочный GRANTING — `sub-grant:{transaction_id}` (общий со StoreKit `sync`; до гранта проверяется и исторический `adapty-txn:{T}`), без `transaction_id` — `adapty-txn:{original_transaction_id ‖ event_id}`; `non_subscription_purchase` — `token-purchase:{transaction_id}` (общий с `POST /v1/tokens/purchase`). [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §A/§E. Один грант на период / на покупку по любому каналу. Схема не меняется.
 - `wallets` — баланс инкрементируется внутри `WalletService.grant`.
-- `users` — lookup по id (`customer_user_id`).
+- `users`, `auth_devices`, `legacy_user_ids` — чтение резолвом `resolve_user` (по `customer_user_id`, затем `profile_id`).
+- `audit_logs` — новые события не требуют схемы (`event_type TEXT`): `subscription_product_unmapped`; payload `adapty_subscription` дополнен `resolvedFrom`, `stale`, `semantics="one_time_purchase"`.
 
 ## ORM
 Добавить модель `AdaptyWebhookEvent` в `src/app/models/tables.py`. Без новых enum-типов.

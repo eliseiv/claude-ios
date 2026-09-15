@@ -3,6 +3,7 @@
 - Статус: Accepted
 - Дата: 2026-06-02
 - Связан с: ADR-005 (idempotency ledger), ADR-006 (credit billing), subscription, wallet-ledger, модуль `token-purchase`.
+- **Пересмотр 2026-09-15 → [ADR-106 §E](ADR-106-apple-billing-single-grant.md):** у ключа `token-purchase:{transactionId}` появился второй производитель — вебхук Adapty (`non_subscription_purchase`); он начисляет пакет **без** требования активной подписки (осознанное отличие канала), а `POST /v1/tokens/purchase` сохраняет `403 subscription_required` по [Q-015-1](../99-open-questions.md) и отвечает `creditsAdded=0`, если покупку уже зачислил вебхук. Анти-тампер (сумма только из серверного каталога) **не изменён**. Тело не переписано (immutability).
 
 ## Context
 Дизайн «Get More Tokens» предлагает **разовую покупку** пакетов токенов (1500 / 600 / 250 / 100 токенов за деньги), **отдельно** от подписки. Сейчас (ADR-006) кредиты начисляются **только** через subscription grant (фикс. пакет на период, идемпотентно по `transactionId` периода). Публичная докупка пакетов была out of scope (Q-006-1).

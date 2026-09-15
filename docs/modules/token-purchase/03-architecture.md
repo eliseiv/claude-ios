@@ -8,8 +8,8 @@
 require_active_subscription(userId)                    # Q-015-1=B: SubscriptionService/policy; нет active -> 403 subscription_required
 verify(transaction) -> { transactionId, productId }    # общий verifier (fail-closed; STOREKIT_TEST_MODE)
 credits = TOKEN_PRODUCTS[productId]                     # неизвестный -> 422
-Wallet.grant(credits, idempotency_key=transactionId,
-             type=credit, meta={source:"token_purchase", productId})
+Wallet.grant(credits, idempotency_key="token-purchase:{transactionId}",
+             type=credit, meta={source:"token_purchase", productId, transactionId})
 -> { creditsAdded, newBalance }
 ```
 
@@ -20,16 +20,18 @@ Wallet.grant(credits, idempotency_key=transactionId,
 - **Отказ:** HTTP `403`, тело `{ "code": "subscription_required", "message": "..." }`. Это операция пополнения, не генерация → `403`, а не `200+blocked` ([ADR-004](../../adr/ADR-004-blocked-http-200.md) применяется только к `/chat/*` и `/policy/effective`; см. [ADR-015 §Код ответа](../../adr/ADR-015-consumable-token-iap.md)).
 
 ## Идемпотентность ([ADR-005](../../adr/ADR-005-idempotency-ledger.md), [ADR-015](../../adr/ADR-015-consumable-token-iap.md))
-- `idempotency_key = transactionId` (consumable). Unique-index `ux_ledger_idempotency (user_id, idempotency_key)` гарантирует один grant на транзакцию. Повтор → idempotent-ответ (`creditsAdded=0`).
-- Пространства transactionId subscription и consumable не пересекаются (StoreKit), но даже при коллизии разные `meta.source`/контракты исключают неоднозначность; idempotency-инвариант ledger сохраняется.
+- `idempotency_key = "token-purchase:{transactionId}"` (`_IDEMPOTENCY_PREFIX`, `src/app/token_purchase/service.py`). Unique-index `ux_ledger_idempotency (user_id, idempotency_key)` гарантирует один grant на транзакцию. Повтор → idempotent-ответ (`creditsAdded=0`).
+- **Второй производитель ключа** — вебхук Adapty `non_subscription_purchase` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E): тот же ключ, та же сумма `one_time_credits`. Порядок каналов не важен; строка под ключом = «уже начислено» (`creditsAdded=0`) независимо от суммы — расхождение сумм (правка оверлея между каналами) не даёт `409` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §A3). Уникальность — в пределах `userId`.
+- Префиксы `sub-grant:` (подписка) и `token-purchase:` (пакет) различны — пространства не пересекаются.
+- ⚠️ **Контраст порядка проверок:** здесь policy-guard подписки идёт **первым** и отказывает `403`; вебхук Adapty проверки подписки не выполняет вовсе ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E3). Переносить guard в вебхук запрещено: там деньги уже списаны.
 
 ## Разграничение с subscription
 - Subscription verifier и grant — не меняются (ADR-006). Token-purchase — отдельный endpoint и отдельный путь grant с тем же Wallet API.
 - Списание (`type=debit`) — не затрагивается; «1 кредит = 1 сообщение» в силе.
 
 ## Инварианты
-- **Покупка только при активной подписке** ([Q-015-1](../../99-open-questions.md) = вариант B): grant не выполняется без `subscription.status == active`.
-- Число кредитов — только из `TOKEN_PRODUCTS` (server-side), никогда из тела клиента.
+- **Покупка через этот endpoint только при активной подписке** ([Q-015-1](../../99-open-questions.md) = вариант B): grant не выполняется без `subscription.status == active`. Вебхук Adapty — отдельный канал без этого условия ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E3).
+- Число кредитов — только из серверного каталога (`one_time_credits`: оверлей → `TOKEN_PRODUCTS`), никогда из тела клиента или payload вебхука.
 - Wallet — единственный писатель ledger (инвариант сохранён).
 - StoreKit payload не логируется.
 

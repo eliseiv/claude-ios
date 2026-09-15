@@ -1,8 +1,8 @@
 # Token Purchase — API Contracts
 
-JWT, владелец = `sub`. Статус: **Реализован (MVP); требует доработки policy-guard** ([Q-015-1](../../99-open-questions.md) Closed = вариант B). Заголовок `Authorization: Bearer <JWT>`, тег `Tokens`.
+JWT, владелец = `sub`. Статус: **Реализован (MVP)**, policy-guard реализован ([Q-015-1](../../99-open-questions.md) Closed = вариант B). Заголовок `Authorization: Bearer <JWT>`, тег `Tokens`.
 
-> ✅ **[Q-015-1](../../99-open-questions.md) Closed (2026-06-02, вариант B):** покупка токенов **требует активной подписки** (докупка сверх месячного пакета). Без активной подписки → `403 subscription_required` **до** начисления. [ADR-002](../../adr/ADR-002-access-policy-state-machine.md) без изменений. Backend-доработка: добавить policy-guard перед `WalletService.grant` (см. [03-architecture.md](03-architecture.md), [07-implementation-phases.md](07-implementation-phases.md)).
+> ✅ **[Q-015-1](../../99-open-questions.md) Closed (2026-06-02, вариант B):** покупка токенов **требует активной подписки** (докупка сверх месячного пакета). Без активной подписки → `403 subscription_required` **до** начисления. [ADR-002](../../adr/ADR-002-access-policy-state-machine.md) без изменений. Policy-guard реализован первым шагом `purchase` — до verify и `WalletService.grant` (см. [03-architecture.md](03-architecture.md)).
 
 ## POST /v1/tokens/purchase
 Обработка consumable-покупки пакета токенов.
@@ -21,7 +21,7 @@ JWT, владелец = `sub`. Статус: **Реализован (MVP); тр�
 2. Верификация транзакции общим verifier'ом (реальная Apple JWS / `STOREKIT_TEST_MODE` для e2e). Невалидная → `422`/`400`.
 3. Извлечь `transactionId`, `productId`.
 4. Маппинг `productId → credits` через server-side `TOKEN_PRODUCTS`. Неизвестный `productId` → `422`.
-5. `Wallet.grant(credits, idempotency_key=transactionId, type=credit, meta={source:"token_purchase", productId})`. Идемпотентно: повтор той же транзакции не начисляет повторно.
+5. `Wallet.grant(credits, idempotency_key="token-purchase:{transactionId}", type=credit, meta={source:"token_purchase", productId, transactionId})`. Идемпотентно: повтор той же транзакции не начисляет повторно. Ключ **общий** с вебхуком Adapty `non_subscription_purchase` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E): покупка, уже зачисленная вебхуком, → `creditsAdded=0`; строка под ключом с другой суммой — тоже `creditsAdded=0`, не `409` ([ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §A3).
 
 ### Response (200)
 ```json
@@ -31,7 +31,8 @@ JWT, владелец = `sub`. Статус: **Реализован (MVP); тр�
   "transactionId": "string"
 }
 ```
-- При повторной (уже обработанной) транзакции: `creditsAdded=0`, `newBalance` = текущий (идемпотентный ответ).
+- При повторной (уже обработанной) транзакции — в том числе уже зачисленной вебхуком Adapty — `creditsAdded=0`, `newBalance` = текущий (идемпотентный ответ).
+- ⚠️ Без активной подписки ответ `403 subscription_required` **даже если** эту покупку уже зачислил вебхук Adapty (он подписку не требует, [ADR-106](../../adr/ADR-106-apple-billing-single-grant.md) §E3).
 
 ## GET /v1/tokens/products
 Каталог продуктов: пакеты токенов **и** подписки. JWT (`bearerAuth`). Полное описание для интеграторов — [API-REFERENCE §GET /v1/tokens/products](../../API-REFERENCE.md#get-v1tokensproducts).
