@@ -8,7 +8,7 @@ Covers follow_up_for_qa from backend:
    get_current_user): no/broken Bearer on /v1/* still 401 (regression guard, CRITICAL).
 4. Named request/response examples on chat/run, chat/tool-result, byok/set, wallet/consume.
 5. blockReason documents all 8 ADR-004 values in ChatResponse; policy reasons[] references them.
-6. Tag order Chat, Policy, Wallet, Subscription, BYOK, Health; each endpoint has exactly one tag.
+6. Tag order includes media feature groups; each covered endpoint has exactly one tag.
 
 The documentation layer is reflection-only: these tests use the OpenAPI schema produced by
 create_app() and (for the regression guard) the live ASGI client from conftest. DOCS_ENABLED
@@ -64,6 +64,8 @@ _TAG_ORDER = [
     "Characters",
     "Voices",
     "Media",
+    "Media Features",
+    "Admin Media Features",
     "Notifications",
     "Policy",
     "Wallet",
