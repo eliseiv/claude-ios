@@ -267,7 +267,17 @@ class ChatStep(Base):
     message_step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     role: Mapped[str] = mapped_column(_chat_role_enum, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # `none_as_null=True` is load-bearing, not tidiness (migration 0034). SQLAlchemy's default
+    # (`none_as_null=False`) encodes a Python `None` as the JSON scalar `null`, and a JSON `null`
+    # is NOT a SQL NULL: `usage IS NOT NULL` is TRUE for it. Every assistant step written without
+    # counters (the turn-failed marker and the media-wizard reply — `chat/orchestrator.py`)
+    # therefore passed the `FILTER (WHERE s.role = 'assistant' AND s.usage IS NOT NULL)` of the
+    # CRM aggregate (`admin/crm_service.py`), arrived in Python as `None` inside `usages` and made
+    # `GET /v1/admin/users/{id}` answer 500. The home of the fix is the COLUMN: it is the one
+    # place that decides how an absent usage is stored, so no writer can reintroduce the JSON
+    # `null` by forgetting a guard. A DELIBERATE JSON `null` would now need `sa.JSON.NULL`, and
+    # nothing wants one — «no usage at all» is the only meaning absence has for this column.
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )

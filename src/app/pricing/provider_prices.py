@@ -224,8 +224,18 @@ def _report_unpriced_step(model: str | None, reason: str) -> None:
     )
 
 
-def _unpriced_reason(usage: Mapping[str, Any]) -> str | None:
-    """Why this ONE step cannot be priced, or ``None`` when it can."""
+def _unpriced_reason(usage: Mapping[str, Any] | None) -> str | None:
+    """Why this ONE step cannot be priced, or ``None`` when it can.
+
+    A step that is not a mapping at all is unpriceable for the most basic reason there is: no
+    model name, and nothing to multiply a price by. It is reported under the EXISTING
+    ``no_model`` — ``reason`` is a bounded enum the operator's dashboards are keyed by
+    (docs/01-architecture.md), and a fourth value would name a different CAUSE of the very same
+    consequence. The runtime guard is by property («not a mapping»), wider than the annotation:
+    the column is JSONB and nothing at the DB level stops a string or a number from landing there.
+    """
+    if not isinstance(usage, Mapping):
+        return _REASON_NO_MODEL
     model = usage.get("model")
     if not isinstance(model, str) or not model:
         return _REASON_NO_MODEL
@@ -236,7 +246,7 @@ def _unpriced_reason(usage: Mapping[str, Any]) -> str | None:
     return None
 
 
-def report_chat_step_pricing(usage: Mapping[str, Any]) -> None:
+def report_chat_step_pricing(usage: Mapping[str, Any] | None) -> None:
     """Report one just-generated chat step to ``chat_unpriced_steps_total`` if it has no price.
 
     Called from the WRITE path — once per LLM call, where the step is created — and nowhere else.
@@ -251,11 +261,13 @@ def report_chat_step_pricing(usage: Mapping[str, Any]) -> None:
     reason = _unpriced_reason(usage)
     if reason is None:
         return
-    model = usage.get("model")
+    model = usage.get("model") if isinstance(usage, Mapping) else None
     _report_unpriced_step(model if isinstance(model, str) and model else None, reason)
 
 
-def chat_cost_usd_by_provider(usages: Sequence[Mapping[str, Any]]) -> dict[str, float] | None:
+def chat_cost_usd_by_provider(
+    usages: Sequence[Mapping[str, Any] | None],
+) -> dict[str, float] | None:
     """Cost of one chat TURN, split by vendor.
 
     A tool-loop turn calls the provider several times (each ``assistant`` step is one call)
@@ -264,8 +276,16 @@ def chat_cost_usd_by_provider(usages: Sequence[Mapping[str, Any]]) -> dict[str, 
     two different bills.
 
     Returns ``None`` when the turn holds no usage at all, or when ANY of its calls is
-    unpriceable — an unknown model, or a step with no token counts to price. A partial sum
-    would understate the cost while looking like a full one.
+    unpriceable — an unknown model, a step with no token counts to price, or an element that is
+    not a usage mapping at all. A partial sum would understate the cost while looking like a
+    full one.
+
+    That last case is stored history, not a hypothetical: ``chat_steps.usage`` accepted a JSON
+    ``null`` until migration 0034 (an assistant step written without counters — the turn-failed
+    marker and the media-wizard reply), and ``s.usage IS NOT NULL`` is TRUE for a JSON ``null``,
+    so the SQL aggregate keeps such a step in ``usages`` and it arrives here as Python ``None``.
+    A step like that carries no counters, which is exactly "unpriceable"; the migration cleans
+    the rows, this guard makes the READ survive them wherever they still exist.
 
     Pure and silent: this is a READ path, run once per rendered row and again for the revenue
     roll-up, so anything reported here would count renders rather than steps. The gap is made
@@ -273,6 +293,8 @@ def chat_cost_usd_by_provider(usages: Sequence[Mapping[str, Any]]) -> dict[str, 
     """
     per_provider: dict[str, float] = {}
     for usage in usages:
+        if not isinstance(usage, Mapping):
+            return None
         model = usage.get("model")
         if not isinstance(model, str) or not model:
             return None
@@ -297,7 +319,7 @@ def chat_cost_usd_by_provider(usages: Sequence[Mapping[str, Any]]) -> dict[str, 
     return per_provider or None
 
 
-def chat_cost_usd(usages: Sequence[Mapping[str, Any]]) -> float | None:
+def chat_cost_usd(usages: Sequence[Mapping[str, Any] | None]) -> float | None:
     """Cost of one chat TURN — the sum of :func:`chat_cost_usd_by_provider`."""
     per_provider = chat_cost_usd_by_provider(usages)
     return None if per_provider is None else sum(per_provider.values())
