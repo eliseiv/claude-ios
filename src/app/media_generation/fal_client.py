@@ -247,6 +247,12 @@ class FalClient:
         )
         return hosted
 
+    async def download_asset(self, url: str) -> bytes:
+        """Download a generated asset only from the configured fal asset-host allowlist."""
+        if not self._upload_host_allowed(url):
+            raise self._upstream_error("untrusted_asset_url", endpoint=_REHOST_ENDPOINT)
+        return await self._get_bytes(url)
+
     async def _get_bytes(self, url: str) -> bytes:
         """Download a trusted-host still. The fal key is not sent: result CDNs are public."""
         try:

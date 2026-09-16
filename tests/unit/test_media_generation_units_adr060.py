@@ -126,6 +126,21 @@ def test_image_output_is_normalized_to_assets() -> None:
     }
 
 
+def test_single_image_output_is_normalized_for_feature_endpoints() -> None:
+    assert _normalize_result(
+        {"image": {"url": "https://cdn/cutout.png", "content_type": "image/png"}},
+        kind=KIND_IMAGE,
+    ) == {
+        "assets": [
+            {
+                "url": "https://cdn/cutout.png",
+                "contentType": "image/png",
+                "fileName": None,
+            }
+        ]
+    }
+
+
 def test_video_output_is_normalized_to_assets() -> None:
     body: dict[str, Any] = {"video": {"url": "https://cdn/out.mp4"}, "seed": 7}
     assert _normalize_result(body, kind=KIND_VIDEO) == {

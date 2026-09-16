@@ -93,7 +93,8 @@ def _moderation_schema(raw: object) -> MediaJobModerationSchema:
     )
 
 
-def _job_response(view: MediaJobView) -> MediaJobResponse:
+def media_job_response(view: MediaJobView) -> MediaJobResponse:
+    """Render any established or feature-specific job through the stable wire contract."""
     job = view.job
     return MediaJobResponse(
         jobId=job.id,
@@ -289,7 +290,7 @@ async def generate_image(
         media_job_id=view.job.id,
         tokens_spent=view.job.credits_charged,
     )
-    return _job_response(view)
+    return media_job_response(view)
 
 
 @router.post(
@@ -351,7 +352,7 @@ async def generate_video(
         media_job_id=view.job.id,
         tokens_spent=view.job.credits_charged,
     )
-    return _job_response(view)
+    return media_job_response(view)
 
 
 @router.post(
@@ -422,7 +423,7 @@ async def list_media_jobs(
         user_id=current.user_id, limit=limit, kind=kind, cursor=_decode_cursor(cursor)
     )
     return MediaJobsListResponse(
-        jobs=[_job_response(view) for view in feed.items], nextCursor=feed.next_cursor
+        jobs=[media_job_response(view) for view in feed.items], nextCursor=feed.next_cursor
     )
 
 
@@ -445,7 +446,7 @@ async def get_media_job(
 ) -> MediaJobResponse:
     await _rate_limit(current.user_id)
     view = await media.get_job(user_id=current.user_id, job_id=job_id)
-    return _job_response(view)
+    return media_job_response(view)
 
 
 @router.api_route(

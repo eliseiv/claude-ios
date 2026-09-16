@@ -21,7 +21,7 @@ import datetime
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from app import instance_config
 from app.chat.attachments import (
@@ -161,6 +161,14 @@ class MediaJobView:
     assets: list[MediaAsset]
 
 
+class MediaJobCompletionHandler(Protocol):
+    """Optional product-specific work that must succeed before a job becomes completed."""
+
+    async def complete(self, job: MediaJob, assets: list[MediaAsset]) -> None: ...
+
+    async def fail(self, job: MediaJob) -> None: ...
+
+
 class MediaGenerationService:
     def __init__(
         self,
@@ -172,6 +180,7 @@ class MediaGenerationService:
         push: MediaPushService | None = None,
         request_logs: RequestLogWriter | None = None,
         moderation: ModerationService | None = None,
+        completion_handler: MediaJobCompletionHandler | None = None,
     ) -> None:
         self._repo = repo
         self._fal = fal
@@ -181,6 +190,7 @@ class MediaGenerationService:
         self._request_logs = request_logs
         # ADR-086: None только в тестах/легаси-сборке графа зависимостей — тогда вердикт unchecked.
         self._moderation = moderation
+        self._completion_handler = completion_handler
 
     # ---- pricing ----
 
@@ -335,6 +345,73 @@ class MediaGenerationService:
         )
         return MediaJobView(job=job, assets=[])
 
+    async def submit_custom(
+        self,
+        *,
+        user_id: uuid.UUID,
+        kind: str,
+        model_id: str,
+        endpoint: str,
+        payload: dict[str, Any],
+        prompt: str,
+        image_urls: list[str],
+        credits: int,
+        operation: str,
+        operation_input: dict[str, Any] | None,
+        visible_in_history: bool,
+    ) -> MediaJobView:
+        """Submit a fixed server-owned media workflow through the established job lifecycle.
+
+        Unlike ``submit``, callers cannot select the endpoint, payload or price over HTTP; the
+        feature service supplies all three. Billing, moderation, refunds and polling remain in
+        one implementation. A zero-credit hidden job is reserved for avatar preparation.
+        """
+        if kind not in (KIND_IMAGE, KIND_VIDEO):
+            raise ValidationFailedError("kind must be image or video")
+        if credits < 0:
+            raise ValidationFailedError("credits must not be negative")
+        input_verdict = await self._moderate_input(prompt=prompt, image_urls=image_urls)
+        job_id = uuid.uuid4()
+        if credits > 0:
+            await self._wallet.consume(
+                user_id=user_id,
+                amount=credits,
+                idempotency_key=f"media-gen:{job_id}",
+                meta={"source": "media_generation", "model": model_id, "kind": kind},
+            )
+        submission = await self._fal.submit(endpoint=endpoint, payload=payload)
+        job = await self._repo.create(
+            job_id=job_id,
+            user_id=user_id,
+            model_id=model_id,
+            kind=kind,
+            fal_endpoint=endpoint,
+            fal_request_id=submission.request_id,
+            status_url=submission.status_url,
+            response_url=submission.response_url,
+            status=STATUS_QUEUED,
+            prompt=prompt,
+            credits_charged=credits,
+            input_image_urls=list(image_urls) or None,
+            moderation=input_verdict.to_payload(),
+            operation=operation,
+            operation_input=operation_input,
+            visible_in_history=visible_in_history,
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "media_feature_submitted",
+            userId=str(user_id),
+            jobId=str(job_id),
+            model=model_id,
+            kind=kind,
+            credits=credits,
+            falEndpoint=endpoint,
+            visibleInHistory=visible_in_history,
+        )
+        return MediaJobView(job=job, assets=[])
+
     async def _moderate_input(self, *, prompt: str, image_urls: list[str]) -> ModerationVerdict:
         """Пре-модерация промпта и клиентского референса (ADR-086 §4).
 
@@ -355,6 +432,10 @@ class MediaGenerationService:
                 "запрос отклонён правилами контента: измените описание или референс"
             )
         return verdict
+
+    async def validate_custom_input(self, *, prompt: str, image_urls: list[str]) -> None:
+        """Run the established pre-moderation before a custom flow calls another provider."""
+        await self._moderate_input(prompt=prompt, image_urls=image_urls)
 
     async def job_exists(self, *, user_id: uuid.UUID, job_id: uuid.UUID) -> bool:
         """Есть ли такая задача у этого владельца — без обращения к провайдеру.
@@ -592,12 +673,24 @@ class MediaGenerationService:
                 return closed
             if output_verdict is not None and output_verdict.blocked:
                 return await self._blocked_by_moderation(job, verdict=output_verdict)
+            if self._completion_handler is not None:
+                try:
+                    await self._completion_handler.complete(job, assets)
+                except ValidationFailedError as exc:
+                    return await self._fail(job, error=exc.message)
+                except Exception as exc:
+                    closed = await self._close_if_overdue(
+                        job, observation=OBSERVATION_INTERNAL_ERROR, cause=exc
+                    )
+                    if closed is None:
+                        raise
+                    return closed
             await self._repo.mark_completed(
                 job,
                 result=result,
                 moderation=None if output_verdict is None else output_verdict.to_payload(),
             )
-            if self._request_logs is not None:
+            if self._request_logs is not None and job.visible_in_history:
                 await self._request_logs.finish_media(
                     media_job_id=job.id, failed=False, refunded=False
                 )
@@ -610,7 +703,7 @@ class MediaGenerationService:
                 model=job.model_id,
                 assets=len(assets),
             )
-            if self._push is not None and assets:
+            if self._push is not None and assets and job.visible_in_history:
                 await self._push.notify_media_ready(
                     job_id=job.id,
                     user_id=job.user_id,
@@ -717,6 +810,7 @@ class MediaGenerationService:
                 reason=_REFUND_REASON,
             )
             refunded = True
+        await self._notify_completion_failed(job)
         await self._repo.mark_failed(
             job,
             # error — человекочитаемый текст: выпущенные iOS-сборки показывают его пользователю
@@ -727,7 +821,7 @@ class MediaGenerationService:
             moderation=verdict.to_payload(),
             result={"assets": []},
         )
-        if self._request_logs is not None:
+        if self._request_logs is not None and job.visible_in_history:
             await self._request_logs.finish_media(
                 media_job_id=job.id, failed=True, refunded=refunded
             )
@@ -775,10 +869,11 @@ class MediaGenerationService:
             moderation_decisions_total.labels(
                 surface=SURFACE_MEDIA_RESULT, stage=STAGE_OUTPUT, decision=STATUS_BLOCKED
             ).inc()
+        await self._notify_completion_failed(job)
         await self._repo.mark_failed(
             job, error=error[:500], refunded=refunded, moderation=moderation_payload
         )
-        if self._request_logs is not None:
+        if self._request_logs is not None and job.visible_in_history:
             await self._request_logs.finish_media(
                 media_job_id=job.id, failed=True, refunded=refunded
             )
@@ -792,6 +887,21 @@ class MediaGenerationService:
             refundedCredits=job.credits_charged if refunded else 0,
         )
         return MediaJobView(job=job, assets=[])
+
+    async def _notify_completion_failed(self, job: MediaJob) -> None:
+        """Let hidden workflows clear pending state without jeopardizing a refund."""
+        if self._completion_handler is None:
+            return
+        try:
+            await self._completion_handler.fail(job)
+        except Exception as exc:  # noqa: BLE001 - failure cleanup cannot keep a paid job open
+            log_event(
+                logger,
+                logging.WARNING,
+                "media_completion_failure_cleanup_failed",
+                jobId=str(job.id),
+                exceptionClass=type(exc).__name__,
+            )
 
     # ---- helpers ----
 
@@ -843,6 +953,9 @@ def _normalize_result(body: dict[str, Any], *, kind: str) -> dict[str, Any]:
     """
     assets: list[dict[str, Any]] = []
     if kind == KIND_IMAGE:
+        single = _asset_dict(body.get("image"))
+        if single is not None:
+            assets.append(single)
         for item in body.get("images") or []:
             asset = _asset_dict(item)
             if asset is not None:

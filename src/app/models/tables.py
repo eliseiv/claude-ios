@@ -645,6 +645,100 @@ class MediaTemplate(Base):
     )
 
 
+class MediaFeaturePreset(Base):
+    """Operator-managed avatar, background or makeup tile for the new media flows."""
+
+    __tablename__ = "media_feature_presets"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    feature: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    gender: Mapped[str | None] = mapped_column(Text, nullable=True)
+    style: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    image_media_type: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(nullable=False, server_default=sa_text("0"))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa_text("true"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "feature IN ('avatar', 'background', 'makeup')",
+            name="ck_media_feature_presets_feature",
+        ),
+        CheckConstraint(
+            "gender IS NULL OR gender IN ('male', 'female')",
+            name="ck_media_feature_presets_gender",
+        ),
+        CheckConstraint(
+            "image_media_type IN ('image/jpeg', 'image/png', 'image/webp')",
+            name="ck_media_feature_presets_media_type",
+        ),
+        Index(
+            "ix_media_feature_presets_list",
+            "feature",
+            "is_active",
+            "sort_order",
+            "id",
+        ),
+    )
+
+
+class UserAvatar(Base):
+    """A user's durable source/prepared avatar; provider URLs are deliberately not persisted."""
+
+    __tablename__ = "user_avatars"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_preset_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("media_feature_presets.id", ondelete="SET NULL"), nullable=True
+    )
+    original_image_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    original_media_type: Mapped[str] = mapped_column(Text, nullable=False)
+    prepared_image_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    prepared_media_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    background_image_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    background_media_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    background_color: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preparation_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "original_media_type IN ('image/jpeg', 'image/png', 'image/webp')",
+            name="ck_user_avatars_original_media_type",
+        ),
+        CheckConstraint(
+            "prepared_media_type IS NULL OR "
+            "prepared_media_type IN ('image/jpeg', 'image/png', 'image/webp')",
+            name="ck_user_avatars_prepared_media_type",
+        ),
+        CheckConstraint(
+            "background_media_type IS NULL OR "
+            "background_media_type IN ('image/jpeg', 'image/png', 'image/webp')",
+            name="ck_user_avatars_background_media_type",
+        ),
+        Index("ix_user_avatars_user_created", "user_id", "created_at"),
+    )
+
+
 class ChatDocument(Base):
     """Текстовый документ чата (ADR-090).
 
@@ -741,6 +835,15 @@ class MediaJob(Base):
     # rendered to the client as status="unchecked" — never as a silent "passed": claiming a
     # verdict about content nobody inspected would be a lie the client cannot detect.
     moderation: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Expand-only discriminator for product-specific media flows. Existing rows/default clients
+    # retain `generation`; hidden preparation jobs are excluded only from list queries.
+    operation: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=sa_text("'generation'")
+    )
+    operation_input: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    visible_in_history: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("true")
+    )
     # ADR-067: stamped once when a media-ready push is claimed (poll or reconciler).
     push_sent_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

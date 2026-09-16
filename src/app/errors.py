@@ -373,6 +373,18 @@ class MediaGenerationNotConfiguredError(ServiceUnavailableError):
     code = "media_generation_not_configured"
 
 
+class AvatarSpeechDisabledError(ValidationFailedError):
+    """422 avatar_speech_disabled: the opt-in product switch is off on this instance."""
+
+    code = "avatar_speech_disabled"
+
+
+class MakeupDisabledError(ValidationFailedError):
+    """422 makeup_disabled: virtual makeup is not enabled on this instance."""
+
+    code = "makeup_disabled"
+
+
 class VoiceOutputNotConfiguredError(ServiceUnavailableError):
     """503 voice_output_not_configured: `OPENAI_API_KEY` пуст, синтезировать нечем (ADR-100 §8).
 

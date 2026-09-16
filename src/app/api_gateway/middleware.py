@@ -56,6 +56,9 @@ class SizeLimitMiddleware:
       - POST /v1/media/uploads — base64 reference image for image-to-image / image-to-video
         (ADR-062). Exact path, so nothing else under /v1/media/* is widened.
       - POST /v1/admin/media/templates — base64 gallery cover (ADR-066). Exact path.
+      - avatar upload/preparation, makeup and admin media-feature presets — the same bounded
+        inline image shape as media uploads. Dynamic avatar prepare paths are matched by the
+        fixed prefix and ``/prepare`` suffix; no unrelated media route is widened.
     """
 
     _CHAT_RUN_PATHS = frozenset({"/v1/chat/run", "/v1/chat/v2/run", "/v1/chat/v2/run/stream"})
@@ -63,6 +66,10 @@ class SizeLimitMiddleware:
     _FILES_SUFFIX = "/files"
     _MEDIA_UPLOAD_PATH = "/v1/media/uploads"
     _MEDIA_TEMPLATE_CREATE_PATH = "/v1/admin/media/templates"
+    _MEDIA_FEATURE_PRESET_CREATE_PATH = "/v1/admin/media/features/presets"
+    _USER_AVATARS_PATH = "/v1/media/user-avatars"
+    _USER_AVATAR_PREPARE_SUFFIX = "/prepare"
+    _MAKEUP_PATH = "/v1/media/makeup"
 
     def __init__(self, app: ASGIApp) -> None:
         self._app = app
@@ -77,10 +84,16 @@ class SizeLimitMiddleware:
     def _limit_for(self, path: str) -> int:
         if path in self._CHAT_RUN_PATHS:
             return self._chat_run_limit
-        if path == self._MEDIA_UPLOAD_PATH:
+        if path in (self._MEDIA_UPLOAD_PATH, self._USER_AVATARS_PATH, self._MAKEUP_PATH):
             return self._media_upload_limit
         if path == self._MEDIA_TEMPLATE_CREATE_PATH:
             return self._media_template_cover_limit
+        if path == self._MEDIA_FEATURE_PRESET_CREATE_PATH:
+            return self._media_upload_limit
+        if path.startswith(f"{self._USER_AVATARS_PATH}/") and path.endswith(
+            self._USER_AVATAR_PREPARE_SUFFIX
+        ):
+            return self._media_upload_limit
         if path.startswith(self._WORKSPACES_PREFIX) and path.endswith(self._FILES_SUFFIX):
             return self._workspace_files_limit
         return self._limit

@@ -463,6 +463,13 @@ class Settings(BaseSettings):
     media_upload_request_body_limit: int = Field(
         default=16 * 1024 * 1024, alias="MEDIA_UPLOAD_REQUEST_BODY_LIMIT"
     )
+    # New product surfaces are independently opt-in. Defaults false are the rollout guarantee:
+    # applying the additive migration to all instances cannot expose unfinished catalogs.
+    avatar_speech_enabled: bool = Field(default=False, alias="AVATAR_SPEECH_ENABLED")
+    makeup_enabled: bool = Field(default=False, alias="MAKEUP_ENABLED")
+    avatar_speech_credit_cost: int = Field(default=10, alias="AVATAR_SPEECH_CREDIT_COST")
+    makeup_credit_cost: int = Field(default=10, alias="MAKEUP_CREDIT_COST")
+    user_avatar_max_count: int = Field(default=20, alias="USER_AVATAR_MAX_COUNT")
     # Decoded-byte ceiling for gallery template covers (ADR-066 admin create).
     media_template_cover_max_bytes: int = Field(
         default=2 * 1024 * 1024, alias="MEDIA_TEMPLATE_COVER_MAX_BYTES"
@@ -1031,6 +1038,18 @@ class Settings(BaseSettings):
         becomes free on that instance while the operator keeps paying the provider.
         """
         return value if value > 0 else 1
+
+    @field_validator("avatar_speech_credit_cost", "makeup_credit_cost")
+    @classmethod
+    def _positive_media_feature_credit_cost(cls, value: int) -> int:
+        """Avatar speech and makeup keep their agreed ten-credit safe fallback."""
+        return value if value > 0 else 10
+
+    @field_validator("user_avatar_max_count")
+    @classmethod
+    def _positive_user_avatar_max_count(cls, value: int) -> int:
+        """A bad instance value must not turn the durable avatar store into an unbounded one."""
+        return value if value > 0 else 20
 
     @field_validator("media_job_deadline_seconds")
     @classmethod

@@ -31,6 +31,7 @@ from app.api_gateway.routers import (
     documents,
     health,
     media,
+    media_features,
     media_templates,
     memory,
     models,
@@ -187,6 +188,20 @@ _OPENAPI_TAGS = [
             "(`GET /v1/media/jobs/{jobId}/assets/{index}/{token}`, без JWT). При `completed` "
             "(и фоновом reconciler) — push APNs с `jobId`/`kind`/`mediaUrl`, если включены "
             "уведомления и зарегистрирован device token."
+        ),
+    },
+    {
+        "name": "Media Features",
+        "description": (
+            "Opt-in сценарии avatar speech, сохранённых пользовательских аватаров, замены "
+            "фона и virtual makeup. Результаты используют общий асинхронный media-job contract."
+        ),
+    },
+    {
+        "name": "Admin Media Features",
+        "description": (
+            "Загрузка и удаление системных аватаров, фонов и makeup-пресетов. Каталог пуст "
+            "после миграции и заполняется отдельно на каждом инстансе."
         ),
     },
     {
@@ -350,6 +365,7 @@ def create_app() -> FastAPI:
         characters,
         voices,
         media,
+        media_features,
         media_templates,
         policy,
         wallet,

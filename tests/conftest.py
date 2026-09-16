@@ -237,6 +237,8 @@ _TABLES = (
     # Media generation (ADR-060, migration 0018): FK→users, listed explicitly so generation jobs
     # do not leak between tests.
     "media_jobs",
+    "user_avatars",
+    "media_feature_presets",
     # Push tokens (ADR-067, migration 0022).
     "device_push_tokens",
     "byok_keys",

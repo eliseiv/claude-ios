@@ -17,7 +17,7 @@ from app.admin.service import AdminService
 from app.api_gateway.admin_guards import enforce_admin_body_size
 from app.api_gateway.auth import require_admin
 from app.api_gateway.rate_limit import enforce_admin_limits
-from app.api_gateway.routers import admin_media_templates, crm_admin, memory
+from app.api_gateway.routers import admin_media_features, admin_media_templates, crm_admin, memory
 from app.config import get_settings
 from app.deps import client_ip, get_admin_service
 from app.errors import RateLimitedError
@@ -42,6 +42,7 @@ router = APIRouter(
 )
 router.include_router(crm_admin.router)
 router.include_router(admin_media_templates.router)
+router.include_router(admin_media_features.router)
 router.include_router(memory.admin_router)
 
 

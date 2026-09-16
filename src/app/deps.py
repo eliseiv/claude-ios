@@ -42,6 +42,11 @@ from app.db import session_scope
 from app.documents import DocumentsService
 from app.errors import ForbiddenError, MediaGenerationNotConfiguredError, UnauthorizedError
 from app.media_generation.fal_client import FalClient
+from app.media_generation.features_repository import MediaFeaturesRepository
+from app.media_generation.features_service import (
+    AvatarPreparationCompleter,
+    MediaFeaturesService,
+)
 from app.media_generation.repository import MediaJobsRepository
 from app.media_generation.service import MediaGenerationService
 from app.media_generation.templates_repository import MediaTemplatesRepository
@@ -296,6 +301,7 @@ def build_media_generation_service(
     wallet service is built on the same session as the repository. ADR-067: the push notifier
     shares that session so push_sent_at lands with mark_completed.
     """
+    features_repo = MediaFeaturesRepository(session)
     return MediaGenerationService(
         repo=MediaJobsRepository(session),
         fal=get_fal_client(),
@@ -304,6 +310,10 @@ def build_media_generation_service(
         push=get_media_push_service(session),
         request_logs=request_logs,
         moderation=get_moderation_service(),
+        completion_handler=AvatarPreparationCompleter(
+            repo=features_repo,
+            fal=get_fal_client(),
+        ),
     )
 
 
@@ -312,6 +322,21 @@ def get_media_generation_service(
     request_logs: Annotated[RequestLogWriter, Depends(get_request_log_writer)],
 ) -> MediaGenerationService:
     return build_media_generation_service(session, request_logs)
+
+
+def get_media_features_service(
+    session: DbSession,
+    media: Annotated[MediaGenerationService, Depends(get_media_generation_service)],
+) -> MediaFeaturesService:
+    """Request-scoped feature service sharing the media transaction and completion assembly."""
+    return MediaFeaturesService(
+        repo=MediaFeaturesRepository(session),
+        media=media,
+        fal=get_fal_client(),
+        speech=get_speech_client(),
+        settings=get_settings(),
+        moderation=get_moderation_service(),
+    )
 
 
 def get_media_templates_service(session: DbSession) -> MediaTemplatesService:

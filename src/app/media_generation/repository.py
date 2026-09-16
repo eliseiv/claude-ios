@@ -63,6 +63,9 @@ class MediaJobsRepository:
         parent_job_id: uuid.UUID | None = None,
         input_image_urls: list[str] | None = None,
         moderation: dict[str, Any] | None = None,
+        operation: str = "generation",
+        operation_input: dict[str, Any] | None = None,
+        visible_in_history: bool = True,
     ) -> MediaJob:
         row = MediaJob(
             id=job_id,
@@ -83,6 +86,9 @@ class MediaJobsRepository:
             parent_job_id=parent_job_id,
             input_image_urls=input_image_urls or None,
             moderation=moderation,
+            operation=operation,
+            operation_input=operation_input,
+            visible_in_history=visible_in_history,
         )
         self._session.add(row)
         await self._session.flush()
@@ -118,7 +124,10 @@ class MediaJobsRepository:
         Fetches ``limit + 1`` rows so the next cursor is known without a second count query: if the
         extra row came back there is more feed, and the cursor points at the last row we return.
         """
-        stmt = select(MediaJob).where(MediaJob.user_id == user_id)
+        stmt = select(MediaJob).where(
+            MediaJob.user_id == user_id,
+            MediaJob.visible_in_history.is_(True),
+        )
         if kind is not None:
             stmt = stmt.where(MediaJob.kind == kind)
         if cursor is not None:
