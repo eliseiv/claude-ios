@@ -1,6 +1,6 @@
 # Module: Scheduled Chats (запланированные чат-задачи)
 
-- Статус: **код написан** ([ADR-107](../../adr/ADR-107-scheduled-chat-tasks.md)) — миграция `0034`, `src/app/scheduled_chats/`, router, worker, push. **Автотесты в дереве** (`tests/unit/test_scheduled_chats_adr107.py`, `tests/integration/test_scheduled_chats_adr107.py`; OpenAPI tag `ScheduledChats`; qa 21 passed — по сообщению orchestrator'а). **Ревью:** `backend-reviewer` → `approve` (resume_only). **Выкатка на инстансы не утверждается** (не измерялась). Честный статус на 2026-09-18.
+- Статус: **код написан** ([ADR-107](../../adr/ADR-107-scheduled-chat-tasks.md)) — миграция `0036`, `src/app/scheduled_chats/`, router, worker, push. **Автотесты в дереве** (`tests/unit/test_scheduled_chats_adr107.py`, `tests/integration/test_scheduled_chats_adr107.py`; OpenAPI tag `ScheduledChats`; qa 21 passed — по сообщению orchestrator'а). **Ревью:** `backend-reviewer` → `approve` (resume_only). **Выкатка на инстансы не утверждается** (не измерялась). Честный статус на 2026-09-18.
 - Ответственность: одноразовая отложенная постановка хода чата (prompt + `runAt`), серверное исполнение через `ChatOrchestrator.run` (v2) и APNs deep-link в чат.
 
 ## Документы

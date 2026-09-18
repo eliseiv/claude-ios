@@ -442,7 +442,7 @@ CREATE INDEX ix_push_tokens_user ON device_push_tokens (user_id);
 
 ### 17a. scheduled_chat_tasks (модуль `scheduled-chats`, [ADR-107](adr/ADR-107-scheduled-chat-tasks.md))
 
-> ⚠️ **Код написан** (миграция `20260918_0035_scheduled_chat_tasks`, revision `0035_scheduled_chat_tasks`, пакет `scheduled_chats`); **автотесты в дереве** (`tests/unit|integration/test_scheduled_chats_adr107.py`; qa 21 passed — по сообщению orchestrator'а); выкат на инстансы **не утверждается** (честный статус 2026-09-18, [ADR-107](adr/ADR-107-scheduled-chat-tasks.md)).
+> ⚠️ **Код написан** (миграция `20260918_0036_scheduled_chat_tasks`, revision `0036_scheduled_chat_tasks`, пакет `scheduled_chats`); **автотесты в дереве** (`tests/unit|integration/test_scheduled_chats_adr107.py`; qa 21 passed — по сообщению orchestrator'а); выкат на инстансы **не утверждается** (честный статус 2026-09-18, [ADR-107](adr/ADR-107-scheduled-chat-tasks.md)).
 
 ```sql
 CREATE TABLE scheduled_chat_tasks (

@@ -1,6 +1,6 @@
 # Scheduled Chats — Data Model
 
-Таблица `scheduled_chat_tasks` ([ADR-107](../../adr/ADR-107-scheduled-chat-tasks.md)). Миграция в дереве: `migrations/versions/20260918_0035_scheduled_chat_tasks.py` (revision `0035_scheduled_chat_tasks`, `down_revision=0033_admin_economics`; single head). Существующие таблицы не ломаются: ход пишет в `chat_sessions` / `chat_steps` как обычный `/v1/chat/v2/run`.
+Таблица `scheduled_chat_tasks` ([ADR-107](../../adr/ADR-107-scheduled-chat-tasks.md)). Миграция в дереве: `migrations/versions/20260918_0036_scheduled_chat_tasks.py` (revision `0036_scheduled_chat_tasks`, `down_revision=0035_media_features`; single head). Существующие таблицы не ломаются: ход пишет в `chat_sessions` / `chat_steps` как обычный `/v1/chat/v2/run`.
 
 ## `scheduled_chat_tasks`
 

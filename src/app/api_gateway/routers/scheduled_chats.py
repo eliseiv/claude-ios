@@ -51,6 +51,10 @@ async def create_scheduled_chat(
     "",
     response_model=ScheduledChatListResponse,
     summary="Список запланированных чат-задач",
+    description=(
+        "Список задач текущего пользователя (newest-first). "
+        "Опциональный фильтр status; пагинация cursor/limit."
+    ),
 )
 async def list_scheduled_chats(
     request: Request,
@@ -68,6 +72,7 @@ async def list_scheduled_chats(
     "/{id}",
     response_model=ScheduledChatResponse,
     summary="Получить запланированную чат-задачу",
+    description="Одна задача владельца. Чужой или несуществующий id → 404.",
 )
 async def get_scheduled_chat(
     request: Request,
@@ -100,6 +105,11 @@ async def patch_scheduled_chat(
     "/{id}",
     response_model=ScheduledChatDeleteResponse,
     summary="Отменить или удалить запланированную чат-задачу",
+    description=(
+        "Из scheduled — soft-cancel (status=cancelled). "
+        "Терминальные (completed/failed/cancelled) — hard-delete. "
+        "running → 409 not_cancellable."
+    ),
 )
 async def delete_scheduled_chat(
     request: Request,

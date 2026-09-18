@@ -8,12 +8,12 @@ result ids and push idempotency.
 ``status`` / ``mode`` are TEXT + CHECK (same pattern as ``media_jobs``): extend without
 ``ALTER TYPE``. Expand-only: one CREATE TABLE + two indexes, no changes to existing tables.
 
-Chain: … -> 0034_chat_steps_usage_null -> 0035_scheduled_chat_tasks (single head).
+Chain: … -> 0035_media_features -> 0036_scheduled_chat_tasks (single head).
 
 NOTE: revision id MUST stay <= 32 chars (alembic_version.version_num VARCHAR(32)).
 
-Revision ID: 0035_scheduled_chat_tasks
-Revises: 0034_chat_steps_usage_null
+Revision ID: 0036_scheduled_chat_tasks
+Revises: 0035_media_features
 Create Date: 2026-09-18
 """
 
@@ -25,8 +25,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0035_scheduled_chat_tasks"
-down_revision: str | None = "0034_chat_steps_usage_null"
+revision: str = "0036_scheduled_chat_tasks"
+down_revision: str | None = "0035_media_features"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

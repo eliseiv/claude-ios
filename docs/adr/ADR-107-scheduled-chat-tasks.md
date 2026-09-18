@@ -1,6 +1,6 @@
 # ADR-107 — Запланированные чат-задачи (отложенный запуск чата)
 
-- **Статус:** Accepted. **Реализация (честный статус на 2026-09-18; состояния разведены):** код **НАПИСАН** (миграция `migrations/versions/20260918_0035_scheduled_chat_tasks.py`, revision `0035_scheduled_chat_tasks`, пакет `src/app/scheduled_chats/`, роутер `scheduled_chats`, worker, push `scheduled_chat_ready`); **автотесты В ДЕРЕВЕ** (`tests/unit/test_scheduled_chats_adr107.py`, `tests/integration/test_scheduled_chats_adr107.py`; OpenAPI tag `ScheduledChats` в `tests/integration/test_api_documentation.py`; по сообщению orchestrator'а — qa: 21 passed на этих файлах); **backend-reviewer: `approve` (resume_only)** — по сообщению orchestrator'а; **выкатка на инстансы НЕ утверждается** (не измерялась).
+- **Статус:** Accepted. **Реализация (честный статус на 2026-09-18; состояния разведены):** код **НАПИСАН** (миграция `migrations/versions/20260918_0036_scheduled_chat_tasks.py`, revision `0036_scheduled_chat_tasks`, пакет `src/app/scheduled_chats/`, роутер `scheduled_chats`, worker, push `scheduled_chat_ready`); **автотесты В ДЕРЕВЕ** (`tests/unit/test_scheduled_chats_adr107.py`, `tests/integration/test_scheduled_chats_adr107.py`; OpenAPI tag `ScheduledChats` в `tests/integration/test_api_documentation.py`; по сообщению orchestrator'а — qa: 21 passed на этих файлах); **backend-reviewer: `approve` (resume_only)** — по сообщению orchestrator'а; **выкатка на инстансы НЕ утверждается** (не измерялась).
 - **Дата:** 2026-09-18
 - **Тип:** feature-ADR (MVP).
 - **Связано:** [ADR-067](ADR-067-media-ready-push-and-reconciler.md) (образец in-process poller + APNs), [ADR-032](ADR-032-notifications-enabled-default-false.md) (toggle), [ADR-012](ADR-012-assistant-mode-vs-billing-mode.md) (`mode` = billing), [ADR-064](ADR-064-study-learn-quiz-generation-mode.md) (`generationMode`, v2), [ADR-104](ADR-104-voice-mode-websocket.md) (внутренний вызов `ChatOrchestrator.run` без JWT на границе воркера), [TD-011](../100-known-tech-debt.md), [TD-010](../100-known-tech-debt.md), [TD-013](../100-known-tech-debt.md).
@@ -76,7 +76,7 @@ CRUD JWT-скоуп владельца: `POST` / `GET` / `GET/{id}` / `PATCH` / 
 
 ### 6. Данные
 
-Таблица `scheduled_chat_tasks` — [modules/scheduled-chats/04-data-model.md](../modules/scheduled-chats/04-data-model.md), сводка в [03-data-model.md](../03-data-model.md). Миграция в дереве: `migrations/versions/20260918_0035_scheduled_chat_tasks.py` (revision `0035_scheduled_chat_tasks`, `down_revision=0033_admin_economics`; single head).
+Таблица `scheduled_chat_tasks` — [modules/scheduled-chats/04-data-model.md](../modules/scheduled-chats/04-data-model.md), сводка в [03-data-model.md](../03-data-model.md). Миграция в дереве: `migrations/versions/20260918_0036_scheduled_chat_tasks.py` (revision `0036_scheduled_chat_tasks`, `down_revision=0035_media_features`; single head).
 
 ## Отклонённое
 
