@@ -52,7 +52,7 @@
 | **Покупка токенов (consumable IAP)** | 🔴 | **token-purchase** (новый), reuse ledger/Wallet | ADR-015 | **3** |
 | **Аутентификация / выпуск JWT (онбординг устройства)** | ✅ **реализовано** | **auth** (новый), `auth_devices`/`auth_refresh_tokens` (миграция `0005`) | ADR-018 (закрывает Q-005-1) | **—** |
 | **Каталог инструментов (`GET /v1/tools`)** | ✅ **реализовано** | chat-orchestrator (`src/app/chat/tools.py`) | ADR-019 | **—** |
-| **Notifications (toggle + push device-token)** | 🟡/🔴 | **notifications** (новый, хранение); отправка push → TD-011 | — | **3** |
+| **Notifications (toggle + push device-token)** | 🟢 | **notifications** — CRUD + media-ready ([ADR-067](adr/ADR-067-media-ready-push-and-reconciler.md)); scheduled-chat push ([ADR-107](adr/ADR-107-scheduled-chat-tasks.md)) — код написан, автотесты в дереве, выкат не утверждается; остаток TD-011 | — | **3** |
 | **Actions (Plan Week, …) + Choose style** | ⏳ Q-016-1 | дефолт: клиентские пресеты (backend не нужен) | — | — |
 | **Web search (toggle)** | ⏳ Q-016-2 | НЕ реализуем до выбора провайдера | — | — |
 

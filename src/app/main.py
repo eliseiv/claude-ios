@@ -41,6 +41,7 @@ from app.api_gateway.routers import (
     presets,
     preview,
     profile,
+    scheduled_chats,
     subscription,
     token_purchase,
     tools,
@@ -59,6 +60,7 @@ from app.instance_config import (
 from app.media_generation.reconciler import reconciler_loop
 from app.observability.context import get_request_id
 from app.observability.logging import configure_logging, log_event
+from app.scheduled_chats.worker import worker_loop as scheduled_chat_worker_loop
 
 logger = logging.getLogger("app.main")
 
@@ -79,6 +81,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reconciler_task = asyncio.create_task(
             reconciler_loop(stop, settings), name="media-reconciler"
         )
+    scheduled_chat_task: asyncio.Task[None] | None = None
+    if settings.scheduled_chat_poll_seconds > 0:
+        scheduled_chat_task = asyncio.create_task(
+            scheduled_chat_worker_loop(stop, settings), name="scheduled-chat-worker"
+        )
     # ADR-099 §2: снимок операторских оверлеев грузится ДО приёма трафика — иначе первые
     # запросы обслуживались бы по env-ценам, то есть тихо отменяли бы правку оператора.
     # Отказ загрузки НЕ мешает старту: пустой снимок = поведение до выката, и это состояние
@@ -97,7 +104,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         stop.set()
-        for task in (reconciler_task, overrides_task):
+        for task in (reconciler_task, scheduled_chat_task, overrides_task):
             if task is None:
                 continue
             try:
@@ -209,7 +216,15 @@ _OPENAPI_TAGS = [
         "description": (
             "Регистрация APNs device-токена (`POST`/`DELETE /v1/notifications/device-token`). "
             "Toggle доставки — `notificationsEnabled` в `/v1/preferences`. "
-            "Deep link media-ready push: `jobId` + `kind` (чата у media нет)."
+            "Deep link media-ready push: `jobId` + `kind` (чата у media нет). "
+            "Scheduled chat ready: `type=scheduled_chat_ready` + `scheduledChatId`/`sessionId`."
+        ),
+    },
+    {
+        "name": "ScheduledChats",
+        "description": (
+            "Одноразовые отложенные чат-задачи: создать prompt+runAt, получить push когда "
+            "сервер сам выполнит `ChatOrchestrator.run` (v2). Cancel/PATCH только из `scheduled`."
         ),
     },
     {
@@ -380,6 +395,7 @@ def create_app() -> FastAPI:
         profile,
         preferences,
         notifications,
+        scheduled_chats,
         billing_adapty,
         billing_cloudpayments,
     ):

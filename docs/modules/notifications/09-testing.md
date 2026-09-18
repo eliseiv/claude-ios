@@ -12,6 +12,7 @@
 - `DELETE` — удаление токена устройства.
 - Изоляция: токен другого `sub` недоступен.
 - Media completed → push invoked once (fake APNs); reconciler advances stuck job.
+- Scheduled chat completed/failed (включая `worker_interrupted`) → `type=scheduled_chat_ready` once; `sessionId` = result ?? planned ?? null ([ADR-107](../../adr/ADR-107-scheduled-chat-tasks.md); покрытие — `tests/unit|integration/test_scheduled_chats_adr107.py`).
 
 ## Out of scope
 - Реальная доставка в Apple APNs (CI — fake client / httpx mock).

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import get_settings
+from app.errors import SessionNotFoundError
 from app.models import ChatSession, ChatStep, ToolCall
 
 # Default max length of an auto-generated chat title (chats/03-architecture.md).
@@ -141,6 +142,7 @@ class ChatRepository:
         workspace_project_id: uuid.UUID | None = None,
         generation_backend: str | None = None,
         temporary: bool = False,
+        resume_only: bool = False,
     ) -> SessionContext:
         """Resume an owned, non-expired session or create a new one.
 
@@ -161,12 +163,20 @@ class ChatRepository:
         contracts. ``temporary`` (v2) is session-fixed the same way: hidden from ``GET /v1/chats``,
         still addressable by id. Ownership of the workspace is validated by the caller before
         creation.
+
+        ``resume_only`` (ADR-107 / BR-SC-6): when True, never create. Soft-expired owned rows are
+        resumed under the same UUID; missing/foreign → ``SessionNotFoundError`` (no silent
+        resume→new).
         """
         if session_id is not None:
             existing = await self.get_session(session_id, user_id)
-            if existing is not None and not self.is_expired(existing):
+            if existing is not None and (resume_only or not self.is_expired(existing)):
                 return SessionContext(session=existing, is_new=False)
+            if resume_only:
+                raise SessionNotFoundError("planned session no longer exists")
             # Missing or expired → new session (mode/assistant_mode/title fixed at creation).
+        elif resume_only:
+            raise SessionNotFoundError("resume_only requires a session id")
         new_session = ChatSession(
             user_id=user_id,
             project_id=project_id,

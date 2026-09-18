@@ -34,6 +34,19 @@ class MediaReadyPush:
     body: str
 
 
+@dataclass(frozen=True)
+class ScheduledChatReadyPush:
+    """Payload for a scheduled-chat terminal alert (ADR-107)."""
+
+    scheduled_chat_id: str
+    session_id: str | None
+    message_step_id: str | None
+    status: str  # completed | failed
+    error_code: str | None
+    title: str
+    body: str
+
+
 class ApnsClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -81,6 +94,20 @@ class ApnsClient:
             "jobId": push.job_id,
             "kind": push.kind,
             "mediaUrl": push.media_url,
+        }
+
+    def build_scheduled_chat_ready_payload(self, push: ScheduledChatReadyPush) -> dict[str, Any]:
+        return {
+            "aps": {
+                "alert": {"title": push.title, "body": push.body},
+                "sound": "default",
+            },
+            "type": "scheduled_chat_ready",
+            "scheduledChatId": push.scheduled_chat_id,
+            "sessionId": push.session_id,
+            "messageStepId": push.message_step_id,
+            "status": push.status,
+            "errorCode": push.error_code,
         }
 
     async def send(self, *, device_token: str, payload: dict[str, Any]) -> ApnsResult:
@@ -132,3 +159,10 @@ def media_ready_copy(*, kind: str) -> tuple[str, str]:
     if kind == "video":
         return "Ready", "Your video is ready"
     return "Ready", "Your photo is ready"
+
+
+def scheduled_chat_ready_copy(*, status: str) -> tuple[str, str]:
+    """Generic alert copy — prompt never goes into APNs (ADR-107 / security)."""
+    if status == "failed":
+        return "Chat ready", "Your scheduled chat could not be completed"
+    return "Chat ready", "Your scheduled chat has finished"

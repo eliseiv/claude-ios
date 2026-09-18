@@ -56,6 +56,8 @@ os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
 # ADR-067: disable the background media reconciler in the hermetic suite (poll path is
 # exercised explicitly; a live loop would race fal fakes across tests).
 os.environ["MEDIA_RECONCILE_INTERVAL_SECONDS"] = "0"
+# ADR-107: disable the scheduled-chat poller in the hermetic suite (same reason as media).
+os.environ["SCHEDULED_CHAT_POLL_SECONDS"] = "0"
 os.environ["MEMORY_EMBEDDING_FAKE"] = "true"
 os.environ["MEMORY_ENABLED"] = "false"
 # ADR-086: модерация — исходящий вызов на горячем пути генерации, и она fail-closed. В
@@ -239,6 +241,8 @@ _TABLES = (
     "media_jobs",
     "user_avatars",
     "media_feature_presets",
+    # Scheduled chats (ADR-107, migration 0035): no FK to chat_sessions; truncate explicitly.
+    "scheduled_chat_tasks",
     # Push tokens (ADR-067, migration 0022).
     "device_push_tokens",
     "byok_keys",

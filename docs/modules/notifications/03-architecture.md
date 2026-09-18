@@ -7,13 +7,15 @@
 - `deviceId` резолвится: тело → JWT-claim → `X-Device-Id`; отсутствие → `422`.
 - Upsert: `INSERT ... ON CONFLICT (user_id, device_id) DO UPDATE SET push_token, updated_at`.
 
-## Отправка (ADR-067)
+## Отправка (ADR-067 media + ADR-107 scheduled)
 - APNs token-based JWT (`APNS_KEY_ID` / `APNS_TEAM_ID` / `APNS_AUTH_KEY`|`_PATH` / `APNS_TOPIC` / `APNS_ENVIRONMENT`).
 - Перед отправкой — `notifications_enabled`; выключено → skip.
-- Триггер: `MediaGenerationService._advance` после `mark_completed` (poll **и** reconciler).
-- Идемпотентность: `UPDATE media_jobs SET push_sent_at WHERE push_sent_at IS NULL`.
+- Триггер media: `MediaGenerationService._advance` после `mark_completed` (poll **и** reconciler) → `notify_media_ready`.
+- Триггер scheduled-chat ([ADR-107](../../adr/ADR-107-scheduled-chat-tasks.md)): после `completed`/`failed` воркера (включая recovery `worker_interrupted`) → **новый** метод (не `notify_media_ready`); payload `type=scheduled_chat_ready`, `sessionId` = `resultSessionId ?? planned ?? null`.
+- Идемпотентность media: `UPDATE media_jobs SET push_sent_at WHERE push_sent_at IS NULL`.
+- Идемпотентность scheduled: `UPDATE scheduled_chat_tasks SET push_sent_at WHERE push_sent_at IS NULL`.
 - `410 Unregistered` → delete token row(s) with that `push_token`.
-- Ошибка APNs не откатывает completed.
+- Ошибка APNs не откатывает терминальный статус домена.
 
 ## Media reconciler
 - `src/app/media_generation/reconciler.py`, старт из lifespan при `MEDIA_RECONCILE_INTERVAL_SECONDS > 0`.

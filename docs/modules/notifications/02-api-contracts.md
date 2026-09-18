@@ -54,3 +54,27 @@ JWT, владелец = `sub`. Deep link media-ready push — по `jobId` (не
 
 - `mediaUrl` — тот же URL, что `assets[0].url` в `GET /v1/media/jobs/{jobId}`.
 - Отправка только при `completed`, один раз (`push_sent_at`), если `notificationsEnabled` и есть токен и настроены `APNS_*`.
+
+## Исходящий push (APNs, scheduled chat ready) — [ADR-107](../../adr/ADR-107-scheduled-chat-tasks.md)
+
+Не HTTP API. **Не** переиспользовать media payload / `notify_media_ready`. Полный контракт — [scheduled-chats/02-api-contracts.md](../scheduled-chats/02-api-contracts.md). Кратко:
+
+```json
+{
+  "aps": {
+    "alert": { "title": "Chat ready", "body": "Your scheduled chat has finished" },
+    "sound": "default"
+  },
+  "type": "scheduled_chat_ready",
+  "scheduledChatId": "<uuid>",
+  "sessionId": "<uuid|null>",
+  "messageStepId": "<uuid|null>",
+  "status": "completed|failed",
+  "errorCode": "string|null"
+}
+```
+
+- **`sessionId`** = `resultSessionId ?? planned sessionId ?? null`.
+- Deep-link — по `sessionId`, если не `null`; иначе fallback UI по `scheduledChatId`.
+- Отправка при `completed` **и** `failed` (включая `worker_interrupted`), один раз (`scheduled_chat_tasks.push_sent_at`).
+- Код триггера ещё не написан (docs-only на 2026-09-18).

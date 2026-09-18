@@ -492,6 +492,24 @@ class Settings(BaseSettings):
     media_job_deadline_seconds: int = Field(
         default=_DEFAULT_MEDIA_JOB_DEADLINE_SECONDS, alias="MEDIA_JOB_DEADLINE_SECONDS"
     )
+
+    # --- Scheduled chat tasks (ADR-107) ---
+    # Poller interval; <=0 disables the in-process worker (tests / ops kill-switch).
+    scheduled_chat_poll_seconds: float = Field(default=15.0, alias="SCHEDULED_CHAT_POLL_SECONDS")
+    scheduled_chat_batch_size: int = Field(default=10, alias="SCHEDULED_CHAT_BATCH_SIZE")
+    scheduled_chat_running_ttl_seconds: int = Field(
+        default=900, alias="SCHEDULED_CHAT_RUNNING_TTL_SECONDS"
+    )
+    scheduled_chat_max_active_per_user: int = Field(
+        default=20, alias="SCHEDULED_CHAT_MAX_ACTIVE_PER_USER"
+    )
+    scheduled_chat_prompt_max_chars: int = Field(
+        default=32768, alias="SCHEDULED_CHAT_PROMPT_MAX_CHARS"
+    )
+    scheduled_chat_min_lead_seconds: int = Field(
+        default=60, alias="SCHEDULED_CHAT_MIN_LEAD_SECONDS"
+    )
+    scheduled_chat_max_lead_days: int = Field(default=90, alias="SCHEDULED_CHAT_MAX_LEAD_DAYS")
     # TTL of the HMAC token in GET /v1/media/jobs/{id}/assets/{index}/{token} (ADR-085).
     # After expiry the client re-polls the job and gets a fresh URL. Secret is PREVIEW_URL_SECRET.
     media_download_ttl_seconds: int = Field(default=86400, alias="MEDIA_DOWNLOAD_TTL_SECONDS")

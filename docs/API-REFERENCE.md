@@ -14,7 +14,7 @@
 2. [Аутентификация и заголовки](#2-аутентификация-и-заголовки)
 3. [Коды ответа (общие)](#3-коды-ответа-общие)
 4. Эндпоинты по модулям:
-   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Characters](#28-characters-персонажи) · [Озвучка ответа](#29-озвучка-ответа-speech) · [Голосовой режим (WebSocket)](#31-голосовой-режим-websocket) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Documents (документы чата)](#30-documents-документы-чата) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
+   - [Auth](#21-auth-выпуск-токена) · [Chat](#4-chat) · [Chat v2 (режимы генерации)](#4a-chat-v2--режимы-генерации) · [Tools](#22-tools-каталог-инструментов) · [Models](#24-models-список-моделей-инстанса) · [Presets](#25-presets-пресеты-промтов) · [Characters](#28-characters-персонажи) · [Озвучка ответа](#29-озвучка-ответа-speech) · [Голосовой режим (WebSocket)](#31-голосовой-режим-websocket) · [Scheduled Chats](#32-scheduled-chats-запланированные-чат-задачи) · [Policy](#5-policy) · [Wallet](#6-wallet) · [Subscription](#7-subscription) · [BYOK](#8-byok) · [Admin](#9-admin) · [Website-builder / Preview](#10-website-builder--preview) · [Health / Docs](#11-health--docs) · [Chats](#17-chats) · [Documents (документы чата)](#30-documents-документы-чата) · [Profile](#18-profile) · [Preferences](#19-preferences) · [Tokens](#20-tokens)
 5. [blockReason — справочник (9 значений)](#12-blockreason--справочник)
 6. [Tool-протокол: client-side vs server-side](#13-tool-протокол)
 7. [Монетизация (кратко)](#14-монетизация-кратко)
@@ -1575,6 +1575,36 @@ Backend нормализует `filename` и в REST, и в вызове мод�
 Поле присутствует всегда и никогда не `null`. Заблокированный ассет не сохраняется и **недоступен** по signed-URL download-роуту.
 
 **Генерация из чата.** Если модель попыталась сгенерировать запрещённый контент через инструменты чата, ход **не падает**: в `serverTools[]` появляется запись со `status: "errored"` и `summary: "content_policy_violation"`, ассистент отвечает как обычно и может переформулировать запрос.
+
+---
+
+## 32. Scheduled Chats (запланированные чат-задачи)
+
+> **Статус:** код написан ([ADR-107](adr/ADR-107-scheduled-chat-tasks.md)); автотесты в дереве (`tests/unit/test_scheduled_chats_adr107.py`, `tests/integration/test_scheduled_chats_adr107.py`; OpenAPI tag `ScheduledChats`; qa 21 passed — по сообщению orchestrator'а); выкат на инстансы не утверждается. Полный контракт — [modules/scheduled-chats/02-api-contracts.md](modules/scheduled-chats/02-api-contracts.md).
+
+Одноразовая отложенная задача: `prompt` + `runAt` (+ опц. `sessionId`). В срок сервер сам вызывает `ChatOrchestrator.run` (v2) и шлёт APNs `type=scheduled_chat_ready` с deep-link в чат.
+
+### Эндпоинты
+
+| Метод | Путь | Назначение |
+|---|---|---|
+| `POST` | `/v1/scheduled-chats` | создать (`201`, статус `scheduled`) |
+| `GET` | `/v1/scheduled-chats` | список владельца (cursor, опц. `status`) |
+| `GET` | `/v1/scheduled-chats/{id}` | одна задача |
+| `PATCH` | `/v1/scheduled-chats/{id}` | правка **только** из `scheduled` |
+| `DELETE` | `/v1/scheduled-chats/{id}` | cancel из `scheduled`; hard-delete терминальных; `running` → `409` |
+
+**Заголовки:** `Authorization: Bearer <JWT>`.
+
+**Ключевые лимиты (дефолты):** prompt ≤ 32768; `runAt` ≥ now+60s и ≤ now+90d; ≤ 20 активных (`scheduled`+`running`) на пользователя.
+
+**Статусы:** `scheduled` → `running` → `completed` | `failed` | `cancelled`.
+
+**Биллинг:** `mode` (`credits`|`byok`) session-fixed; при create/PATCH с `sessionId` поле `mode` в теле игнорируется. Списание/policy — в момент запуска. Отказ → `failed` + push.
+
+**Worker:** claim `scheduled→running` (`SKIP LOCKED`); stuck-`running` сверх TTL → `failed`/`worker_interrupted`. Resume без строки сессии → `failed`/`session_not_found` (не новая сессия).
+
+**Push (не HTTP):** custom `type=scheduled_chat_ready`; `sessionId` = `resultSessionId ?? planned ?? null` (+ fallback по `scheduledChatId`). Не media payload.
 
 ---
 

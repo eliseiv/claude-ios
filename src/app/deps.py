@@ -61,6 +61,7 @@ from app.observability.context import set_user_id
 from app.preferences.service import PreferencesService
 from app.profile.service import ProfileService
 from app.request_logs.service import RequestLogWriter
+from app.scheduled_chats.service import ScheduledChatsService
 from app.subscription.service import SubscriptionService
 from app.subscription.storekit import get_storekit_verifier
 from app.token_purchase.service import TokenPurchaseService
@@ -266,6 +267,10 @@ def get_notifications_service(session: DbSession) -> NotificationsService:
 
 def get_media_push_service(session: DbSession) -> MediaPushService:
     return MediaPushService(session, apns=get_apns_client())
+
+
+def get_scheduled_chats_service(session: DbSession) -> ScheduledChatsService:
+    return ScheduledChatsService(session)
 
 
 @lru_cache(maxsize=1)

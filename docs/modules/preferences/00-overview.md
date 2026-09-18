@@ -8,7 +8,7 @@
 - `PATCH /v1/preferences` — частичное обновление (`defaultAssistantMode`, `notificationsEnabled`, `codeDefaults`).
 
 ## Out of scope
-- Сама отправка push (модуль notifications, [TD-011](../../100-known-tech-debt.md)).
+- Сама отправка push (модуль notifications: media [ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md), scheduled-chat [ADR-107](../../adr/ADR-107-scheduled-chat-tasks.md); остаток [TD-011](../../100-known-tech-debt.md)).
 - Тема/локаль UI — клиентские настройки (если не потребуется серверная синхронизация).
 
 ## Бизнес-правила

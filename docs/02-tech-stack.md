@@ -148,7 +148,8 @@ src/app/
   snippets/               # сохранённые код-фрагменты
   attachments/            # двухшаговый upload/extract_text/таблица — ОТЛОЖЕН (TD-015, transport ADR-014 Superseded); MVP — inline base64 в /chat/run (ADR-020, реализует chat-orchestrator)
   token_purchase/         # consumable IAP → grant кредитов (reuse storekit verifier + Wallet, ADR-015)
-  notifications/          # device push-token CRUD (отправка push → TD-011)
+  notifications/          # device push-token CRUD + APNs (media-ready ADR-067; scheduled_chat_ready ADR-107 — код написан, автотесты в дереве)
+  scheduled_chats/        # отложенный запуск чата (ADR-107) — код написан (миграция 0034); автотесты в дереве; выкат не утверждается
 migrations/               # alembic
 tests/
   unit/  integration/  e2e/

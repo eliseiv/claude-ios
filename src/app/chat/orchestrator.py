@@ -1307,6 +1307,7 @@ class ChatOrchestrator:
         generation_mode: GenerationMode = "general",
         generation_backend: GenerationBackend = "legacy",
         temporary: bool = False,
+        resume_only: bool = False,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
         on_transcript: Callable[[str], Awaitable[None]] | None = None,
         on_turn_start: Callable[[uuid.UUID], Awaitable[None]] | None = None,
@@ -1359,6 +1360,7 @@ class ChatOrchestrator:
             generation_mode=generation_mode,
             generation_backend=generation_backend,
             temporary=temporary,
+            resume_only=resume_only,
             on_text_delta=on_text_delta,
             media_selection=media_selection,
             memory_search=memory_search,
@@ -1424,6 +1426,7 @@ class ChatOrchestrator:
         requested_backend: GenerationBackend,
         use_generation_v2: bool,
         temporary: bool,
+        resume_only: bool = False,
     ) -> tuple[SessionContext, Mode]:
         """Резолв-или-создание сессии со ВСЕМИ проверками session-fixed полей.
 
@@ -1437,6 +1440,8 @@ class ChatOrchestrator:
 
         `title` — параметр, а не вывод из сообщения: у голосового `start` сообщения ещё нет.
         Автозаголовок из первой реплики остаётся правилом чатов и проставляется вызывающим.
+
+        ``resume_only`` (ADR-107): never create; soft-expired owned UUID is resumed as-is.
         """
         # ADR-034 §3: resolve the session-fixed model. None (no field) → NULL (= instance default,
         # never substituted in the DB so the row stays "instance default" even if env default
@@ -1447,7 +1452,8 @@ class ChatOrchestrator:
         # the request `model` is IGNORED (the stored model is already valid) — so a bad model field
         # on a resume must NOT fail. Pre-determine «is this a create?» to gate validation; the
         # validation itself runs BEFORE the session row is created (no invalid model is written).
-        will_create = await self._will_create_session(user_id, session_id)
+        # resume_only never creates (soft-expired keeps same UUID) — expiry ≠ create.
+        will_create = False if resume_only else await self._will_create_session(user_id, session_id)
         if (
             will_create
             and resolved_model is not None
@@ -1508,6 +1514,7 @@ class ChatOrchestrator:
             generation_backend=requested_backend,
             # Temporary chat (v2): session-fixed; only written on create (resume ignores request).
             temporary=bool(temporary) if will_create else False,
+            resume_only=resume_only,
         )
         sess = ctx.session
         await self._ensure_session_backend(
@@ -1537,6 +1544,7 @@ class ChatOrchestrator:
         generation_mode: GenerationMode = "general",
         generation_backend: GenerationBackend = "legacy",
         temporary: bool = False,
+        resume_only: bool = False,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
         media_selection: dict[str, Any] | None = None,
         memory_search: bool | None = None,
@@ -1567,6 +1575,7 @@ class ChatOrchestrator:
             requested_backend=requested_backend,
             use_generation_v2=use_generation_v2,
             temporary=temporary,
+            resume_only=resume_only,
         )
         sess = ctx.session
 

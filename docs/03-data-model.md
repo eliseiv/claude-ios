@@ -348,9 +348,9 @@ CREATE TABLE user_preferences (
 ```
 > Строка создаётся лениво (upsert при первом GET/PATCH preferences) либо отдаётся дефолтами, если отсутствует. `notifications_enabled` — единый источник настройки уведомлений; регистрация push-токенов — `device_push_tokens` (таблица 17).
 > **`default_voice_id` (миграция `0032_user_default_voice`, expand-only, [ADR-100](adr/ADR-100-assistant-speech-output.md)):** `ALTER TABLE user_preferences ADD COLUMN default_voice_id TEXT` — nullable, без `server_default`, без backfill и без индекса (по голосу не фильтруют; строка читается по PK). Существующие строки остаются `NULL` и звучат голосом инстанса. Внешнего ключа нет — реестр в коде, тот же приём, что у `chat_sessions.model` ([ADR-034](adr/ADR-034-user-model-selection.md)) и `chat_sessions.character_id` ([ADR-097](adr/ADR-097-character-personas.md)); ссылочная целостность держится валидацией на `PATCH`, а не БД. Откат — `DROP COLUMN`.
-> **Порядок миграций.** Две волны идут параллельно и номера уже перераспределены: озвучка ([ADR-100](adr/ADR-100-assistant-speech-output.md)) занимает **`0032_user_default_voice`** (от `0031_chat_character`), оверлеи экономики ([ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)) — **`0033_admin_economics`** (от `0032_user_default_voice`). Инвариант — **single head**, а не конкретный номер: `down_revision` каждой ревизии проставляется по фактическому head на момент записи файла, иначе получаются две головы с общим родителем и `alembic upgrade head` падает на прод-инстансе. Таблицы этих двух миграций не пересекаются, поэтому порядок применения на данные не влияет.
+> **Порядок миграций.** ✅ **Обе волны ПРИЗЕМЛИЛИСЬ (уточнение факта 2026-09-10; прежняя редакция гласила «Две волны идут параллельно и номера уже перераспределены»).** Озвучка ([ADR-100](adr/ADR-100-assistant-speech-output.md)) заняла **`0032_user_default_voice`** (от `0031_chat_character`, коммит `3de0c33`), оверлеи экономики ([ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md)) — **`0033_admin_economics`** (от `0032_user_default_voice`, коммит `cd0cd63`); обе применены на инстансах — `alembic_version = 0033_admin_economics` на 82 БД (измерено 2026-09-10), то есть номера **зафиксированы и больше не двигаются**. Инвариант — **single head**, а не конкретный номер: `down_revision` каждой ревизии проставляется по фактическому head на момент записи файла, иначе получаются две головы с общим родителем и `alembic upgrade head` падает на прод-инстансе. Таблицы этих двух миграций не пересекаются, поэтому порядок применения на данные не влияет.
 >
-> ⛔ **Пока волна не приземлилась, её миграция называется в `docs/` ПОЛНЫМ идентификатором ревизии** (`0032_user_default_voice`), **а не коротким номером** (`0032`). Короткий номер — координата в очереди, а не адрес: при двух параллельных волнах он **переезжает** к соседу, а документ, несущий короткий номер, продолжает читаться как верный — ни один гейт на этом не падает, и расхождение всплывает у devops на `alembic upgrade head`. Именно так номер `0033` разъехался по шести документам. Закрытых волн правило не касается: их номера уже приземлились и не двигаются, а переписывать историю ради формы адреса не нужно. **Проверка одной командой:** `grep -rnoE 'миграци[а-я]* \*{0,2}\`0[0-9]{3}\`' docs/` не должна содержать номера незакрытых волн.
+> ⛔ **Пока волна не приземлилась, её миграция называется в `docs/` ПОЛНЫМ идентификатором ревизии** (`0032_user_default_voice`), **а не коротким номером** (`0032`). Короткий номер — координата в очереди, а не адрес: при двух параллельных волнах он **переезжает** к соседу, а документ, несущий короткий номер, продолжает читаться как верный — ни один гейт на этом не падает, и расхождение всплывает у devops на `alembic upgrade head`. Именно так номер `0033` разъехался по шести документам. Закрытых волн правило не касается: их номера уже приземлились и не двигаются, а переписывать историю ради формы адреса не нужно. ⚠️ **`0032_user_default_voice` и `0033_admin_economics` с 2026-09-10 относятся именно к закрытым волнам** — правило действует для СЛЕДУЮЩИХ незакрытых волн, а не для этих двух. **Проверка одной командой:** `grep -rnoE 'миграци[а-я]* \*{0,2}\`0[0-9]{3}\`' docs/` не должна содержать номера незакрытых волн.
 
 ### 13. workspace_projects ([ADR-013](adr/ADR-013-workspace-projects-vs-website-builder.md), [ADR-036](adr/ADR-036-workspaces-implementation.md), модуль `workspaces`)
 > **Поставка 3 (миграция `0011`).** Создаётся вместе с `workspace_files` и `chat_sessions.workspace_project_id`.
@@ -438,7 +438,47 @@ CREATE TABLE device_push_tokens (
 );
 CREATE INDEX ix_push_tokens_user ON device_push_tokens (user_id);
 ```
-> Регистрация APNs-токена устройства. Один токен на `(user_id, device_id)` (upsert). Отправка media-ready push — [ADR-067](adr/ADR-067-media-ready-push-and-reconciler.md); идемпотентность на `media_jobs.push_sent_at`. Toggle — `user_preferences.notifications_enabled`.
+> Регистрация APNs-токена устройства. Один токен на `(user_id, device_id)` (upsert). Отправка media-ready push — [ADR-067](adr/ADR-067-media-ready-push-and-reconciler.md); идемпотентность на `media_jobs.push_sent_at`. Также push `scheduled_chat_ready` — [ADR-107](adr/ADR-107-scheduled-chat-tasks.md); идемпотентность на `scheduled_chat_tasks.push_sent_at`. Toggle — `user_preferences.notifications_enabled`.
+
+### 17a. scheduled_chat_tasks (модуль `scheduled-chats`, [ADR-107](adr/ADR-107-scheduled-chat-tasks.md))
+
+> ⚠️ **Код написан** (миграция `20260918_0035_scheduled_chat_tasks`, revision `0035_scheduled_chat_tasks`, пакет `scheduled_chats`); **автотесты в дереве** (`tests/unit|integration/test_scheduled_chats_adr107.py`; qa 21 passed — по сообщению orchestrator'а); выкат на инстансы **не утверждается** (честный статус 2026-09-18, [ADR-107](adr/ADR-107-scheduled-chat-tasks.md)).
+
+```sql
+CREATE TABLE scheduled_chat_tasks (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_id              UUID NULL,                  -- planned UUID; БЕЗ FK / БЕЗ ON DELETE SET NULL (ADR-107 §1)
+    prompt                  TEXT NOT NULL,
+    mode                    TEXT NOT NULL,              -- credits | byok
+    assistant_mode          TEXT NULL,                  -- chat | code
+    model                   TEXT NULL,
+    generation_mode         TEXT NULL,
+    run_at                  TIMESTAMPTZ NOT NULL,
+    status                  TEXT NOT NULL,              -- scheduled | running | completed | failed | cancelled
+    claimed_at              TIMESTAMPTZ NULL,
+    started_at              TIMESTAMPTZ NULL,
+    finished_at             TIMESTAMPTZ NULL,
+    result_session_id       UUID NULL,                  -- без FK; UUID для GET/push
+    result_message_step_id  UUID NULL,
+    error_code              TEXT NULL,
+    error_message           TEXT NULL,
+    push_sent_at            TIMESTAMPTZ NULL,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_scheduled_chat_status CHECK (
+        status IN ('scheduled', 'running', 'completed', 'failed', 'cancelled')
+    ),
+    CONSTRAINT ck_scheduled_chat_mode CHECK (mode IN ('credits', 'byok')),
+    CONSTRAINT ck_scheduled_chat_assistant_mode CHECK (
+        assistant_mode IS NULL OR assistant_mode IN ('chat', 'code')
+    )
+);
+CREATE INDEX ix_scheduled_chat_status_run_at ON scheduled_chat_tasks (status, run_at);
+CREATE INDEX ix_scheduled_chat_user_created ON scheduled_chat_tasks (user_id, created_at DESC);
+```
+
+> Одноразовые отложенные чат-задачи. Claim = due-poll + `FOR UPDATE SKIP LOCKED` (`scheduled→running`). Stuck-`running` TTL → `failed`/`worker_interrupted`. `session_id` хранит UUID без SET NULL: отсутствие сессии на run → `session_not_found`, не новая сессия. Исполнение — внутренний `ChatOrchestrator.run` (v2). Push — [modules/notifications](modules/notifications/00-overview.md). Детали — [modules/scheduled-chats/04-data-model.md](modules/scheduled-chats/04-data-model.md).
 
 ---
 
@@ -599,10 +639,23 @@ ALTER TABLE media_jobs ADD COLUMN moderation JSONB NULL;
 непустое значение в запросе отвергается `400`. Колонка «на будущее» была бы полем, которое нечем
 заполнить и незачем читать.
 
-⚠️ **Статус на 2026-09-08 (ночь):** DDL выше **нормативен**; миграция `0033_admin_economics` и
-`src/app/models/tables.py` объявляют три колонки `NOT NULL` и приводятся к нему фронтом работ
-[ADR-099 §14](adr/ADR-099-crm-admin-economics-and-instance-settings.md). Правка вносится **в саму
-`0033`** (она не выкачена ни на один инстанс), второй миграции не заводится.
+✅ **Статус 2026-09-10 (уточнение ФАКТА): DDL выше — ДЕЙСТВУЮЩИЙ, а не только нормативный.**
+Миграция `0033_admin_economics` и `src/app/models/tables.py` объявляют три колонки **nullable**
+и совпадают с DDL выше построчно (уникальность, nullability, дефолты, оба CHECK); фронт работ
+[ADR-099 §14](adr/ADR-099-crm-admin-economics-and-instance-settings.md) **выполнен** коммитом `cd0cd63` (2026-09-08).
+
+⚠️ **Прежняя редакция этого абзаца была ложна в ОБЕИХ половинах, и обе сняты.** Она утверждала
+(а) «миграция и `tables.py` объявляют три колонки `NOT NULL` и приводятся к нему фронтом работ»
+— тогда как `0033` вошла в историю **сразу целевой**: `git log --follow` по файлу миграции даёт
+ровно один коммит, и в нём три колонки уже `nullable=True`; (б) «правка вносится в саму `0033`,
+она не выкачена ни на один инстанс» — тогда как к 2026-09-10 `0033` применена на **82** БД
+(41 primary + 41 резерв): `alembic_version = 0033_admin_economics` и живая схема совпадает с
+DDL выше **на всех** (три колонки nullable, оба CHECK в целевой редакции).
+
+⛔ **`0033` применена — править её на месте ЗАПРЕЩЕНО.** Любое дальнейшее изменение DDL
+`admin_products` вносится **новой ревизией** (`0034+`), а не правкой `0033`
+([ADR-099 §9](adr/ADR-099-crm-admin-economics-and-instance-settings.md), «разрешение исчерпано»). Отдельного `0034` сегодня не требуется:
+живая схема уже совпадает с DDL выше, поэтому он был бы `ALTER`, не меняющим ничего.
 
 ### 24. admin_tariffs (модуль `admin`)
 

@@ -426,3 +426,66 @@ class CloudPaymentsCheckoutNotConfiguredError(ServiceUnavailableError):
     """
 
     code = "cloudpayments_checkout_not_configured"
+
+
+# --- Scheduled chat tasks (ADR-107 / modules/scheduled-chats/02-api-contracts.md) -------------
+
+
+class PromptRequiredError(ValidationFailedError):
+    code = "prompt_required"
+
+
+class PromptTooLongError(ValidationFailedError):
+    code = "prompt_too_long"
+
+
+class RunAtTimezoneRequiredError(ValidationFailedError):
+    code = "run_at_timezone_required"
+
+
+class RunAtNotInFutureError(ValidationFailedError):
+    code = "run_at_not_in_future"
+
+
+class RunAtTooSoonError(ValidationFailedError):
+    code = "run_at_too_soon"
+
+
+class RunAtTooFarError(ValidationFailedError):
+    code = "run_at_too_far"
+
+
+class UnsupportedModeError(ValidationFailedError):
+    code = "unsupported_mode"
+
+
+class UnsupportedAssistantModeError(ValidationFailedError):
+    code = "unsupported_assistant_mode"
+
+
+class UnsupportedGenerationModeError(ValidationFailedError):
+    code = "unsupported_generation_mode"
+
+
+class UnsupportedModelError(ValidationFailedError):
+    code = "unsupported_model"
+
+
+class EmptyPatchError(ValidationFailedError):
+    code = "empty_patch"
+
+
+class ActiveLimitExceededError(ConflictError):
+    code = "active_limit_exceeded"
+
+
+class NotPatchableError(ConflictError):
+    code = "not_patchable"
+
+
+class NotCancellableError(ConflictError):
+    code = "not_cancellable"
+
+
+class ScheduledChatNotFoundError(NotFoundError):
+    code = "scheduled_chat_not_found"

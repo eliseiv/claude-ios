@@ -20,6 +20,7 @@ from app.models.tables import (
     MediaTemplate,
     Project,
     RequestLog,
+    ScheduledChatTask,
     SiteFile,
     Subscription,
     ToolCall,
@@ -62,4 +63,5 @@ __all__ = [
     "MediaTemplate",
     "UserAvatar",
     "DevicePushToken",
+    "ScheduledChatTask",
 ]

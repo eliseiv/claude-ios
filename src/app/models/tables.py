@@ -1078,3 +1078,67 @@ class AdminSetting(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )
+
+
+class ScheduledChatTask(Base):
+    """One-shot delayed chat run (ADR-107, migration 0034).
+
+    ``session_id`` is a planned resume UUID **without** FK: deleting the chat must not NULL the
+    column (that would silently turn resume into «new session»). Preflight before ``run`` and on
+    create/PATCH enforce ownership; missing row → ``failed`` / ``session_not_found``.
+    """
+
+    __tablename__ = "scheduled_chat_tasks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    assistant_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generation_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    claimed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    result_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    result_message_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    push_sent_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('scheduled', 'running', 'completed', 'failed', 'cancelled')",
+            name="ck_scheduled_chat_status",
+        ),
+        CheckConstraint("mode IN ('credits', 'byok')", name="ck_scheduled_chat_mode"),
+        CheckConstraint(
+            "assistant_mode IS NULL OR assistant_mode IN ('chat', 'code')",
+            name="ck_scheduled_chat_assistant_mode",
+        ),
+        Index("ix_scheduled_chat_status_run_at", "status", "run_at"),
+        Index("ix_scheduled_chat_user_created", "user_id", sa_text("created_at DESC")),
+    )
