@@ -8,12 +8,15 @@ from collections.abc import AsyncIterator
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
 from app.db import dispose_engine
 from app.memory.embedding import get_embedding_client
 from app.memory.indexer import MemoryIndexer
+from app.memory.repository import MemoryRepository
+from app.models import ChatChunk, ChatSession
 from app.preferences.service import PreferencesService
 from tests.conftest import auth_headers, seed_user
 
@@ -155,3 +158,223 @@ async def test_memory_search_in_system_prompt(
     assert fake_anthropic.calls
     system = fake_anthropic.calls[-1]["system_prompt"]
     assert "past conversations" in system.lower() or "PostgreSQL" in system
+
+
+# --------------------------------------------------------------------------------------------
+# Персистентность кусков шага: MemoryRepository.upsert_chunks
+#
+# Ниже — репозиторный уровень, а не ручка: оба инварианта живут ИМЕННО в `upsert_chunks`, и
+# через API их не наблюсти. Один шаг индексируется двумя независимыми путями — фоновой задачей
+# `schedule_index_turn` (собственный sessionmaker) и явным `index_turn`/`backfill_user`, — то
+# есть в БД одновременно пишут ДВА соединения.
+# --------------------------------------------------------------------------------------------
+
+
+def _vec(seed: float) -> list[float]:
+    """Вектор нужной размерности (`chat_chunks.embedding` — `Vector(1536)`)."""
+    return [seed] + [0.0] * 1535
+
+
+async def _seed_session(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Пользователь и чат: у `chat_chunks` FK на `users.id` и `chat_sessions.id`."""
+    async with db_sessionmaker() as session:
+        uid = await seed_user(session)
+        chat = ChatSession(user_id=uid, mode="credits")
+        session.add(chat)
+        await session.commit()
+        return uid, chat.id
+
+
+async def _chunks_of_step(
+    db_sessionmaker: async_sessionmaker[AsyncSession], chat_step_id: uuid.UUID
+) -> list[tuple[int, str]]:
+    async with db_sessionmaker() as session:
+        rows = await session.execute(
+            select(ChatChunk.chunk_index, ChatChunk.text)
+            .where(ChatChunk.chat_step_id == chat_step_id)
+            .order_by(ChatChunk.chunk_index)
+        )
+        return [(int(idx), str(txt)) for idx, txt in rows.all()]
+
+
+async def _write_chunks(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    user_id: uuid.UUID,
+    session_id: uuid.UUID,
+    chat_step_id: uuid.UUID,
+    message_step_id: uuid.UUID,
+    chunks: list[tuple[int, str, list[float]]],
+) -> None:
+    async with db_sessionmaker() as session:
+        await MemoryRepository(session).upsert_chunks(
+            user_id=user_id,
+            session_id=session_id,
+            chat_step_id=chat_step_id,
+            message_step_id=message_step_id,
+            workspace_project_id=None,
+            session_title="t",
+            role="user",
+            chunks=chunks,
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_upsert_chunks_reindex_to_fewer_chunks_drops_tail(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Переиндексация шага в МЕНЬШЕЕ число кусков сносит хвостовые номера.
+
+    Инвариант: после записи N кусков в шаге не остаётся кусков с `chunk_index >= N`. Иначе
+    хвост прошлой (более длинной) индексации остаётся живым и попадает в векторный поиск как
+    актуальный фрагмент — молча, потому что поиск идёт по `chat_chunks`, а не по шагу. Второй
+    проверяемый здесь же инвариант — куски с сохранившимися номерами ПЕРЕЗАПИСЫВАЮТСЯ новым
+    текстом, а не остаются от прошлой индексации.
+    """
+    uid, session_id = await _seed_session(db_sessionmaker)
+    step_id, message_step_id = uuid.uuid4(), uuid.uuid4()
+
+    await _write_chunks(
+        db_sessionmaker,
+        user_id=uid,
+        session_id=session_id,
+        chat_step_id=step_id,
+        message_step_id=message_step_id,
+        chunks=[(0, "old-0", _vec(0.1)), (1, "old-1", _vec(0.2)), (2, "old-2", _vec(0.3))],
+    )
+    assert await _chunks_of_step(db_sessionmaker, step_id) == [
+        (0, "old-0"),
+        (1, "old-1"),
+        (2, "old-2"),
+    ]
+
+    await _write_chunks(
+        db_sessionmaker,
+        user_id=uid,
+        session_id=session_id,
+        chat_step_id=step_id,
+        message_step_id=message_step_id,
+        chunks=[(0, "new-0", _vec(0.4)), (1, "new-1", _vec(0.5))],
+    )
+
+    assert await _chunks_of_step(db_sessionmaker, step_id) == [(0, "new-0"), (1, "new-1")]
+
+
+@pytest.mark.asyncio
+async def test_upsert_chunks_reindex_to_zero_chunks_drops_all(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Пустой список кусков снимает шаг с индекса целиком.
+
+    Отдельный кейс, потому что запись идёт по отдельной ветке (`if chunks:` пропускает вставку),
+    и без него «ноль кусков» молча перестал бы что-либо чистить.
+    """
+    uid, session_id = await _seed_session(db_sessionmaker)
+    step_id, message_step_id = uuid.uuid4(), uuid.uuid4()
+
+    await _write_chunks(
+        db_sessionmaker,
+        user_id=uid,
+        session_id=session_id,
+        chat_step_id=step_id,
+        message_step_id=message_step_id,
+        chunks=[(0, "a", _vec(0.1)), (1, "b", _vec(0.2))],
+    )
+    await _write_chunks(
+        db_sessionmaker,
+        user_id=uid,
+        session_id=session_id,
+        chat_step_id=step_id,
+        message_step_id=message_step_id,
+        chunks=[],
+    )
+
+    assert await _chunks_of_step(db_sessionmaker, step_id) == []
+
+
+@pytest.mark.asyncio
+async def test_upsert_chunks_concurrent_indexing_of_same_step_keeps_one_row_per_index(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Две одновременные индексации ОДНОГО шага не роняют транзакцию на уникальном ограничении.
+
+    Гонка ставится ДЕТЕРМИНИРОВАННО, а не расчётом на удачу планировщика. Соединение A пишет
+    куски и НЕ фиксирует транзакцию; соединение B начинает писать те же `(chat_step_id,
+    chunk_index)` и упирается в блокировку на `uq_chat_chunks_step_chunk`: незафиксированную
+    строку A оно не видит, но и вставить поверх её ключа не может. Дожидаемся именно этого
+    состояния (опрос `pg_stat_activity`, а не `sleep` на глазок), затем фиксируем A — с этого
+    момента исход определён устройством запроса B, а не таймингом.
+
+    «Удалить всё и вставить» здесь ОБЯЗАН упасть с `UniqueViolationError`: DELETE у B не увидел
+    незафиксированных строк A, значит удалять было нечего, а INSERT приходит на ключ, к тому
+    моменту уже зафиксированный. Идемпотентная запись обязана пройти и оставить ровно одну
+    строку на номер.
+    """
+    uid, session_id = await _seed_session(db_sessionmaker)
+    step_id, message_step_id = uuid.uuid4(), uuid.uuid4()
+
+    async def _upsert(session: AsyncSession, tag: str) -> None:
+        await MemoryRepository(session).upsert_chunks(
+            user_id=uid,
+            session_id=session_id,
+            chat_step_id=step_id,
+            message_step_id=message_step_id,
+            workspace_project_id=None,
+            session_title="t",
+            role="user",
+            chunks=[(0, tag + "-0", _vec(0.1)), (1, tag + "-1", _vec(0.2))],
+        )
+
+    async def _wait_until_blocked(watcher: AsyncSession, pid: int) -> bool:
+        """True, как только СОЕДИНЕНИЕ B встало в ожидание блокировки (иначе — тайм-аут).
+
+        Ждём КОНКРЕТНЫЙ бэкенд по его `pg_backend_pid()`, а не «любой заблокированный в этой
+        базе»: в полном прогоне в той же базе живут соединения других тестов, и общий счётчик
+        дал бы ложное срабатывание — A зафиксировали бы раньше, чем B упёрся в ключ, и гонка
+        осталась бы непоставленной под зелёным результатом.
+        """
+        for _ in range(400):  # до ~20 c; штатно срабатывает на первых итерациях
+            blocked = await watcher.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE pid = :pid AND wait_event_type = 'Lock'"
+                ),
+                {"pid": pid},
+            )
+            if blocked and int(blocked) > 0:
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
+    async with (
+        db_sessionmaker() as session_a,
+        db_sessionmaker() as session_b,
+        db_sessionmaker() as watcher,
+    ):
+        pid_b = await session_b.scalar(text("SELECT pg_backend_pid()"))
+        assert pid_b is not None
+
+        await _upsert(session_a, "a")  # записано, НЕ зафиксировано
+
+        task_b = asyncio.create_task(_upsert(session_b, "b"))
+        try:
+            assert await _wait_until_blocked(watcher, int(pid_b)), (
+                "конкурирующая запись не встала в ожидание блокировки — гонка не поставлена, "
+                "и зелёный этого кейса ничего не доказывает"
+            )
+            await session_a.commit()
+            await task_b  # прежняя реализация падает здесь: UniqueViolationError
+            await session_b.commit()
+        finally:
+            if not task_b.done():
+                task_b.cancel()
+
+    async with db_sessionmaker() as session:
+        total = await session.scalar(
+            select(func.count()).select_from(ChatChunk).where(ChatChunk.chat_step_id == step_id)
+        )
+    assert total == 2
+    assert [idx for idx, _ in await _chunks_of_step(db_sessionmaker, step_id)] == [0, 1]

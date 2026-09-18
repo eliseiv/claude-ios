@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ChatChunk, ChatSession, ChatStep, UserMemory
@@ -52,21 +53,51 @@ class MemoryRepository:
         role: str,
         chunks: list[tuple[int, str, list[float]]],
     ) -> None:
-        await self._session.execute(delete(ChatChunk).where(ChatChunk.chat_step_id == chat_step_id))
-        for chunk_index, chunk_text, embedding in chunks:
-            row = ChatChunk(
-                user_id=user_id,
-                session_id=session_id,
-                chat_step_id=chat_step_id,
-                message_step_id=message_step_id,
-                workspace_project_id=workspace_project_id,
-                session_title=session_title,
-                role=role,
-                chunk_index=chunk_index,
-                text=chunk_text,
-                embedding=embedding,
+        # Две индексации одного шага могут идти одновременно (фоновый schedule_index_turn
+        # против явного index_step/backfill_user), поэтому «удалить всё и вставить» роняет
+        # транзакцию на uq_chat_chunks_step_chunk. Пишем идемпотентно: INSERT ... ON CONFLICT
+        # DO UPDATE по (chat_step_id, chunk_index), а хвост прошлой (более длинной) индексации
+        # срезаем ПОСЛЕ вставки по chunk_index >= len(chunks) — так чистка сохраняется, но
+        # не трогает куски, которые только что записал этот или параллельный вызов.
+        if chunks:
+            stmt = pg_insert(ChatChunk).values(
+                [
+                    {
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "chat_step_id": chat_step_id,
+                        "message_step_id": message_step_id,
+                        "workspace_project_id": workspace_project_id,
+                        "session_title": session_title,
+                        "role": role,
+                        "chunk_index": chunk_index,
+                        "text": chunk_text,
+                        "embedding": embedding,
+                    }
+                    for chunk_index, chunk_text, embedding in chunks
+                ]
             )
-            self._session.add(row)
+            await self._session.execute(
+                stmt.on_conflict_do_update(
+                    constraint="uq_chat_chunks_step_chunk",
+                    set_={
+                        "user_id": stmt.excluded.user_id,
+                        "session_id": stmt.excluded.session_id,
+                        "message_step_id": stmt.excluded.message_step_id,
+                        "workspace_project_id": stmt.excluded.workspace_project_id,
+                        "session_title": stmt.excluded.session_title,
+                        "role": stmt.excluded.role,
+                        "text": stmt.excluded.text,
+                        "embedding": stmt.excluded.embedding,
+                    },
+                )
+            )
+        await self._session.execute(
+            delete(ChatChunk).where(
+                ChatChunk.chat_step_id == chat_step_id,
+                ChatChunk.chunk_index >= len(chunks),
+            )
+        )
         await self._session.flush()
 
     async def delete_chunks_for_session(self, session_id: uuid.UUID) -> None:
