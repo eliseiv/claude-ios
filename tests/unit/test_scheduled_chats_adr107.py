@@ -10,7 +10,11 @@ import pytest
 
 from app.chat.orchestrator import ChatRunOut
 from app.config import get_settings
-from app.notifications.apns_client import ApnsClient, ScheduledChatReadyPush, scheduled_chat_ready_copy
+from app.notifications.apns_client import (
+    ApnsClient,
+    ScheduledChatReadyPush,
+    scheduled_chat_ready_copy,
+)
 from app.notifications.push_service import ScheduledChatPushService
 from app.preferences.service import PreferencesView
 from app.scheduled_chats.worker import _map_run_outcome, worker_loop

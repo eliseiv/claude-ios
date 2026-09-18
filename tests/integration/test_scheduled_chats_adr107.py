@@ -193,9 +193,7 @@ async def test_create_validation_codes(
 
     monkeypatch.setenv("SCHEDULED_CHAT_PROMPT_MAX_CHARS", "10")
     get_settings.cache_clear()
-    long = await client.post(
-        _URL, headers=headers, json={"prompt": "x" * 11, "runAt": _run_at()}
-    )
+    long = await client.post(_URL, headers=headers, json={"prompt": "x" * 11, "runAt": _run_at()})
     assert long.status_code == 422
     assert _err(long) == "prompt_too_long"
     monkeypatch.delenv("SCHEDULED_CHAT_PROMPT_MAX_CHARS", raising=False)
@@ -309,9 +307,13 @@ async def test_active_limit_and_patch_delete_guards(
     headers = auth_headers(uid)
 
     r1 = await client.post(_URL, headers=headers, json={"prompt": "a", "runAt": _run_at()})
-    r2 = await client.post(_URL, headers=headers, json={"prompt": "b", "runAt": _run_at(seconds=130)})
+    r2 = await client.post(
+        _URL, headers=headers, json={"prompt": "b", "runAt": _run_at(seconds=130)}
+    )
     assert r1.status_code == 201 and r2.status_code == 201
-    over = await client.post(_URL, headers=headers, json={"prompt": "c", "runAt": _run_at(seconds=140)})
+    over = await client.post(
+        _URL, headers=headers, json={"prompt": "c", "runAt": _run_at(seconds=140)}
+    )
     assert over.status_code == 409
     assert _err(over) == "active_limit_exceeded"
 
@@ -326,9 +328,7 @@ async def test_active_limit_and_patch_delete_guards(
         )
         await s.commit()
 
-    patch_running = await client.patch(
-        f"{_URL}/{tid}", headers=headers, json={"prompt": "nope"}
-    )
+    patch_running = await client.patch(f"{_URL}/{tid}", headers=headers, json={"prompt": "nope"})
     assert patch_running.status_code == 409
     assert _err(patch_running) == "not_patchable"
 
@@ -448,9 +448,7 @@ async def test_push_once_on_stuck_ttl_worker_interrupted(
     async with db_sessionmaker() as s:
         uid = await seed_user(s, subscription="active", balance=20)
         await s.execute(
-            text(
-                "INSERT INTO user_preferences (user_id, notifications_enabled) VALUES (:u, true)"
-            ),
+            text("INSERT INTO user_preferences (user_id, notifications_enabled) VALUES (:u, true)"),
             {"u": uid},
         )
         await s.execute(
@@ -701,9 +699,7 @@ async def test_push_once_on_completed(
     async with db_sessionmaker() as s:
         uid = await seed_user(s, subscription="active", balance=50)
         await s.execute(
-            text(
-                "INSERT INTO user_preferences (user_id, notifications_enabled) VALUES (:u, true)"
-            ),
+            text("INSERT INTO user_preferences (user_id, notifications_enabled) VALUES (:u, true)"),
             {"u": uid},
         )
         await s.execute(
