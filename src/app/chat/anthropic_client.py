@@ -74,9 +74,11 @@ AnthropicUsage = LLMUsage
 # block.model_dump() carries non-wire SDK fields (e.g. "caller": {"type": "direct"}) that are
 # garbage on replay and violate the payload-purity invariant. Normalization keeps ONLY these
 # fields per type (allowlist, not point-removal of `caller`) so it is robust to future SDK
-# annotations. Applied ONCE at the persist boundary (when assembling content blocks from the
-# Anthropic response); all later replays read already-clean blocks (hot-path continuation does
-# not re-normalize). Raw tool_use.id is preserved verbatim — ADR-008 invariant.
+# annotations. Applied at the persist boundary (when assembling content blocks from the Anthropic
+# response) AND again on replay through ``_replay_assistant_blocks`` (ADR-105 §A3), so a step
+# persisted before a type gained its allowlist is healed on the way out instead of poisoning every
+# later continuation. The hot-path continuation WITHIN one turn does not re-normalize: it reuses
+# the already-normalized ``content_blocks``. Raw tool_use.id is preserved verbatim — ADR-008.
 _BLOCK_WIRE_FIELDS: dict[str, tuple[str, ...]] = {
     "text": ("type", "text"),
     "image": ("type", "source"),
@@ -84,22 +86,36 @@ _BLOCK_WIRE_FIELDS: dict[str, tuple[str, ...]] = {
     "tool_use": ("type", "id", "name", "input"),
     "thinking": ("type", "thinking", "signature"),
     "redacted_thinking": ("type", "data"),
+    # Hosted web search (``generation_mode == "research"``). The installed SDK does not model
+    # these two types at all, so their blocks arrive through the union fallback below and MUST be
+    # cut here; otherwise the fallback's own fields travel back to Anthropic and the whole
+    # continuation is rejected with 400 «Extra inputs are not permitted». The inner
+    # ``web_search_result`` items of ``content`` are raw wire objects (url / title /
+    # encrypted_content / page_age) and are wire-valid as they stand — they are NOT touched.
+    "server_tool_use": ("type", "id", "name", "input"),
+    "web_search_tool_result": ("type", "tool_use_id", "content"),
 }
 
 
 def _normalize_block(block: dict[str, Any]) -> dict[str, Any]:
     """Strip non-wire SDK fields from one content block by its type's wire allowlist (ADR-021).
 
-    For a known block type, keep only the wire-valid fields present in the block. For an unknown
-    type, drop only confirmed non-wire SDK annotations (``caller``) and keep the rest so no content
-    is lost (forward-compatible with new block types).
+    For a known block type, keep only the wire-valid fields present in the block. For a type with
+    no allowlist, keep the content but drop two artifacts: the SDK annotation ``caller`` (not a
+    wire field, ADR-021 §Decision) and the NULLS the SDK's union fallback injects. The installed
+    SDK validates every response content block against ``TextBlock | ToolUseBlock``; a block whose
+    ``type`` matches neither is built from the first variant, so it comes back carrying
+    ``text: None`` on top of its real fields. None of the types in
+    ``_ANTHROPIC_ASSISTANT_INPUT_TYPES`` that lack an allowlist requires an explicit null at its
+    TOP level, so dropping top-level ``None`` loses nothing for them; nested nulls (a
+    ``web_search_result``'s ``page_age``) live inside values and are untouched.
     """
     block_type = block.get("type")
     if isinstance(block_type, str) and block_type in _BLOCK_WIRE_FIELDS:
         allowed = _BLOCK_WIRE_FIELDS[block_type]
         return {k: block[k] for k in allowed if k in block}
-    # Unknown type: don't lose content — drop only known non-wire SDK fields.
-    return {k: v for k, v in block.items() if k != "caller"}
+    # No allowlist for this type: don't lose content — drop only known non-wire artifacts.
+    return {k: v for k, v in block.items() if k != "caller" and v is not None}
 
 
 # ADR-105 §A3.6: block types the Anthropic Messages API DEFINES in its input schema for an
