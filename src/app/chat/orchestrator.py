@@ -533,7 +533,7 @@ def _system_prompt_for(
 # (cache_control: ephemeral on system) is not invalidated and user data does not gain system
 # authority (05-security.md).
 _CONTEXT_FREE_STRING_MAX = {
-    "codeLanguage": 40,
+    "codeLanguage": 200,
     "tone": 40,
     "locale": 35,
 }

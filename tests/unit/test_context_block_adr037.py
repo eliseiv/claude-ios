@@ -99,7 +99,7 @@ def test_lenient_invalid_keys_dropped_valid_kept() -> None:
         {
             "responseStyle": "verbose",  # out-of-enum → dropped
             "verbosity": "extreme",  # out-of-enum → dropped
-            "codeLanguage": "x" * 41,  # > 40 chars → dropped
+            "codeLanguage": "x" * 201,  # > 200 chars → dropped
             "locale": "ru_RU-extra-but-way-too-long-string-here",  # > 35 chars → dropped
             "tone": "professional",  # valid free-string → kept
         }
@@ -137,11 +137,16 @@ def test_validated_value_accepts_each_valid(key: str, raw: str) -> None:
         ("tone", ""),  # empty after strip
         ("locale", "ru/RU"),  # disallowed char
         ("locale", "x" * 36),  # over length
-        ("codeLanguage", "y" * 41),  # over length
+        ("codeLanguage", "y" * 201),  # over length
     ],
 )
 def test_validated_value_rejects_invalid(key: str, raw: Any) -> None:
     assert _validated_context_value(key, raw) is None
+
+
+def test_code_language_accepts_exactly_200_chars() -> None:
+    """Upper boundary (2026-09-22): 200 kept, 201 dropped — see parametrized cases above."""
+    assert _validated_context_value("codeLanguage", "z" * 200) == "z" * 200
 
 
 def test_wrong_type_value_dropped_not_raised() -> None:
