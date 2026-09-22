@@ -176,7 +176,7 @@ async def test_partial_invalid_context_is_not_422_drops_invalid(
             "context": {
                 "responseStyle": "verbose",  # out-of-enum → dropped
                 "verbosity": 99,  # wrong type → dropped
-                "codeLanguage": "x" * 50,  # too long → dropped
+                "codeLanguage": "x" * 201,  # too long → dropped
                 "locale": "ru RU!",  # bad charset → dropped
                 "tone": "formal",  # valid → kept
                 "futureKey": "ignored",  # unknown → ignored
