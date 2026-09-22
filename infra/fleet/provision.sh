@@ -100,6 +100,25 @@ new)
   #   выставляется ПЕРЕД выходом в производство (07-deployment.md §Prod-readiness).
   #
   setvar APPSTORE_BUNDLE_ID ""
+  # --- Секреты, которые `.env.prod.example` оставляет плейсхолдером-заглушкой ------------
+  # Инцидент 2026-09-22 (ittechnewapps/appscoolnew/backrewio): `new` копировал шаблон, но не
+  # генерировал `KMS_LOCAL_MASTER_KEY` — на клоне оставался буквальный литерал
+  # `<base64-32-random-bytes>`. Он не ломает ни health, ни /docs — инстанс выглядит рабочим —
+  # но КАЖДЫЙ `/v1/chat/run` падал `500` на `base64.b64decode()` в `get_kms_client()`
+  # (`binascii.Error: Incorrect padding`), потому что зависимость собирается на первом же
+  # обращении к оркестратору. Тот же класс дефекта — ещё у пяти ключей: `PREVIEW_URL_SECRET`,
+  # `METRICS_SCRAPE_TOKEN` (свежие секреты, `.env.prod.example` только подсказывает команду
+  # `openssl rand ...`, а не генерирует значение) и `FAL_API_KEY`/`APNS_KEY_ID`/`APNS_TEAM_ID`/
+  # `APNS_TOPIC` (их легитимное «выключено» — ПУСТАЯ строка, а не текст подсказки в `<...>`:
+  # непустой мусор в `FAL_API_KEY` ушёл бы к fal.ai как `Authorization: Key <...>` вместо
+  # чистого документированного `503`).
+  setvar KMS_LOCAL_MASTER_KEY "$(openssl rand -base64 32)"
+  setvar PREVIEW_URL_SECRET "$(openssl rand -base64 32)"
+  setvar METRICS_SCRAPE_TOKEN "$(openssl rand -base64 32)"
+  setvar FAL_API_KEY ""
+  setvar APNS_KEY_ID ""
+  setvar APNS_TEAM_ID ""
+  setvar APNS_TOPIC ""
   # --- Продукты по умолчанию (решение владельца 2026-09-08) ---------------------------------
   # Раньше здесь стояли пустые карты — как защита от ВЫМЫШЛЕННЫХ продуктов шаблона
   # (`tokens_1500`, `weekly_xxx`), из-за которых покупка настоящего продукта отвергалась как
