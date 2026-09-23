@@ -547,6 +547,11 @@ class UserPreferences(Base):
     # не сортируют, строка читается по PK. Читается на КАЖДОМ синтезе и на сессии НЕ фиксируется,
     # иначе смена настройки не подействовала бы на уже начатые чаты (ADR-100 §5).
     default_voice_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # (migration 0037): default chat model. nullable; NULL = «дефолт инстанса» (тот же id,
+    # что `default:true` в GET /v1/models без персонального выбора). Внешнего ключа нет — каталог
+    # моделей живёт в коде/оверлеях, ссылочная целостность держится валидацией на PATCH
+    # (422 unsupported_model), ровно как у `default_voice_id` выше.
+    default_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )

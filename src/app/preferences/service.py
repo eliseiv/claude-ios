@@ -41,6 +41,7 @@ class PreferencesView:
     memory_enabled: bool
     memory_search_scope: Literal["global", "workspace"]
     default_voice_id: str | None
+    default_model: str | None
 
 
 def _defaults() -> PreferencesView:
@@ -55,6 +56,8 @@ def _defaults() -> PreferencesView:
         memory_search_scope="global",
         # ADR-100: NULL = голос инстанса (TTS_DEFAULT_VOICE_ID), а не «озвучки нет».
         default_voice_id=None,
+        # NULL = дефолт инстанса (GET /v1/models default:true без персонального выбора).
+        default_model=None,
     )
 
 
@@ -70,6 +73,7 @@ def _to_view(row: UserPreferences) -> PreferencesView:
         # сохраняется `characterId` в списке чатов при снятом флаге персонажей: выключатель гасит
         # поведение, но не стирает выбор пользователя.
         default_voice_id=row.default_voice_id,
+        default_model=row.default_model,
     )
 
 
@@ -98,12 +102,14 @@ class PreferencesService:
         code_defaults: dict[str, Any] | None = None,
         memory_search_scope: str | None = None,
         default_voice_id: str | None | _Unset = UNSET,
+        default_model: str | None | _Unset = UNSET,
     ) -> PreferencesView:
         """Upsert preferences, updating only the provided fields.
 
-        ``default_voice_id`` is the one parameter whose ``None`` is a VALUE (reset to the instance
-        voice), so «not provided» is carried by ``UNSET`` instead. Validation of the slug against
-        the registry happens at the router (the 422 codes are contract-level), not here.
+        ``default_voice_id``/``default_model`` are the parameters whose ``None`` is a VALUE (reset
+        to the instance default), so «not provided» is carried by ``UNSET`` instead. Validation of
+        the slug against the registry happens at the router (the 422 codes are contract-level), not
+        here.
         """
         row = await self._load(user_id)
         if row is None:
@@ -133,6 +139,11 @@ class PreferencesService:
                     if not isinstance(default_voice_id, _Unset)
                     else defaults.default_voice_id
                 ),
+                default_model=(
+                    default_model
+                    if not isinstance(default_model, _Unset)
+                    else defaults.default_model
+                ),
             )
             self._session.add(row)
         else:
@@ -146,6 +157,8 @@ class PreferencesService:
                 row.memory_search_scope = memory_search_scope
             if not isinstance(default_voice_id, _Unset):
                 row.default_voice_id = default_voice_id
+            if not isinstance(default_model, _Unset):
+                row.default_model = default_model
         await self._session.flush()
         await self._session.commit()
         return _to_view(row)
@@ -171,3 +184,14 @@ class PreferencesService:
         if row is None:
             return None
         return row.default_voice_id
+
+    async def get_default_model(self, user_id: uuid.UUID) -> str | None:
+        """Stored default chat model for the user, or ``None`` (= instance default).
+
+        Read on every `GET /v1/models` call (like `get_default_voice_id` — no session-fixing:
+        the catalog reflects the CURRENT preference, not the one at some past session's start).
+        """
+        row = await self._load(user_id)
+        if row is None:
+            return None
+        return row.default_model

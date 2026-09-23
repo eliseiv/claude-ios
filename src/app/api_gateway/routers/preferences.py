@@ -7,6 +7,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 
+from app import instance_config
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.chat.voices import is_selectable_voice
 from app.config import get_settings
@@ -14,6 +15,7 @@ from app.deps import CurrentUser, get_preferences_service
 from app.errors import (
     RateLimitedError,
     UnknownVoiceError,
+    UnsupportedModelError,
     VoiceOutputDisabledError,
 )
 from app.preferences.service import UNSET, PreferencesService, PreferencesView
@@ -35,6 +37,7 @@ def _to_response(view: PreferencesView) -> PreferencesResponse:
         memoryEnabled=view.memory_enabled,
         memorySearchScope=view.memory_search_scope,
         defaultVoiceId=view.default_voice_id,
+        defaultModel=view.default_model,
     )
 
 
@@ -59,14 +62,29 @@ def _validate_default_voice_id(value: str | None) -> None:
         raise UnknownVoiceError(f"voice '{value}' is not available on this instance")
 
 
+def _validate_default_model(value: str | None) -> None:
+    """Gate a non-null ``defaultModel`` on the instance's current chat catalog.
+
+    ``null`` is a legal value (reset to the instance default) and passes. Mirrors
+    ``_validate_default_voice_id``, minus the feature-toggle half — chat model selection has no
+    instance-wide off switch, only a witnessed model can be selected (same gate as `model` at
+    session creation, ADR-034, and scheduled-chats' create/PATCH, ADR-107).
+    """
+    if value is None:
+        return
+    if not instance_config.model_is_selectable(value, settings=get_settings()):
+        raise UnsupportedModelError(f"model '{value}' is not available on this instance")
+
+
 @router.get(
     "",
     response_model=PreferencesResponse,
     summary="Получить настройки",
     description=(
         "Возвращает пользовательские настройки: дефолтный тип ассистента (chat|code), "
-        "toggle уведомлений, голос озвучки по умолчанию и дефолты Code-контекста. Если "
-        "настройки ещё не заданы — возвращаются значения по умолчанию (chat / true / null / {})."
+        "toggle уведомлений, голос озвучки и модель чата по умолчанию, дефолты Code-контекста. "
+        "Если настройки ещё не заданы — возвращаются значения по умолчанию "
+        "(chat / true / null / null / {})."
     ),
 )
 async def get_preferences(
@@ -100,6 +118,9 @@ async def patch_preferences(
     voice_sent = "defaultVoiceId" in body.model_fields_set
     if voice_sent:
         _validate_default_voice_id(body.defaultVoiceId)
+    model_sent = "defaultModel" in body.model_fields_set
+    if model_sent:
+        _validate_default_model(body.defaultModel)
     view = await prefs.patch(
         current.user_id,
         default_assistant_mode=body.defaultAssistantMode,
@@ -107,5 +128,6 @@ async def patch_preferences(
         code_defaults=body.codeDefaults,
         memory_search_scope=body.memorySearchScope,
         default_voice_id=body.defaultVoiceId if voice_sent else UNSET,
+        default_model=body.defaultModel if model_sent else UNSET,
     )
     return _to_response(view)

@@ -9,13 +9,16 @@ per-user rate limit as other reads.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
 
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.chat.instance_catalog import build_instance_catalog
 from app.config import get_settings
-from app.deps import CurrentUser
+from app.deps import CurrentUser, get_preferences_service
 from app.errors import RateLimitedError
+from app.preferences.service import PreferencesService
 from app.schemas.models import ModelsResponse
 
 router = APIRouter(prefix="/v1/models", tags=["Models"])
@@ -27,12 +30,20 @@ router = APIRouter(prefix="/v1/models", tags=["Models"])
     summary="Доступные модели инстанса",
     description=(
         "Модели, которые этот инстанс умеет обслужить. Chat — по включённым credits-провайдерам; "
-        "photo/video — если задан ключ fal. У chat ровно одна `default:true` (дефолт инстанса), "
-        "она первая. Поле `id` чата уходит в `POST /v1/chat/run` `model`; fal-id — endpoint "
-        "генерации, не принимается как модель чата."
+        "photo/video — если задан ключ fal. У chat ровно одна `default:true`, она первая: "
+        "персональный выбор (`PATCH /v1/preferences` `defaultModel`), если задан и всё ещё есть "
+        "на витрине, иначе дефолт инстанса. Поле `id` чата уходит в `POST /v1/chat/run` `model`; "
+        "fal-id — endpoint генерации, не принимается как модель чата."
     ),
 )
-async def list_models(request: Request, current: CurrentUser) -> ModelsResponse:
+async def list_models(
+    request: Request,
+    current: CurrentUser,
+    prefs: Annotated[PreferencesService, Depends(get_preferences_service)],
+) -> ModelsResponse:
     if not await enforce_other_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
-    return ModelsResponse(models=build_instance_catalog(get_settings()))
+    user_default_model = await prefs.get_default_model(current.user_id)
+    return ModelsResponse(
+        models=build_instance_catalog(get_settings(), user_default_model=user_default_model)
+    )

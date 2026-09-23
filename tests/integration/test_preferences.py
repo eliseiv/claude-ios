@@ -41,6 +41,7 @@ async def test_get_without_row_returns_defaults_and_does_not_write(
         # что должен видеть клиент: «на этом инстансе памяти нет».
         "memoryEnabled": False,
         "defaultVoiceId": None,
+        "defaultModel": None,
         "memorySearchScope": "global",
     }
     # GET must NOT create a row (lazy defaults only).
@@ -68,6 +69,7 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "codeDefaults": {},
         "memoryEnabled": False,
         "defaultVoiceId": None,
+        "defaultModel": None,
         "memorySearchScope": "global",
     }
     assert await _row_count(db_sessionmaker, str(uid)) == 1
@@ -89,6 +91,7 @@ async def test_patch_upsert_partial_preserves_other_fields(
         "codeDefaults": {},
         "memoryEnabled": False,
         "defaultVoiceId": None,
+        "defaultModel": None,
         "memorySearchScope": "global",
     }
 

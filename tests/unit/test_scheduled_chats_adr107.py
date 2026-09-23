@@ -92,6 +92,7 @@ async def test_push_skips_when_notifications_disabled() -> None:
             memory_enabled=False,
             default_voice_id=None,
             memory_search_scope="global",
+            default_model=None,
         )
     )
     apns = MagicMock()
@@ -153,6 +154,7 @@ async def test_push_skips_when_apns_not_configured() -> None:
             memory_enabled=False,
             default_voice_id=None,
             memory_search_scope="global",
+            default_model=None,
         )
     )
     apns = MagicMock()

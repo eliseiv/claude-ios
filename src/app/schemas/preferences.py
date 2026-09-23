@@ -52,6 +52,14 @@ class PreferencesResponse(StrictModel):
             "на инстансе выключена."
         )
     )
+    defaultModel: str | None = Field(
+        description=(
+            "Модель чата по умолчанию — `id` из каталога `GET /v1/models` (только `modality: "
+            "chat`). `null` означает дефолт инстанса. Если сохранённая модель позже снята "
+            "оператором с витрины, `GET /v1/models` молча возвращается к дефолту инстанса — "
+            "значение здесь при этом не стирается."
+        )
+    )
 
 
 class PreferencesPatchRequest(StrictModel):
@@ -77,19 +85,29 @@ class PreferencesPatchRequest(StrictModel):
             "422 (`voice_output_disabled`)."
         ),
     )
+    defaultModel: str | None = Field(
+        default=None,
+        description=(
+            "Новая модель чата по умолчанию — `id` из каталога `GET /v1/models` (`modality: "
+            "chat`). Явный `null` сбрасывает выбор к дефолту инстанса. Значение вне текущей "
+            "витрины чата инстанса — ошибка 422 (`unsupported_model`)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check(self) -> PreferencesPatchRequest:
-        # `defaultVoiceId` считается ПРИСЛАННЫМ по факту присутствия ключа, а не по non-None:
-        # явный `null` — значимое значение (сброс к голосу инстанса, ADR-100), и проверка «хотя бы
-        # одно поле» обязана его засчитывать, иначе `{"defaultVoiceId": null}` отвергался бы как
-        # пустое тело. У остальных полей `null` значения не имеет и семантика прежняя.
+        # `defaultVoiceId`/`defaultModel` считаются ПРИСЛАННЫМИ по факту присутствия ключа, а не
+        # по non-None: явный `null` — значимое значение (сброс к дефолту инстанса, ADR-100), и
+        # проверка «хотя бы одно поле» обязана его засчитывать, иначе `{"defaultVoiceId": null}`
+        # отвергался бы как пустое тело. У остальных полей `null` значения не имеет и семантика
+        # прежняя.
         if (
             self.defaultAssistantMode is None
             and self.notificationsEnabled is None
             and self.codeDefaults is None
             and self.memorySearchScope is None
             and "defaultVoiceId" not in self.model_fields_set
+            and "defaultModel" not in self.model_fields_set
         ):
             raise ValueError("at least one field is required")
         if self.codeDefaults is not None:

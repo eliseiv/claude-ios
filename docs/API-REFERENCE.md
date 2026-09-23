@@ -840,7 +840,7 @@ Steps-view — агрегированные шаги одного message-шаг
 
 ## 19. Preferences
 
-Пользовательские настройки. Источник дефолта `assistantMode` для `/chat/run` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Если строка ещё не создана — возвращаются дефолты (`chat` / `false` / `null` / `{}`). Дефолт `notificationsEnabled=false` ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default; iOS включает push через `PATCH` после системного разрешения. Существующие строки `user_preferences` сохраняют ранее сохранённое значение (без backfill).
+Пользовательские настройки. Источник дефолта `assistantMode` для `/chat/run` ([ADR-012](adr/ADR-012-assistant-mode-vs-billing-mode.md)). Если строка ещё не создана — возвращаются дефолты (`chat` / `false` / `null` / `null` / `{}`). Дефолт `notificationsEnabled=false` ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)): privacy-by-default; iOS включает push через `PATCH` после системного разрешения. Существующие строки `user_preferences` сохраняют ранее сохранённое значение (без backfill).
 
 **Заголовки:** `Authorization: Bearer <JWT>`.
 
@@ -851,6 +851,7 @@ Steps-view — агрегированные шаги одного message-шаг
 | `defaultAssistantMode` | `chat` \| `code` | дефолтный тип ассистента; ортогонален billing_mode |
 | `notificationsEnabled` | bool | единый toggle уведомлений (push-токены — модуль notifications, Спринт 3); дефолт `false` при отсутствии строки ([ADR-032](adr/ADR-032-notifications-enabled-default-false.md)) |
 | `defaultVoiceId` | string \| null | голос озвучки по умолчанию ([ADR-100](adr/ADR-100-assistant-speech-output.md)); `null` = голос инстанса. Каталог допустимых значений — [`GET /v1/voices`](#29-озвучка-ответа-speech). Голос **персонажа** этой настройкой не переопределяется |
+| `defaultModel` | string \| null | модель чата по умолчанию (2026-09-23); `null` = дефолт инстанса. Каталог — [`GET /v1/models`](#24-models-список-моделей-инстанса), только `modality: chat`. Переставляет `default:true` в `GET /v1/models`; снятая оператором с витрины модель молча деградирует к дефолту инстанса (значение в preferences не стирается) |
 | `codeDefaults` | object | дефолты Code-контекста (язык и т.п.); без секретов |
 
 **Коды:** `200`; `401`; `429`; `5xx`.
@@ -858,11 +859,11 @@ Steps-view — агрегированные шаги одного message-шаг
 ### PATCH /v1/preferences
 Частичное обновление (любое подмножество полей); создаёт строку при отсутствии (upsert). Требуется хотя бы одно поле.
 
-**Request:** любое подмножество `{ "defaultAssistantMode": "chat"|"code", "notificationsEnabled": bool, "defaultVoiceId": string|null, "codeDefaults": object }`. `codeDefaults` — ≤ 8 KB сериализованного JSON, без секретов (ключи вида `key`/`token`/`secret` → `422`). `defaultVoiceId` вне каталога `GET /v1/voices` → `422 unknown_voice`; при выключенной на инстансе озвучке любое непустое значение → `422 voice_output_disabled` (уже сохранённое значение при этом продолжает отдаваться в `GET`); `null` возвращает голос инстанса.
+**Request:** любое подмножество `{ "defaultAssistantMode": "chat"|"code", "notificationsEnabled": bool, "defaultVoiceId": string|null, "defaultModel": string|null, "codeDefaults": object }`. `codeDefaults` — ≤ 8 KB сериализованного JSON, без секретов (ключи вида `key`/`token`/`secret` → `422`). `defaultVoiceId` вне каталога `GET /v1/voices` → `422 unknown_voice`; при выключенной на инстансе озвучке любое непустое значение → `422 voice_output_disabled` (уже сохранённое значение при этом продолжает отдаваться в `GET`); `null` возвращает голос инстанса. `defaultModel` вне текущей витрины `GET /v1/models` (`modality: chat`) → `422 unsupported_model`; `null` возвращает дефолт инстанса.
 
 **Response (200):** полный актуальный объект настроек (как у `GET`).
 
-**Коды:** `200`; `401`; `422` (ни одного поля / `codeDefaults` > 8 KB / секреты в `codeDefaults` / `unknown_voice` / `voice_output_disabled` / схема); `429`; `5xx`.
+**Коды:** `200`; `401`; `422` (ни одного поля / `codeDefaults` > 8 KB / секреты в `codeDefaults` / `unknown_voice` / `voice_output_disabled` / `unsupported_model` / схема); `429`; `5xx`.
 
 ---
 
@@ -1198,6 +1199,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 ```
 - `id` — для `modality=chat` уходит в `POST /v1/chat/run` `model`. Fal-id в `chat.model` → `422 unsupported_model`. `displayName`/`name` — одно имя для UI.
 - **`default` читается ТОЛЬКО внутри `modality` ([ADR-087 §4](adr/ADR-087-default-chat-model-gpt-4-1.md)):** сначала отфильтруйте по `modality`, потом берите `default`. У `chat` — ровно один `true` (и он первый в массиве), у `photo` — ровно один `true` при включённом fal, у `video` — **всегда `false`**. Поэтому в одном ответе законно встречаются **два** `default: true` (chat и photo); прочтение «ровно один на весь ответ» неверно.
+- **Персональный дефолт чата (`PATCH /v1/preferences` `defaultModel`, 2026-09-23):** если задан и всё ещё есть на витрине — `true`/первая позиция у `modality=chat` переходят на него вместо дефолта инстанса. Снятая оператором с витрины сохранённая модель молча не действует (без ошибки), выбор в preferences при этом не стирается.
 - **`modality` (`chat`\|`photo`\|`video`) — стабильный фильтр ([ADR-087 §5](adr/ADR-087-default-chat-model-gpt-4-1.md)):** значения не переименовываются и не меняют смысла; новое значение может быть только добавлено (отдельным решением), поэтому клиент обязан **игнорировать** строку с неизвестной `modality`, а не падать.
 - **Дефолт чата на OpenAI-инстансах — `gpt-4.1`** ([ADR-087](adr/ADR-087-default-chat-model-gpt-4-1.md)): у `gpt-4o` встроенный guardrail отказывался описывать изображения с людьми. `gpt-4o` остаётся в списке и выбирается явно. **Модель фиксируется на сессию** — сменить её внутри начатого чата нельзя (создайте новый чат); уже начатые чаты продолжаются на своей модели.
 - `provider` (`openai`\|`anthropic`\|`fal`), `variant`/`family` (у chat `null`) — аддитивные поля; старые клиенты игнорируют.

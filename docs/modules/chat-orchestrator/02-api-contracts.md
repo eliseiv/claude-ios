@@ -739,7 +739,7 @@ Backend только инициирует tool-call; исполняет клие
 - `displayName` / `name` — одно и то же человекочитаемое имя (`name` — дубль для клиентов, которые читают `name`).
 <a id="default-per-modality-adr-087"></a>
 - **`default` (bool) трактуется ТОЛЬКО внутри `modality` ([ADR-075](../../adr/ADR-075-unified-instance-models-catalog.md), уточнено [ADR-087 §4](../../adr/ADR-087-default-chat-model-gpt-4-1.md)).** Клиент обязан **сначала отфильтровать по `modality`**, и только потом читать `default`:
-  - `modality=chat` — ровно один `true` (дефолт инстанса), он **первый** в массиве;
+  - `modality=chat` — ровно один `true`, он **первый** в массиве. Это дефолт инстанса, **если** пользователь не задал персональный (`PATCH /v1/preferences` `defaultModel`, 2026-09-23) — тогда `true` и первая позиция переходят на выбранную модель. Сохранённый персональный выбор, снятый оператором с витрины, отдаётся как отсутствующий (молчаливая деградация к дефолту инстанса, без ошибки) — см. [modules/preferences/02-api-contracts.md](../preferences/02-api-contracts.md#get-v1preferences);
   - `modality=photo` — ровно один `true` (`fal-ai/nano-banana-pro`), только когда задан `FAL_API_KEY`;
   - `modality=video` — **всегда `false`**: дефолтной видео-модели у инстанса нет.
 
