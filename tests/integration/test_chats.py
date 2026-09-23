@@ -413,7 +413,12 @@ async def test_steps_view_uses_domain_tool_names_no_raw_id(
             payload={
                 "content": [
                     {"type": "text", "text": "let me read that"},
-                    {"type": "tool_use", "id": raw_id, "name": "fs_read", "input": {}},
+                    {
+                        "type": "tool_use",
+                        "id": raw_id,
+                        "name": "fs_read",
+                        "input": {"path": "/notes.txt"},
+                    },
                 ]
             },
         )
@@ -433,6 +438,48 @@ async def test_steps_view_uses_domain_tool_names_no_raw_id(
     tool_names = [st["toolName"] for st in body["steps"] if st["kind"] == "tool_call"]
     assert "files.read" in tool_names  # domain dotted name resolved
     assert raw_id not in r.text  # raw provider id never leaks
+    tool_call_step = next(st for st in body["steps"] if st["kind"] == "tool_call")
+    assert tool_call_step["args"] == {"path": "/notes.txt"}
+    assert tool_call_step["result"] is None
+    assert tool_call_step["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_steps_view_exposes_tool_result_and_error(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+        sid = await _seed_session(s, user_id=uid, title="t")
+        msid = uuid.uuid4()
+        tcid = await _seed_tool_call(
+            s,
+            session_id=sid,
+            message_step_id=msid,
+            tool_name="files.read",
+            provider_tool_use_id="toolu_RESOK",
+        )
+        await _seed_step(
+            s,
+            session_id=sid,
+            message_step_id=msid,
+            role="tool",
+            payload={
+                "toolCallId": str(tcid),
+                "toolName": "files.read",
+                "result": {"content": "file text"},
+                "error": None,
+            },
+        )
+        await s.commit()
+
+    r = await client.get(f"/v1/chats/{sid}/steps", headers=auth_headers(uid))
+    assert r.status_code == 200
+    tool_result_step = next(st for st in r.json()["steps"] if st["kind"] == "tool_result")
+    assert tool_result_step["result"] == {"content": "file text"}
+    assert tool_result_step["error"] is None
+    assert tool_result_step["args"] is None
 
 
 @pytest.mark.asyncio

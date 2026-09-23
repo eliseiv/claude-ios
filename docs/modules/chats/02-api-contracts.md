@@ -112,12 +112,16 @@ Steps-view для UI («N steps»): агрегированные шаги пос
       "kind": "reasoning | tool_call | tool_result | assistant_message",
       "toolName": "string | null",
       "summary": "string (краткое описание шага для UI)",
+      "args": "object | null",
+      "result": "object | null",
+      "error": "object | null",
       "createdAt": "ISO8601"
     }
   ]
 }
 ```
 - Источник — `chat_steps` + `tool_calls` по `message_step_id`. Порядок шагов внутри message-шага — по `chat_steps.seq` ([ADR-021](../../adr/ADR-021-deterministic-step-order-and-block-normalization.md)), НЕ `created_at`. `toolName` — доменное имя (с точкой), как в `tool_calls.tool_name`. Никаких секретов/raw provider id наружу.
+- **`args`/`result`/`error` (2026-09-23, аддитивно).** `args` — аргументы вызова (`tool_use.input`), заполнено только у `kind=tool_call`, иначе `null`. `result` — результат инструмента при успехе, `error` — при отказе; оба заполнены только у `kind=tool_result` (ровно одно из двух непусто, второе `null`), у прочих `kind` — оба `null`. Содержимое — то же самое, что уже отдаёт полная история (`GET /v1/chats/{id}` `steps[].payload`); steps-view не скрывает и не урезает его — только резюмирует в `summary`. Квиз-ход ([ADR-065 §2](../../adr/ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md)) эти поля не затрагивает: срез касается только текстовых блоков assistant-шага, а tool-шаги (включая сам `quiz.generate`) отдаются как обычно — то же правило, что уже действовало для `toolName`/`summary`.
 - **Parallel tool use ([ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** assistant-ход с несколькими `tool_use`-блоками порождает несколько строк `tool_calls` (по одной на вызов) → несколько `kind=tool_call` шагов steps-view одного `messageStepId` (по `toolName` каждого). Это согласуется с `toolCalls[]` ответа `/chat/run` — каждый элемент массива соответствует своему `tool_call`-шагу.
 
 ## PATCH /v1/chats/{id}

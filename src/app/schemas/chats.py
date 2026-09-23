@@ -96,6 +96,23 @@ class StepsViewStepSchema(StrictModel):
         default=None, description="Доменное имя инструмента (с точкой) или null."
     )
     summary: str = Field(description="Краткое человекочитаемое описание шага.")
+    args: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Аргументы вызова (`tool_use.input`) — только у `kind=tool_call`, иначе `null`. "
+            "То же содержимое, что в полной истории `GET /v1/chats/{id}` `steps[].payload`."
+        ),
+    )
+    result: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Результат инструмента — только у `kind=tool_result` при успехе, иначе `null`."
+        ),
+    )
+    error: dict[str, Any] | None = Field(
+        default=None,
+        description=("Ошибка инструмента — только у `kind=tool_result` при отказе, иначе `null`."),
+    )
     createdAt: datetime.datetime = Field(description="Время шага (ISO8601).")
 
 

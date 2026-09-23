@@ -163,6 +163,9 @@ async def get_chat_steps(
                 kind=step.kind,
                 toolName=step.tool_name,
                 summary=step.summary,
+                args=step.args,
+                result=step.result,
+                error=step.error,
                 createdAt=step.created_at,
             )
             for step in view.steps

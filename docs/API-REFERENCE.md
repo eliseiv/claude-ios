@@ -776,6 +776,9 @@ Steps-view — агрегированные шаги одного message-шаг
 | `steps[].kind` | `reasoning` \| `tool_call` \| `tool_result` \| `assistant_message` | тип шага для UI |
 | `steps[].toolName` | string \| null | доменное имя инструмента (с точкой) или `null` |
 | `steps[].summary` | string | краткое человекочитаемое описание |
+| `steps[].args` | object \| null | аргументы вызова, только у `kind=tool_call` |
+| `steps[].result` | object \| null | результат при успехе, только у `kind=tool_result` |
+| `steps[].error` | object \| null | ошибка при отказе, только у `kind=tool_result` |
 | `steps[].createdAt` | string (ISO8601) | время шага |
 
 **Коды:** `200`; `401`; `404`; `429`; `5xx`.

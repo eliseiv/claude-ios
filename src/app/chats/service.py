@@ -93,6 +93,9 @@ class StepsViewStep:
     tool_name: str | None
     summary: str
     created_at: datetime.datetime
+    args: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -548,6 +551,7 @@ class ChatsService:
                     # Resolve the public dotted tool name via the raw provider id (never emitted).
                     match = by_provider_id.get(str(block.get("id")))
                     domain_name = match.tool_name if match is not None else None
+                    raw_input = block.get("input")
                     out.append(
                         StepsViewStep(
                             kind="tool_call",
@@ -556,6 +560,7 @@ class ChatsService:
                                 f"вызов {domain_name}" if domain_name else "вызов инструмента"
                             ),
                             created_at=step.created_at,
+                            args=raw_input if isinstance(raw_input, dict) else None,
                         )
                     )
         elif step.role == "tool":
@@ -567,12 +572,16 @@ class ChatsService:
                 except ValueError:
                     match = None
                 tool_name = match.tool_name if match is not None else None
+            raw_result = step.payload.get("result")
+            raw_error = step.payload.get("error")
             out.append(
                 StepsViewStep(
                     kind="tool_result",
                     tool_name=tool_name,
                     summary=f"результат {tool_name}" if tool_name else "результат инструмента",
                     created_at=step.created_at,
+                    result=raw_result if isinstance(raw_result, dict) else None,
+                    error=raw_error if isinstance(raw_error, dict) else None,
                 )
             )
         # role == "user" is not part of the assistant step-view (it is the trigger, not a step).
