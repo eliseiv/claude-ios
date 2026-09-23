@@ -337,6 +337,61 @@ _PRESETS: tuple[Preset, ...] = (
             "提出文件夹和文件结构",
         ),
     ),
+    Preset(
+        id="generate_photo",
+        icon="photo",
+        title={
+            "en": "Generate Photo",
+            "ru": "Сгенерировать фото",
+            "zh-Hans": "生成照片",
+        },
+        prompt={
+            "en": (
+                "Generate a photo for me. I'll describe what I want to see — subject, style, "
+                "and mood — and you create it."
+            ),
+            "ru": (
+                "Сгенерируй для меня фото. Я опишу, что хочу увидеть — сюжет, стиль и "
+                "настроение, — а ты создашь изображение."
+            ),
+            "zh-Hans": (
+                "帮我生成一张照片。我会描述想要的内容——主体、风格和氛围——然后由你生成图片。"
+            ),
+        },
+        category="entertainment",
+        subcategory="creator",
+        description=_loc(
+            "Creates a photo from your description",
+            "Создаёт фото по твоему описанию",
+            "根据描述生成照片",
+        ),
+    ),
+    Preset(
+        id="generate_video",
+        icon="video",
+        title={
+            "en": "Generate Video",
+            "ru": "Сгенерировать видео",
+            "zh-Hans": "生成视频",
+        },
+        prompt={
+            "en": (
+                "Generate a video for me. I'll describe the scene, action, and style, and "
+                "you create it."
+            ),
+            "ru": (
+                "Сгенерируй для меня видео. Я опишу сцену, действие и стиль, а ты создашь " "ролик."
+            ),
+            "zh-Hans": ("帮我生成一段视频。我会描述场景、动作和风格，然后由你生成视频。"),
+        },
+        category="entertainment",
+        subcategory="creator",
+        description=_loc(
+            "Creates a video from your description",
+            "Создаёт видео по твоему описанию",
+            "根据描述生成视频",
+        ),
+    ),
     # --- Agents screen (appended; subcategory == id distinguishes these from home chips) ---
     Preset(
         id="editor",

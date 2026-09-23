@@ -32,6 +32,12 @@ _ORIGINAL_IDS = [
     "summarize_text",
     "project_structure",
 ]
+# 2026-09-23: two additional home chips (media generation) — declared right after the
+# original seven, before the Agents-screen cards (app.chat.presets declaration order).
+_MEDIA_IDS = [
+    "generate_photo",
+    "generate_video",
+]
 _AGENT_IDS = [
     "editor",
     "letters",
@@ -52,7 +58,7 @@ _AGENT_IDS = [
     "stories",
     "games",
 ]
-_EXPECTED_IDS = _ORIGINAL_IDS + _AGENT_IDS
+_EXPECTED_IDS = _ORIGINAL_IDS + _MEDIA_IDS + _AGENT_IDS
 # Stable SF-Symbol icons per id (ADR-035 §4, ADR-049 §1.1) — locale-independent.
 _EXPECTED_ICONS = {
     "plan_week": "calendar",
@@ -62,6 +68,8 @@ _EXPECTED_ICONS = {
     "daily_review": "checklist",
     "summarize_text": "doc.text",
     "project_structure": "folder",
+    "generate_photo": "photo",
+    "generate_video": "video",
     "editor": "pencil",
     "letters": "envelope",
     "analyst": "chart.bar",
@@ -132,6 +140,14 @@ _CHIP_SUBCATEGORIES = {
     "daily_review": "planner",
     "summarize_text": "editor",
     "project_structure": "documents",
+}
+_MEDIA_CATEGORIES = {
+    "generate_photo": "entertainment",
+    "generate_video": "entertainment",
+}
+_MEDIA_SUBCATEGORIES = {
+    "generate_photo": "creator",
+    "generate_video": "creator",
 }
 _RU_AGENT_DESCRIPTIONS = {
     "editor": "Улучшает тексты, письма и документы",
@@ -322,6 +338,9 @@ def test_every_shipped_preset_has_category_and_subcategory() -> None:
     for pid in _ORIGINAL_IDS:
         assert by_id[pid]["category"] == _CHIP_CATEGORIES[pid], pid
         assert by_id[pid]["subcategory"] == _CHIP_SUBCATEGORIES[pid], pid
+    for pid in _MEDIA_IDS:
+        assert by_id[pid]["category"] == _MEDIA_CATEGORIES[pid], pid
+        assert by_id[pid]["subcategory"] == _MEDIA_SUBCATEGORIES[pid], pid
     for pid in _AGENT_IDS:
         assert by_id[pid]["category"] == _EXPECTED_CATEGORIES[pid], pid
         assert by_id[pid]["subcategory"] == pid, pid

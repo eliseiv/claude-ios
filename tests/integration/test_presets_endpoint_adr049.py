@@ -32,6 +32,8 @@ _EXPECTED_IDS = [
     "daily_review",
     "summarize_text",
     "project_structure",
+    "generate_photo",
+    "generate_video",
     "editor",
     "letters",
     "analyst",
