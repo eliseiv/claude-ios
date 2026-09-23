@@ -28,7 +28,6 @@ orvianix.shop           orvianix      B
 probotappbek.shop       probotappbek  A
 probotit.shop           probotit      A
 qoravena.shop           qoravena      B
-qorimelo.shop           qorimelo      B
 ravelumi.shop           ravelumi      B
 ravionet.shop           ravionet      B
 selquro.shop            selquro       B
@@ -68,7 +67,6 @@ orvianix.shop
 probotappbek.shop
 probotit.shop
 qoravena.shop
-qorimelo.shop
 ravelumi.shop
 ravionet.shop
 reluniqo.shop

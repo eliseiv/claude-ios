@@ -268,6 +268,8 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 
 Актуальное состояние задачи. Опрашивает провайдера, пока задача не терминальна; после `completed`/`failed` ответ идёт из БД. Параллельно фоновый reconciler ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)) продвигает non-terminal jobs без клиентского poll — нужен для media-ready push, когда iOS заморозил приложение.
 
+> **[ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) (реализовано) — для задачи, принятой прокси-сервисом.** Контракт ручки не меняется (путь, поля, статусы, коды). Меняется источник исхода: ручка провайдера **не опрашивает** — исход приносит серверный вебхук прокси ([ниже](#post-v1mediawebhooksproxyjobid-серверный-adr-108)); ответ `GET` строится из БД. Первый `GET` после постановки переводит `queued` → `running` (сигнала «вендор начал» у прокси нет). Если колбэк не пришёл за `MEDIA_JOB_DEADLINE_SECONDS`, задача закрывается так же, как ниже (`failed`, `creditsRefunded: true`). Для клиента правило прежнее: опрашивать до `completed`/`failed`.
+
 При `completed` в `assets[].url` — **signed URL на наш домен** (`https://<SERVICE_DOMAIN>/v1/media/jobs/{jobId}/assets/{index}/{token}`), не голый `*.fal.media`. Сырой URL провайдера остаётся в БД (цепочки правок). Пустой `SERVICE_DOMAIN` — относительный путь. Просроченный токен: снова опросите эту ручку — придёт свежая ссылка.
 
 При переходе в `completed` (poll или reconciler) бэкенд один раз шлёт APNs (если `notificationsEnabled` + device token + `APNS_*`): custom keys `jobId`, `kind`, `mediaUrl` (= тот же signed `assets[0].url`), `aps.mutable-content=1`. Deep link — по `jobId` (чата у media нет).
@@ -343,7 +345,7 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 
 ## `GET` / `HEAD` `/v1/media/jobs/{jobId}/assets/{index}/{token}`
 
-Байты готового ассета. **Без JWT** — авторизация в HMAC-токене пути (AVPlayer заголовок Bearer не шлёт). Тот же гейт `FAL_API_KEY`, что у остального `/v1/media/*`.
+Байты готового ассета. **Без JWT** — авторизация в HMAC-токене пути (AVPlayer заголовок Bearer не шлёт). Тот же гейт `FAL_API_KEY`, что у остального `/v1/media/*`. [ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) : гейт — `proxy_configured ∨ fal_configured`; allowlist хостов — `FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES` (файл может жить на CDN вендора прокси); ответы ручки не меняются.
 
 Играйте / скачивайте `assets[].url` как есть. `HEAD` отдаёт те же заголовки без тела. Проброс `Range` / `If-Range` → `206` + `Content-Range` / `Accept-Ranges: bytes`.
 
@@ -402,6 +404,17 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 
 ---
 
+## `POST /v1/media/webhooks/proxy/{jobId}` (серверный, ADR-108)
+
+Норма [ADR-108 §4](../../adr/ADR-108-media-generation-via-proxy.md). **Не клиентский контракт:** ручку вызывает прокси-сервис по `callbackUrl`, который сервер передал при постановке задачи; iOS её не вызывает. В OpenAPI не публикуется.
+
+- **Авторизация:** query `token` = `hex(HMAC-SHA256(webhook_secret, jobId))`; `webhook_secret` = `PROXY_WEBHOOK_SECRET`, иначе `PROXY_API_KEY`. Без JWT, вне гейта `/v1/media/*` и вне per-user rate limit.
+- **Тело:** JSON-объект колбэка прокси (форма — у вендора; классификация исхода `pending` / `failed` / `completed` — [ADR-108 §4.3](../../adr/ADR-108-media-generation-via-proxy.md)). Лимит — общий `SIZE_LIMIT_BODY`.
+- **Ответы, в порядке проверок:** `401 unauthorized` — нет/неверный `token` (до обращения к БД); `422 validation_error` — тело не JSON-объект; `404 not_found` — задачи нет или она не принималась прокси (`provider = ''`); `200 {"ok": true}` — задача терминальна (повторная доставка, ничего не меняется) **или** исход применён.
+- **Идемпотентность:** первый терминальный исход выигрывает; возврат кредитов — ключом `media-refund:{jobId}`, push — claim `push_sent_at`.
+
+---
+
 ## Ошибки
 
 Формат общий: `{"error": {"code", "message", "requestId"}}`.
@@ -418,8 +431,8 @@ DELETE /v1/media/jobs/{jobId}          → убрать завершённую �
 | `validation_error` | 422 | **только на POST:** неизвестная модель; модель не того типа для маршрута; значение вне набора **режима** (`aspectRatio`/`resolution`/`duration`); параметр, которого у режима нет вовсе; не-`https` URL картинки; больше `maxInputImages` картинок; лишнее поле в теле; `sourceJobId` вместе с `imageUrls`/`imageUrl`; `sourceJobId` на незавершённую задачу, на видео или на задачу без результата; битый `cursor`. Также — если параметры отклонил сам провайдер при приёме (в `message` будет имя проблемного параметра). Отклонение уже принятого запуска приходит не этим кодом, а как `status: "failed"` |
 | `payload_too_large` | 413 | **только на `POST /v1/media/uploads`:** файл или тело запроса больше лимита |
 | `rate_limited` | 429 | превышен per-user лимит или лимит провайдера |
-| `upstream_error` | 502 | провайдер недоступен (таймаут, connect, 5xx, битый ответ). **Кредиты не списаны** — списание откатывается вместе с задачей. На download — исходящий fetch fal недоступен |
-| `media_generation_not_configured` | 503 | генерация не настроена на инстансе (`FAL_API_KEY` не задан) либо провайдер отклонил ключ. Проблема оператора, не клиента. Так отвечают маршруты постановки/опроса/uploads/`GET /v1/media/models` и download-роут. **Исключение:** `GET /v1/media/templates/*` и admin CRUD шаблонов не зависят от fal и при пустом ключе остаются доступны ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)) |
+| `upstream_error` | 502 | провайдер недоступен (таймаут, connect, 5xx, битый ответ). **Кредиты не списаны** — списание откатывается вместе с задачей. На download — исходящий fetch fal недоступен. [ADR-108 §3.3](../../adr/ADR-108-media-generation-via-proxy.md): через прокси — когда ни один маршрут вендора не принял задачу; код и откат списания те же |
+| `media_generation_not_configured` | 503 | генерация не настроена на инстансе (`FAL_API_KEY` не задан) либо провайдер отклонил ключ. Проблема оператора, не клиента. Так отвечают маршруты постановки/опроса/uploads/`GET /v1/media/models` и download-роут. **Исключение:** `GET /v1/media/templates/*` и admin CRUD шаблонов не зависят от fal и при пустом ключе остаются доступны ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)). [ADR-108 §1](../../adr/ADR-108-media-generation-via-proxy.md) : «не настроена» ⇔ ни `proxy_configured` (`PROXY_API_KEY` + `SERVICE_DOMAIN`), ни `FAL_API_KEY`; «отклонил ключ» — `401`/`403` прокси или fal; `POST /v1/media/uploads`, перехост стартового кадра i2v и features по-прежнему требуют `FAL_API_KEY` и без него отвечают этим кодом до списания |
 | `gateway_timeout` | 504 | **только download:** исходящее чтение CDN fal превысило таймаут |
 
 **Инварианты биллинга, на которые можно опираться:**

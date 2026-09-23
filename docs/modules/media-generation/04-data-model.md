@@ -4,6 +4,8 @@
 
 Колонка `moderation` добавляется **отдельной expand-only миграцией** ([ADR-086](../../adr/ADR-086-ugc-moderation.md)); номер ревизии определяется на момент реализации (следующий свободный, single head сохраняется). Backfill не выполняется: у старых строк `moderation IS NULL`, и это честно означает «не проверялось».
 
+Колонки `provider`, `vendor_price`, `pending_result` добавляются **одной** expand-only миграцией [ADR-108 §9](../../adr/ADR-108-media-generation-via-proxy.md) (номер ревизии — следующий после головы на момент реализации, single head). **DML по существующим строкам нет:** константный дефолт `''` у `provider` верен для всех прежних строк (они — прямой fal); констрейнты и индексы существующих колонок не меняются. Токен вебхука не хранится — он вычисляется из `jobId`. У proxy-задачи `status_url` и `response_url` — пустые строки (колонки остаются `NOT NULL`), `fal_endpoint` — endpoint варианта каталога, `fal_request_id` — id задачи прокси, а если прокси id не вернул — пустая строка ([ADR-108 §3.3](../../adr/ADR-108-media-generation-via-proxy.md)).
+
 ## `media_jobs`
 
 | Колонка | Тип | Описание |
@@ -25,6 +27,9 @@
 | `result` | `jsonb` NULL | **нормализованный** результат `{assets: [{url, contentType, fileName}], description?, seed?}` — не сырое тело провайдера. При блокировке пост-модерацией пишется `{"assets": []}` (ассеты отбрасываются, [ADR-086 §5](../../adr/ADR-086-ugc-moderation.md)) |
 | `moderation` | `jsonb` NULL | вердикт модерации ([ADR-086 §10](../../adr/ADR-086-ugc-moderation.md)): `{status, stage, categories, checkedAt, provider, model}`. `NULL` = **не проверялось** (строка создана до ADR-086 либо `MODERATION_ENABLED=false`) и отдаётся клиенту как `status: "unchecked"` — никогда как `passed` |
 | `error` | `text` NULL | причина провала, ≤ 500 символов |
+| `provider` | `text` NOT NULL default `''` | **[ADR-108 §9](../../adr/ADR-108-media-generation-via-proxy.md).** Сервис прокси, принявший запуск: `fal` \| `kie` \| `sosana`; `''` — задача прямого fal (legacy), в том числе все строки, существовавшие до миграции. Классификатор транспорта: `<> ''` — колбэк без опроса, `''` — опрос `status_url`. `CHECK` на значения нет — набор сервисов прокси внешний |
+| `vendor_price` | `numeric(18,6)` NULL | **[ADR-108 §8](../../adr/ADR-108-media-generation-via-proxy.md).** Фактическая цена запуска у вендора из колбэка; `NULL` — не сообщена. Клиенту не отдаётся; `provider_cost_usd` ([ADR-079](../../adr/ADR-079-crm-provider-cost-duration-payments.md)) не заменяет |
+| `pending_result` | `jsonb` NULL | **[ADR-108 §5](../../adr/ADR-108-media-generation-via-proxy.md).** Нормализованный результат колбэка `completed`, ещё не применённый общим путём завершения (пост-модерация / handler отказали транзиентно); после терминала — `NULL`. Download-роут его **не** читает — ассет достижим только из `result` |
 | `created_at` | `timestamptz` NOT NULL default `now()` | постановка в очередь |
 | `updated_at` | `timestamptz` NOT NULL default `now()` | последний переход состояния |
 

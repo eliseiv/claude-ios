@@ -1,6 +1,7 @@
 # ADR-072 — Per-instance gate for media chat tools (`CHAT_MEDIA_TOOLS_ENABLED`)
 
 - **Статус:** Accepted
+- **Пометка 2026-09-23 ([ADR-108 §1](ADR-108-media-generation-via-proxy.md), реализовано в коде и инфраструктуре; приёмка пройдена; переключение инстансов — по «Порядку выката»), тело не переписано:** «`FAL_API_KEY` включает всю media-поверхность» → её включает предикат «генерация настроена» (`proxy_configured ∨ fal_configured`); `CHAT_MEDIA_TOOLS_ENABLED` по-прежнему гейтит chat-tools поверх него.
 - **Дата:** 2026-08-12
 - **Связано:** [ADR-060](ADR-060-media-generation-fal.md), [ADR-068](ADR-068-media-generate-chat-tools.md), [ADR-070](ADR-070-media-choices-wizard.md), [ADR-017](ADR-017-multi-instance-deploy.md)
 

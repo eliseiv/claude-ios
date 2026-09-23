@@ -1,0 +1,303 @@
+# ADR-108 — Генерация фото и видео через прокси-сервис: отправка задачи в прокси, завершение вебхуком, маршрутизация по стоимости вендора
+
+- **Статус:** Accepted. **Реализовано в коде и инфраструктуре; приёмка пройдена; переключение инстансов — по «Порядку выката».** Миграция — `migrations/versions/20260923_0038_media_jobs_proxy.py` (ревизия `0038_media_jobs_proxy`, `down_revision` `0037_user_default_model`); тесты волны — `tests/unit/test_media_proxy_units_adr108.py`, `tests/integration/test_media_proxy_adr108.py`, `tests/integration/test_migration_0038_media_jobs_proxy_adr108.py`. Слияние в `main` и выкат на инстансы этим статусом не утверждаются.
+- **Дата:** 2026-09-23
+- **Тип:** feature-ADR (смена транспорта модуля [media-generation](../modules/media-generation/README.md))
+- **Решение владельца (дословно, пересмотру не подлежит):** «Теперь нам необходимо настроить все инстансы на работу не через FAL. у нас есть прокси сервис, который использует 3 провайдера для генерации фото и видео. FAL выходит слишком дорогим, поэтому мы используем данный сервис для генерации с помощью тех же моделей, но только через других провайдеров. Твоя задача изучить как работает сервис ai-media-upscaler и подготовить данный сервис через работу с помощью проксисервиса. Главное чтобы логика работы никак не поменялась, чтобы эндпоинты работали так же как сейчас, чтобы ценообразование считалось так же.»
+- **Образец:** репозиторий `ai-media-upscaler`, решение **ai-media-upscaler ADR-078** («Генерация фото и видео через Proxy AI»). Нумерация ADR в репозиториях независима: в этом репозитории номер ADR-078 занят другим решением ([ADR-078](ADR-078-crm-request-history-derived-from-domain.md)), и ссылка на образец везде несёт префикс репозитория.
+- **Пересматривает (тела не переписываются — пометки в шапках):**
+  - [ADR-060 §1](ADR-060-media-generation-fal.md) — «опрос, а не вебхук… опрос не добавляет ни одного неаутентифицированного эндпоинта» → завершение **proxy-задачи** приходит вебхуком (§4); клиентский контракт «202 + опрос нашего `GET`» **не меняется**;
+  - [ADR-060 §3](ADR-060-media-generation-fal.md) — исходящий клиент `fal_client.py` поверх `queue.fal.run` как единственный транспорт сабмита → `ProxyClient` поверх `POST {PROXY_BASE}/api/v1/tasks` (§2, §3); маппинг ошибок сабмита сохраняется по набору кодов (§3.3); персистентные `status_url`/`response_url` у proxy-задач пустые;
+  - [ADR-060 §5](ADR-060-media-generation-fal.md) — «`FAL_API_KEY` пуст → вся поверхность `/v1/media/*` — `503`» → предикат «генерация настроена» из §1;
+  - [ADR-067 §2/§3](ADR-067-media-ready-push-and-reconciler.md) — «push после `mark_completed` в `_advance` (общий путь poll и reconciler)», «reconciler вызывает fal status+result path» → у proxy-задачи точка завершения — общий путь завершения, вызываемый из вебхука **и** из `_advance` (§5); согласователь по proxy-задаче наружу не ходит (§6); «Отклонённое: webhook fal» снято для прокси;
+  - [ADR-105 §B2/§B5/§B7](ADR-105-provider-failure-input-shape-and-media-deadline.md) — «опрос выполняется всегда (последний шанс)» у proxy-задачи неприменим — опрашивать нечего; добавлено значение `lastObservation = webhook_pending`; §B7 «пустой ключ fal» относится только к legacy-задачам (§6);
+  - [ADR-085](ADR-085-media-asset-download-proxy.md) — allowlist хостов исходящего чтения ассета = `FAL_UPLOAD_HOST_SUFFIXES` → `FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES` (§7);
+  - [ADR-075](ADR-075-unified-instance-models-catalog.md) — «непустой `FAL_API_KEY` добавляет photo/video в `GET /v1/models`» и [ADR-072](ADR-072-chat-media-tools-instance-gate.md) — «`FAL_API_KEY` включает всю media-поверхность» → тот же предикат §1 (ответы ручек не меняются).
+- **Не пересматривает:** [ADR-061](ADR-061-fal-price-calibration-and-priced-defaults.md) и [ADR-099 §4](ADR-099-crm-admin-economics-and-instance-settings.md) (цена в кредитах — функция модели и параметров, резолв «оверлей → `MEDIA_MODEL_CREDITS` → `run_price()`» — бит-в-бит), [ADR-062](ADR-062-media-upload-via-fal-storage.md) (`POST /v1/media/uploads` остаётся на хранилище fal), [ADR-063](ADR-063-media-feed-edit-chains-and-job-deletion.md) (лента, `DELETE` и `409 job_not_terminal`), [ADR-066](ADR-066-media-templates-catalog.md) (шаблоны вне гейта), [ADR-068](ADR-068-media-generate-chat-tools.md)/[ADR-070](ADR-070-media-choices-wizard.md)/[ADR-103](ADR-103-media-jobs-turn-scoped-merge.md) (chat-tools и `mediaJobs`), [ADR-077 §3](ADR-077-crm-request-logs.md) (закрытие `request_logs` в терминале), [ADR-079](ADR-079-crm-provider-cost-duration-payments.md) (`provider_cost_usd` — формула не меняется, §8), [ADR-086](ADR-086-ugc-moderation.md) (пре-модерация до списания, пост-модерация image-результата), [ADR-105 §B1/§B3/§B6](ADR-105-provider-failure-input-shape-and-media-deadline.md) (инвариант дедлайна, величина `MEDIA_JOB_DEADLINE_SECONDS`, одна сборка сервиса).
+- **Миграция:** одна, expand-only, **без DML** по существующим строкам (§9). **Новые env:** `PROXY_API_KEY`, `PROXY_BASE`, `PROXY_TIMEOUT_SECONDS`, `PROXY_WEBHOOK_SECRET`, `MEDIA_VENDOR_PRICES` (имена — из образца), `MEDIA_RESULT_HOST_SUFFIXES` (в образце нет, §7).
+
+## Контекст
+
+**Как устроено сейчас (по коду, прочитано в этом ходу).** Сабмит — прямой вызов очереди fal: `await self._fal.submit(endpoint=variant.endpoint, payload=payload)` (`src/app/media_generation/service.py:317`, у `submit_custom` — `:382`) между `wallet.consume` (`:310`) и `self._repo.create(...)` (`:318`), в одной транзакции. Завершение — опросом: `_advance` зовёт `self._fal.status(...)` (`:619`) и `self._fal.result(...)` (`:637`), затем пост-модерация (`:666`), completion handler (`:678`), `mark_completed` (`:688`), `request_logs.finish_media` (`:694`), push (`:707`). Гейт — `require_media_generation_configured` проверяет `get_fal_client().configured` (`src/app/deps.py:245`). Согласователь при пустом `FAL_API_KEY` берёт только просроченные (`src/app/media_generation/reconciler.py:42-46`).
+
+**Что делает образец (по коду `ai-media-upscaler`, прочитано в этом ходу).**
+
+- `ProxyClient.submit` шлёт `POST {proxy_base}/api/v1/tasks` с телом `{service, endpoint, method: "POST", payload, callbackUrl}` и заголовком `Authorization: Bearer <proxy_api_key>`, ключей вендоров в теле нет (`src/app/media_generation/proxy_client.py:56-77`, `:47-54`). Id задачи прокси берётся из `request_id`/`requestId`/`id`/`uid`/`taskId`, иначе `"pending"` (`:184-196`).
+- Маршруты — `routing.candidate_routes`: для `nano-banana-2`/`nano-banana-pro` при `numImages == 1` и `resolution ∈ {1K,2K,4K}` — `sosana` (`https://api.sosana.art/api/image/create-async`) и `kie` (`https://api.kie.ai/api/v1/jobs/createTask`), всегда — `fal` (`https://queue.fal.run/<endpoint>`); сортировка по USD-цене единицы, при равенстве sosana → kie → fal (`src/app/media_generation/routing.py:278-325`, `:336-338`); таблица цен — `default_vendor_prices()` + оверрайд `MEDIA_VENDOR_PRICES` (`:55-84`, `:328-333`); любая модель, не названная в таблице, идёт через `"*:*:fal"` (`:83`).
+- Откат на следующий маршрут — только на `RateLimitedError`/`UpstreamError` (`src/app/media_generation/service.py:863-874` образца); `401/403` → `MediaGenerationNotConfiguredError`, `422` → `ValidationFailedError` без отката (`proxy_client.py:128-149`).
+- Завершение — `POST /v1/media/webhooks/proxy/{job_id}?token=…` на отдельном роутере без гейта и без JWT (`src/app/api_gateway/routers/media_webhooks.py:19-44`); токен — `HMAC-SHA256(secret, str(job_id))` hex, секрет — `PROXY_WEBHOOK_SECRET`, иначе `PROXY_API_KEY` (`webhook.py:30-48`); `callbackUrl = https://{SERVICE_DOMAIN}/v1/media/webhooks/proxy/{job_id}?token=…`, при пустом домене — `localhost` (`webhook.py:51-58`). Обработка: неверный токен → `401`, нет задачи → `404`, терминальная → no-op, `pending` → `mark_running`, `failed` → `_fail`, иначе нормализация и `_complete` с `vendor_price` (`service.py:1093-1115` образца).
+- Статусного API у прокси нет: proxy-задача при опросе только помечается `running` и по `MEDIA_JOB_TIMEOUT_SECONDS` (дефолт 45 мин) проваливается с возвратом (`service.py:1130-1134`, `:1289-1297` образца; `config.py:210` образца). Legacy-строки (`provider` пуст, `status_url` непуст) опрашивают fal по-прежнему (`service.py:1286-1287` образца).
+- Схема: `provider TEXT NOT NULL DEFAULT ''`, `vendor_price NUMERIC(18,6) NULL` — миграция `20260913_0025_media_jobs_proxy.py` образца (ревизия `0025_media_jobs_proxy`; тело ai-media-upscaler ADR-078 называет её `0024` — расхождение документа образца с его кодом, на наше решение не влияет).
+- `FAL_API_KEY` в образце остаётся для загрузок (`config.py:211-214` образца).
+
+**Утверждения об API прокси, которые НЕ подтверждены ничем, кроме кода образца и его фейков** (документации прокси в дереве нет): отсутствие статусного/опросного и отменяющего API; форма тела колбэка; политика повторной доставки колбэка при не-`2xx`; хосты CDN, на которых `sosana`/`kie` отдают результат. Решение ниже построено так, чтобы ни одно из них не ломало инварианты по умолчанию; проверка каждого — вопрос владельцу (§Вопросы).
+
+**Чем наш модуль отличается от образца и что поэтому НЕ переносится как есть:** пост-модерация image-результата ([ADR-086 §5](ADR-086-ugc-moderation.md)), дедлайн задачи 6 ч с двусторонним предикатом ([ADR-105 §B](ADR-105-provider-failure-input-shape-and-media-deadline.md)), push при готовности ([ADR-067](ADR-067-media-ready-push-and-reconciler.md)), закрытие `request_logs` ([ADR-077](ADR-077-crm-request-logs.md)), прокси ассетов с allowlist хостов ([ADR-085](ADR-085-media-asset-download-proxy.md)), скрытые задачи и completion handler аватаров ([10-avatar-speech-and-makeup.md](../modules/media-generation/10-avatar-speech-and-makeup.md)), автодеплой на весь флот одним прогоном. Каталоги моделей, шаблоны, features, avatar- и asset-proxy-механика **не выравниваются** с образцом; переносится только транспорт.
+
+## Решение
+
+### §1. Предикат «генерация настроена» и выбор транспорта
+
+- **`proxy_configured`** ⇔ `PROXY_API_KEY` непуст **и** `Settings.normalized_service_domain()` непуст. Домен входит в предикат, потому что без него `callbackUrl` не строится: образец в этом случае подставляет `localhost`, и задача, за которую списаны кредиты, гарантированно не получает колбэка и висит до дедлайна. У нас — отказ до списания.
+- **`fal_configured`** ⇔ `FAL_API_KEY` непуст (как сегодня, `FalClient.configured`).
+- **Гейт `/v1/media/*`** (`require_media_generation_configured`), media-строки `GET /v1/models` ([ADR-075](ADR-075-unified-instance-models-catalog.md)), media-строки тарифной поверхности CRM (`src/app/instance_config/tariffs.py:360`): **`proxy_configured ∨ fal_configured`**. Ответы ручек при этом не меняются: состав и форма те же, меняется только условие.
+- **Транспорт сабмита** (`submit` и `submit_custom`): `proxy_configured` → прокси (§2–§3); иначе `fal_configured` → прямой fal, **как сегодня** (строка `provider = ''`). Это переходная ветка: инстанс переключается заданием `PROXY_API_KEY` и откатывается его снятием, без выката кода — раскатка по одному инстансу, а не всем флотом одним деплоем (автодеплой CI выкатывает код на все инстансы разом). Снятие прямой ветки после переключения всего флота — [TD-056](../100-known-tech-debt.md).
+- **Что по-прежнему требует `FAL_API_KEY` при работающем прокси:** `POST /v1/media/uploads` ([ADR-062](ADR-062-media-upload-via-fal-storage.md)); перехост стартового кадра image-to-video на fal CDN (`FalClient.rehost_reference_image`, зовётся в `submit` до списания — `service.py:259`; хосты вне fal-allowlist возвращаются без изменений — `fal_client.py:231-232`); загрузки аватара/аудио/makeup-фото в features (`features_service.py` — вызовы `self._fal.upload`); опрос legacy-задач (§6). Без `FAL_API_KEY` эти пути отвечают `503 media_generation_not_configured` **до** списания, как сегодня на инстансе без ключа. Готовность features (`avatar-speech/options` → `configured`) — `(proxy_configured ∨ fal_configured) ∧ fal_configured ∧ speech`, то есть фактически требует `FAL_API_KEY`, как и сейчас.
+- **Правило провижининга:** `PROXY_API_KEY` задаётся **ровно** на тех инстансах, где сегодня задан `FAL_API_KEY`; `FAL_API_KEY` там **не снимается**. Инстанс без `FAL_API_KEY` не получает и `PROXY_API_KEY` — иначе на нём включилась бы генерация без загрузок.
+
+#### §1.1. Настройки — единственное нормативное место дефолтов
+
+| Переменная | Класс | Дефолт | Смысл |
+|---|---|---|---|
+| `PROXY_API_KEY` | секрет | пусто | ключ инстанса, `Authorization: Bearer`; пусто → прямой fal (§1) |
+| `PROXY_BASE` | public | `https://proxy.broadapps.dev` | база API прокси (из образца) |
+| `PROXY_TIMEOUT_SECONDS` | public | `30` | таймаут одного вызова прокси (§3.3) |
+| `PROXY_WEBHOOK_SECRET` | секрет | пусто → `PROXY_API_KEY` | подпись `callbackUrl` (§4.1); на проде задаётся явно, свежий per-instance (§Порядок выката п.1) |
+| `MEDIA_VENDOR_PRICES` | public | `{}` | оверрайд цен маршрутизации `{"<model>:<tier>:<service>": usd}` (§2); на кредиты не влияет |
+| `MEDIA_RESULT_HOST_SUFFIXES` | public | пусто | хосты CDN вендоров для allowlist результата (§7); пусто → маршруты sosana/kie выключены |
+
+Прочие документы ссылаются сюда и дефолтов не повторяют.
+
+### §2. Маршрутизация: публичная модель → сервис прокси и endpoint вендора
+
+Публичные id, варианты, allowlist полей, дефолты цены и сами кредиты остаются в `catalog.py` без изменений. Для каждого запуска строится список маршрутов `VendorRoute(service, endpoint, payload, unit_price, catalog_endpoint)`; перебор — по возрастанию `unit_price`, при равенстве sosana → kie → fal (порядок образца). Таблица цен маршрутизации — USD-стоимость единицы у вендора: **наша закупка, а не цена клиенту**; клиенту она не видна и на кредиты не влияет.
+
+**Сверка каталога claude-ios с образцом, модель за моделью** (endpoint'ы claude-ios — `src/app/media_generation/catalog.py:205,212,229,236,255,263,280,287,308,317`; образца — его `catalog.py:290,298,316,324,430,437,453,460,478,486`; совпадают побуквенно):
+
+| Публичная модель | endpoint fal (text / image) | Маршруты | Условие маршрута не-fal |
+|---|---|---|---|
+| `nano-banana-pro` | `fal-ai/nano-banana-pro` / `fal-ai/nano-banana-pro/edit` | sosana, kie, **fal** | §2.1 |
+| `nano-banana-2` | `fal-ai/nano-banana-2` / `fal-ai/nano-banana-2/edit` | sosana, kie, **fal**; `0.5K` — только fal | §2.1 |
+| `kling-video` | `fal-ai/kling-video/v2.5-turbo/pro/text-to-video` / `…/image-to-video` | только **fal** | — |
+| `kling-video-v3` | `fal-ai/kling-video/v3/pro/text-to-video` / `…/image-to-video` | только **fal** | — |
+| `veo-3.1` | `fal-ai/veo3.1` / `fal-ai/veo3.1/image-to-video` | только **fal** | — |
+| *features (в образце нет):* `fal-ai/imageutils/rembg`, `fal-ai/sync-lipsync/v3/image-to-video`, `fal-ai/image-apps-v2/makeup-application` (`features_service.py:42-44`) | как есть | только **fal** (правило `*:*:fal`) | — |
+
+Маршрут **fal** через прокси: `service = "fal"`, `endpoint = "https://queue.fal.run/" + <endpoint варианта>`, `payload` — **тот же**, что сегодня уходит в fal (`build_fal_input` / payload `submit_custom`), без единого изменения. Маршрут `fal` существует **всегда**, но место его в списке задаёт цена, а не правило «последним»: по дефолтной таблице он дороже `sosana`/`kie` на тех же ячейках и при равной цене проигрывает им по порядку sosana → kie → fal, поэтому на дефолтах он последний; оверрайд `MEDIA_VENDOR_PRICES`, делающий fal дешевле, ставит его **первым**. Следствие (§3.3): `422` маршрута `fal` останавливает перебор, поэтому при fal первым маршруты `sosana`/`kie` до него не пробуются, а при отказе fal по валидации клиент получает `422`, как сегодня.
+
+**Срок хранения результата fal-маршрута — задаёт прокси, а не мы.** Прямой сабмит шлёт fal заголовок `X-Fal-Object-Lifecycle-Preference` со сроком из `FAL_ASSET_RETENTION_SECONDS` ([ADR-061 §5](ADR-061-fal-price-calibration-and-priced-defaults.md); `FalClient._lifecycle_header`, `src/app/media_generation/fal_client.py:121-137`, ставится на сабмите — `:149`), а в шаблонах инстансов стоит `FAL_ASSET_RETENTION_SECONDS=0` (`.env.example:152`, `.env.prod.example:329`) — по `Settings.fal_asset_retention` (`src/app/config.py:910-926`) это «без истечения». Тело запроса к прокси `{service, endpoint, method, payload, callbackUrl}` (`src/app/media_generation/proxy_client.py:88-94`) поля заголовков не несёт, поэтому через прокси предпочтение до fal **не доходит**: срок хранения задаёт прокси (его fal-аккаунт и его заголовки) либо дефолт fal — по ADR-061 «не менее 7 дней». Гарантировать бессрочную ссылку на proxy-задачу мы не можем. Пересылает ли прокси заголовок и есть ли у него поле срока — [Q-108-9](../99-open-questions.md). **Смягчение и наблюдаемое поведение:** истёкший ассет отдаётся download-роутом как `404` — upstream `404`/`410` → `NotFoundError` (`src/app/media_generation/asset_proxy.py:26`, `:81-84`), задача при этом остаётся `completed` в ленте, как сегодня у legacy-задачи с настройкой, отличной от `0`; правка по `sourceJobId` с истёкшим ассетом приходит, как сегодня, `failed` от провайдера ([02-api-contracts.md §Цепочки правок](../modules/media-generation/02-api-contracts.md#цепочки-правок)). Долговременная защита — собственное хранение ассетов ([Q-060-1](../99-open-questions.md)).
+
+**Таблица цен маршрутизации** — `default_vendor_prices()` образца (снимок, прочитан в этом ходу; оверрайд — `MEDIA_VENDOR_PRICES`, JSON `{"<model>:<tier>:<service>": usd}`, неотрицательное число, иначе ключ игнорируется): `nano-banana-2` — `0.5K:fal 0.06`, `1K/2K/4K:sosana 0.022/0.028/0.040`, `:kie 0.04/0.06/0.09`, `:fal 0.08/0.12/0.16`; `nano-banana-pro` — `1K/2K/4K:sosana 0.0275/0.035/0.050`, `:kie 0.08/0.12/0.16`, `:fal 0.15/0.15/0.30`; `*:*:fal 1.0` для всего прочего. Ключи образца для моделей, которых в claude-ios нет (`seedvr-upscale`, `topaz-*`, `amt-fps`), не переносятся.
+
+#### §2.1. Маршрут не-fal допустим, только если он выполняет ТОТ ЖЕ запуск
+
+Образец ставит sosana/kie для Nano Banana без проверки параметров, и payload этих вендоров теряет часть запроса: у sosana нет `seed` и `output_format`, у kie нет `seed`, а `output_format` сводится к `png|jpg` (`routing.py:186-194`, `:221-234` образца). У нас это было бы изменением логики («тот же запрос — другой результат»), поэтому маршрут `sosana`/`kie` кандидат **только** при выполнении ВСЕХ условий:
+
+1. `MEDIA_RESULT_HOST_SUFFIXES` непуст (§7) — иначе результат вендора нечем отдать клиенту через download-роут;
+2. модель `nano-banana-2` или `nano-banana-pro`, `numImages == 1`, `resolution ∈ {1K, 2K, 4K}` (после `resolve_values`);
+3. `seed` не задан;
+4. `outputFormat`: у `sosana` — не задан; у `kie` — не задан, `png` или `jpeg`;
+5. `aspectRatio` **задан явно** и входит в базовый набор `_IMAGE_ASPECT_RATIOS` (`catalog.py:147-159`) — панорамные `4:1`, `1:4`, `8:1`, `1:8` у `nano-banana-2` идут только в fal. Явность обязательна: при отсутствии поля образец подставляет вендору `"auto"` (`"aspect_ratio": fal_payload.get("aspect_ratio") or "auto"` — ai-media-upscaler `src/app/media_generation/routing.py:189` для sosana и `:228` для kie), а в fal мы поле при отсутствии не шлём вовсе, и соотношение выбирает fal, — запрос без `aspectRatio` у вендора был бы другим запуском. Снять условие можно только после подтверждения, что `"auto"` вендора совпадает с поведением fal ([Q-108-4](../99-open-questions.md)). **Поддержка базового набора вендорами тоже не проверена** — проверка до заполнения `MEDIA_RESULT_HOST_SUFFIXES` ([Q-108-4](../99-open-questions.md)).
+
+Не выполнено хоть одно — у запуска единственный маршрут `fal`. По умолчанию (`MEDIA_RESULT_HOST_SUFFIXES` пуст) **все** запуски идут через `fal` прокси — тот же вендор, те же endpoint'ы и те же payload'ы, что сегодня. Удешевление за счёт `sosana`/`kie` включает оператор, заполнив `MEDIA_RESULT_HOST_SUFFIXES` после проверок [Q-108-3](../99-open-questions.md) и [Q-108-4](../99-open-questions.md).
+
+### §3. Сабмит
+
+#### §3.1. Порядок и транзакционная граница — без изменений
+
+```
+модерация входа → цена (resolve_values → price_of) → jobId = uuid4()
+  → wallet.consume(key=media-gen:{jobId})
+  → ProxyClient.submit по маршрутам §2 (callbackUrl строится из jobId ДО вызова)
+  → INSERT media_jobs(provider=<service принявшего маршрута>, fal_endpoint=<endpoint варианта>,
+                      fal_request_id=<id задачи прокси>, status_url='', response_url='', status='queued')
+  → session_scope commit — всё в ОДНОЙ транзакции
+```
+
+**Отказ сабмита откатывает списание на ЛЮБОМ вызывающем — и REST-ручке, и chat-tool.** Шаги `wallet.consume → транспорт → INSERT` в `submit` и `submit_custom` выполняются во **вложенной транзакции** (`SAVEPOINT`): исключение любого из них откатывает её до выхода из метода. Причина — предсуществующий дефект: tool-loop чата перехватывает отказы сабмита и превращает их в мягкую ошибку инструмента (`src/app/chat/global_tools.py` на `HEAD`: ветки `except InsufficientCreditsError`, `except ValidationFailedError`, `except UpstreamError`, `except MediaGenerationNotConfiguredError` после вызова `self._media.submit`), ход доходит до коммита, и строка списания, вставленная `consume`, коммитится без задачи. [TD-048](../100-known-tech-debt.md) описывает носитель на `InsufficientCreditsError`; те же перехватчики `UpstreamError`/`ValidationFailedError`/`MediaGenerationNotConfiguredError` дают тот же исход, если отказ случился **после** `consume` (транспорт). Вложенная транзакция закрывает весь класс внутри сабмита, не завися от того, что делает вызывающий; закрытие [TD-048](../100-known-tech-debt.md) — по его собственному признаку.
+
+Инварианты [ADR-060 §4](ADR-060-media-generation-fal.md) сохраняются: **сабмит не принят ни одним маршрутом → списание откатилось**; **строка есть ⇒ за неё заплачено и прокси ею владеет**. Модерация входа — до списания ([ADR-086 §4](ADR-086-ugc-moderation.md)). Цена считается **до** выбора маршрута и от маршрута не зависит.
+
+#### §3.2. Тело запроса к прокси
+
+`POST {PROXY_BASE}/api/v1/tasks`, `Authorization: Bearer <PROXY_API_KEY>`, `Content-Type: application/json`, тело `{"service", "endpoint", "method": "POST", "payload", "callbackUrl"}`; ключи вендоров в теле не передаются; таймаут вызова — `PROXY_TIMEOUT_SECONDS`. `callbackUrl` — §4.1.
+
+#### §3.3. Ошибки сабмита и откат на следующий маршрут
+
+| Ответ прокси | Маршрут `fal` | Маршрут `sosana`/`kie` | Итог, если маршрутов больше нет |
+|---|---|---|---|
+| таймаут / connect к прокси | **стоп**, `502 upstream_error` | **стоп**, `502 upstream_error` | — |
+| битый JSON / `2xx` с `error: true` / `5xx` / `402` / `400` без признака валидации | следующий маршрут | следующий маршрут | `502 upstream_error` |
+| `429` | следующий маршрут | следующий маршрут | `429 rate_limited` |
+| `401` / `403` | **стоп**, `503 media_generation_not_configured` | **стоп**, тот же `503` | — |
+| `422`, либо `400` с признаком валидации в `message` | **стоп**, `422 validation_error` с текстом (≤ 500 символов, одной строкой) | **следующий маршрут** | — |
+
+**Бюджет времени сабмита — решение (отличие от образца).** Все маршруты идут через ОДИН хост прокси, поэтому таймаут или обрыв соединения говорит о самом прокси, а не о вендоре, и следующий маршрут упрётся в то же; вдобавок таймаут неоднозначен — прокси мог задачу принять, и откат на другой маршрут означал бы вторую оплаченную генерацию. Поэтому на таймауте/connect откат **не выполняется** (образец откатывается и на них — ai-media-upscaler `service.py:863-874`, `proxy_client.py:106-109`). Итог: после списания сабмит держит транзакцию не дольше одного `PROXY_TIMEOUT_SECONDS` плюс быстрые HTTP-отказы остальных маршрутов (маршрутов не больше трёх) — того же порядка, что сегодняшний один вызов fal с `FAL_TIMEOUT_SECONDS`. Колбэк задачи, чей сабмит закончился таймаутом, приходит к откаченной строке → `404`, списания нет.
+
+**Id задачи прокси.** `fal_request_id` = первое непустое из `request_id`/`requestId`/`id`/`uid`/`taskId` ответа (в том числе внутри `data`), как в образце (`proxy_client.py:184-196` образца). Прокси id не вернул — пишется **пустая строка**, а не `"pending"` образца (`proxy_client.py:196` образца): `"pending"` читается как статус, а не как идентификатор, и совпадал бы у всех таких задач. Колонка диагностическая: колбэк адресуется `jobId`, а не id прокси.
+
+Строка `422` у не-fal — **отличие от образца**: отказ вендора, который параметр не поддерживает, не должен превращаться в `422` там, где fal запрос принял бы; поэтому окончательный вердикт о валидности даёт только маршрут `fal`. Набор кодов, видимых клиенту на `POST`, — тот же, что сегодня ([ADR-060 §3](ADR-060-media-generation-fal.md)); на любом из них списание откатывается.
+
+### §4. Завершение: входящий вебхук
+
+#### §4.1. Адрес и подпись
+
+- `callbackUrl = https://{normalized_service_domain}/v1/media/webhooks/proxy/{jobId}?token={token}`, `token = hex(HMAC-SHA256(key = webhook_secret, msg = str(jobId)))`, `webhook_secret = PROXY_WEBHOOK_SECRET`, если непуст, иначе `PROXY_API_KEY`. Токен детерминирован по `jobId` — в БД не хранится.
+- **Роутер флота путь пропускает без правок:** правила Traefik заданы только по хосту — `rule: "Host(\`<домен>\`)"` (`infra/fleet/gen-router-config.py:54`, сгенерированный `infra/fleet/dynamic.yml`), path-фильтров и middleware нет. У каждого инстанса свой `SERVICE_DOMAIN`, поэтому колбэк приходит ровно на тот инстанс, который поставил задачу.
+- **Контраст (два HMAC-токена в одном модуле, обе стороны помечены):** токен download-роута ассета ([ADR-085](ADR-085-media-asset-download-proxy.md)) подписан `PREVIEW_URL_SECRET` (по [06-rbac.md](../modules/media-generation/06-rbac.md)), лежит в ПУТИ и выдаётся клиенту; токен колбэка подписан `webhook_secret`, лежит в QUERY, клиенту не выдаётся никогда и открывает ровно одно действие — применение исхода к задаче `jobId`. Секреты не совпадают и не подменяют друг друга.
+
+#### §4.2. Ручка `POST /v1/media/webhooks/proxy/{jobId}`
+
+- **Отдельный роутер**, вне зависимости `require_media_generation_configured` и вне per-user rate limit `/v1/media/*`; без JWT. **Не входит в OpenAPI** (`include_in_schema=False`): это серверная ручка прокси, не контракт клиента, и публичный Swagger `/v1/media/*` остаётся прежним.
+- **Порядок проверок (прецеденция — нормативна):** (1) `token` ∉ `[1..128]` символов или HMAC не совпал (`hmac.compare_digest`; пустой `webhook_secret` ⇒ всегда несовпадение) → **`401 unauthorized`**, без обращения к БД; (2) тело не JSON-объект → `422 validation_error`; (3) задачи нет **или** `provider = ''` (legacy-задача колбэков не заказывала) → `404 not_found`; (4) задача терминальна → `200 {"ok": true}` без изменений (повторная доставка); (5) иначе — применение исхода §4.3 → `200 {"ok": true}`.
+- **Размер тела** — общий `SIZE_LIMIT_BODY` (дефолт 512 KB, `src/app/config.py:605`); повышенного лимита ручка не получает.
+- **Rate limit не вводится:** источник один (прокси), проверка подписи — одна HMAC до любого чтения БД, поэтому отбитый запрос дешевле, чем вызов лимитера в Redis; per-IP лимит по образцу `enforce_cloudpayments_webhook_limits` (`src/app/api_gateway/rate_limit.py:139-160`) при единственном IP-источнике душил бы законные колбэки при росте нагрузки.
+- **Транзакция и конкуренция:** строка читается `SELECT … FOR UPDATE` (новый метод репозитория по id), решение о переходе и все записи (`wallet.grant` возврата, `mark_*`, `push_sent_at`, `request_logs`) — в одной транзакции запроса. Тот же захват строки выполняет ветка proxy-задачи в `_advance` (§6) — чтобы колбэк `completed` и закрытие по дедлайну не записали два противоположных терминала одной задаче (без захвата последняя запись ORM перезаписала бы первую).
+
+#### §4.3. Применение исхода
+
+Классификация колбэка — `webhook_outcome` образца (`webhook.py:76-101` образца): `failed` (статус из набора отказа, либо `code ∈ {400,500,501}`, либо `error: true`), `completed` (статус из набора успеха **или** в теле найдены URL результата), иначе `pending`.
+
+- **Шаг 0 — результат уже получен.** `pending_result` непуст (прежний колбэк `completed` записан, §5 отложен) → новый колбэк результат **не меняет**: `completed` → только повтор §5 с сохранённого `pending_result`; `failed` / `pending` → игнорируется, `200` (`media_webhook_outcome = result_already_received`). Шаги ниже выполняются только при пустом `pending_result`.
+- `pending` → `mark_running`.
+- `failed` → `_fail(job, error=<текст вендора ≤ 500 символов>)` — тот же путь, что у отказа при опросе: возврат `media-refund:{jobId}`, классификация отказа по контент-политике ([ADR-086 §5](ADR-086-ugc-moderation.md); в `moderation.provider` пишется `job.provider`), `request_logs`, completion handler `fail`.
+- `completed` →
+  1. **нормализация:** если тело (на верхнем уровне или в `payload`/`data`/`result`) несёт форму fal (`images[]` / `video`) — она нормализуется **действующим** `_normalize_result` (`service.py:947`), чтобы `contentType`/`fileName`/`description`/`seed` сохранились как сегодня; иначе — сбор URL по образцу (`_collect_urls`, `webhook.py:158-197` образца) в `{assets: [{url}]}`;
+  2. **пригодность URL:** ассет без `https://` или с хостом вне `FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES` отбрасывается; ассетов не осталось → `_fail(error="generation produced no output")` — тот же исход, что «`COMPLETED` без пригодного URL» сегодня;
+  3. `vendor_price` из тела (`parse_vendor_price` образца) пишется в строку;
+  4. нормализованный результат пишется в **`pending_result`** (§9), и тем же вызовом выполняется **общий путь завершения** §5.
+
+Первый терминальный исход выигрывает: колбэк `failed` после уже записанного `pending_result` игнорируется; повторный `completed` при записанном `pending_result` результат не переписывает, а только повторяет попытку §5 (шаг 0 выше; полный порядок — [03-architecture.md §Транспорт через прокси](../modules/media-generation/03-architecture.md#транспорт-через-прокси-adr-108)).
+
+### §5. Общий путь завершения — один на вебхук и на `_advance`
+
+Выделяется из сегодняшней ветки `COMPLETED` опроса (`service.py:659-718`) **без изменения шагов и порядка**: пост-модерация (только `kind=image`) → `blocked` → `_blocked_by_moderation` (возврат, `{"assets": []}`, без push) → completion handler → `mark_completed(result, moderation)` (и `pending_result := NULL`) → `request_logs.finish_media` → `media_generation_completed` → push ([ADR-067 §2](ADR-067-media-ready-push-and-reconciler.md), claim `push_sent_at`). Вход пути — нормализованный результат: у legacy-задачи — из `fal.result`, у proxy-задачи — из `pending_result`.
+
+**Транзиентный отказ внутри пути** (исключение пост-модерации, исключение completion handler, кроме `ValidationFailedError`) у proxy-задачи **не теряет результат**: `pending_result` уже записан и коммитится, задача остаётся `running`, вебхук отвечает `200`, а следующий `_advance` (клиентский `GET` или согласователь) повторяет §5 с того же `pending_result`, пока не выйдет дедлайн ([ADR-105 §B2](ADR-105-provider-failure-input-shape-and-media-deadline.md): по истечении — `failed` + возврат, `lastObservation = moderation_unavailable` / `internal_error`). Это ровно сегодняшняя семантика «следующий опрос доберёт исход, но не позже дедлайна» — у proxy-задачи роль «следующего опроса» играет повтор с сохранённого результата. Без `pending_result` результат, полученный в единственном колбэке при недоступной модерации, был бы потерян.
+
+**Транзакционная граница §5 в вебхуке — SAVEPOINT, и это противоположно пути опроса (обе стороны помечены).** В вебхуке запись `pending_result` (и `vendor_price`) выполняется **до** §5, а сам §5 идёт во вложенной транзакции (`SAVEPOINT`): транзиентный отказ откатывает **только** частичные записи §5 (completion handler, `mark_*`), а `pending_result` коммитится вместе с ответом `200`. В пути опроса (`_advance`) исключение §5 у задачи моложе дедлайна, как сегодня, **всплывает и откатывает запрос целиком** — там терять нечего: у legacy-задачи результат заново читается из fal, у proxy-задачи он уже лежит в `pending_result` с прошлого коммита. Перенести «откат запроса целиком» в вебхук ЗАПРЕЩЕНО — это и есть потеря результата; перенести SAVEPOINT в опрос не нужно.
+
+Сервис для вебхука собирается **той же** `deps.build_media_generation_service` ([ADR-105 §B6](ADR-105-provider-failure-input-shape-and-media-deadline.md)) — третий вызывающий единственной сборки; вторая сборка запрещена.
+
+### §6. Опрос, согласователь, дедлайн
+
+- **Классификатор задачи:** proxy-задача ⇔ `provider <> ''`; legacy-задача ⇔ `provider = ''`. Симметрично: строка, созданная прямой ветвью §1 или до миграции, — legacy и опрашивает fal **как сегодня**, включая опрос после дедлайна; строка, принятая прокси, — proxy и **никогда** не опрашивает fal (`status_url` пуст). Контраст: `provider = 'fal'` — это fal **через прокси** (колбэк, без опроса), `provider = ''` — fal **напрямую** (опрос); одно имя вендора, противоположные транспорты.
+- **`_advance` proxy-задачи** (под захватом строки §4.2): `pending_result` непуст → §5; иначе возраст `> MEDIA_JOB_DEADLINE_SECONDS` → событие `media_generation_deadline_exceeded` с `lastObservation = webhook_pending` → `_fail(error="generation did not complete in time")`; иначе `mark_running`. Наружу вызовов нет. Предикат дедлайна остаётся двусторонним: (а) против недооценки — proxy-задача старше дедлайна без применённого терминального колбэка ⇒ `failed` + возврат; (б) против переоценки — моложе дедлайна ⇒ не трогается; с записанным `pending_result` ⇒ сначала §5, и только при его провале — дедлайн.
+- **Новое значение `lastObservation = webhook_pending`**, предикат: `provider <> ''` и терминальный колбэк не применён. Существующие пять значений ([ADR-105 §B5](ADR-105-provider-failure-input-shape-and-media-deadline.md)) относятся к legacy-задачам (и `moderation_unavailable`/`internal_error` — также к §5 proxy-задачи); предикаты взаимоисключающи по классификатору.
+- **Величина дедлайна не меняется** — `MEDIA_JOB_DEADLINE_SECONDS` (6 ч). Переменная образца `MEDIA_JOB_TIMEOUT_SECONDS` (45 мин) **не вводится**: это вторая величина о том же факте рядом с действующей. Следствие: proxy-задача, колбэк которой потерян, доходит до `failed` + возврат через 6 ч, а не через 45 мин ([Q-108-5](../99-open-questions.md)).
+- **Порядок продвижения внутри пакета.** Выборка согласователя — старейшие первыми с лимитом пакета (`order_by(created_at, id).limit(...)` в `MediaJobsRepository.list_non_terminal`); **внутри уже выбранного пакета** legacy-строки продвигаются раньше proxy-строк (`jobs.sort(key=lambda row: bool(row.provider))`, `src/app/media_generation/reconciler.py:84`). Норма принята: захват proxy-строки живёт до коммита пакета, и взятый до HTTP-опросов legacy-строк он держал бы параллельный колбэк той же задачи на всё время этих опросов. **Голодания это не создаёт:** сортировка не меняет, КАКИЕ строки попали в пакет (это решает выборка до сортировки), а меняет только порядок их обработки в одном тике; proxy-строка из пакета продвигается в том же тике, лишь позже — не более чем на время опросов legacy-строк этого пакета. Число legacy-строк со временем только убывает ([TD-057](../100-known-tech-debt.md)).
+- **Блокировки согласователя.** Согласователь продвигает пакет в одной транзакции, и захват строки proxy-задачи (§4.2) живёт до коммита пакета, а возврат по дедлайну делает `UPDATE wallets` — тот же ресурс, что трогает вебхук. Чтобы не ждать чужого захвата и не взаимоблокироваться с вебхуком, согласователь берёт proxy-строки через `SELECT … FOR UPDATE SKIP LOCKED`: занятая строка пропускается и продвигается следующим тиком. Клиентский `GET` и вебхук берут свою одну строку обычным `FOR UPDATE` (ждут). Legacy-строки блокировку не берут — как сегодня.
+- **Согласователь** (`reconcile_once`): выборка — незавершённые строки, **старейшие первыми**, отвечающие `provider <> '' ∨ fal_configured ∨ created_at < now − MEDIA_JOB_DEADLINE_SECONDS` (legacy-задачи при пустом `FAL_API_KEY` — только просроченные, как [ADR-105 §B7](ADR-105-provider-failure-input-shape-and-media-deadline.md)). Для proxy-задачи тик — только §5-повтор или дедлайн, без исходящих вызовов. Push по proxy-задаче согласователь шлёт только тогда, когда §5 завершился именно в его тике.
+- **Задачи в полёте в момент переключения инстанса** (`queued`/`running`, созданные прямым fal): это legacy-строки; они доопрашиваются fal, пока задан `FAL_API_KEY` (а он по §1 не снимается), и подчиняются дедлайну как сегодня. Переключение их не трогает, DML не требуется. Замер до переключения, только агрегаты: `SELECT count(*), sum(credits_charged), min(created_at) FROM media_jobs WHERE status IN ('queued','running');`.
+- **Отмена задачи:** пользовательской отмены в модуле нет, и решение её не вводит; `DELETE` незавершённой задачи — по-прежнему `409 job_not_terminal`. Отменяющего API у прокси образец не использует.
+
+### §7. Хосты результата: `MEDIA_RESULT_HOST_SUFFIXES`
+
+- Новая переменная, public, список суффиксов хостов через запятую, **дефолт пуст**.
+- **Норма:** дефолтный список `fal_asset_host_allowed(url, suffixes=None)` (`src/app/media_generation/asset_hosts.py:14-25`; сегодня при `suffixes is None` берётся `get_settings().fal_upload_host_suffixes()` — `:24`) становится `FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES`. Fal-only список остаётся **только** там, где он передан явно, — в `FalClient._upload_host_allowed` (`src/app/media_generation/fal_client.py:191`).
+- **Все вызывающие** (свип по имени функции `git grep -n 'fal_asset_host_allowed'` по всему репозиторию, снимок 2026-09-23; вызывающий, найденный позже, — тот же пункт): (1) `stream_fal_asset` — download-роут (`src/app/media_generation/asset_proxy.py:62`), дефолтный список → объединение; (2) `public_asset_url` — `assets[].url` ответов задачи и ленты и `mediaUrl` push (`src/app/media_generation/signed_url.py:125`), дефолтный список → объединение: **без этого хост вендора отдавался бы клиенту СЫРЫМ URL** — при несовпадении функция возвращает `stored_url` как есть (`signed_url.py:125-126`), в обход прокси ассетов [ADR-085](ADR-085-media-asset-download-proxy.md); (3) `FalClient._upload_host_allowed` (`fal_client.py:191`) — явный fal-only список, **не меняется**: через него идут `upload`, `rehost_reference_image`, `download_asset` (`fal_client.py:211,231,252`), куда результат чужого вендора попадать не должен; (4) проверка пригодности URL колбэка (§4.3 п.2) — новый вызывающий, объединение. Других вызывающих в `src/` нет, в `tests/` имя функции не встречается.
+- Следствие для `rehost_reference_image`: стартовый кадр i2v с хоста вендора (правка результата `sosana`/`kie` через `sourceJobId`) не перехостится и уходит в fal как есть (`fal_client.py:231-232`) — fal скачивает его сам, как сегодня любой внешний https-URL.
+- **Почему новая переменная, а не новый дефолт `FAL_UPLOAD_HOST_SUFFIXES`:** значение задано явно в `.env.example:150` и `.env.prod.example:328`, из которых разворачиваются инстансы, — дефолт кода на живых инстансах мёртв. Новая переменная ни в шаблонах, ни в `.env` не встречается, поэтому её дефолт действует.
+- Пустое значение выключает маршруты `sosana`/`kie` (§2.1 п.1) — результат, который нельзя отдать клиенту, заказывать нельзя.
+
+### §8. Стоимость вендора
+
+`vendor_price NUMERIC(18,6) NULL` — фактическая цена запуска, сообщённая колбэком (`NULL` = не сообщена). Клиенту не отдаётся ни в одном ответе. `provider_cost_usd` ([ADR-079](ADR-079-crm-provider-cost-duration-payments.md)) считается **той же** формулой, что сегодня (`service.py:297-305`), независимо от маршрута — CRM-отчёты себестоимости ([ADR-092](ADR-092-crm-daily-costs-endpoint.md)) этим решением не меняются, включая сырой ключ провайдера media-строк (`"Fal"`) — он описывает источник строки, а не вендора маршрута; переход CRM на `vendor_price` — отдельное решение ([Q-108-6](../99-open-questions.md)).
+
+### §9. Схема данных
+
+Одна миграция, expand-only, single head — `0038_media_jobs_proxy` (`migrations/versions/20260923_0038_media_jobs_proxy.py`, `down_revision` `0037_user_default_model`; длина id — в пределах `varchar(32)` `alembic_version`):
+
+| Колонка | Тип | Смысл |
+|---|---|---|
+| `provider` | `TEXT NOT NULL DEFAULT ''` | сервис прокси, принявший запуск: `fal` \| `kie` \| `sosana`; `''` — legacy (прямой fal). Классификатор §6 |
+| `vendor_price` | `NUMERIC(18,6) NULL` | §8 |
+| `pending_result` | `JSONB NULL` | нормализованный результат колбэка `completed`, ещё не применённый §5; после терминала — `NULL`. **Download-роут его не читает** — ассет достижим только из `result` терминальной `completed` |
+
+**DML по существующим строкам нет:** `ADD COLUMN … NOT NULL DEFAULT ''` с константным дефолтом заполняет старые строки значением `''` без `UPDATE`, и это значение для них верно (они legacy). Констрейнты и индексы существующих колонок не меняются; `CHECK` на значения `provider` не вводится (набор сервисов прокси — внешний контракт, как `status`). Токен вебхука не хранится (§4.1). Под правило «миграция, меняющая существующие данные» (Pre-push CI gate протокола агентов — прогон на копии прод-дампа) эта миграция не подпадает.
+
+### §10. Наблюдаемость (без секретов)
+
+- `media_generation_submitted` / `media_feature_submitted` — `+ proxyService` (или `null` у прямой ветки).
+- `proxy_call_outcome` (ошибка исходящего вызова: `reason`, `falEndpoint`, `upstreamStatus`), `proxy_submit_outcome` (принято: `proxyService`, `falEndpoint`, `proxyRequestId`), `media_generation_route_fallback` (`jobId`, `model`, `proxyService`, `falEndpoint`) — по образцу.
+- **`media_webhook_outcome`** (новое): `jobId`, `proxyService`, `outcome`. Значения и предикаты (взаимоисключающи, вычисляются из фактов запроса): `bad_token` — §4.2 п.1; `not_json` — п.2; `unknown_job` — п.3; `duplicate_terminal` — п.4; `pending` / `failed` — §4.3; `completed` — §5 отработал и задача **`completed`** (ассеты выданы); `completion_failed` — §5 отработал, но задача ушла в **`failed`** (пост-модерация `blocked`, `ValidationFailedError` completion handler); `completion_deferred` — `pending_result` записан, §5 отложен транзиентным отказом; `no_usable_asset` — §4.3 п.2 отбросил все ассеты; `result_already_received` — §4.3 шаг 0 проигнорировал колбэк `failed`/`pending`. Уровень: `bad_token`/`unknown_job`/`no_usable_asset` — WARNING, прочие — INFO. `duplicate_terminal` у задачи, закрытой дедлайном, — единственный наблюдаемый след «результат пришёл после дедлайна» (у legacy такой приход не наблюдается, [TD-050](../100-known-tech-debt.md)).
+- **Недостижимый вебхук — наблюдаем, а не молчит 6 ч.** Отказ, от которого иначе нет защиты: ключ прокси задан, а колбэк до инстанса не доходит (домен, TLS, маршрут, блок на стороне прокси) — тогда каждая proxy-задача висит `running` до дедлайна и закрывается возвратом, а закупка у вендора оплачена. Меры:
+  - **Метрика** `media_proxy_jobs_awaiting_callback` (Gauge, без лейблов) — число строк `provider <> '' ∧ status ∈ {queued, running} ∧ pending_result IS NULL ∧ created_at < now − 3600 s`. Порог — константа кода: замер длительности `completed` по флоту дал максимум 2310 с ([07-implementation-phases.md Phase 8 п.2](../modules/media-generation/07-implementation-phases.md#phase-8--дедлайн-задачи-и-одна-сборка-сервиса-adr-105-b-реализована-cbed6ca)); час — выше него и вшестеро ниже дедлайна. **Producer:** согласователь, один агрегатный запрос на тик (`reconcile_once`); **consumer:** правило алерта «значение > 0 дольше 15 мин» в `infra/observability/rules/alerts.yml` (зона `devops`). Предикат двусторонний: (а) proxy-задача без колбэка дольше часа — в счёте; (б) задача моложе часа, задача с записанным `pending_result` (колбэк дошёл, отложена модерация) и legacy-строки — не в счёте.
+  - **Self-probe достижимости** — шаг проверки инстанса (`infra/fleet/verify.sh`, зона `devops`), **снаружи** хоста: `POST https://{SERVICE_DOMAIN}/v1/media/webhooks/proxy/00000000-0000-0000-0000-000000000000` без `token` обязан вернуть `401` (§4.2 п.1 — отказ до БД); печатается только HTTP-код. `401` доказывает, что маршрут, TLS и роутер пропускают путь до приложения; `404`/`502`/таймаут — вебхук недостижим, инстанс на прокси не переключается. Доходит ли до инстанса сам **прокси** (его исходящая сеть), probe не доказывает — это даёт только метрика выше и [Q-108-2](../99-open-questions.md).
+  - **Связь с дедлайном** ([Q-108-5](../99-open-questions.md)): метрика даёт реакцию за час вместо шести; сокращение самого дедлайна — решение владельца.
+  - ⚠️ **Оговорка о доставке.** «Реакция за час» наступает, только если алерт до кого-то доходит. Прогон признака «правило алерта без канала доставки» по конфигурации репозитория: `grep -rn -i -E 'alertmanager|alerting:' infra docker-compose*.yml .github` — **0** совпадений (положительный контроль: та же команда на копии `prometheus.prod.yml` с дописанным `alerting:` дала 2), правил в `infra/observability/rules/alerts.yml` — **8**, то есть без канала доставки **8 из 8**, включая `MediaProxyJobsAwaitingCallback`; Prometheus в `infra/fleet/` не упоминается вовсе (`git grep -n -i prometheus -- infra/fleet` — пусто), а `prometheus.prod.yml` снимает только `api:8000` одного стека. Долг — [TD-060](../100-known-tech-debt.md). До его закрытия недостижимость вебхука ловится только разделом «ПРОКСИ ГЕНЕРАЦИИ» `verify.sh` при прогоне оператором и ручным чтением метрики.
+- **Запрещено в логах:** `PROXY_API_KEY`, `webhook_secret`, значение `token`, тело колбэка целиком, URL ассета целиком.
+- **Access-логи.** Приложение пишет access-лог: gunicorn с `UvicornWorker` и `--access-logfile -` (`Dockerfile:87-94`). **Норма:** фильтр на логгере `uvicorn.access` вырезает query-строку у путей `/v1/media/webhooks/proxy/*` до записи (фильтр реализует `backend` — `AccessLogQueryRedactionFilter` в `src/app/observability/logging.py`; то, что строка access-лога без фильтра содержит query, — наблюдение ревью, в этом решении не измерено; тест по захваченному журналу пишет `qa` ([09-testing.md](../modules/media-generation/09-testing.md))). Access-лог Traefik флота включён для ответов `400-599` (`infra/fleet/router/traefik.yml:36-38`), то есть колбэки с отказом (`401`/`404`/`422`) попадают в него с query; как его редактировать — [Q-108-10](../99-open-questions.md), зона `devops`, до его закрытия область утечки — одна задача на токен (§4.1).
+
+### §11. Безопасность новой ручки — сводка
+
+Аутентификация — HMAC по `jobId` (§4.1), без JWT; отказ без подписи — `401` до БД; идемпотентность — терминальная задача не меняется, возврат идемпотентен ключом `media-refund:{jobId}`, push — claim `push_sent_at`; SSRF — сервер по URL из колбэка не ходит, кроме download-роута и модерации изображений, а URL вне allowlist отбрасывается до записи (§4.3); размер тела — общий лимит; rate limit — не вводится (§4.2); ручка вне OpenAPI; ключ прокси и секрет подписи — per-instance секреты.
+
+## Было → стало (по каждому затронутому пути)
+
+Для инстанса, где задан `PROXY_API_KEY` (§1). Инстанс без него работает, как сегодня.
+
+| Путь | Было | Стало |
+|---|---|---|
+| `POST /v1/media/images`, `/videos` | сабмит в `queue.fal.run` ключом `FAL_API_KEY` | сабмит в прокси (§3); вендор — первый допустимый маршрут §2 (по умолчанию — fal через прокси). Коды ответа, `202`-тело, цена и откат списания — те же |
+| Chat-tools `media.generate_*`, `mediaSelection` | тот же `MediaGenerationService.submit` | тот же, транспорт — §3 |
+| Features: `…/user-avatars/{id}/prepare`, `avatar-speech`, `makeup` | `submit_custom` → fal | `submit_custom` → прокси, маршрут только `fal`; загрузки — fal storage как сегодня |
+| `GET /v1/media/jobs/{jobId}` | опрос fal; `queued → running`, когда fal отвечает `IN_QUEUE`/`IN_PROGRESS`; `completed`, когда опрос нашёл результат | proxy-задача: наружу не ходит; первый `_advance` ставит `running`; `completed`/`failed` — с колбэком (§4) или повтором §5; дедлайн — §6 (`webhook_pending`). Legacy-задача — как было |
+| `GET /v1/media/jobs` (лента) | read-only | без изменений |
+| `DELETE /v1/media/jobs/{jobId}` | `409` для незавершённой | без изменений |
+| `GET`/`HEAD …/assets/{index}/{token}` | allowlist `FAL_UPLOAD_HOST_SUFFIXES` | allowlist `∪ MEDIA_RESULT_HOST_SUFFIXES` (§7); при пустом значении — как было |
+| `assets[].url` задачи и ленты, `mediaUrl` push (`public_asset_url`) | signed URL, если хост в `FAL_UPLOAD_HOST_SUFFIXES`, иначе сырой URL | signed URL, если хост в объединении §7; ассет с хостом вне объединения до строки не доходит (§4.3 п.2) |
+| `POST /v1/media/uploads` | fal storage | без изменений (нужен `FAL_API_KEY`) |
+| Срок хранения результата fal-маршрута | заголовок `X-Fal-Object-Lifecycle-Preference` по `FAL_ASSET_RETENTION_SECONDS` (шаблон — `0`, без истечения) | через прокси заголовок не передаётся; срок — прокси/дефолт fal (≥ 7 дней по ADR-061); истёкший ассет → `404` download-роута ([Q-108-9](../99-open-questions.md)) |
+| Chat-tools `media.generate_*`: отказ сабмита после списания | мягкая ошибка инструмента, строка списания коммитится без задачи (предсуществующий дефект, [TD-048](../100-known-tech-debt.md)) | вложенная транзакция сабмита откатывает списание; баланс не меняется (§3.1) |
+| `GET /v1/media/models`, media-строки `GET /v1/models`, тарифы CRM | видны при `FAL_API_KEY` | видны при `proxy_configured ∨ fal_configured` (§1); содержимое то же |
+| `/v1/media/templates/*` | вне гейта | без изменений |
+| Согласователь | опрашивает fal по каждой незавершённой | legacy — как было; proxy — §5-повтор или дедлайн, без исходящих вызовов (§6) |
+| Push «media ready» | из `_advance` (опрос или согласователь) | из §5 — в вебхуке, в `GET` или в согласователе, где §5 завершился |
+| **Новый** `POST /v1/media/webhooks/proxy/{jobId}` | — | §4; вне OpenAPI |
+
+Единственные изменения, наблюдаемые клиентом, и все они неизбежно следуют из переноса: (1) момент перехода `queued → running` (у прокси нет сигнала «вендор начал»); (2) при включённых маршрутах `sosana`/`kie` — CDN-хост в `inputImageUrls` следующих правок и сам вендор изображения (`assets[].url` клиенту по-прежнему signed URL на наш домен); (3) при потере колбэка задача закрывается дедлайном, а не опросом fal.
+
+## Альтернативы
+
+- **Поллинг прокси вместо вебхука.** Отклонено: по образцу статусного API у прокси нет (не подтверждено документацией прокси — [Q-108-1](../99-open-questions.md)). Если окажется, что есть, дедлайн можно дополнить опросом отдельным решением.
+- **Строгий гейт образца (`PROXY_API_KEY` пуст → `503`).** Отклонено: автодеплой выкатывает код на весь флот сразу, и любой инстанс без провижининга ключа потерял бы генерацию в момент выката; переходная ветка §1 даёт раскатку по одному инстансу и откат снятием переменной.
+- **`MEDIA_JOB_TIMEOUT_SECONDS` образца (45 мин).** Отклонено как вторая величина о том же факте (§6); сокращение дедлайна — решение владельца ([Q-108-5](../99-open-questions.md)).
+- **Маршрутизация sosana/kie без условий §2.1** (как в образце). Отклонено: теряет `seed`/`outputFormat` и может отклонить параметры, которые fal принимает, — меняет логику запуска.
+- **Применять исход колбэка без `pending_result`** (как в образце). Отклонено: при недоступной пост-модерации результат единственного колбэка терялся бы, а задача доживала бы до дедлайна с оплаченной у вендора генерацией.
+- **Коммит строки до сабмита** (чтобы ранний колбэк гарантированно видел строку). Отклонено: ломает инвариант «`5xx` на `POST` ⇒ списания и задачи нет». Остаточное окно гонки — [Q-108-2](../99-open-questions.md).
+
+## Последствия
+
+- (+) Генерация идёт через прокси; удешевление Nano Banana включается одной переменной после проверок; остальные модели — fal через прокси.
+- (+) Публичные контракты `/v1/media/*`, цены в кредитах и биллинговые инварианты — без изменений.
+- (−) Значение, обязанное совпадать на основном и резерве (`PROXY_WEBHOOK_SECRET`), живёт в `.env` каждого сервера отдельно — класс риска [TD-059](../100-known-tech-debt.md); для этого секрета закрыт `proxy-rollout.sh` и сверкой в `verify.sh`.
+- (+) Потерянный колбэк не держит оплату дольше дедлайна; поздний колбэк наблюдаем (`duplicate_terminal`).
+- (−) `FAL_API_KEY` остаётся обязательным на генерирующих инстансах (загрузки, перехост i2v, features).
+- (−) Колбэк, пришедший раньше коммита транзакции сабмита, получает `404`; исход задачи тогда зависит от повторной доставки прокси ([Q-108-2](../99-open-questions.md)), иначе — дедлайн и возврат.
+- (−) Ротация `PROXY_API_KEY` при пустом `PROXY_WEBHOOK_SECRET` обесценивает токены задач в полёте — их закроет дедлайн. Поэтому `PROXY_WEBHOOK_SECRET` задаётся явно.
+- (−) Две ветки транспорта сабмита в коде до переключения всего флота (§1) — [TD-056](../100-known-tech-debt.md); ветка опроса legacy до исчерпания legacy-строк — [TD-057](../100-known-tech-debt.md); ротация `PROXY_WEBHOOK_SECRET` без предыдущего значения обесценивает токены задач в полёте — [TD-058](../100-known-tech-debt.md).
+
+## Порядок выката
+
+1. **devops (до мержа кода):** на каждом инстансе с непустым `FAL_API_KEY` **вписать в `.env` свежий `PROXY_WEBHOOK_SECRET` — ОДНО И ТО ЖЕ значение на основном и резервном сервере** (пока `PROXY_API_KEY` пуст, секрет ни на что не влияет — токенов никто не получает). Секрет обязан совпадать на обоих: после повышения резерва колбэки задач в полёте проверяются секретом резерва. Для существующих инстансов это делает `infra/fleet/proxy-rollout.sh` с маршрутизатора (сухой прогон по умолчанию, запись — `--apply`; разные непустые секреты на двух серверах — остановка без выбора). **Остановка с кодом 6:** если на основном `PROXY_API_KEY` уже задан, а `PROXY_WEBHOOK_SECRET` пуст, колбэки сейчас подписаны ключом прокси (§4.1), и запись секрета на основной сменила бы ключ подписи — задачи в полёте получили бы `401`. Скрипт в БД не ходит; продолжение — только с флагом `--no-proxy-jobs-in-flight` после того, как запрос п.5 (`SELECT count(*) FROM media_jobs WHERE provider <> '' AND status IN ('queued','running');`) дал на основном `0`. Перенос секрета на резерв ключ подписи основного не меняет и остановки не требует. `provision.sh new` генерирует секрет новому инстансу, `provision.sh adapt` его не трогает (его зовут на резерве после копии `.env`, и генерация там развела бы секреты). Совпадение проверяет раздел «ПРОКСИ ГЕНЕРАЦИИ» `infra/fleet/verify.sh` («совпадает / РАЗНЫЙ / нет данных»); он же сверяет **состояние** `PROXY_API_KEY` (пусто / задан / заглушка, не значение) на основном и резерве — несовпадение даёт нарушение `ключ-прокси-на-серверах-различается` (обрыв записи между серверами иначе всплыл бы только при повышении резерва); и подготовить `PROXY_API_KEY` (выдаёт владелец прокси; **решение владельца 2026-09-23: отдельный ключ на каждый инстанс** — [Q-108-7](../99-open-questions.md), закрыт), **не вписывая `PROXY_API_KEY` в `.env`** до шага 3. **`PROXY_API_KEY` вписывает владелец, вне репозитория**: ни шаблоны, ни `provision.sh` его значения не задают; убедиться, что `SERVICE_DOMAIN` задан. Шаблоны `.env.example`/`.env.prod.example`, `infra/fleet/provision.sh`, `infra/fleet/verify.sh` — зона `devops`.
+2. **Код** выкатывается — поведение всех инстансов не меняется (ключа прокси нет, работает прямая ветка).
+3. **Переключение по одному инстансу:** self-probe §10 даёт `401`; владелец вписывает `PROXY_API_KEY` на **оба** сервера инстанса тем же `proxy-rollout.sh` (ключ — только из stdin или файла, не аргументом командной строки; `PROXY_WEBHOOK_SECRET` уже задан шагом 1), перезапуск `api` — только на основном (`--restart`), прогнать по одному запуску на каждую модель и один features-запуск (если флаги включены) до `completed`, проверить приход колбэка (`media_webhook_outcome = completed` **и** `GET /v1/media/jobs/{jobId}` → `completed` с ассетами; `completion_failed` — колбэк дошёл, но задача провалена, переключение не подтверждено), сверить `creditsCharged` и возврат на заведомо отклоняемом промпте; затем следующий инстанс. Пока открыты [Q-108-1](../99-open-questions.md) и [Q-108-2](../99-open-questions.md) (нет опросного API, неизвестна повторная доставка), переключение **только по одному инстансу с этой проверкой** — массовое переключение запрещено.
+4. **Удешевление** — после проверок [Q-108-3](../99-open-questions.md) и [Q-108-4](../99-open-questions.md): заполнить `MEDIA_RESULT_HOST_SUFFIXES` на одном инстансе, повторить шаг 3 для `nano-banana-2`/`nano-banana-pro` 1K/2K/4K, затем флот.
+
+5. **Откат.**
+   - **Инстанса на прямой fal** — удалить `PROXY_API_KEY`. `PROXY_WEBHOOK_SECRET` при этом **не снимается и не меняется**, пока на инстансе есть незавершённые proxy-строки (`SELECT count(*) FROM media_jobs WHERE provider <> '' AND status IN ('queued','running');` → `0`): колбэки задач в полёте подписаны им, и его снятие или смена дали бы им `401` (при пустом секрете подпись шла бы по `PROXY_API_KEY`, которого уже нет) — такие задачи закрыл бы только дедлайн. Ручка вебхука работает и без `PROXY_API_KEY` — она вне гейта (§4.2).
+   - **КОДА** на версию до ADR-108 при proxy-строках в БД: старый код колонку `provider` не знает, видит `status_url = ''` и опрашивает fal по своей логике — по [03-architecture.md §Клиент провайдера](../modules/media-generation/03-architecture.md#клиент-провайдера) при непрошедшем префиксе берётся канонический URL очереди, то есть с id задачи **прокси**, которого у fal нет (поведение старого кода на пустом `status_url` по коду в этом решении **не проверено**). Ожидаемый исход — отказ опроса → `failed` с возвратом либо дедлайн с возвратом; ручки вебхука в старом коде нет, результат вендора теряется, закупка оплачена. Поэтому откат кода — только после отката всех инстансов на прямой fal и исчерпания их незавершённых proxy-строк (запрос выше); миграцию откатывать не нужно (expand-only, старый код новые колонки игнорирует).
+
+## Классы новых переменных ([ADR-099 §8.2](ADR-099-crm-admin-economics-and-instance-settings.md#82-что-в-поверхность-не-входит--свип-по-всем-переменным-этого-сервиса))
+
+Предложено здесь, вносится в перечень §8.2 волной, вводящей поля в код (правило §8.2): `PROXY_API_KEY`, `PROXY_WEBHOOK_SECRET` — **(а)** credential; `PROXY_BASE`, `PROXY_TIMEOUT_SECONDS` (семейное правило `*_TIMEOUT_SECONDS`), `MEDIA_RESULT_HOST_SUFFIXES` (SSRF-allowlist, соседка `FAL_UPLOAD_HOST_SUFFIXES`), `MEDIA_VENDOR_PRICES` (выбор апстрима; цену в кредитах не задаёт) — **(б)**.
+
+## Вопросы на решение владельца
+
+Зарегистрированы в [99-open-questions.md](../99-open-questions.md) как `Q-108-1` … `Q-108-10` (раздел «Открытые вопросы генерации через прокси»); здесь — краткие формулировки, нормативна запись реестра.
+
+- **Q-108-1.** Есть ли у прокси статусный (опросный) и отменяющий API? Решение исходит из «нет» (по образцу).
+- **Q-108-2.** Повторяет ли прокси доставку колбэка при не-`2xx` (сколько раз, с каким интервалом)? От ответа зависит исход колбэка, пришедшего до коммита сабмита (`404`).
+- **Q-108-3.** Хосты CDN, на которых `sosana` и `kie` отдают результат, — значение `MEDIA_RESULT_HOST_SUFFIXES`. Снимается пробным запуском через прокси.
+- **Q-108-4.** Поддерживают ли `sosana`/`kie` базовый набор `aspectRatio` и формат вывода так, как §2.1; какова фактическая форма тела колбэка по каждому сервису (включая вложенность fal-результата для §4.3 п.1).
+- **Q-108-5.** Оставить дедлайн proxy-задачи 6 ч (решение по умолчанию — логика не меняется) или сократить (образец — 45 мин).
+- **Q-108-6.** Переводить ли CRM-себестоимость ([ADR-079](ADR-079-crm-provider-cost-duration-payments.md)/[ADR-092](ADR-092-crm-daily-costs-endpoint.md)) с расчётной `provider_cost_usd` на фактическую `vendor_price`.
+- **Q-108-7.** ~~Кто и как выдаёт `PROXY_API_KEY`.~~ **Закрыт — решение владельца 2026-09-23: отдельный ключ на каждый инстанс.**
+- **Q-108-8.** Features (`rembg`, `sync-lipsync`, `makeup`) в образце отсутствуют; предложено — только fal через прокси. Подтвердить.
+- **Q-108-9.** Пересылает ли прокси fal заголовок срока хранения результата (или есть ли поле срока)? Сейчас — неизвестно.
+- **Q-108-10.** Как не писать `?token=` колбэков в access-лог Traefik флота (зона devops).
+
+## Тесты
+
+Сценарии — нормативно в [modules/media-generation/09-testing.md](../modules/media-generation/09-testing.md) (раздел «Транспорт через прокси»). Главное требование: сквозной путь «`POST` → фейк прокси на границе httpx → колбэк с подписью → `GET` отдаёт `completed` с signed URL» на настоящей сборке сервиса; тесты, которые сами вызывают `_complete` или пишут `status='completed'` в БД, покрытием вебхука не считаются.

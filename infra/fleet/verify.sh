@@ -188,3 +188,100 @@ while IFS=$'	' read -r inst domain port primary; do
   esac
 done < instances.tsv
 [ "$tls_bad" = "0" ] && echo "  у всех инстансов сертификат Let's Encrypt"
+
+# --- Генерация через прокси (ADR-108 §1, §10) -----------------------------------------------
+# Инстанс на прокси узнаёт о готовности задачи ТОЛЬКО колбэком. Если колбэк до инстанса не
+# доходит (домен, TLS, маршрут), каждая задача висит `running` до дедлайна (6 ч) и закрывается
+# возвратом, а закупка у вендора оплачена, — и ни health, ни /docs этого не видят.
+#
+# Проба снаружи хоста приложения: POST на ручку колбэка БЕЗ token обязан дать 401 — отказ по
+# подписи до БД, то есть DNS, TLS, вход и роутер пропускают путь до приложения. 404/502/таймаут
+# — вебхук недостижим. Адрес строится из SERVICE_DOMAIN самого инстанса, нормализованного так же,
+# как это делает код для callbackUrl (Settings.normalized_service_domain: снять пробелы по краям,
+# схему http(s):// без учёта регистра и «/» по краям), а НЕ из instances.tsv: колбэк приходит
+# туда, куда указывает .env. Расхождение домена .env с таблицей — нарушение. Печатается ТОЛЬКО
+# HTTP-код. Что прокси сам доходит до инстанса (его исходящая сеть), проба не доказывает — это
+# видно по метрике media_proxy_jobs_awaiting_callback.
+#
+# Секрет подписи колбэка обязан совпадать на основном и резерве: после повышения резерва колбэки
+# задач в полёте проверяются ЕГО секретом. Хэш секрета считается на каждом сервере, сюда приходит
+# только хэш, наружу — только вердикт «совпадает / РАЗНЫЙ / нет данных».
+#
+# С .env читаются ТОЛЬКО признаки: 0 — пусто, 1 — задан, 2 — задан ЗАГЛУШКОЙ <...>. Заглушка
+# для кода — ЗАДАННОЕ значение (любая непустая строка): в PROXY_API_KEY она переключает инстанс на
+# прокси с негодным ключом, в FAL_API_KEY — включает fal с негодным ключом. Поэтому заглушка —
+# нарушение, а не «не задан». Значения ключей сюда не приходят; домен не секрет и приходит.
+# Классы:
+#   на прокси (PROXY_API_KEY задан или заглушка) — проба обязательна; любое отклонение = НАРУШЕНИЕ;
+#   кандидат  (задан только FAL_API_KEY)        — проба перед переключением (§Порядок выката п.3);
+#             отклонение = переключать нельзя, но сегодня инстанс работает (прямой fal);
+#   без генерации — пропуск (заглушка в FAL_API_KEY всё равно нарушение).
+echo
+echo "ПРОКСИ ГЕНЕРАЦИИ:"
+hook_bad=0; hook_cand_bad=0; hook_proxy=0; hook_cand=0
+hook_path="/v1/media/webhooks/proxy/00000000-0000-0000-0000-000000000000"
+# Удалённый фрагмент печатает одну строку: P=<0|1|2> F=<0|1|2> W=<0|1> H=<sha256|-> D=<домен|->.
+# Текст фрагмента без одинарных кавычек: он передаётся внутри двойных.
+flag_snippet='c(){ v=$(grep -m1 "^$1=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); case "$v" in "") printf 0;; \<*) printf 2;; *) printf 1;; esac; }; w=$(grep -m1 "^PROXY_WEBHOOK_SECRET=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); if [ -n "$w" ]; then wh=$(printf %s "$w" | sha256sum | cut -c1-64); wf=1; else wh=-; wf=0; fi; w=; d=$(grep -m1 "^SERVICE_DOMAIN=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); l=$(printf %s "$d" | tr "[:upper:]" "[:lower:]"); case "$l" in https://*) d=${d#????????};; http://*) d=${d#???????};; esac; d=$(printf %s "$d" | sed "s#^/*##; s#/*\$##"); printf "P=%s F=%s W=%s H=%s D=%s\n" "$(c PROXY_API_KEY)" "$(c FAL_API_KEY)" "$wf" "$wh" "${d:--}"'
+flags_of() {  # flags_of ХОСТ ИНСТАНС — строка признаков или пусто
+  ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$1" "cd /opt/$2 2>/dev/null || exit 1; $flag_snippet" 2>/dev/null \
+    | tr -d '\r' | grep -m1 -E '^P=[012] F=[012] W=[01] H=([0-9a-f]{64}|-) D=[A-Za-z0-9.:-]+$'
+}
+fval() { printf '%s\n' "$1" | tr ' ' '\n' | awk -F= -v k="$2" '$1==k{print substr($0, length(k)+2); exit}'; }
+while IFS=$'\t' read -r inst domain port primary; do
+  case "$inst" in ""|\#*) continue;; esac
+  [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
+  fl="$(flags_of "app${primary}" "$inst")"
+  if [ -z "$fl" ]; then
+    printf "  %-14s нет данных о .env основного (ssh/каталог)\n" "$inst"
+    continue
+  fi
+  f_proxy="$(fval "$fl" P)"; f_fal="$(fval "$fl" F)"; f_sec="$(fval "$fl" W)"
+  h_pri="$(fval "$fl" H)"; env_dom="$(fval "$fl" D)"; [ "$env_dom" = "-" ] && env_dom=""
+  probs=""
+  # Резерв: признаки читаются для ВСЕХ классов — ключ прокси, заданный только на резерве, после
+  # повышения включил бы прокси на инстансе, который до этого на прокси не был.
+  sfl="$(flags_of "app$(other "$primary")" "$inst")"
+  h_sb="$(fval "$sfl" H)"; p_sb="$(fval "$sfl" P)"
+  # Состояние ключа прокси (0/1/2 — не значение и не хэш) обязано совпадать: обрыв записи между
+  # серверами (proxy-rollout.sh пишет ключ по очереди) иначе всплыл бы только при повышении резерва.
+  [ -n "$sfl" ] && [ "$p_sb" != "$f_proxy" ] && probs="$probs ключ-прокси-на-серверах-различается"
+  [ "$f_fal" = "2" ] && probs="$probs FAL_API_KEY-заглушка"
+  [ "$f_proxy" = "2" ] && probs="$probs PROXY_API_KEY-заглушка"
+  if [ "$f_proxy" != "0" ]; then cls="на прокси"; hook_proxy=$((hook_proxy+1))
+  elif [ "$f_fal" = "1" ]; then cls="кандидат"; hook_cand=$((hook_cand+1))
+  else
+    if [ -n "$probs" ]; then hook_bad=$((hook_bad+1)); printf "  %-14s %-10s%s\n" "$inst" "без генер." "$probs"; fi
+    continue
+  fi
+  # Домен колбэка — из .env; расхождение с таблицей (регистр DNS не различает) — нарушение.
+  if [ -z "$env_dom" ]; then
+    probs="$probs SERVICE_DOMAIN-пуст"
+  elif [ "$(printf %s "$env_dom" | tr '[:upper:]' '[:lower:]')" != "$(printf %s "$domain" | tr '[:upper:]' '[:lower:]')" ]; then
+    probs="$probs домен-.env≠таблицы"
+  fi
+  if [ -n "$env_dom" ]; then
+    code=""
+    for _try in 1 2; do
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST \
+        -H 'Content-Type: application/json' --data '{}' "https://$env_dom$hook_path" 2>/dev/null)"
+      [ "$code" = "401" ] && break
+    done
+    [ "$code" = "401" ] || probs="$probs вебхук->${code:-нет ответа}"
+  fi
+  if [ "$f_proxy" != "0" ]; then
+    [ "$f_sec" = "1" ] || probs="$probs PROXY_WEBHOOK_SECRET-пуст"
+    [ "$f_fal" = "1" ] || probs="$probs FAL_API_KEY-не-задан"
+  fi
+  # Секрет на резерве: хэш сравнивается здесь, наружу — только вердикт.
+  if [ -z "$sfl" ]; then
+    [ "$f_sec" = "1" ] && probs="$probs секрет-на-резерве:нет-данных"
+  elif [ "$h_pri" != "$h_sb" ]; then
+    probs="$probs секрет-основной≠резерв"
+  fi
+  if [ -n "$probs" ]; then
+    if [ "$f_proxy" != "0" ]; then hook_bad=$((hook_bad+1)); else hook_cand_bad=$((hook_cand_bad+1)); fi
+    printf "  %-14s %-10s%s\n" "$inst" "$cls" "$probs"
+  fi
+done < instances.tsv
+echo "  на прокси: $hook_proxy; кандидатов: $hook_cand; нарушений: $hook_bad; кандидатов не готово к переключению: $hook_cand_bad"

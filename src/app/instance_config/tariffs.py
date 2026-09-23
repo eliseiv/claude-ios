@@ -357,10 +357,10 @@ def pricing_rows(
                     snapshot=snap,
                 )
             )
-    if not cfg.fal_api_key.strip():
-        # Тот же гейт, что у GET /v1/models: без ключа fal инстанс не умеет запустить ни одну
-        # генерацию, и объявлять её тариф значило бы предложить оператору править цену
-        # несуществующей возможности.
+    if not cfg.media_generation_configured():
+        # Тот же гейт, что у GET /v1/models (ADR-108 §1: proxy_configured ∨ fal_configured): без
+        # него инстанс не умеет запустить ни одну генерацию, и объявлять её тариф значило бы
+        # предложить оператору править цену несуществующей возможности.
         return rows
     for model in models_of_kind(KIND_IMAGE):
         for cell in photo_cells(model):

@@ -4,6 +4,7 @@
 - Ответственность: генерация изображений и видео на провайдере [fal.ai](https://fal.ai) по асинхронному контракту «поставить задачу → опросить результат» ([ADR-060](../../adr/ADR-060-media-generation-fal.md)). Списание кредитов при постановке, возврат при провале у провайдера.
 - Модели MVP: **Nano Banana Pro**, **Nano Banana 2** (изображения), **Kling Video**, **Kling Video V3**, **Veo 3.1** (видео).
 - Активируется **по инстансу**: `FAL_API_KEY` не задан → постановка/опрос/uploads/`GET /v1/media/models` отвечают `503 media_generation_not_configured`. Каталог шаблонов (`/v1/media/templates/*`) от fal не зависит ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)).
+- **Транспорт через прокси-сервис — [ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) (реализовано; переключение инстансов — по «Порядку выката»).** На инстансе с `PROXY_API_KEY` сабмит уходит в `https://proxy.broadapps.dev`, завершение приходит вебхуком `POST /v1/media/webhooks/proxy/{jobId}`; гейт — `proxy_configured ∨ fal_configured`; контракт `/v1/media/*` и цены в кредитах не меняются; `FAL_API_KEY` остаётся для загрузок, перехоста i2v и features. Всё, что ниже описывает опрос fal, — поведение legacy-строк (`provider = ''`) и инстансов без `PROXY_API_KEY`.
 
 ## Документы
 - [00-overview.md](00-overview.md)
@@ -39,6 +40,8 @@
 - ✅ Каталог шаблонов галереи: `GET /v1/media/templates/images|videos`, публичный cover GET, admin POST/DELETE с base64-обложкой ([ADR-066](../../adr/ADR-066-media-templates-catalog.md)); seed 5+5; не зависит от `FAL_API_KEY`.
 
 ## Changelog
+- 2026-09-23 ([ADR-108](../../adr/ADR-108-media-generation-via-proxy.md)): **реализовано в коде и инфраструктуре; приёмка пройдена; переключение инстансов — по «Порядку выката».** Миграция `0038_media_jobs_proxy`; тесты `tests/unit/test_media_proxy_units_adr108.py`, `tests/integration/test_media_proxy_adr108.py`, `tests/integration/test_migration_0038_media_jobs_proxy_adr108.py`. Слияние и выкат этой записью не утверждаются.
+- 2026-09-23 ([ADR-108](../../adr/ADR-108-media-generation-via-proxy.md), **на дату записи — docs-only**; реализация — запись выше): спроектирован перевод генерации на прокси-сервис по образцу ai-media-upscaler ADR-078. Сабмит — `POST {PROXY_BASE}/api/v1/tasks`; завершение — вебхук с HMAC по `jobId` → `pending_result` → общий путь завершения (пост-модерация, handler, `completed`, `request_logs`, push), повторяемый `_advance` до дедлайна; маршрутизация Nano Banana на sosana/kie только при условиях «тот же запуск» и непустом `MEDIA_RESULT_HOST_SUFFIXES`, остальное — fal через прокси. Переходная ветка: без `PROXY_API_KEY` — прямой fal. Миграция expand-only без DML (`provider`, `vendor_price`, `pending_result`). Обновлены 02/03/04/06/07/09/10.
 - 2026-09-16: добавлены opt-in backend-сценарии avatar speech, сохранённых пользовательских
   аватаров, подготовки фона и virtual makeup. Оба продуктовых флага по умолчанию выключены;
   миграция `0035_media_features` аддитивна, каталоги пусты и заполняются через admin API.

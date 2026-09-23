@@ -11,8 +11,20 @@ Two operations, both owner-scoped:
   never got.
 
 Generation is asynchronous by nature (Veo/Kling take minutes), so ``submit`` returns a job in
-``queued`` state and the client polls. There is no webhook: a poll-based contract needs no public
-callback surface and no signature scheme, and the iOS client is already polling-shaped.
+``queued`` state and the client polls — the client contract is "202 + poll our GET".
+
+ADR-108 — two transports behind that one contract, classified per row by ``provider``:
+
+* **proxy job** (``provider <> ''``, instance ``proxy_configured``): submitted through the proxy
+  service over the routes of ``routing.py``; completion arrives by the webhook
+  ``POST /v1/media/webhooks/proxy/{jobId}`` (``handle_proxy_webhook``). Nothing polls fal for it:
+  ``_advance`` only replays the shared completion path from ``pending_result``, applies the
+  deadline or marks it ``running``.
+* **legacy job** (``provider = ''``): the direct fal client, polled exactly as before ADR-108 —
+  the transitional branch of an instance without ``PROXY_API_KEY`` and every row created before.
+
+Both finish through ONE completion path (``_complete_run``: post-moderation → handler →
+``mark_completed`` → ``request_logs`` → push), with unchanged steps and order.
 """
 
 from __future__ import annotations
@@ -35,9 +47,12 @@ from app.errors import (
     JobNotTerminalError,
     NotFoundError,
     PayloadTooLargeError,
+    RateLimitedError,
+    UpstreamError,
     UpstreamJobGoneError,
     ValidationFailedError,
 )
+from app.media_generation.asset_hosts import fal_asset_host_allowed
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
@@ -55,13 +70,45 @@ from app.media_generation.fal_client import (
     FalClient,
     upstream_status_of,
 )
+from app.media_generation.proxy_client import (
+    ProxyClient,
+    ProxySubmission,
+    ProxyTransportError,
+)
 from app.media_generation.repository import (
     STATUS_COMPLETED,
     STATUS_QUEUED,
     TERMINAL_STATUSES,
     MediaJobsRepository,
 )
+from app.media_generation.routing import (
+    SERVICE_FAL,
+    VendorRoute,
+    candidate_routes,
+    fal_route,
+    merged_vendor_prices,
+)
 from app.media_generation.signed_url import public_asset_url
+from app.media_generation.webhook import (
+    OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
+    WEBHOOK_COMPLETED,
+    WEBHOOK_COMPLETION_DEFERRED,
+    WEBHOOK_COMPLETION_FAILED,
+    WEBHOOK_DUPLICATE_TERMINAL,
+    WEBHOOK_FAILED,
+    WEBHOOK_NO_USABLE_ASSET,
+    WEBHOOK_PENDING,
+    WEBHOOK_RESULT_ALREADY_RECEIVED,
+    WEBHOOK_UNKNOWN_JOB,
+    callback_url,
+    collect_urls,
+    fal_shaped_candidates,
+    log_webhook_outcome,
+    parse_vendor_price,
+    webhook_error_message,
+    webhook_outcome,
+)
 from app.models import MediaJob
 from app.moderation import ModerationService, ModerationVerdict, unchecked_verdict
 from app.moderation.service import (
@@ -120,6 +167,33 @@ OBSERVATION_UPSTREAM_PENDING = "upstream_pending"  # FalClient.status: non-termi
 OBSERVATION_MODERATION_UNAVAILABLE = "moderation_unavailable"  # assets in, _moderate_output raised
 OBSERVATION_NOT_CONFIGURED = "not_configured"  # FAL_API_KEY empty — no request went upstream
 OBSERVATION_INTERNAL_ERROR = "internal_error"  # raised outside FalClient and _moderate_output
+# ADR-108 §6: a proxy job (provider <> '') whose terminal callback has not been applied. Mutually
+# exclusive with the five values above by the transport classifier: those describe a poll of fal
+# (legacy jobs), plus `moderation_unavailable`/`internal_error` of the shared completion path.
+OBSERVATION_WEBHOOK_PENDING = "webhook_pending"
+
+# ADR-108 §4.3 п.2: the outcome of a `completed` callback without a single usable asset — the same
+# terminal as "fal COMPLETED without a usable URL" on the poll path.
+NO_OUTPUT_ERROR = "generation produced no output"
+
+
+class _TransientCompletionError(Exception):
+    """A transient fault inside the shared completion path (ADR-108 §5).
+
+    Carries the ``lastObservation`` the deadline branch would report and the original exception.
+    The poll path turns it into ``_close_if_overdue`` or re-raises the cause (as before); the
+    webhook rolls back its savepoint and keeps ``pending_result``.
+    """
+
+    def __init__(self, observation: str, cause: Exception) -> None:
+        super().__init__(observation)
+        self.observation = observation
+        self.cause = cause
+
+
+def _is_proxy_job(job: MediaJob) -> bool:
+    """ADR-108 §6 classifier: proxy job ⇔ ``provider <> ''`` (``'fal'`` = fal THROUGH the proxy)."""
+    return bool(getattr(job, "provider", "") or "")
 
 
 def _now() -> datetime.datetime:
@@ -133,6 +207,16 @@ class MediaAsset:
     url: str
     content_type: str | None
     file_name: str | None
+
+
+@dataclass(frozen=True)
+class _SubmitHandle:
+    """What the INSERT of a job needs from the transport that accepted it (ADR-108 §3.1)."""
+
+    provider: str
+    request_id: str
+    status_url: str
+    response_url: str
 
 
 @dataclass(frozen=True)
@@ -181,9 +265,12 @@ class MediaGenerationService:
         request_logs: RequestLogWriter | None = None,
         moderation: ModerationService | None = None,
         completion_handler: MediaJobCompletionHandler | None = None,
+        proxy: ProxyClient | None = None,
     ) -> None:
         self._repo = repo
         self._fal = fal
+        # ADR-108 §1: None (tests / an assembly without the proxy) ⇒ the direct fal branch only.
+        self._proxy = proxy
         self._wallet = wallet
         self._settings = settings
         self._push = push
@@ -307,31 +394,54 @@ class MediaGenerationService:
         # дефект, из-за которого написан багрепорт: за отклонённый контент уже списаны кредиты.
         input_verdict = await self._moderate_input(prompt=prompt, image_urls=client_image_urls)
 
-        await self._wallet.consume(
-            user_id=user_id,
-            amount=cost,
-            idempotency_key=f"media-gen:{job_id}",
-            meta={"source": "media_generation", "model": model.id, "kind": model.kind},
-        )
+        # ADR-108 §3.1: the debit, the transport and the INSERT share ONE savepoint. A REST caller
+        # rolls the whole request back on an exception anyway (unchanged); a caller that CATCHES
+        # the exception and keeps its transaction (chat tools turn it into a soft tool error)
+        # would otherwise commit a debit for a run nobody accepted. The savepoint rolls back the
+        # debit ITSELF, whoever the caller is.
+        async with self._repo.savepoint():
+            await self._wallet.consume(
+                user_id=user_id,
+                amount=cost,
+                idempotency_key=f"media-gen:{job_id}",
+                meta={"source": "media_generation", "model": model.id, "kind": model.kind},
+            )
 
-        submission = await self._fal.submit(endpoint=variant.endpoint, payload=payload)
-        job = await self._repo.create(
-            job_id=job_id,
-            user_id=user_id,
-            model_id=model.id,
-            kind=model.kind,
-            fal_endpoint=variant.endpoint,
-            fal_request_id=submission.request_id,
-            status_url=submission.status_url,
-            response_url=submission.response_url,
-            status=STATUS_QUEUED,
-            prompt=prompt,
-            credits_charged=cost,
-            provider_cost_usd=provider_cost_usd,
-            parent_job_id=source_job_id,
-            input_image_urls=list(image_urls) or None,
-            moderation=input_verdict.to_payload(),
-        )
+            # ADR-108 §1/§3: the transport is chosen AFTER the debit, inside the same savepoint,
+            # and never moves the price computed above. No route accepted the run ⇒ the exception
+            # rolls the debit back with the savepoint.
+            if self._proxy_enabled():
+                routes = candidate_routes(
+                    model=model,
+                    variant=variant,
+                    values=values,
+                    fal_payload=payload,
+                    prices=merged_vendor_prices(self._settings.media_vendor_prices()),
+                    result_hosts_configured=bool(self._settings.media_result_host_suffixes()),
+                )
+                handle = await self._submit_via_proxy(
+                    job_id=job_id, model_id=model.id, routes=routes
+                )
+            else:
+                handle = await self._submit_direct(endpoint=variant.endpoint, payload=payload)
+            job = await self._repo.create(
+                job_id=job_id,
+                user_id=user_id,
+                model_id=model.id,
+                kind=model.kind,
+                fal_endpoint=variant.endpoint,
+                fal_request_id=handle.request_id,
+                status_url=handle.status_url,
+                response_url=handle.response_url,
+                status=STATUS_QUEUED,
+                prompt=prompt,
+                credits_charged=cost,
+                provider_cost_usd=provider_cost_usd,
+                parent_job_id=source_job_id,
+                input_image_urls=list(image_urls) or None,
+                moderation=input_verdict.to_payload(),
+                provider=handle.provider,
+            )
         log_event(
             logger,
             logging.INFO,
@@ -342,6 +452,7 @@ class MediaGenerationService:
             kind=model.kind,
             credits=cost,
             falEndpoint=variant.endpoint,
+            proxyService=handle.provider or None,
         )
         return MediaJobView(job=job, assets=[])
 
@@ -372,32 +483,51 @@ class MediaGenerationService:
             raise ValidationFailedError("credits must not be negative")
         input_verdict = await self._moderate_input(prompt=prompt, image_urls=image_urls)
         job_id = uuid.uuid4()
-        if credits > 0:
-            await self._wallet.consume(
+        # ADR-108 §3.1: `consume → transport → create` is ONE savepoint, so "no route accepted
+        # the run ⇒ no debit" holds for ANY caller, not only for a caller whose request rolls
+        # back entirely (see `submit`).
+        async with self._repo.savepoint():
+            if credits > 0:
+                await self._wallet.consume(
+                    user_id=user_id,
+                    amount=credits,
+                    idempotency_key=f"media-gen:{job_id}",
+                    meta={"source": "media_generation", "model": model_id, "kind": kind},
+                )
+            if self._proxy_enabled():
+                # ADR-108 §2: features (rembg / lip-sync / makeup) have ONLY the fal route — the
+                # `*:*:fal` rule; the payload is the one the direct fal submit sends.
+                route = fal_route(
+                    model_id=model_id,
+                    tier="*",
+                    endpoint=endpoint,
+                    payload=payload,
+                    prices=merged_vendor_prices(self._settings.media_vendor_prices()),
+                )
+                handle = await self._submit_via_proxy(
+                    job_id=job_id, model_id=model_id, routes=[route]
+                )
+            else:
+                handle = await self._submit_direct(endpoint=endpoint, payload=payload)
+            job = await self._repo.create(
+                job_id=job_id,
                 user_id=user_id,
-                amount=credits,
-                idempotency_key=f"media-gen:{job_id}",
-                meta={"source": "media_generation", "model": model_id, "kind": kind},
+                model_id=model_id,
+                kind=kind,
+                fal_endpoint=endpoint,
+                fal_request_id=handle.request_id,
+                status_url=handle.status_url,
+                response_url=handle.response_url,
+                status=STATUS_QUEUED,
+                prompt=prompt,
+                credits_charged=credits,
+                input_image_urls=list(image_urls) or None,
+                moderation=input_verdict.to_payload(),
+                operation=operation,
+                operation_input=operation_input,
+                visible_in_history=visible_in_history,
+                provider=handle.provider,
             )
-        submission = await self._fal.submit(endpoint=endpoint, payload=payload)
-        job = await self._repo.create(
-            job_id=job_id,
-            user_id=user_id,
-            model_id=model_id,
-            kind=kind,
-            fal_endpoint=endpoint,
-            fal_request_id=submission.request_id,
-            status_url=submission.status_url,
-            response_url=submission.response_url,
-            status=STATUS_QUEUED,
-            prompt=prompt,
-            credits_charged=credits,
-            input_image_urls=list(image_urls) or None,
-            moderation=input_verdict.to_payload(),
-            operation=operation,
-            operation_input=operation_input,
-            visible_in_history=visible_in_history,
-        )
         log_event(
             logger,
             logging.INFO,
@@ -409,8 +539,84 @@ class MediaGenerationService:
             credits=credits,
             falEndpoint=endpoint,
             visibleInHistory=visible_in_history,
+            proxyService=handle.provider or None,
         )
         return MediaJobView(job=job, assets=[])
+
+    # ---- submit transport (ADR-108 §1–§3) ----
+
+    def _proxy_enabled(self) -> bool:
+        """``proxy_configured`` on an assembly that carries the proxy client (ADR-108 §1)."""
+        return self._proxy is not None and self._settings.proxy_configured()
+
+    async def _submit_direct(self, *, endpoint: str, payload: dict[str, Any]) -> _SubmitHandle:
+        """The direct fal branch — byte-for-byte the submit of before ADR-108 (``provider=''``)."""
+        submission = await self._fal.submit(endpoint=endpoint, payload=payload)
+        return _SubmitHandle(
+            provider="",
+            request_id=submission.request_id,
+            status_url=submission.status_url,
+            response_url=submission.response_url,
+        )
+
+    async def _submit_via_proxy(
+        self, *, job_id: uuid.UUID, model_id: str, routes: list[VendorRoute]
+    ) -> _SubmitHandle:
+        """Try the routes cheapest first; the first accepting one owns the job (ADR-108 §3.3).
+
+        * proxy timeout / connect → stop (``502``): the next route hits the same host, and the
+          proxy may already have accepted the task — a fallback could pay for a second run;
+        * ``401``/``403`` → stop (``503 media_generation_not_configured``);
+        * ``422`` on the fal route → stop (``422``); on sosana/kie → next route: only fal gives
+          the final verdict about the validity of a request fal itself would accept;
+        * ``429`` / other upstream failures → next route; exhausted → the last of them.
+        """
+        if self._proxy is None:  # pragma: no cover - guarded by _proxy_enabled
+            raise UpstreamError("generation provider unavailable")
+        callback = callback_url(settings=self._settings, job_id=job_id)
+        last_retryable: RateLimitedError | UpstreamError | None = None
+        for route in routes:
+            try:
+                submission: ProxySubmission = await self._proxy.submit(
+                    service=route.service,
+                    endpoint=route.endpoint,
+                    payload=route.payload,
+                    callback_url=callback,
+                    catalog_endpoint=route.catalog_endpoint,
+                )
+            except ProxyTransportError:
+                raise
+            except ValidationFailedError:
+                if route.service == SERVICE_FAL:
+                    raise
+                self._log_route_fallback(job_id=job_id, model_id=model_id, route=route)
+                continue
+            except (RateLimitedError, UpstreamError) as exc:
+                last_retryable = exc
+                self._log_route_fallback(job_id=job_id, model_id=model_id, route=route)
+                continue
+            return _SubmitHandle(
+                provider=route.service,
+                request_id=submission.request_id,
+                # ADR-108 §3.1: a proxy job is never polled — no status/response URL.
+                status_url="",
+                response_url="",
+            )
+        if last_retryable is not None:
+            raise last_retryable
+        raise UpstreamError("generation provider unavailable")
+
+    @staticmethod
+    def _log_route_fallback(*, job_id: uuid.UUID, model_id: str, route: VendorRoute) -> None:
+        log_event(
+            logger,
+            logging.WARNING,
+            "media_generation_route_fallback",
+            jobId=str(job_id),
+            model=model_id,
+            proxyService=route.service,
+            falEndpoint=route.catalog_endpoint,
+        )
 
     async def _moderate_input(self, *, prompt: str, image_urls: list[str]) -> ModerationVerdict:
         """Пре-модерация промпта и клиентского референса (ADR-086 §4).
@@ -540,11 +746,15 @@ class MediaGenerationService:
             raise NotFoundError("media job not found")
         return job, assets[index]
 
-    async def advance(self, job: MediaJob) -> MediaJobView:
-        """Advance one already-loaded job (used by the background reconciler, ADR-067)."""
+    async def advance(self, job: MediaJob, *, skip_locked: bool = False) -> MediaJobView:
+        """Advance one already-loaded job (used by the background reconciler, ADR-067).
+
+        ``skip_locked`` (ADR-108 §6, reconciler): a proxy job whose row another session holds
+        (a callback or a poll in flight) is left untouched for the next tick instead of waited on.
+        """
         if job.status in TERMINAL_STATUSES:
             return MediaJobView(job=job, assets=_assets_from_result(job.result))
-        return await self._advance(job)
+        return await self._advance(job, skip_locked=skip_locked)
 
     async def list_jobs(
         self,
@@ -596,7 +806,7 @@ class MediaGenerationService:
             status=job.status,
         )
 
-    async def _advance(self, job: MediaJob) -> MediaJobView:
+    async def _advance(self, job: MediaJob, *, skip_locked: bool = False) -> MediaJobView:
         """Poll fal once and persist any state transition (ADR-060 §3, ADR-105 §B2).
 
         A ``422`` while polling is a *rejected run*, not a bad poll: fal validates some inputs only
@@ -614,7 +824,11 @@ class MediaGenerationService:
         ``failed`` with a refund and the exception does not surface; a younger job is not touched
         (the exception propagates, a non-terminal status marks it ``running``) — the next poll
         retries, as before.
+
+        ADR-108 §6: a proxy job (``provider <> ''``) is never polled — see ``_advance_proxy``.
         """
+        if _is_proxy_job(job):
+            return await self._advance_proxy(job, skip_locked=skip_locked)
         try:
             status = await self._fal.status(status_url=job.status_url, endpoint=job.fal_endpoint)
         except ValidationFailedError as exc:
@@ -658,64 +872,8 @@ class MediaGenerationService:
                 return closed
             if not assets:
                 # COMPLETED with nothing usable is a failed run from the user's point of view.
-                return await self._fail(job, error="generation produced no output")
-            # ADR-086 §5: пост-модерация результата. Только image — omni-moderation не принимает
-            # видео; у видео-задачи moderation отражает вход (Q-086-2). Проверка ДО mark_completed,
-            # чтобы заблокированный ассет никогда не оказался в терминальном completed.
-            try:
-                output_verdict = await self._moderate_output(job, assets)
-            except Exception as exc:
-                closed = await self._close_if_overdue(
-                    job, observation=OBSERVATION_MODERATION_UNAVAILABLE, cause=exc
-                )
-                if closed is None:
-                    raise
-                return closed
-            if output_verdict is not None and output_verdict.blocked:
-                return await self._blocked_by_moderation(job, verdict=output_verdict)
-            if self._completion_handler is not None:
-                try:
-                    await self._completion_handler.complete(job, assets)
-                except ValidationFailedError as exc:
-                    return await self._fail(job, error=exc.message)
-                except Exception as exc:
-                    closed = await self._close_if_overdue(
-                        job, observation=OBSERVATION_INTERNAL_ERROR, cause=exc
-                    )
-                    if closed is None:
-                        raise
-                    return closed
-            await self._repo.mark_completed(
-                job,
-                result=result,
-                moderation=None if output_verdict is None else output_verdict.to_payload(),
-            )
-            if self._request_logs is not None and job.visible_in_history:
-                await self._request_logs.finish_media(
-                    media_job_id=job.id, failed=False, refunded=False
-                )
-            log_event(
-                logger,
-                logging.INFO,
-                "media_generation_completed",
-                userId=str(job.user_id),
-                jobId=str(job.id),
-                model=job.model_id,
-                assets=len(assets),
-            )
-            if self._push is not None and assets and job.visible_in_history:
-                await self._push.notify_media_ready(
-                    job_id=job.id,
-                    user_id=job.user_id,
-                    kind=job.kind,
-                    media_url=public_asset_url(
-                        job_id=job.id,
-                        owner_user_id=job.user_id,
-                        index=0,
-                        stored_url=assets[0].url,
-                    ),
-                )
-            return MediaJobView(job=job, assets=assets)
+                return await self._fail(job, error=NO_OUTPUT_ERROR)
+            return await self._complete_or_close(job, result=result, assets=assets)
 
         if status.status in (FAL_FAILED, FAL_CANCELED):
             return await self._fail(job, error=status.error or "generation failed upstream")
@@ -725,6 +883,184 @@ class MediaGenerationService:
             return closed
         await self._repo.mark_running(job)
         return MediaJobView(job=job, assets=[])
+
+    # ---- shared completion path (ADR-108 §5) ----
+
+    async def _complete_or_close(
+        self, job: MediaJob, *, result: dict[str, Any], assets: list[MediaAsset]
+    ) -> MediaJobView:
+        """The completion path on the POLL side: a transient fault closes an overdue job, and on a
+        younger one the original exception surfaces and rolls the request back — as before."""
+        try:
+            return await self._complete_run(job, result=result, assets=assets)
+        except _TransientCompletionError as err:
+            closed = await self._close_if_overdue(job, observation=err.observation, cause=err.cause)
+            if closed is None:
+                raise err.cause from err.cause.__cause__
+            return closed
+
+    async def _complete_run(
+        self, job: MediaJob, *, result: dict[str, Any], assets: list[MediaAsset]
+    ) -> MediaJobView:
+        """ONE completion path for the webhook and ``_advance`` (ADR-108 §5), steps and order
+        unchanged from the former ``COMPLETED`` branch of the poll: post-moderation (image only) →
+        ``blocked`` → ``_blocked_by_moderation`` (refund, ``{"assets": []}``, no push) →
+        completion handler → ``mark_completed`` (clears ``pending_result``) →
+        ``request_logs.finish_media`` → ``media_generation_completed`` → push.
+
+        A transient fault (post-moderation raised; the handler raised anything but
+        ``ValidationFailedError``) surfaces as ``_TransientCompletionError`` — each caller decides
+        what it means for its transaction.
+        """
+        # ADR-086 §5: пост-модерация результата. Только image — omni-moderation не принимает
+        # видео; у видео-задачи moderation отражает вход (Q-086-2). Проверка ДО mark_completed,
+        # чтобы заблокированный ассет никогда не оказался в терминальном completed.
+        try:
+            output_verdict = await self._moderate_output(job, assets)
+        except Exception as exc:
+            raise _TransientCompletionError(OBSERVATION_MODERATION_UNAVAILABLE, exc) from exc
+        if output_verdict is not None and output_verdict.blocked:
+            return await self._blocked_by_moderation(job, verdict=output_verdict)
+        if self._completion_handler is not None:
+            try:
+                await self._completion_handler.complete(job, assets)
+            except ValidationFailedError as exc:
+                return await self._fail(job, error=exc.message)
+            except Exception as exc:
+                raise _TransientCompletionError(OBSERVATION_INTERNAL_ERROR, exc) from exc
+        await self._repo.mark_completed(
+            job,
+            result=result,
+            moderation=None if output_verdict is None else output_verdict.to_payload(),
+        )
+        if self._request_logs is not None and job.visible_in_history:
+            await self._request_logs.finish_media(media_job_id=job.id, failed=False, refunded=False)
+        log_event(
+            logger,
+            logging.INFO,
+            "media_generation_completed",
+            userId=str(job.user_id),
+            jobId=str(job.id),
+            model=job.model_id,
+            assets=len(assets),
+        )
+        if self._push is not None and assets and job.visible_in_history:
+            await self._push.notify_media_ready(
+                job_id=job.id,
+                user_id=job.user_id,
+                kind=job.kind,
+                media_url=public_asset_url(
+                    job_id=job.id,
+                    owner_user_id=job.user_id,
+                    index=0,
+                    stored_url=assets[0].url,
+                ),
+            )
+        return MediaJobView(job=job, assets=assets)
+
+    # ---- proxy jobs (ADR-108 §4–§6) ----
+
+    async def _advance_proxy(self, job: MediaJob, *, skip_locked: bool = False) -> MediaJobView:
+        """``_advance`` of a proxy job, under the same row lock as the webhook (ADR-108 §6).
+
+        No outgoing call at all: ``pending_result`` recorded → replay the completion path;
+        otherwise older than ``MEDIA_JOB_DEADLINE_SECONDS`` → ``failed`` + refund
+        (``lastObservation = webhook_pending``); otherwise ``running``. Two-sided deadline
+        predicate: (a) an overdue job with no applied terminal callback is closed; (b) a younger
+        one is not touched, and one with ``pending_result`` first gets §5 — the deadline only if
+        that fails.
+        """
+        locked = await self._repo.get_for_update(job.id, skip_locked=skip_locked)
+        if locked is None:
+            if skip_locked:
+                # Held by a concurrent callback/poll: that session decides; the row is still
+                # non-terminal (or becomes terminal) and the next tick sees it either way.
+                return MediaJobView(job=job, assets=[])
+            raise NotFoundError("media job not found")
+        job = locked
+        if job.status in TERMINAL_STATUSES:
+            # A concurrent callback closed it while we waited for the lock.
+            return MediaJobView(job=job, assets=_assets_from_result(job.result))
+        pending = job.pending_result
+        if isinstance(pending, dict):
+            assets = _assets_from_result(pending)
+            if not assets:
+                return await self._fail(job, error=NO_OUTPUT_ERROR)
+            return await self._complete_or_close(job, result=pending, assets=assets)
+        closed = await self._close_if_overdue(job, observation=OBSERVATION_WEBHOOK_PENDING)
+        if closed is not None:
+            return closed
+        await self._repo.mark_running(job)
+        return MediaJobView(job=job, assets=[])
+
+    async def handle_proxy_webhook(self, *, job_id: uuid.UUID, body: dict[str, Any]) -> str:
+        """Apply a proxy callback to job ``job_id``; returns the ``media_webhook_outcome`` value.
+
+        The caller (the router) has ALREADY verified the HMAC token and that ``body`` is a JSON
+        object — both before any DB access (ADR-108 §4.2 п.1–2). Here, in order: the row is
+        locked (``FOR UPDATE``); none or a legacy row → ``NotFoundError`` (``404``); terminal →
+        no-op (a repeated delivery); otherwise the outcome of §4.3 is applied. The first terminal
+        outcome wins; a result already recorded in ``pending_result`` is never overwritten.
+        """
+        job = await self._repo.get_for_update(job_id)
+        if job is None or not _is_proxy_job(job):
+            log_webhook_outcome(job_id=str(job_id), proxy_service=None, outcome=WEBHOOK_UNKNOWN_JOB)
+            raise NotFoundError("media job not found")
+        outcome = await self._apply_callback(job, body)
+        log_webhook_outcome(job_id=str(job.id), proxy_service=job.provider, outcome=outcome)
+        return outcome
+
+    async def _apply_callback(self, job: MediaJob, body: dict[str, Any]) -> str:
+        if job.status in TERMINAL_STATUSES:
+            return WEBHOOK_DUPLICATE_TERMINAL
+        classified = webhook_outcome(body)
+        pending = job.pending_result
+        if isinstance(pending, dict):
+            # §4.3 step 0 — the result is already received: a new callback never replaces it.
+            if classified == OUTCOME_COMPLETED:
+                return await self._complete_in_savepoint(job, pending)
+            return WEBHOOK_RESULT_ALREADY_RECEIVED
+        if classified == OUTCOME_FAILED:
+            await self._fail(job, error=webhook_error_message(body))
+            return WEBHOOK_FAILED
+        if classified != OUTCOME_COMPLETED:
+            await self._repo.mark_running(job)
+            return WEBHOOK_PENDING
+        result = _callback_result(body, kind=job.kind)
+        if not _assets_from_result(result):
+            await self._fail(job, error=NO_OUTPUT_ERROR)
+            return WEBHOOK_NO_USABLE_ASSET
+        await self._repo.store_pending_result(
+            job, pending_result=result, vendor_price=parse_vendor_price(body)
+        )
+        return await self._complete_in_savepoint(job, result)
+
+    async def _complete_in_savepoint(self, job: MediaJob, result: dict[str, Any]) -> str:
+        """§5 inside a SAVEPOINT — the webhook side (ADR-108 §5).
+
+        ``pending_result`` is written BEFORE this savepoint, so a transient fault rolls back only
+        the partial writes of §5 (handler, ``mark_*``) while the result commits with the ``200``;
+        the next ``_advance`` replays §5 from it until the deadline. Rolling back the whole
+        request here instead would LOSE the result of the only callback. (The poll side does the
+        opposite on purpose: its exception still rolls the request back, see
+        ``_complete_or_close`` — there nothing is lost.)
+        """
+        assets = _assets_from_result(result)
+        if not assets:
+            await self._fail(job, error=NO_OUTPUT_ERROR)
+            return WEBHOOK_NO_USABLE_ASSET
+        try:
+            async with self._repo.savepoint():
+                view = await self._complete_run(job, result=result, assets=assets)
+        except _TransientCompletionError:
+            # The rolled-back savepoint expired what it touched; reload before anyone reads it.
+            await self._repo.refresh(job)
+            return WEBHOOK_COMPLETION_DEFERRED
+        # ADR-108 §10: the value is the FACT of the resulting status, not the branch taken — §5
+        # also ends in `failed` (post-moderation `blocked`, a handler `ValidationFailedError`).
+        if view.job.status == STATUS_COMPLETED:
+            return WEBHOOK_COMPLETED
+        return WEBHOOK_COMPLETION_FAILED
 
     def _fal_failure_observation(self) -> str:
         """``lastObservation`` of a failed ``FalClient.status``/``result`` call (ADR-105 §B5).
@@ -863,7 +1199,9 @@ class MediaGenerationService:
                 stage=STAGE_OUTPUT,
                 categories=(),
                 checked_at=datetime.datetime.now(datetime.UTC),
-                provider="fal",
+                # ADR-108 §4.3: the service that refused — the proxy route of a proxy job, fal
+                # for a job of the direct client (`provider = ''`).
+                provider=getattr(job, "provider", "") or "fal",
                 model=job.model_id,
             ).to_payload()
             moderation_decisions_total.labels(
@@ -977,6 +1315,49 @@ def _normalize_result(body: dict[str, Any], *, kind: str) -> dict[str, Any]:
     if isinstance(seed, int):
         result["seed"] = seed
     return result
+
+
+def _has_fal_shape(body: dict[str, Any], *, kind: str) -> bool:
+    if kind == KIND_IMAGE:
+        return isinstance(body.get("images"), list) or isinstance(body.get("image"), dict)
+    if kind == KIND_VIDEO:
+        return isinstance(body.get("video"), dict) or isinstance(body.get("videos"), list)
+    return False
+
+
+def _callback_result(body: dict[str, Any], *, kind: str) -> dict[str, Any]:
+    """Normalized result of a ``completed`` proxy callback (ADR-108 §4.3 п.1–2).
+
+    1. If the body (top level, or ``payload``/``data``/``result``) carries fal's output form, the
+       SAME ``_normalize_result`` as the poll path projects it, so ``contentType``/``fileName``/
+       ``description``/``seed`` survive as today; otherwise every asset URL of the body is
+       collected into ``{assets: [{url}]}``.
+    2. An asset that is not ``https://`` or whose host is outside
+       ``FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES`` is dropped BEFORE anything is
+       stored — the server never follows a URL from a callback it did not allowlist (SSRF).
+    """
+    normalized: dict[str, Any] | None = None
+    for candidate in fal_shaped_candidates(body):
+        if not _has_fal_shape(candidate, kind=kind):
+            continue
+        projected = _normalize_result(candidate, kind=kind)
+        if projected["assets"]:
+            normalized = projected
+            break
+    if normalized is None:
+        normalized = {
+            "assets": [
+                {"url": url, "contentType": None, "fileName": None} for url in collect_urls(body)
+            ]
+        }
+    normalized["assets"] = [
+        asset
+        for asset in normalized["assets"]
+        if isinstance(asset, dict)
+        and isinstance(asset.get("url"), str)
+        and fal_asset_host_allowed(asset["url"])
+    ]
+    return normalized
 
 
 def _asset_dict(item: Any) -> dict[str, Any] | None:

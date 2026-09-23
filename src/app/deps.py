@@ -47,6 +47,7 @@ from app.media_generation.features_service import (
     AvatarPreparationCompleter,
     MediaFeaturesService,
 )
+from app.media_generation.proxy_client import ProxyClient
 from app.media_generation.repository import MediaJobsRepository
 from app.media_generation.service import MediaGenerationService
 from app.media_generation.templates_repository import MediaTemplatesRepository
@@ -235,14 +236,23 @@ def get_fal_client() -> FalClient:
     return FalClient(get_settings())
 
 
-def require_media_generation_configured() -> None:
-    """Gate generation routes on the instance having a fal key (ADR-060 §5).
+def get_proxy_client() -> ProxyClient:
+    # ADR-108: outgoing proxy-service calls — no DbSession (no persisted state); needs only
+    # settings (key / base / timeout / service domain).
+    return ProxyClient(get_settings())
 
-    Generation is opt-in per instance. Without ``FAL_API_KEY``, models/jobs/uploads/submit answer
-    ``503 media_generation_not_configured``. Gallery templates (``/v1/media/templates/*``, ADR-066)
-    intentionally sit on a separate router without this gate — the tile catalog does not call fal.
+
+def require_media_generation_configured() -> None:
+    """Gate generation routes on the instance being configured for generation (ADR-108 §1).
+
+    Generation is opt-in per instance: unless ``proxy_configured ∨ fal_configured``
+    (``Settings.media_generation_configured``), models/jobs/uploads/submit answer
+    ``503 media_generation_not_configured``. Paths that still need ``FAL_API_KEY`` behind a proxy
+    (uploads, the i2v rehost, feature uploads) refuse on their own, before any debit. Gallery
+    templates (``/v1/media/templates/*``, ADR-066) and the proxy webhook
+    (``/v1/media/webhooks/proxy/*``, ADR-108 §4.2) sit on separate routers without this gate.
     """
-    if not get_fal_client().configured:
+    if not get_settings().media_generation_configured():
         raise MediaGenerationNotConfiguredError("media generation is not configured")
 
 
@@ -304,7 +314,9 @@ def build_media_generation_service(
 
     ADR-060: the wallet debit and the media_jobs insert must land in ONE transaction, so the
     wallet service is built on the same session as the repository. ADR-067: the push notifier
-    shares that session so push_sent_at lands with mark_completed.
+    shares that session so push_sent_at lands with mark_completed. ADR-108 §5: the proxy webhook
+    is the third caller of this assembly (request path, reconciler, webhook) — with the proxy
+    client, which the service uses only when ``proxy_configured``.
     """
     features_repo = MediaFeaturesRepository(session)
     return MediaGenerationService(
@@ -319,6 +331,7 @@ def build_media_generation_service(
             repo=features_repo,
             fal=get_fal_client(),
         ),
+        proxy=get_proxy_client(),
     )
 
 

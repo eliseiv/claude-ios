@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from io import BytesIO
 from types import SimpleNamespace
@@ -244,6 +245,11 @@ async def test_custom_jobs_reuse_billing_and_can_be_hidden(
         async def create(self, **kwargs: Any) -> object:
             created.update(kwargs)
             return SimpleNamespace(**kwargs, credits_refunded=False, result=None, error=None)
+
+        def savepoint(self) -> contextlib.nullcontext[None]:
+            # ADR-108 §3.1: submit_custom wraps consume → transport → create in a savepoint;
+            # the fake has no transaction to nest, so the savepoint is a no-op context.
+            return contextlib.nullcontext()
 
     class Fal:
         async def submit(self, *, endpoint: str, payload: dict[str, Any]) -> FalSubmission:

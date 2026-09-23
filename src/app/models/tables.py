@@ -853,6 +853,18 @@ class MediaJob(Base):
     push_sent_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # ADR-108 §9: the proxy service that accepted the run (`fal` | `kie` | `sosana`); '' = a job of
+    # the direct fal client (legacy), including every row that existed before the column. THE
+    # transport classifier: <> '' — completed by the webhook, never polled; '' — polls status_url.
+    # No CHECK: the set of proxy services is an external contract (like `status`).
+    provider: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("''"))
+    # ADR-108 §8: actual vendor price reported by the callback; NULL = not reported. Never sent to
+    # the client and does not replace provider_cost_usd.
+    vendor_price: Mapped[decimal.Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    # ADR-108 §5: normalized result of a `completed` callback not yet applied by the shared
+    # completion path (post-moderation / handler failed transiently); NULL after the terminal.
+    # The download route never reads it — an asset is reachable only from `result`.
+    pending_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )

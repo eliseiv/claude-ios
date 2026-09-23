@@ -14,6 +14,11 @@ ADR-105 §B7/§B8: for a job the client no longer polls, the deadline of §B1 is
 With an empty ``FAL_API_KEY`` there is nothing to poll with, but jobs past the deadline are still
 closed as ``failed`` with a refund (``lastObservation = not_configured``) and no request goes
 upstream; younger jobs are not touched.
+
+ADR-108 §6: proxy jobs (``provider <> ''``) are always in the selection — their tick makes NO
+outgoing call (a replay of the completion path from ``pending_result`` or the deadline). The
+selection is ``provider <> '' ∨ fal_configured ∨ created_at < now − MEDIA_JOB_DEADLINE_SECONDS``,
+oldest first. ADR-108 §10: every tick also refreshes ``media_proxy_jobs_awaiting_callback``.
 """
 
 from __future__ import annotations
@@ -27,8 +32,14 @@ from app.config import Settings, get_settings
 from app.db import get_sessionmaker
 from app.media_generation.repository import MediaJobsRepository
 from app.observability.logging import log_event
+from app.observability.metrics import media_proxy_jobs_awaiting_callback
 
 logger = logging.getLogger("app.media_generation.reconciler")
+
+# ADR-108 §10: a proxy job without a callback for longer than this is counted by the gauge. A code
+# constant, not a setting: the longest `completed` measured across the fleet is 2310 s; one hour
+# is above it and six times below the 6 h deadline.
+MEDIA_PROXY_CALLBACK_OVERDUE_SECONDS = 3600
 
 
 async def reconcile_once(settings: Settings | None = None) -> int:
@@ -36,31 +47,46 @@ async def reconcile_once(settings: Settings | None = None) -> int:
 
     With a fal key: every non-terminal job, oldest first. Without one (ADR-105 §B7): only jobs
     older than ``MEDIA_JOB_DEADLINE_SECONDS`` — the service closes each of them by the deadline
-    without an outgoing call (the fal client refuses before any request when the key is empty).
+    without an outgoing call (the fal client refuses before any request when the key is empty) —
+    plus every proxy job regardless of age (ADR-108 §6).
     """
     settings = settings or get_settings()
-    configured = bool(settings.fal_api_key.strip())
+    configured = settings.fal_configured()
+    now = datetime.datetime.now(tz=datetime.UTC)
     created_before: datetime.datetime | None = None
     if not configured:
-        created_before = datetime.datetime.now(tz=datetime.UTC) - datetime.timedelta(
-            seconds=settings.media_job_deadline_seconds
-        )
+        created_before = now - datetime.timedelta(seconds=settings.media_job_deadline_seconds)
     batch = max(1, settings.media_reconcile_batch_size)
     maker = get_sessionmaker()
     advanced = 0
     async with maker() as session:
         try:
             repo = MediaJobsRepository(session)
-            jobs = await repo.list_non_terminal(limit=batch, created_before=created_before)
+            media_proxy_jobs_awaiting_callback.set(
+                await repo.count_awaiting_callback(
+                    created_before=now
+                    - datetime.timedelta(seconds=MEDIA_PROXY_CALLBACK_OVERDUE_SECONDS)
+                )
+            )
+            jobs = await repo.list_non_terminal(
+                limit=batch, created_before=created_before, include_proxy_jobs=True
+            )
             if not jobs:
                 await session.commit()
                 return 0
             service = deps.build_media_generation_service(
                 session, deps.get_request_log_writer(session)
             )
+            # A proxy job is advanced under a row lock (ADR-108 §4.2) that lives until this
+            # batch commits. Legacy jobs poll fal over HTTP, so they go first: a lock taken
+            # before them would keep a concurrent callback of that job waiting for every poll.
+            # The selection itself stays oldest-first.
+            jobs.sort(key=lambda row: bool(row.provider))
             for job in jobs:
                 try:
-                    await service.advance(job)
+                    # ADR-108 §6: SKIP LOCKED for proxy rows — never wait for a concurrent
+                    # callback/poll while this batch already holds row and wallet locks.
+                    await service.advance(job, skip_locked=True)
                     advanced += 1
                 except Exception as exc:  # noqa: BLE001 - one bad job must not stall the batch
                     log_event(

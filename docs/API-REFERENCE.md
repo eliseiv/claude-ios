@@ -1186,7 +1186,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 ## 24. Models (список моделей инстанса)
 
 ### GET /v1/models
-Список моделей, которые **этот** инстанс умеет обслужить: chat (credits-провайдеры) + fal photo/video, если задан `FAL_API_KEY`. [ADR-034](adr/ADR-034-user-model-selection.md), [ADR-073](adr/ADR-073-dual-credits-llm-providers.md), [ADR-075](adr/ADR-075-unified-instance-models-catalog.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1models--список-доступных-моделей-инстанса-adr-034).
+Список моделей, которые **этот** инстанс умеет обслужить: chat (credits-провайдеры) + fal photo/video, если задан `FAL_API_KEY` (после [ADR-108](adr/ADR-108-media-generation-via-proxy.md) — если генерация на инстансе настроена; ответ не меняется). [ADR-034](adr/ADR-034-user-model-selection.md), [ADR-073](adr/ADR-073-dual-credits-llm-providers.md), [ADR-075](adr/ADR-075-unified-instance-models-catalog.md), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1models--список-доступных-моделей-инстанса-adr-034).
 **Заголовки:** `Authorization: Bearer <JWT>` (обязателен — как все `/v1/*`).
 **Response 200:**
 ```json

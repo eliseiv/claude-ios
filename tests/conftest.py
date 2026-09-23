@@ -80,6 +80,15 @@ os.environ["APNS_TOPIC"] = ""
 # test_media_asset_proxy_adr085.py) and keeps working.
 os.environ["PREVIEW_URL_SECRET"] = ""
 os.environ["SERVICE_DOMAIN"] = ""
+# ADR-108 §1/§7: PROXY_API_KEY (with SERVICE_DOMAIN) switches the submit transport from direct fal
+# to the proxy, and MEDIA_RESULT_HOST_SUFFIXES switches the sosana/kie routes on and widens the
+# result-host allowlist. A developer .env carrying either value would make the whole suite run a
+# different branch than CI; pin the CI posture (both empty). Tests of the proxy branch set them
+# explicitly via monkeypatch.setenv.
+os.environ["PROXY_API_KEY"] = ""
+os.environ["PROXY_WEBHOOK_SECRET"] = ""
+os.environ["MEDIA_RESULT_HOST_SUFFIXES"] = ""
+os.environ["MEDIA_VENDOR_PRICES"] = "{}"
 
 # JWT: tokens are signed below with an ephemeral RSA key (_PRIVATE_PEM); the service must
 # verify with the matching JWT_PUBLIC_KEY and the iss/aud baked into make_jwt(). Force a

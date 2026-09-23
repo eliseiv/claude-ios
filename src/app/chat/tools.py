@@ -126,7 +126,7 @@ GLOBAL_SERVER_SIDE_TOOLS = frozenset(
 DISABLEABLE_TOOL_FAMILIES: frozenset[str] = frozenset({"files", "calendar", "reminders", "site"})
 
 # Chat media tools (ADR-068 / ADR-070). Gated per-instance by CHAT_MEDIA_TOOLS_ENABLED (ADR-072);
-# orthogonal to FAL_API_KEY (which gates /v1/media/*).
+# orthogonal to the media-generation gate of /v1/media/* (ADR-108 §1: proxy ∨ FAL_API_KEY).
 MEDIA_CHAT_TOOLS = frozenset(
     {
         TOOL_MEDIA_GENERATE_IMAGE,

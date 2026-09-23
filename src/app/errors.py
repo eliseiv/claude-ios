@@ -363,11 +363,13 @@ class CloudPaymentsVerificationUnavailableError(AppError):
 class MediaGenerationNotConfiguredError(ServiceUnavailableError):
     """Image/video generation is unavailable on this instance (ADR-060 §5).
 
-    503 with code=media_generation_not_configured: either ``FAL_API_KEY`` is unset (the feature is
-    opt-in per instance) or fal rejected the configured key with 401/403. Both are operator
-    problems, not client ones, so they share one machine-readable code the iOS client maps to
-    "generation not available here" — distinguishable from a fal outage (502 upstream_error) and
-    from an empty balance (409 insufficient_credits).
+    503 with code=media_generation_not_configured: either generation is not configured (ADR-108
+    §1: neither ``proxy_configured`` nor ``FAL_API_KEY``; a path that still needs ``FAL_API_KEY``
+    behind the proxy — uploads, the i2v rehost, features — without it) or the proxy/fal rejected
+    the configured key with 401/403. Both are operator problems, not client ones, so they share
+    one machine-readable code the iOS client maps to "generation not available here" —
+    distinguishable from a provider outage (502 upstream_error) and from an empty balance
+    (409 insufficient_credits).
     """
 
     code = "media_generation_not_configured"

@@ -2,8 +2,9 @@
 
 Chat rows come from the instance-config layer (credits_providers + allowlists + the operator
 showcase, ADR-034/073/099).
-Fal rows are appended only when ``FAL_API_KEY`` is non-empty (ADR-060 gate). Leftover opposite
-LLM keys do not add a chat provider — that still requires ``LLM_PROVIDERS``.
+Fal rows are appended only when media generation is configured on the instance —
+``Settings.media_generation_configured()`` (ADR-108 §1: ``proxy_configured ∨ fal_configured``).
+Leftover opposite LLM keys do not add a chat provider — that still requires ``LLM_PROVIDERS``.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def build_instance_catalog(
         rest = [m for m in models if m.modality != "chat"]
         chat_models.sort(key=lambda m: m.id != user_default_model)
         models = chat_models + rest
-    if not settings.fal_api_key.strip():
+    if not settings.media_generation_configured():
         return models
     for entry in fal_catalog_entries():
         models.append(

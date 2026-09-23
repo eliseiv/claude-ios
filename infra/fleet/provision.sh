@@ -34,6 +34,16 @@ setvar() {  # setvar КЛЮЧ ЗНАЧЕНИЕ — заменить или до�
   fi
 }
 
+gen_hex32() {  # gen_hex32 — 32 случайных байта в hex; при сбое openssl — ошибка и выход, а не пусто
+  local v
+  v="$(openssl rand -hex 32 2>/dev/null)"
+  case "$v" in
+    *[!0-9a-f]*|"") echo "[$INST] openssl rand не дал секрет — ПРЕРЫВАЮ" >&2; exit 1;;
+  esac
+  [ "${#v}" = "64" ] || { echo "[$INST] openssl rand дал секрет неверной длины — ПРЕРЫВАЮ" >&2; exit 1; }
+  printf '%s' "$v"
+}
+
 case "$MODE" in
 adapt)
   SELF="${3:?третьим аргументом — на каком сервере наполняем: A или B}"
@@ -47,6 +57,11 @@ adapt)
   # 14 ГБ только под приложение. Нагрузка почти целиком в ожидании ответа провайдера, поэтому
   # два асинхронных воркера обслуживают тот же поток запросов вдвое дешевле по памяти.
   grep -q "^GUNICORN_WORKERS=" "$DIR/.env" || setvar GUNICORN_WORKERS 2
+  # PROXY_WEBHOOK_SECRET и PROXY_API_KEY режим adapt НЕ трогает (ADR-108). adapt запускается и
+  # на РЕЗЕРВЕ — migrate-all.sh и repair-replication.sh зовут его после копирования .env с
+  # основного, — поэтому секрет, сгенерированный здесь, разошёлся бы между основным и резервом, и
+  # после повышения резерва колбэки задач в полёте получили бы 401. Оба значения выставляются
+  # сразу на ОБА сервера скриптом infra/fleet/proxy-rollout.sh.
   echo "[$INST] .env приведён: туннель $(wg_of "$SELF"), порты api=$API_PORT pg=$PG_PORT"
   ;;
 
@@ -116,6 +131,16 @@ new)
   setvar PREVIEW_URL_SECRET "$(openssl rand -base64 32)"
   setvar METRICS_SCRAPE_TOKEN "$(openssl rand -base64 32)"
   setvar FAL_API_KEY ""
+  # Генерация через прокси (ADR-108 §1, §Порядок выката п.1). Ключ прокси выдаёт владелец и
+  # вписывает позже, вручную, и только там, где задан FAL_API_KEY: непустое значение сразу
+  # переключает инстанс на прокси, поэтому здесь — пусто, а не текст подсказки. Секрет подписи
+  # колбэка — свежий на инстанс; пока ключа нет, он ни на что не влияет. Значение не печатается.
+  setvar PROXY_API_KEY ""
+  # Секрет — через переменную, а не прямой подстановкой: exit внутри $(...) завершил бы только
+  # подоболочку, и в .env записалось бы пусто.
+  PWS="$(gen_hex32)" || exit 1
+  setvar PROXY_WEBHOOK_SECRET "$PWS"
+  unset PWS
   setvar APNS_KEY_ID ""
   setvar APNS_TEAM_ID ""
   setvar APNS_TOPIC ""

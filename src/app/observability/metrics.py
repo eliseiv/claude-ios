@@ -248,3 +248,13 @@ media_price_legacy_overquote = Gauge(
     "1 when the legacy multiplier triple over-quotes at least one price cell (ADR-099 §4.4).",
     ["model"],
 )
+# ADR-108 §10 — producer: `reconcile_once`, one aggregate query per tick; consumer: the alert
+# "value > 0 for longer than 15 min" (infra/observability/rules/alerts.yml, devops zone). Counts
+# proxy jobs whose callback never arrived: `provider <> '' ∧ status ∈ {queued, running} ∧
+# pending_result IS NULL ∧ created_at < now − MEDIA_PROXY_CALLBACK_OVERDUE_SECONDS`. Not counted:
+# a job younger than the threshold, a job with `pending_result` (callback arrived, completion
+# deferred) and every legacy row (`provider = ''`).
+media_proxy_jobs_awaiting_callback = Gauge(
+    "media_proxy_jobs_awaiting_callback",
+    "Proxy media jobs without a callback for longer than an hour (ADR-108 §10).",
+)

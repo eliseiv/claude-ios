@@ -6,6 +6,8 @@
 
 `GET`/`HEAD /v1/media/jobs/{jobId}/assets/{index}/{token}` **без JWT** ([ADR-085](../../adr/ADR-085-media-asset-download-proxy.md)): авторизация — HMAC в пути (тот же `PREVIEW_URL_SECRET`, канон `media-asset|{jobId}|{ownerUserId}|{index}|{exp}`). Подпись привязана к владельцу строки `media_jobs`. Битый/просроченный токен → `401`; нет job / нет index / хост stored URL вне allowlist → `404`. Preview-токен на этот роут не принимается.
 
+`POST /v1/media/webhooks/proxy/{jobId}` ([ADR-108 §4](../../adr/ADR-108-media-generation-via-proxy.md)) **без JWT**: авторизация — query `token` = HMAC-SHA256 по `jobId` на `PROXY_WEBHOOK_SECRET` (иначе `PROXY_API_KEY`). **Контраст (обе стороны помечены):** download-токен подписан `PREVIEW_URL_SECRET`, выдаётся клиенту и привязан к владельцу; токен колбэка подписан другим секретом, клиенту не выдаётся никогда и разрешает только применение исхода к одной задаче. Неверный токен → `401` до обращения к БД; задачи нет или она не принималась прокси → `404`. Скоупа по `user_id` у ручки нет — владелец задачи колбэком не выбирается и не меняется.
+
 ## Изоляция владельца
 
 Все запросы к `media_jobs` скоупятся `WHERE user_id = :sub`. Поэтому чужая задача **неотличима** от несуществующей: и то и другое → `404 not_found`. Чужая задача не появляется и в `GET /v1/media/jobs`.
@@ -16,8 +18,8 @@
 
 | Условие | Результат |
 |---|---|
-| `FAL_API_KEY` не задан на инстансе | `503 media_generation_not_configured` |
-| провайдер отклонил ключ (`401`/`403`) | `503 media_generation_not_configured` |
+| `FAL_API_KEY` не задан на инстансе ([ADR-108 §1](../../adr/ADR-108-media-generation-via-proxy.md): не задан ни `FAL_API_KEY`, ни `PROXY_API_KEY` + `SERVICE_DOMAIN`) | `503 media_generation_not_configured` |
+| провайдер отклонил ключ (`401`/`403`; ADR-108 — fal или прокси) | `503 media_generation_not_configured` |
 | баланс кредитов меньше **итоговой** цены запуска (с учётом `numImages`/`duration`) | `409 insufficient_credits`, списания нет |
 | удаление задачи в статусе `queued`/`running` | `409 job_not_terminal`; сначала опрос до терминального статуса, иначе возврат кредитов при провале станет невозможен |
 | превышен per-user rate limit | `429 rate_limited` |
@@ -30,7 +32,7 @@
 
 ## Что не логируется и не отдаётся
 
-- `FAL_API_KEY` — не в логах (redaction покрывает `*key*`), не в ответах, не в БД.
+- `FAL_API_KEY` — не в логах (redaction покрывает `*key*`), не в ответах, не в БД. Так же `PROXY_API_KEY` и `PROXY_WEBHOOK_SECRET` ([ADR-108 §10](../../adr/ADR-108-media-generation-via-proxy.md)); значение `token` колбэка и тело колбэка целиком в структурные логи не пишутся.
 - Тело ответа провайдера наверх не проксируется; исключение — текст `422`, который содержит только имя проблемного параметра (обрезается до 500 символов).
 - Промт пользователя хранится в `media_jobs.prompt` (нужен для листинга) и **не** попадает в структурные логи.
 - Полный URL CDN fal и signed token download-роута не логируются. Исходящий fetch только на хосты из `FAL_UPLOAD_HOST_SUFFIXES`, без follow-redirect.

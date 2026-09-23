@@ -1,6 +1,7 @@
 # ADR-075 — Unified instance catalog on GET /v1/models (chat + fal)
 
 - **Статус:** Accepted
+- **Пометка 2026-09-23 ([ADR-108 §1](ADR-108-media-generation-via-proxy.md), реализовано в коде и инфраструктуре; приёмка пройдена; переключение инстансов — по «Порядку выката»), тело не переписано:** условие «непустой `FAL_API_KEY` добавляет photo/video» → «генерация настроена» (`proxy_configured ∨ fal_configured`); состав и форма строк (`provider: "fal"`, `id` = endpoint fal) не меняются.
 - **Дата:** 2026-08-14
 - **Связано:** [ADR-034](ADR-034-user-model-selection.md), [ADR-060](ADR-060-media-generation-fal.md), [ADR-073](ADR-073-dual-credits-llm-providers.md)
 

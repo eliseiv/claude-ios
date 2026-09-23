@@ -387,12 +387,15 @@ class Settings(BaseSettings):
     )
 
     # --- Image/video generation via fal.ai (ADR-060, media-generation/03) ---
-    # SECRET: the fal API key, presented upstream as `Authorization: Key <value>`. Empty (default)
-    # => the whole /v1/media/* surface answers 503 media_generation_not_configured, so the feature
-    # is opt-in per instance. Never logged (redaction covers *key* fields).
+    # SECRET: the fal API key, presented upstream as `Authorization: Key <value>`. Generation is
+    # opt-in per instance: /v1/media/* answers 503 media_generation_not_configured unless
+    # `media_generation_configured()` (ADR-108 §1: proxy_configured ∨ fal_configured). Even with
+    # the proxy, uploads, the i2v rehost, feature uploads and legacy polling still need this key.
+    # Never logged (redaction covers *key* fields).
     fal_api_key: str = Field(default="", alias="FAL_API_KEY")
     # ADR-072: when False, chat does NOT offer media.ask_params / media.generate_* (and refuses
-    # mediaSelection), while /v1/media/* still works if FAL_API_KEY is set. Default True keeps
+    # mediaSelection), while /v1/media/* still works if media generation is configured
+    # (ADR-108 §1: proxy_configured ∨ FAL_API_KEY). Default True keeps
     # prior behaviour on every instance. Per-instance (e.g. ravelumi: REST gallery only).
     chat_media_tools_enabled: bool = Field(default=True, alias="CHAT_MEDIA_TOOLS_ENABLED")
     # ADR-081: comma-separated tool families to hide on THIS instance only
@@ -492,6 +495,26 @@ class Settings(BaseSettings):
     media_job_deadline_seconds: int = Field(
         default=_DEFAULT_MEDIA_JOB_DEADLINE_SECONDS, alias="MEDIA_JOB_DEADLINE_SECONDS"
     )
+
+    # --- Image/video generation via the proxy service (ADR-108 §1.1 — the one normative place
+    # of these defaults; other documents refer there). ---
+    # SECRET: the instance key for the proxy, sent as `Authorization: Bearer <value>`. Empty
+    # (default) => the direct fal branch, exactly as before ADR-108. Set together with
+    # SERVICE_DOMAIN => generation goes through the proxy (`proxy_configured`). Never logged.
+    proxy_api_key: str = Field(default="", alias="PROXY_API_KEY")
+    # PUBLIC base of the proxy API (`POST {PROXY_BASE}/api/v1/tasks`). Fixed server-side.
+    proxy_base: str = Field(default="https://proxy.broadapps.dev", alias="PROXY_BASE")
+    # Connect+read timeout of ONE proxy call (ADR-108 §3.3: a timeout stops the route loop).
+    proxy_timeout_seconds: float = Field(default=30.0, alias="PROXY_TIMEOUT_SECONDS")
+    # SECRET: signs the webhook `callbackUrl` token (ADR-108 §4.1). Empty => PROXY_API_KEY is
+    # used instead; on prod it is set explicitly, fresh per instance. Never logged.
+    proxy_webhook_secret: str = Field(default="", alias="PROXY_WEBHOOK_SECRET")
+    # Override of the ROUTING price table `{"<model>:<tier>:<service>": usd}` (ADR-108 §2). This
+    # is our purchase price at the vendor; it never moves the credit price of a run.
+    media_vendor_prices_raw: str = Field(default="{}", alias="MEDIA_VENDOR_PRICES")
+    # CDN host suffixes of the proxy vendors (sosana/kie), comma-separated (ADR-108 §7). They
+    # extend the result-host allowlist; empty (default) switches the sosana/kie routes off.
+    media_result_host_suffixes_raw: str = Field(default="", alias="MEDIA_RESULT_HOST_SUFFIXES")
 
     # --- Scheduled chat tasks (ADR-107) ---
     # Poller interval; <=0 disables the in-process worker (tests / ops kill-switch).
@@ -913,6 +936,72 @@ class Settings(BaseSettings):
         """
         parts = (item.strip().lower() for item in self.fal_upload_host_suffixes_raw.split(","))
         return tuple(part for part in parts if part)
+
+    def media_result_host_suffixes(self) -> tuple[str, ...]:
+        """CDN host suffixes of the proxy vendors (ADR-108 §7), parsed like the fal list."""
+        parts = (item.strip().lower() for item in self.media_result_host_suffixes_raw.split(","))
+        return tuple(part for part in parts if part)
+
+    def media_asset_host_suffixes(self) -> tuple[str, ...]:
+        """Default result-host allowlist: ``FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES``.
+
+        ADR-108 §7: the download route, the client-facing signed URL and the webhook asset filter
+        read THIS union. The fal-only list stays only where it is passed explicitly
+        (``FalClient._upload_host_allowed``). With an empty ``MEDIA_RESULT_HOST_SUFFIXES`` the
+        union equals the fal list, i.e. the behaviour before ADR-108.
+        """
+        merged: list[str] = []
+        for suffix in (*self.fal_upload_host_suffixes(), *self.media_result_host_suffixes()):
+            if suffix not in merged:
+                merged.append(suffix)
+        return tuple(merged)
+
+    def media_vendor_prices(self) -> dict[str, float]:
+        """Parse MEDIA_VENDOR_PRICES (ADR-108 §2) — routing prices only, never credits.
+
+        A key survives only with a non-negative finite number (bool excluded); anything else is
+        ignored, and a malformed document degrades to "no overrides". Pure (no I/O).
+        """
+        import json
+        import math
+
+        try:
+            parsed = json.loads(self.media_vendor_prices_raw or "{}")
+        except (ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        prices: dict[str, float] = {}
+        for key, value in parsed.items():
+            if not isinstance(key, str):
+                continue
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                continue
+            number = float(value)
+            if not math.isfinite(number) or number < 0:
+                continue
+            prices[key] = number
+        return prices
+
+    # --- ADR-108 §1: THE predicate "generation is configured" and the submit transport. ---
+    # Every decision "is media generation available on this instance" reads these methods, never
+    # the raw keys: a second hand-written check is how a surface drifts from the gate.
+
+    def fal_configured(self) -> bool:
+        """``FAL_API_KEY`` is non-empty (blank counts as empty) — the direct fal client can run."""
+        return bool(self.fal_api_key.strip())
+
+    def proxy_configured(self) -> bool:
+        """``PROXY_API_KEY`` and ``SERVICE_DOMAIN`` are both set (ADR-108 §1).
+
+        The domain is part of the predicate because without it no ``callbackUrl`` can be built: a
+        job debited for would never get its callback and would hang until the deadline.
+        """
+        return bool(self.proxy_api_key.strip()) and bool(self.normalized_service_domain())
+
+    def media_generation_configured(self) -> bool:
+        """The gate of ``/v1/media/*``, the media rows of ``GET /v1/models`` and the CRM tariffs."""
+        return self.proxy_configured() or self.fal_configured()
 
     def token_products_default(self) -> frozenset[str]:
         """Идентификаторы продуктов с поднятым `isDefault` (ADR-098 §7).

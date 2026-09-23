@@ -65,6 +65,21 @@
 4. **Согласователь:** сервис — той же функцией, что request-путь (`deps.build_media_generation_service`, с `request_logs` и `moderation`; `deps.get_media_generation_service` — её обёртка-зависимость FastAPI); при пустом `FAL_API_KEY` — только просроченные (`MediaJobsRepository.list_non_terminal(created_before=…)`), без опроса; `media_reconcile_job_error` + `exceptionClass`.
 5. **Тесты:** [09-testing.md §Дедлайн задачи](09-testing.md#integration--дедлайн-задачи-adr-105).
 
+## Phase 9 — Транспорт через прокси-сервис ([ADR-108](../../adr/ADR-108-media-generation-via-proxy.md), реализована; приёмка пройдена)
+
+Порядок обязателен: **код безопасен к выкату без env** (без `PROXY_API_KEY` работает прямой fal), переключение — по одному инстансу ([ADR-108 §Порядок выката](../../adr/ADR-108-media-generation-via-proxy.md)).
+
+1. **Config:** `PROXY_API_KEY`, `PROXY_BASE`, `PROXY_TIMEOUT_SECONDS`, `PROXY_WEBHOOK_SECRET`, `MEDIA_VENDOR_PRICES`, `MEDIA_RESULT_HOST_SUFFIXES` — дефолты и смысл только в [ADR-108 §1.1](../../adr/ADR-108-media-generation-via-proxy.md). `MEDIA_JOB_TIMEOUT_SECONDS` образца **не вводится** — дедлайн остаётся `MEDIA_JOB_DEADLINE_SECONDS`.
+2. **Миграция** (expand-only, single head, без DML): `media_jobs.provider TEXT NOT NULL DEFAULT ''`, `vendor_price NUMERIC(18,6) NULL`, `pending_result JSONB NULL`.
+3. **Клиент прокси и маршрутизация:** `POST {PROXY_BASE}/api/v1/tasks`, маршруты и цены [ADR-108 §2](../../adr/ADR-108-media-generation-via-proxy.md), условия не-fal маршрута §2.1, ошибки и откат §3.3.
+4. **Предикат «генерация настроена»** (§1) — в `require_media_generation_configured`, каталог инстанса `src/app/chat/instance_catalog.py` (`GET /v1/models`), тарифной поверхности CRM и готовности features; выбор транспорта в `submit` и `submit_custom`.
+5. **Вебхук:** отдельный роутер вне гейта и вне OpenAPI, порядок проверок [§4.2](../../adr/ADR-108-media-generation-via-proxy.md), строка под `FOR UPDATE`, `pending_result`, общий путь завершения под `SAVEPOINT` (§5), сервис — `deps.build_media_generation_service`.
+6. **`_advance` и согласователь:** классификатор `provider`, ветка proxy-задачи и `lastObservation = webhook_pending` (§6), выборка согласователя.
+7. **Allowlist хостов результата** (§7) — download-роут и проверка URL колбэка.
+8. **Наблюдаемость** — [§10](../../adr/ADR-108-media-generation-via-proxy.md), включая метрику `media_proxy_jobs_awaiting_callback` (producer — согласователь) и алерт по ней (devops).
+9. **devops:** шаблоны env, провижининг `PROXY_WEBHOOK_SECRET` и `PROXY_API_KEY` по [ADR-108 §Порядок выката](../../adr/ADR-108-media-generation-via-proxy.md), self-probe вебхука в `infra/fleet/verify.sh`, правило алерта, prod-checklist.
+10. **Тесты:** [09-testing.md §Транспорт через прокси](09-testing.md#integration--транспорт-через-прокси-adr-108).
+
 ## Post-MVP (не в этой поставке)
 
 - ~~**Фоновая доводка «зависших» задач**~~ — **сделано:** фоновый согласователь ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md), закрыл [Q-060-2](../../99-open-questions.md)); предел жизни задачи, на которую провайдер не даёт конечного ответа, — Phase 8 ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).

@@ -740,7 +740,7 @@ Backend только инициирует tool-call; исполняет клие
 <a id="default-per-modality-adr-087"></a>
 - **`default` (bool) трактуется ТОЛЬКО внутри `modality` ([ADR-075](../../adr/ADR-075-unified-instance-models-catalog.md), уточнено [ADR-087 §4](../../adr/ADR-087-default-chat-model-gpt-4-1.md)).** Клиент обязан **сначала отфильтровать по `modality`**, и только потом читать `default`:
   - `modality=chat` — ровно один `true`, он **первый** в массиве. Это дефолт инстанса, **если** пользователь не задал персональный (`PATCH /v1/preferences` `defaultModel`, 2026-09-23) — тогда `true` и первая позиция переходят на выбранную модель. Сохранённый персональный выбор, снятый оператором с витрины, отдаётся как отсутствующий (молчаливая деградация к дефолту инстанса, без ошибки) — см. [modules/preferences/02-api-contracts.md](../preferences/02-api-contracts.md#get-v1preferences);
-  - `modality=photo` — ровно один `true` (`fal-ai/nano-banana-pro`), только когда задан `FAL_API_KEY`;
+  - `modality=photo` — ровно один `true` (`fal-ai/nano-banana-pro`), только когда задан `FAL_API_KEY` ([ADR-108 §1](../../adr/ADR-108-media-generation-via-proxy.md): когда генерация настроена — `PROXY_API_KEY`+`SERVICE_DOMAIN` или `FAL_API_KEY`; состав строк не меняется);
   - `modality=video` — **всегда `false`**: дефолтной видео-модели у инстанса нет.
 
   Отсюда: в одном ответе одновременно присутствуют **до двух** `default: true` (chat и photo) — это контракт, а не дефект. Прочтение «ровно один `default: true` на весь ответ» неверно и было источником репорта BUG-003.

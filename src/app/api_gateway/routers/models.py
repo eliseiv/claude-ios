@@ -1,10 +1,10 @@
 """Models catalog route: GET /v1/models (chat-orchestrator/02, ADR-034 / ADR-073 / ADR-075).
 
 JWT-protected like GET /v1/tools (CurrentUser) — the list is not secret but the /v1/* auth contour
-is uniform. Returns the instance catalog: credits chat models plus fal photo/video when
-``FAL_API_KEY`` is set. Chat composition is still ``credits_providers()`` (opt-in
-``LLM_PROVIDERS``); a leftover opposite LLM key does not add that provider. Read-only;
-per-user rate limit as other reads.
+is uniform. Returns the instance catalog: credits chat models plus fal photo/video when media
+generation is configured (ADR-108 §1: ``proxy_configured ∨ fal_configured``). Chat
+composition is still ``credits_providers()`` (opt-in ``LLM_PROVIDERS``); a leftover opposite LLM
+key does not add that provider. Read-only; per-user rate limit as other reads.
 """
 
 from __future__ import annotations

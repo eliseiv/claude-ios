@@ -5,9 +5,10 @@ asynchronous — the POST routes return a `queued` job and the client polls
 `GET /v1/media/jobs/{jobId}`, which is the only route that touches the provider. Per-user rate
 limit like the other non-chat endpoints.
 
-Routes on this router are gated on the instance being configured for generation: without
-`FAL_API_KEY` they answer `503 media_generation_not_configured` — including `GET /v1/media/models`.
-Gallery templates live on a separate router (ADR-066) and are not gated.
+Routes on this router are gated on the instance being configured for generation (ADR-108 §1:
+`proxy_configured ∨ fal_configured`); otherwise they answer `503 media_generation_not_configured` —
+including `GET /v1/media/models`. Gallery templates (ADR-066) and the proxy webhook (ADR-108 §4.2)
+live on separate routers and are not gated.
 """
 
 from __future__ import annotations

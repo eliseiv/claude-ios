@@ -119,7 +119,9 @@ def public_asset_url(
 ) -> str:
     """Client-facing URL: signed path on SERVICE_DOMAIN, or ``stored_url`` if we cannot rewrite.
 
-    Non-fal hosts are left as-is (tests and unexpected providers). A missing preview secret
+    Hosts outside ``FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES`` (ADR-108 §7) are left
+    as-is (tests and unexpected providers); a proxy-job asset outside that union never reaches a
+    row (the webhook drops it), so a vendor CDN URL is not handed out raw. A missing preview secret
     must not break job polling — log and hand the stored URL through.
     """
     if not fal_asset_host_allowed(stored_url):

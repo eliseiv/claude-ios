@@ -86,6 +86,22 @@ groups:
           summary: "site.write_file failures observed"
           description: "site_file_write_total{result!=success} rate > 0.5/s for 15m — check limits/content-type allowlist (ADR-010)."
 
+      # Proxy media jobs whose webhook callback never arrived (ADR-108 §10). Producer:
+      # reconcile_once sets the gauge each tick; it counts proxy jobs (provider <> '') still
+      # queued/running, without pending_result, older than 1h (> max observed completion 2310s).
+      # Not counted: jobs younger than 1h, jobs whose callback arrived (pending_result set),
+      # legacy direct-fal rows. Fires => callbacks do not reach the instance (domain/TLS/route or
+      # proxy side): every such job waits to the 6h deadline and is refunded while the vendor run
+      # is paid. Check the webhook self-probe in infra/fleet/verify.sh.
+      - alert: MediaProxyJobsAwaitingCallback
+        expr: media_proxy_jobs_awaiting_callback > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Proxy media jobs without callback on {{ $labels.instance }}"
+          description: "media_proxy_jobs_awaiting_callback > 0 for 15m — proxy jobs older than 1h got no webhook callback (ADR-108 §10)."
+
       # Readiness flapping inferred from scrape health is covered by BackendTargetDown.
       # Anthropic/Apple/KMS dependency outages surface as wallet/debit failures and
       # elevated chat_run_latency; add provider-specific probes when those exporters exist.

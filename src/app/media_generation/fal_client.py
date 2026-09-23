@@ -1,5 +1,10 @@
 """Outgoing calls to the fal.ai queue API — submit / status / result (ADR-060 §3).
 
+ADR-108: on an instance with ``proxy_configured`` generation runs are submitted through the proxy
+(``proxy_client.py``); this client then remains for uploads, the i2v rehost, feature uploads,
+polling of legacy jobs (``provider = ''``) and the direct submit branch of an instance without
+``PROXY_API_KEY``.
+
 Every generation goes through the *queue* API (``https://queue.fal.run``) rather than the
 synchronous one: Kling and Veo runs take minutes, far beyond any sane HTTP timeout, so the
 submit call returns a ``request_id`` immediately and the client polls ``GET /v1/media/jobs/{id}``.
@@ -102,10 +107,11 @@ class FalClient:
 
     @property
     def configured(self) -> bool:
-        return bool(self._settings.fal_api_key)
+        # ADR-108 §1: `fal_configured` — the one definition, shared with the gate and catalogs.
+        return self._settings.fal_configured()
 
     def _headers(self) -> dict[str, str]:
-        if not self._settings.fal_api_key:
+        if not self.configured:
             raise MediaGenerationNotConfiguredError("media generation is not configured")
         return {
             "Authorization": f"Key {self._settings.fal_api_key}",

@@ -33,6 +33,7 @@ from app.api_gateway.routers import (
     media,
     media_features,
     media_templates,
+    media_webhooks,
     memory,
     models,
     notifications,
@@ -382,6 +383,9 @@ def create_app() -> FastAPI:
         media,
         media_features,
         media_templates,
+        # ADR-108 §4.2: the proxy callback — own router, outside the /v1/media gate, not in
+        # the OpenAPI schema (include_in_schema=False on the router).
+        media_webhooks,
         policy,
         wallet,
         subscription,

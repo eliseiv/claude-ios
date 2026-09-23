@@ -139,7 +139,8 @@ class MediaFeaturesService:
         enabled = self._settings.avatar_speech_enabled
         return {
             "enabled": enabled,
-            "configured": self._fal.configured and self._speech.configured,
+            # ADR-108 §1: (proxy ∨ fal) ∧ fal ∧ speech — the uploads still need FAL_API_KEY.
+            "configured": self._generation_ready() and self._speech.configured,
             "credits": self._settings.avatar_speech_credit_cost,
             "maxTextLength": 300,
             "languages": (
@@ -483,9 +484,13 @@ class MediaFeaturesService:
         if not self._settings.avatar_speech_enabled:
             raise AvatarSpeechDisabledError("avatar speech is disabled")
 
+    def _generation_ready(self) -> bool:
+        """ADR-108 §1: generation configured AND the fal key the feature uploads go through."""
+        return self._settings.media_generation_configured() and self._fal.configured
+
     def _require_avatar_ready(self, *, require_speech: bool = False) -> None:
         self._require_avatar_enabled()
-        if not self._fal.configured:
+        if not self._generation_ready():
             raise MediaGenerationNotConfiguredError("media generation is not configured")
         if require_speech and not self._speech.configured:
             raise VoiceOutputNotConfiguredError("speech synthesis is not configured")
@@ -493,7 +498,7 @@ class MediaFeaturesService:
     def _require_makeup_ready(self) -> None:
         if not self._settings.makeup_enabled:
             raise MakeupDisabledError("makeup is disabled")
-        if not self._fal.configured:
+        if not self._generation_ready():
             raise MediaGenerationNotConfiguredError("media generation is not configured")
 
 

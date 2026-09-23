@@ -16,6 +16,8 @@
 | `migrations/versions/20260804_0018_media_jobs.py` | миграция таблицы |
 | `migrations/versions/20260805_0019_media_jobs_edit_chain.py` | цепочка правок: `parent_job_id`, `input_image_urls` |
 
+**[ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) (реализовано) добавляет:** исходящий клиент прокси (`POST {PROXY_BASE}/api/v1/tasks`), модуль маршрутизации (публичная модель → `fal`/`kie`/`sosana` + endpoint вендора, цены маршрутов), подпись и разбор колбэка, отдельный роутер `POST /v1/media/webhooks/proxy/{jobId}` (вне гейта, вне OpenAPI), метод репозитория «строка по id под `FOR UPDATE`» и миграцию `provider`/`vendor_price`/`pending_result`. Имена модулей образца: `proxy_client.py`, `routing.py`, `webhook.py`, `routers/media_webhooks.py` (ai-media-upscaler). Порядок шагов — [§Транспорт через прокси](#транспорт-через-прокси-adr-108).
+
 Wiring — `deps.build_media_generation_service` (единственная сборка сервиса — request-путь и согласователь, [ADR-105 §B6](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)), `deps.get_media_generation_service` (её обёртка-зависимость FastAPI), `deps.get_fal_client`.
 
 ## Поток постановки задачи
@@ -43,6 +45,8 @@ POST /v1/media/images|videos
 ```
 
 Диаграмма выше — **полный** порядок шагов сабмита; шаг модерации входа добавлен [ADR-086](../../adr/ADR-086-ugc-moderation.md) и обязан присутствовать здесь так же, как в ADR.
+
+**[ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) :** при `proxy_configured` шаг `fal.submit` заменяется перебором маршрутов прокси (`callbackUrl` строится из `jobId` до вызова), а `INSERT` пишет `provider`/`status_url=''`/`response_url=''`; все прочие шаги, их порядок и граница транзакции — те же. Полный порядок — [§Транспорт через прокси](#транспорт-через-прокси-adr-108).
 
 > **`409 insufficient_credits` на шаге `wallet.consume` отменяет строку списания ТОЛЬКО откатом транзакции** ([wallet-ledger/03-architecture.md §consume](../wallet-ledger/03-architecture.md)): строка вставляется до балансового гейта. Отсюда: перехватить этот отказ и вернуть управление штатно — значит **закоммитить списание, которого не было**, при том что `INSERT media_jobs` (строка 39) не выполнялся и задачи нет. По REST-ручкам `/v1/media/*` отказ долетает наружу и откат происходит; **носитель дефекта — мягкий отказ media-инструмента в tool-loop чата**, где ход намеренно не роняется ([ADR-068 §1](../../adr/ADR-068-media-generate-chat-tools.md)): [TD-048](../../100-known-tech-debt.md).
 
@@ -87,6 +91,8 @@ GET /v1/media/jobs/{jobId}   (тот же путь _advance — у фоново�
 ```
 
 Диаграмма выше — **полный** порядок опроса, включая шаг пост-модерации ([ADR-086](../../adr/ADR-086-ugc-moderation.md)), терминальные `422`/`404` на опросе (факт кода: `MediaGenerationService._advance` ловит `ValidationFailedError` и `UpstreamJobGoneError`; `404` — коммит `5ebf963`, в [ADR-060 §3](../../adr/ADR-060-media-generation-fal.md) не значился) и ветку дедлайна **[ADR-105 §B2](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md) (реализована в `cbed6ca`: `MediaGenerationService._close_if_overdue`, зовётся из `_advance` только когда опрос не дал конечного состояния; до `cbed6ca` нижняя ветка шла без дедлайна, и задача, на которую fal не давал конечного ответа, опрашивалась вечно без возврата кредитов)**. Каждой ветке дедлайна `_advance` передаёт `lastObservation` по месту, где опрос остановился: исключение `FalClient.status`/`FalClient.result` → `upstream_error` при заданном ключе и `not_configured` при пустом (`_fal_failure_observation`), нетерминальный статус → `upstream_pending`, исключение нормализации результата → `internal_error`, исключение `_moderate_output` → `moderation_unavailable`; значения — константы `OBSERVATION_*` в `src/app/media_generation/service.py`, текст ошибки — `DEADLINE_EXCEEDED_ERROR`.
+
+Диаграмма выше — поток **legacy-задачи** (`provider = ''`) по [ADR-108](../../adr/ADR-108-media-generation-via-proxy.md); у proxy-задачи ветки `fal.status`/`fal.result` нет — [§Транспорт через прокси](#транспорт-через-прокси-adr-108).
 
 **Дедлайн задачи ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).** Любая строка `media_jobs` достигает `completed`/`failed` не позже `created_at + MEDIA_JOB_DEADLINE_SECONDS` (дефолт `21600`, 6 ч). Предикат двусторонний: **(а)** задача старше дедлайна, опрос не дал конечного состояния по ЛЮБОЙ причине ⇒ `failed` + возврат; **(б)** задача моложе дедлайна правилом не трогается, какой бы ни была ошибка, а задача старше дедлайна, чей опрос дал `COMPLETED` с ассетами или `FAILED`, получает этот исход, а не текст дедлайна (опрос выполняется всегда — «последний шанс»). Мерило — возраст, а не число попыток: частота опроса зависит от клиента, интервала и числа реплик. Значение `<= 0` приводится к дефолту.
 
@@ -145,6 +151,8 @@ GET /v1/media/jobs/{jobId}   (тот же путь _advance — у фоново�
 
 URL'ы опроса берутся из ответа на сабмит и **персистятся**: для вложенных endpoint'ов вида `kling-video/v3/pro/text-to-video` очередная тропа не выводится из одного идентификатора. Так как это URL, пришедший из внешней системы, перед каждым запросом проверяется префикс `FAL_QUEUE_BASE` (SSRF-guard); не прошёл — используется канонический вид, а не чужой хост.
 
+Раздел описывает прямой клиент fal. С [ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) он остаётся для загрузок, перехоста, features-загрузок, опроса legacy-задач и прямой ветки сабмита на инстансе без `PROXY_API_KEY`; сабмит через прокси — `Authorization: Bearer <PROXY_API_KEY>`, таймаут `PROXY_TIMEOUT_SECONDS`, ключ не логируется.
+
 Маппинг ошибок — см. [ADR-060 §3](../../adr/ADR-060-media-generation-fal.md). Единственное исключение из правила «upstream наверх не проксируем» — `422`: сообщение fal называет проблемный параметр, секретов не содержит и полезно клиенту; текст обрезается до 500 символов и сплющивается в одну строку.
 
 ## Нормализация результата
@@ -166,6 +174,7 @@ URL'ы опроса берутся из ответа на сабмит и **пе
 | `fal_submit_outcome` | сабмит принят провайдером |
 | `fal_call_outcome` | ошибка исходящего вызова: `reason`, `falEndpoint`, `upstreamStatus`. **`jobId` нет** — атрибуция к задаче по этому событию невозможна; её даёт `media_reconcile_job_error` |
 | `media_reconcile_job_error` | продвижение задачи согласователем завершилось исключением (WARNING): `jobId`, `exceptionClass` — имя класса исключения, не текст ([ADR-105 §B5](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md); поле добавлено в `cbed6ca`, `reconcile_once`) |
+| `proxy_submit_outcome` / `proxy_call_outcome` / `media_generation_route_fallback` / `media_webhook_outcome` | [ADR-108 §10](../../adr/ADR-108-media-generation-via-proxy.md): принятие задачи прокси, ошибка исходящего вызова прокси, откат на следующий маршрут, исход колбэка (значения `outcome` и их предикаты — в ADR). `media_generation_submitted` / `media_feature_submitted` получают `proxyService`. **Запрещено:** `PROXY_API_KEY`, секрет подписи, значение `token`, тело колбэка целиком, URL ассета целиком |
 | `media_generation_deadline_exceeded` | [ADR-105 §B5](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), реализовано в `cbed6ca` (`MediaGenerationService._close_if_overdue`). Задача доведена до `failed` по дедлайну (WARNING, пишется ветка дедлайна `_advance` перед `_fail`): `jobId`, `model`, `ageSeconds`, `lastObservation` ∈ `upstream_error` \| `upstream_pending` \| `moderation_unavailable` \| `not_configured` \| `internal_error` (предикаты — в ADR), `upstreamStatus` (только когда исключение fal его несёт — `upstream_status_of`, см. ниже). Следом — `media_generation_failed`. `not_configured` через HTTP-ручку не наблюдаемо: без `FAL_API_KEY` роутер `/v1/media` отвечает `503` до сервиса ([ADR-105 §B5](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), уточнение факта); его пишет согласователь |
 
 ## Согласователь: одна сборка сервиса ([ADR-105 §B6](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md))
@@ -173,3 +182,70 @@ URL'ы опроса берутся из ответа на сабмит и **пе
 `reconcile_once` (`src/app/media_generation/reconciler.py`) собирает `MediaGenerationService` **той же функцией и с тем же набором зависимостей**, что request-путь (`repo`, `fal`, `wallet`, `settings`, `push`, `request_logs`, `moderation`): это `deps.build_media_generation_service(session, request_logs)` (`src/app/deps.py`) — единственная сборка сервиса; `deps.get_media_generation_service` — её обёртка-зависимость FastAPI для request-пути, согласователь зовёт её напрямую с `deps.get_request_log_writer(session)`. Реализовано в `cbed6ca`; до него (на `f8f4b37`) согласователь собирал сервис сам и **без** `request_logs` и `moderation` — строка `request_logs` задачи, доведённой согласователем, оставалась `queued` ([ADR-077 §3](../../adr/ADR-077-crm-request-logs.md) не выполнялся), а картинка, готовность которой обнаружил согласователь, выдавалась **без пост-модерации** ([ADR-086 §5](../../adr/ADR-086-ugc-moderation.md) не выполнялся). При пустом `FAL_API_KEY` согласователь не опрашивает, но задачи старше дедлайна доводит до `failed` (`lastObservation = not_configured`, [ADR-105 §B7](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)): выборка сужается по возрасту `MediaJobsRepository.list_non_terminal(limit=…, created_before=now − MEDIA_JOB_DEADLINE_SECONDS)`, и каждая взятая задача проходит обычный `advance` — `FalClient` отказывает до запроса (`FalClient._headers`), ветка дедлайна её закрывает; до `cbed6ca` `reconcile_once` при пустом ключе возвращал `0` до выборки. Выборка — по-прежнему старейшие первыми; дедлайн ограничивает сверху, сколько в голове пачки может лежать мёртвых задач.
 
 **HTTP-статус fal на исключении ([ADR-105 §B5](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).** `FalClient._raise_for_status` и `FalClient._upstream_error` прикрепляют HTTP-статус ответа fal к поднимаемому исключению атрибутом `upstream_status` (`_with_upstream_status`, `src/app/media_generation/fal_client.py`); читает его `upstream_status_of(exc)` — `None` у таймаута, обрыва, битого тела и пустого ключа (ответа HTTP не было). Ветка дедлайна пишет `upstreamStatus` в событие только при не-`None`.
+
+## Транспорт через прокси (ADR-108)
+
+Норма — [ADR-108](../../adr/ADR-108-media-generation-via-proxy.md); здесь — полный порядок шагов для точки чтения реализации. Классификатор: **proxy-задача ⇔ `provider <> ''`**, legacy-задача ⇔ `provider = ''` (опрос fal по разделам выше). Контраст: `provider = 'fal'` — fal **через прокси** (колбэк, опроса нет); `provider = ''` — fal **напрямую** (опрос).
+
+**Сабмит (proxy_configured):**
+
+```
+POST /v1/media/images|videos | submit_custom | chat-tool media.generate_*
+  ├─ … все шаги §Поток постановки задачи до wallet.consume — БЕЗ изменений
+  ├─ SAVEPOINT { wallet.consume → маршруты → INSERT } — отказ внутри откатывает списание
+  │     на ЛЮБОМ вызывающем, в том числе в tool-loop чата (ADR-108 §3.1)
+  ├─ routes = маршруты ADR-108 §2 по возрастанию цены (fal есть всегда; последний на дефолтах,
+  │          первый — если MEDIA_VENDOR_PRICES сделал его дешевле; sosana/kie — только по §2.1)
+  ├─ callbackUrl = https://{SERVICE_DOMAIN}/v1/media/webhooks/proxy/{jobId}?token=HMAC(jobId)
+  ├─ для route in routes: ProxyClient.submit(service, endpoint, payload, callbackUrl)
+  │     ├─ таймаут / connect к прокси → 502, без отката на следующий маршрут
+  │     ├─ 429 / 5xx / 402 / 400 без валидации → следующий маршрут
+  │     ├─ 422 (или 400 с валидацией) у sosana/kie → следующий маршрут
+  │     ├─ 422 у fal → 422 validation_error            ┐
+  │     └─ 401/403 → 503 media_generation_not_configured ┘ стоп, списание откатывается
+  │     (маршруты исчерпаны → последний 429 | 502, списание откатывается)
+  └─ INSERT media_jobs(provider, fal_endpoint=<endpoint варианта>, fal_request_id=<id прокси>,
+                      status_url='', response_url='', status='queued', …)
+        ↓ session_scope commit — ОДНА транзакция, как сегодня
+```
+
+**Колбэк `POST /v1/media/webhooks/proxy/{jobId}`:**
+
+```
+  ├─ token невалиден                  → 401 (БД не читается)
+  ├─ тело не JSON-объект              → 422
+  ├─ SELECT … FOR UPDATE по id; нет строки или provider = '' → 404
+  ├─ status ∈ {completed, failed}     → 200 no-op (media_webhook_outcome=duplicate_terminal)
+  ├─ pending_result непуст (шаг 0 ADR-108 §4.3 — результат уже получен)
+  │     ├─ outcome = completed → результат НЕ перезаписывается → SAVEPOINT: ОБЩИЙ ПУТЬ ЗАВЕРШЕНИЯ
+  │     │                        с сохранённого pending_result (исходы — как в ветке ниже)
+  │     └─ outcome = failed | pending → игнор → 200 (media_webhook_outcome=result_already_received)
+  ├─ outcome = pending                → mark_running → 200
+  ├─ outcome = failed                 → _fail(текст вендора) → 200
+  └─ outcome = completed              (pending_result пуст)
+        ├─ нормализация (форма fal → действующий _normalize_result; иначе сбор URL)
+        ├─ URL не https / хост вне FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES → отброшен
+        │     └─ ассетов нет → _fail("generation produced no output") → 200
+        ├─ UPDATE pending_result, vendor_price
+        └─ SAVEPOINT: ОБЩИЙ ПУТЬ ЗАВЕРШЕНИЯ
+              пост-модерация (image) → blocked? _blocked_by_moderation
+              → completion handler → mark_completed (pending_result := NULL)
+              → request_logs.finish_media → media_generation_completed → push (claim push_sent_at)
+              ├─ задача completed → 200 (media_webhook_outcome=completed)
+              ├─ задача failed (blocked / ValidationFailedError handler) → 200 (completion_failed)
+              └─ транзиентный отказ → ROLLBACK TO SAVEPOINT, pending_result остаётся → 200
+                                      (media_webhook_outcome=completion_deferred)
+        ↓ commit
+```
+
+**`_advance` proxy-задачи** (клиентский `GET` и согласователь, под тем же `FOR UPDATE`):
+
+```
+  ├─ pending_result непуст → ОБЩИЙ ПУТЬ ЗАВЕРШЕНИЯ; исключение → _close_if_overdue
+  │     (moderation_unavailable | internal_error) либо, у молодой задачи, наверх — как сегодня
+  ├─ возраст > MEDIA_JOB_DEADLINE_SECONDS → media_generation_deadline_exceeded
+  │     (lastObservation = webhook_pending) → _fail("generation did not complete in time")
+  └─ иначе → mark_running   (исходящих вызовов нет)
+```
+
+Диаграммы выше — **полный** порядок: общий путь завершения — это сегодняшняя ветка `COMPLETED` §Поток опроса без изменения шагов; сервис для вебхука собирается `deps.build_media_generation_service` ([ADR-105 §B6](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)). **Контраст транзакционных границ (обе стороны помечены):** в вебхуке общий путь идёт под `SAVEPOINT`, и его отказ НЕ откатывает `pending_result`; в `_advance` отказ у задачи моложе дедлайна откатывает запрос целиком, как сегодня. Согласователь берёт незавершённые строки `provider <> '' ∨ fal_configured ∨ created_at < now − MEDIA_JOB_DEADLINE_SECONDS`, старейшие первыми; proxy-строки — через `FOR UPDATE SKIP LOCKED` (занятая вебхуком или `GET` строка пропускается до следующего тика — иначе захват, живущий до коммита пакета, и `UPDATE wallets` возврата дают взаимоблокировку с вебхуком); клиентский `GET` и вебхук ждут обычный `FOR UPDATE` ([ADR-108 §6](../../adr/ADR-108-media-generation-via-proxy.md)).
