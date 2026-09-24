@@ -124,7 +124,7 @@ async def test_rehost_uploads_a_jpeg_to_fal_cdn(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         "app.media_generation.fal_client.httpx",
         SimpleNamespace(
-            AsyncClient=lambda timeout: scripted,
+            AsyncClient=lambda timeout, **_kwargs: scripted,
             TimeoutException=httpx.TimeoutException,
             RequestError=httpx.RequestError,
         ),
