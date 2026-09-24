@@ -245,7 +245,7 @@
 
 ---
 
-# Пути-дубликаты ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)) — D1: код написан, не закоммичен; D2: тесты пишутся, не измерено; D3: не выкачено
+# Пути-дубликаты ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)) — D1: код в `main` (`67bfd66`); D2: 12 функций `test_` в `tests/integration/test_billing_web_aliases_adr110.py`, покрытие не измерено; D3: выкачено (CI `36020854651`, `ssh deploy` — `success`)
 
 ## Фаза D1 — роутер `/v1/web` (backend)
 - `src/app/api_gateway/routers/billing_cloudpayments.py`: второй `APIRouter(prefix="/v1/web", include_in_schema=False)`; оба роутера строятся из ОДНОЙ таблицы регистрации (пары путей из [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md), функция-обработчик, `response_model`/`status_code`/`dependencies`). Регистрация нового роутера — в `create_app()` рядом с `billing_cloudpayments.router`.

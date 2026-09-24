@@ -8,7 +8,7 @@
 - **Тот же обработчик**, без копирования логики. Оба роутера строятся из ОДНОЙ таблицы регистрации (суффиксы пары, функция, параметры маршрута); у пары побуквенно совпадают метод, `response_model`, `status_code`, `dependencies` (у вебхука — `require_cloudpayments_webhook`) — [ADR-110 §1](../../adr/ADR-110-ru-payment-neutral-path-aliases.md).
 - Корзины лимитов ключуются не путём (`rl:other`, `rl:experiments`, `rl:cpwebhook`), поэтому у пары одна корзина — это требование, а не совпадение ([ADR-110 §3–§4](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)).
 - Лог исхода вебхука и сигнатура `CloudPaymentsWebhookService.handle(raw)` **не меняются**: путь запроса наблюдаем по access-логу приложения (`uvicorn.access`), [ADR-110 §5](../../adr/ADR-110-ru-payment-neutral-path-aliases.md).
-- Состояние: код §1 написан в рабочем дереве, не закоммичен и не выкачен; тесты — пишутся, покрытие не измерено (шапка ADR-110). Таблица регистрации — `_ROUTES` в `src/app/api_gateway/routers/billing_cloudpayments.py`, второй роутер — `web_router`; подключение — `app.include_router(billing_cloudpayments.web_router)` в `create_app()` после цикла модулей.
+- Состояние: код §1 в `main` (`67bfd66`), выкачен (CI `36020854651`, джоб `ssh deploy` — `success`); автотесты — 12 функций `test_` в `tests/integration/test_billing_web_aliases_adr110.py`, покрытие не измерено (шапка ADR-110). Таблица регистрации — `_ROUTES` в `src/app/api_gateway/routers/billing_cloudpayments.py`, второй роутер — `web_router`; подключение — `app.include_router(billing_cloudpayments.web_router)` в `create_app()` после цикла модулей.
 
 ## Checkout — исходящий вызов broadapps ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md))
 

@@ -17,7 +17,7 @@
 > | `POST /v1/billing/cloudpayments/experiments/assign` | `POST /v1/web/offers/assign` |
 > | `POST /v1/billing/cloudpayments/experiments/paywall-shown` | `POST /v1/web/offers/shown` |
 >
-> Всё, что ниже сказано о пути `/v1/billing/cloudpayments/<X>`, действует на его дубликат дословно. Корзина rate-limit у пары ОДНА (чередование путей бюджет не удваивает). Старые пути не меняются и не устаревают. Состояние: код §1 написан в рабочем дереве, не закоммичен и не выкачен; тесты — пишутся, покрытие не измерено — поэлементно в шапке ADR-110.
+> Всё, что ниже сказано о пути `/v1/billing/cloudpayments/<X>`, действует на его дубликат дословно. Корзина rate-limit у пары ОДНА (чередование путей бюджет не удваивает). Старые пути не меняются и не устаревают. Состояние: код §1 в `main` (`67bfd66`), выкачен (CI `36020854651`, джоб `ssh deploy` — `success`); автотесты — 12 функций `test_` в `tests/integration/test_billing_web_aliases_adr110.py`, покрытие не измерено — поэлементно в шапке ADR-110.
 
 > **Инвариант исходящего контура ([ADR-098 §1](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)):** во ВСЕХ наших исходящих вызовах к broadapps (`/payments/link`, отмена подписки, обе ручки экспериментов) `user_id` = **JWT `sub`** и никогда не из тела. Один человек — одна личность у поставщика; трёхступенчатый резолв ([ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)/[ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)) работает только в сторону «поставщик → мы» и панель поставщика не чинит. Единственный вызов, идущий НЕ по нашему `sub`, — верификация `GET /users/{X}/payments` ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)): там `X` пришёл в колбэке и идентификатор выбираем не мы.
 
@@ -179,7 +179,7 @@
 
 ### Эффект у нас
 - **Норма ([ADR-111](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)):** `will_renew=false` пишется ТОЛЬКО когда поставщик нашёл и отменил активную RU-подписку (`found=True`, ответ `canceled=true`) и строка `subscriptions` существует; `status`/`expires_at` **не меняются** (доступ до конца оплаченного периода). `canceled=false` → локальная строка не трогается. Отказ поставщика (`502`) → не трогается. Оригинал и `/v1/web/cancel` — одно поведение.
-- Код по норме **написан в рабочем дереве, не закоммичен, в `main` не слит и не выкачен; автотесты пишутся** (состояние на 2026-09-24T18:05Z — поэлементно в шапке [ADR-111](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)); [TD-064](../../100-known-tech-debt.md) закрыт нормативно. Остаточный риск (одновременные RU- и Apple-подписки, колонки источника нет) — [Q-111-1](../../99-open-questions.md).
+- Код по норме **в `main` (`a985f30`); не выкачен на момент измерения (CI `36039561564` — `in_progress`); автотесты — 4 функции `test_` в `tests/integration/test_billing_cancel_adr111.py`** (состояние на 2026-09-24T18:16Z — поэлементно в шапке [ADR-111](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)); [TD-064](../../100-known-tech-debt.md) закрыт нормативно. Остаточный риск (одновременные RU- и Apple-подписки, колонки источника нет) — [Q-111-1](../../99-open-questions.md).
 
 ### Ответ (`CloudPaymentsCancelResponse`)
 
@@ -189,7 +189,7 @@
 
 Значения `status`/`canceledAt` — passthrough поставщика; их набор и формат в коде не фиксируются (не-строка → `null`).
 
-`willRenew` — значение флага ПОСЛЕ операции ([ADR-111 §3](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)): `canceled=true` → `false`; `canceled=false` → текущее `subscriptions.will_renew`, строки нет → `false`; `will_renew IS NULL` → `false` (поле не nullable, строка не меняется). Код написан в рабочем дереве, не слит (шапка ADR-111).
+`willRenew` — значение флага ПОСЛЕ операции ([ADR-111 §3](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)): `canceled=true` → `false`; `canceled=false` → текущее `subscriptions.will_renew`, строки нет → `false`; `will_renew IS NULL` → `false` (поле не nullable, строка не меняется). Код в `main` (`a985f30`), выкат — шапка ADR-111.
 
 | Поле | Тип | Источник |
 |---|---|---|
