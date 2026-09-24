@@ -19,13 +19,24 @@
   payment path. The upstream ``user_id`` is the JWT subject on both, like every other outgoing
   broadapps call. Deliberate asymmetry: /assign answers 502 when the provider fails (the segment is
   never invented), /paywall-shown answers 200 {"logged": false} and NEVER 502.
+
+Neutral path aliases (ADR-110 §1): every handler above is ALSO served under ``/v1/web`` by a second
+router, ``web_router`` (``/webhook`` -> ``/events``, ``/checkout`` -> ``/session``, ``/cancel`` ->
+``/cancel``, ``/experiments/assign`` -> ``/offers/assign``, ``/experiments/paywall-shown`` ->
+``/offers/shown``). It is the SAME function with the SAME route parameters, so the response, error
+codes, auth and rate-limit buckets are identical on both paths (the buckets are keyed by user/IP,
+never by path). Both routers are built from ONE table, ``_ROUTES``, so the pair cannot drift. The
+alias router is hidden from OpenAPI (``include_in_schema=False``).
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Request
+from fastapi.params import Depends as DependsParam
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
@@ -66,22 +77,10 @@ from app.schemas.billing_cloudpayments import (
 )
 
 router = APIRouter(prefix="/v1/billing/cloudpayments", tags=["Billing (CloudPayments)"])
+# ADR-110 §1/§2: neutral-path duplicates of the same handlers, hidden from the OpenAPI schema.
+web_router = APIRouter(prefix="/v1/web", include_in_schema=False)
 
 
-@router.post(
-    "/webhook",
-    response_model=CloudPaymentsWebhookResponse,
-    dependencies=[Depends(require_cloudpayments_webhook)],
-    summary="Приём платежа RU (webhook)",
-    description=(
-        "Серверный вебхук платёжного агрегатора (вызывает агрегатор, не клиент). Публичный: "
-        "событие лишь ТРИГГЕР — начисление выполняется только после подтверждения платежа через "
-        "платёжный сервис. Тело читается сырым, без валидации схемы. Ответ всегда `200`, тело "
-        '`{"code": 0}` (событие принято: платёж начислен либо проигнорирован). `429` — при частых '
-        "вызовах с одного IP; `500` — если способ оплаты не сконфигурирован, при недоступности "
-        "верификации или сбое БД (тогда агрегатор повторяет доставку)."
-    ),
-)
 async def cloudpayments_webhook(
     request: Request,
     service: Annotated[CloudPaymentsWebhookService, Depends(get_cloudpayments_webhook_service)],
@@ -97,16 +96,6 @@ async def cloudpayments_webhook(
     return JSONResponse({"code": 0}, status_code=200)
 
 
-@router.post(
-    "/checkout",
-    response_model=CloudPaymentsCheckoutResponse,
-    summary="Создать ссылку на оплату (RU)",
-    description=(
-        "Создаёт платёжную ссылку для российской оплаты и возвращает `paymentUrl` — откройте его "
-        "для оплаты. Требуется авторизация (JWT). Укажите `productId` и `customerEmail`. Доступно "
-        "не на всех инсталляциях (`503`, если способ оплаты недоступен)."
-    ),
-)
 async def cloudpayments_checkout(
     body: CloudPaymentsCheckoutRequest,
     current: CurrentUser,
@@ -133,20 +122,6 @@ async def cloudpayments_checkout(
     )
 
 
-@router.post(
-    "/experiments/assign",
-    response_model=ExperimentAssignResponse,
-    summary="Назначить сегмент эксперимента",
-    description=(
-        "Назначает пользователя в сегмент эксперимента пейволла и возвращает **действующий** "
-        "сегмент. Требуется JWT; пользователь берётся из токена. Пришлите `experimentCode`, "
-        "`segmentCode` и `placement` — значения передаются как есть. Рисуйте пейволл по "
-        "`segment.code` из ответа, а не по запрошенному `segmentCode`: при "
-        "`requestedSegmentMatches=false` у пользователя уже есть другое назначение. Повторный "
-        "вызов безопасен (`created=false`). При `502`/`429`/`503` покажите свой пейволл по "
-        "умолчанию — это не ошибка для пользователя. Доступно не на всех инсталляциях (`503`)."
-    ),
-)
 async def experiments_assign(
     body: ExperimentAssignRequest,
     current: CurrentUser,
@@ -176,17 +151,6 @@ async def experiments_assign(
     )
 
 
-@router.post(
-    "/experiments/paywall-shown",
-    response_model=PaywallShownResponse,
-    summary="Записать показ пейволла",
-    description=(
-        "Записывает показ пейволла. Тело — такое же, как у назначения сегмента. Вызывается на "
-        'каждый показ; события намеренно не дедуплицируются. Ответ — `{"logged": true|false}`: '
-        "`false` означает, что событие не принято, но на показ пейволла это не влияет и ответа "
-        "можно не дожидаться. Доступно не на всех инсталляциях (`503`)."
-    ),
-)
 async def experiments_paywall_shown(
     body: PaywallShownRequest,
     current: CurrentUser,
@@ -213,16 +177,6 @@ async def experiments_paywall_shown(
     return PaywallShownResponse(logged=logged)
 
 
-@router.post(
-    "/cancel",
-    response_model=CloudPaymentsCancelResponse,
-    summary="Отменить подписку (RU)",
-    description=(
-        "Отменяет автопродление активной RU-подписки у провайдера (broadapps). Доступ сохраняется "
-        "до конца оплаченного периода (`status`/`expiresAt` не меняются), а `willRenew` становится "
-        "`false`. Требуется JWT. Если активной подписки у провайдера нет — `canceled=false`."
-    ),
-)
 async def cloudpayments_cancel(
     current: CurrentUser,
     session: DbSession,
@@ -245,3 +199,110 @@ async def cloudpayments_cancel(
         alreadyCanceled=result.already_canceled,
         willRenew=False,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _RouteSpec:
+    """One row of the ADR-110 §1 table: both paths of a pair share every route parameter."""
+
+    billing_path: str
+    web_path: str
+    endpoint: Callable[..., Any]
+    response_model: type[Any]
+    summary: str
+    description: str
+    dependencies: Sequence[DependsParam] = ()
+
+
+# The ONE declaration both routers are built from (ADR-110 §1). Order = the original declaration
+# order, so the OpenAPI operations of the original paths stay exactly as they were.
+_ROUTES: tuple[_RouteSpec, ...] = (
+    _RouteSpec(
+        billing_path="/webhook",
+        web_path="/events",
+        endpoint=cloudpayments_webhook,
+        response_model=CloudPaymentsWebhookResponse,
+        dependencies=(Depends(require_cloudpayments_webhook),),
+        summary="Приём платежа RU (webhook)",
+        description=(
+            "Серверный вебхук платёжного агрегатора (вызывает агрегатор, не клиент). Публичный: "
+            "событие лишь ТРИГГЕР — начисление выполняется только после подтверждения платежа "
+            "через платёжный сервис. Тело читается сырым, без валидации схемы. Ответ всегда "
+            '`200`, тело `{"code": 0}` (событие принято: платёж начислен либо проигнорирован). '
+            "`429` — при частых вызовах с одного IP; `500` — если способ оплаты не "
+            "сконфигурирован, при недоступности верификации или сбое БД (тогда агрегатор "
+            "повторяет доставку)."
+        ),
+    ),
+    _RouteSpec(
+        billing_path="/checkout",
+        web_path="/session",
+        endpoint=cloudpayments_checkout,
+        response_model=CloudPaymentsCheckoutResponse,
+        summary="Создать ссылку на оплату (RU)",
+        description=(
+            "Создаёт платёжную ссылку для российской оплаты и возвращает `paymentUrl` — откройте "
+            "его для оплаты. Требуется авторизация (JWT). Укажите `productId` и `customerEmail`. "
+            "Доступно не на всех инсталляциях (`503`, если способ оплаты недоступен)."
+        ),
+    ),
+    _RouteSpec(
+        billing_path="/experiments/assign",
+        web_path="/offers/assign",
+        endpoint=experiments_assign,
+        response_model=ExperimentAssignResponse,
+        summary="Назначить сегмент эксперимента",
+        description=(
+            "Назначает пользователя в сегмент эксперимента пейволла и возвращает **действующий** "
+            "сегмент. Требуется JWT; пользователь берётся из токена. Пришлите `experimentCode`, "
+            "`segmentCode` и `placement` — значения передаются как есть. Рисуйте пейволл по "
+            "`segment.code` из ответа, а не по запрошенному `segmentCode`: при "
+            "`requestedSegmentMatches=false` у пользователя уже есть другое назначение. Повторный "
+            "вызов безопасен (`created=false`). При `502`/`429`/`503` покажите свой пейволл по "
+            "умолчанию — это не ошибка для пользователя. Доступно не на всех инсталляциях (`503`)."
+        ),
+    ),
+    _RouteSpec(
+        billing_path="/experiments/paywall-shown",
+        web_path="/offers/shown",
+        endpoint=experiments_paywall_shown,
+        response_model=PaywallShownResponse,
+        summary="Записать показ пейволла",
+        description=(
+            "Записывает показ пейволла. Тело — такое же, как у назначения сегмента. Вызывается на "
+            'каждый показ; события намеренно не дедуплицируются. Ответ — `{"logged": true|false}`: '
+            "`false` означает, что событие не принято, но на показ пейволла это не влияет и ответа "
+            "можно не дожидаться. Доступно не на всех инсталляциях (`503`)."
+        ),
+    ),
+    _RouteSpec(
+        billing_path="/cancel",
+        web_path="/cancel",
+        endpoint=cloudpayments_cancel,
+        response_model=CloudPaymentsCancelResponse,
+        summary="Отменить подписку (RU)",
+        description=(
+            "Отменяет автопродление активной RU-подписки у провайдера (broadapps). Доступ "
+            "сохраняется до конца оплаченного периода (`status`/`expiresAt` не меняются), а "
+            "`willRenew` становится `false`. Требуется JWT. Если активной подписки у провайдера "
+            "нет — `canceled=false`."
+        ),
+    ),
+)
+
+
+def _register(target: APIRouter, spec: _RouteSpec, path: str) -> None:
+    target.add_api_route(
+        path,
+        spec.endpoint,
+        methods=["POST"],
+        response_model=spec.response_model,
+        dependencies=list(spec.dependencies),
+        summary=spec.summary,
+        description=spec.description,
+    )
+
+
+for _spec in _ROUTES:
+    _register(router, _spec, _spec.billing_path)
+    _register(web_router, _spec, _spec.web_path)

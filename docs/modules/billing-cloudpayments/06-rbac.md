@@ -1,5 +1,8 @@
 # billing-cloudpayments / 06 — RBAC / Authorization
 
+## Дубликаты путей ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md))
+Авторизация, rate-limit и гейт инстанса у каждого пути-дубликата `/v1/web/*` — **те же**, что у его оригинала (один обработчик): JWT для `session`/`cancel`/`offers/*`, публичный вебхук с верификацией для `events`. Корзина лимита у пары одна. Всё ниже про `/v1/billing/cloudpayments/<X>` действует на дубликат дословно.
+
 ## Checkout — пользовательский JWT ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md))
 Эндпоинт `POST /v1/billing/cloudpayments/checkout` — **обычный пользовательский `/v1/*` контур** (`bearerAuth`, `CurrentUser`), НЕ machine-to-machine.
 
@@ -13,6 +16,9 @@
 | Секреты | `CLOUDPAYMENTS_API_TOKEN` (секрет) и `CLOUDPAYMENTS_APP_ID` — серверные, не в клиенте, не в логах/ответе. `customer_email` — PII, не логируется |
 | Не сконфигурировано | `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN` пусты → `503` ⇒ активен только на avelyra |
 | SSRF | исходящий вызов только к фиксированному `CLOUDPAYMENTS_API_BASE` (config), не из тела клиента |
+
+## Cancel — пользовательский JWT (по коду, внесено [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md))
+`POST /v1/billing/cloudpayments/cancel` — тот же контур, что checkout: JWT (`CurrentUser`), `user_id` к поставщику = `sub`, корзина `rl:other:{user_id}`, гейт `cloudpayments_checkout_configured()` → `503`. Контракт — [02-api-contracts.md](02-api-contracts.md#post-v1billingcloudpaymentscancel).
 
 ## Webhook — ПУБЛИЧНЫЙ эндпоинт + верификация ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md))
 Эндпоинт `POST /v1/billing/cloudpayments/webhook` вызывается агрегатором broadapps. **[ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md): эндпоинт ПУБЛИЧНЫЙ (нет `401`)** — broadapps шлёт колбэк **без авторизации** (`authScheme=none`) и **без подписи**. Аутентичность события устанавливается **не токеном, а верификацией платежа через broadapps API** нашим `CLOUDPAYMENTS_API_TOKEN`.

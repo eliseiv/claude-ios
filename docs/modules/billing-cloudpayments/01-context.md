@@ -16,6 +16,8 @@
 ## Кто вызывает
 - **Входящий вебхук** (`/webhook`): **broadapps (внешний агрегатор)** — серверный HTTP POST в формате CloudPayments (фронтит YooKassa). Не наш iOS-клиент. **[ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md): колбэк приходит БЕЗ авторизации/подписи → эндпоинт публичный (нет `401`), rate-limit per-IP.** Аутентичность события устанавливается **верификацией** через broadapps API (`GET /users/{deviceId}/payments`, `Bearer CLOUDPAYMENTS_API_TOKEN`), а не токеном колбэка. `CLOUDPAYMENTS_WEBHOOK_TOKEN` — легаси/опционален.
 - **Исходящий checkout** (`/checkout`, [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)): **наш iOS-клиент** (JWT). Мы, в свою очередь, **вызываем broadapps** `POST /payments/link` (исходящий httpx, `Authorization: Bearer <CLOUDPAYMENTS_API_TOKEN>`).
+- **Отмена подписки** (`/cancel`) и **эксперименты** (`/experiments/*`): **наш iOS-клиент** (JWT).
+- **Пути-дубликаты `/v1/web/*`** ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)): те же вызывающие, что у оригиналов (`/v1/web/events` — broadapps, остальные — iOS-клиент).
 
 ## Исходящая зависимость (checkout + эксперименты)
 | Зависимость | Что используется | Источник |

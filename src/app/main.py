@@ -412,6 +412,9 @@ def create_app() -> FastAPI:
         billing_cloudpayments,
     ):
         app.include_router(module.router)
+    # ADR-110 §1: neutral-path duplicates (/v1/web/*) of the RU-payment handlers — the same
+    # functions, built from the same table as `billing_cloudpayments.router`; hidden from OpenAPI.
+    app.include_router(billing_cloudpayments.web_router)
     app.include_router(health.router)
     _document_voice_mode(app)
 

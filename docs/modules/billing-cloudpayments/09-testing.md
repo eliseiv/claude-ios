@@ -47,6 +47,17 @@
 - Ledger-namespace `cp-txn:*` не пересекается с `adapty-txn:*`/`sub-grant:*`/`admin-sub-grant:*`.
 - Миграция `0014`: `alembic heads` = один; `upgrade`/`downgrade` чистые.
 
+## Пути-дубликаты `/v1/web/*` ([ADR-110 §8](../../adr/ADR-110-ru-payment-neutral-path-aliases.md))
+Обязательное покрытие — по [ADR-110 §8](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) целиком; кратко:
+- паритет КАЖДОЙ из пяти пар (одинаковый вход → одинаковые статус и тело, ветви успеха и отказов);
+- вебхук `/v1/web/events`: без `Authorization` не `401`, поддельный колбэк не начисляет, пустой `CLOUDPAYMENTS_API_TOKEN` → `500`, кривое тело → `200 {"code":0}`;
+- одна корзина на пару (`rl:cpwebhook`, `rl:other`, `rl:experiments`) при чередовании путей;
+- один платёж на оба пути → одно начисление;
+- `/openapi.json` без `/v1/web/`, операции оригиналов не изменились;
+- `POST .../cancel` (до ADR-110 без автотестов): нет активной подписки → `canceled=false`; отказ поставщика → `502`; успех → `will_renew=false` без смены `status`/`expires_at`;
+- `POST .../cancel` при `canceled=false` и СУЩЕСТВУЮЩЕЙ локальной строке `subscriptions` (в т. ч. подписки Apple/Adapty): исход **не закрепляется** — поведение открыто ([TD-064](../../100-known-tech-debt.md)); кейс обязан проверять только паритет пары путей, а не значение `will_renew`;
+- снятие регистрации любого дубликата роняет хотя бы один кейс.
+
 ## Swagger-чистота
 - В OpenAPI (`/openapi.json`) у роута нет вхождений `ADR-`/`Q-`/`TD-` и внутренних имён таблиц/namespace ([R2ter](../../08-api-documentation.md)).
 

@@ -108,7 +108,7 @@ def _level_for(result: str, reason: str | None) -> int:
 Каждая return-ветка проходит через `_log_outcome` один раз; `handle` НЕ логирует на пути `_apply`.
 
 ## Allowlist / запрет (PII, секреты)
-**Логируется только:** `result`, `reason`, `transactionId`, `productId`, `userId` (**резолвнутый** наш UUID, `str`), `kind`, `resolvedVia` (`"user_id"`\|`"device_id"`, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)). Опционально — `accountId` (= исходный `X`/deviceId, наш внутренний id, безопасно).
+**Логируется только:** `result`, `reason`, `transactionId`, `productId`, `userId` (**резолвнутый** наш UUID, `str`), `kind`, `resolvedVia` (`"user_id"`\|`"device_id"`, [ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)). Опционально — `accountId` (= исходный `X`/deviceId, наш внутренний id, безопасно). Пути-дубликаты [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) полей не добавляют: путь колбэка виден в access-логе приложения.
 **ЗАПРЕЩЕНО:** карт-данные (`CardFirstSix`/`CardLastFour`/`Issuer`/`CardType`), `Authorization`/bearer/`CLOUDPAYMENTS_WEBHOOK_TOKEN`, сырой `raw`/`Data`-строка, `amount`/`currency` в логе (они только в санитизированном `payload`/audit, не в outcome-логе). Канон — [ADR-050 §7](../../adr/ADR-050-cloudpayments-webhook.md), [05-security.md](../../05-security.md#логирование-безопасное).
 
 ## Дополнение [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md) — поля верификации/реконсиляции

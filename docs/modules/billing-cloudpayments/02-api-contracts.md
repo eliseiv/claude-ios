@@ -5,6 +5,20 @@
 - **Входящая** — `POST /v1/billing/cloudpayments/webhook` ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)): broadapps присылает колбэк о состоявшейся оплате.
 - **Эксперименты пейволла** — `POST /v1/billing/cloudpayments/experiments/assign` и `POST /v1/billing/cloudpayments/experiments/paywall-shown` ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)): passthrough к broadapps, денег не касаются.
 
+- **Отмена RU-подписки** — `POST /v1/billing/cloudpayments/cancel` (реализована коммитом `71b12bf`; до [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) в `docs/` не была описана — уточнение факта, контракт ниже зафиксирован по коду).
+
+> **Нейтральные пути-дубликаты ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)).** Каждая из пяти ручек доступна ещё и по второму пути — тот же обработчик, тот же контракт (тело, ответ, коды ошибок, auth, корзина лимита), в OpenAPI дубликаты не входят:
+>
+> | Путь | Дубликат |
+> |---|---|
+> | `POST /v1/billing/cloudpayments/checkout` | `POST /v1/web/session` |
+> | `POST /v1/billing/cloudpayments/cancel` | `POST /v1/web/cancel` |
+> | `POST /v1/billing/cloudpayments/webhook` | `POST /v1/web/events` |
+> | `POST /v1/billing/cloudpayments/experiments/assign` | `POST /v1/web/offers/assign` |
+> | `POST /v1/billing/cloudpayments/experiments/paywall-shown` | `POST /v1/web/offers/shown` |
+>
+> Всё, что ниже сказано о пути `/v1/billing/cloudpayments/<X>`, действует на его дубликат дословно. Корзина rate-limit у пары ОДНА (чередование путей бюджет не удваивает). Старые пути не меняются и не устаревают. Состояние: код §1 написан в рабочем дереве, не закоммичен и не выкачен; тесты — пишутся, покрытие не измерено — поэлементно в шапке ADR-110.
+
 > **Инвариант исходящего контура ([ADR-098 §1](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)):** во ВСЕХ наших исходящих вызовах к broadapps (`/payments/link`, отмена подписки, обе ручки экспериментов) `user_id` = **JWT `sub`** и никогда не из тела. Один человек — одна личность у поставщика; трёхступенчатый резолв ([ADR-053](../../adr/ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)/[ADR-055](../../adr/ADR-055-adapty-webhook-user-resolution-via-auth-devices.md)) работает только в сторону «поставщик → мы» и панель поставщика не чинит. Единственный вызов, идущий НЕ по нашему `sub`, — верификация `GET /users/{X}/payments` ([ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)): там `X` пришёл в колбэке и идентификатор выбираем не мы.
 
 ## POST /v1/billing/cloudpayments/checkout
@@ -148,6 +162,55 @@
 
 ---
 
+## POST /v1/billing/cloudpayments/cancel
+
+Отмена автопродления активной RU-подписки у broadapps. **Вызывает iOS-клиент** (JWT). Контракт зафиксирован **по коду** (`src/app/api_gateway/routers/billing_cloudpayments.py::cloudpayments_cancel`, `src/app/billing_cloudpayments/checkout.py::CloudPaymentsCheckoutClient.cancel_subscription`, схема `CloudPaymentsCancelResponse`); собственного ADR у ручки нет, в `docs/` она внесена [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) (уточнение факта). Дубликат — `POST /v1/web/cancel`.
+
+### Авторизация, гейт, лимит
+- Пользовательский **JWT** (`CurrentUser`); нет/невалидный → `401`. `user_id` исходящих вызовов = JWT `sub` (инвариант [ADR-098 §1](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)).
+- Гейт инстанса — `cloudpayments_checkout_configured()` → `503 cloudpayments_checkout_not_configured`.
+- Rate-limit — `enforce_other_limits(user_id=sub)` (корзина `rl:other:{user_id}`, общая с `/checkout`) → `429`.
+- Тела запроса нет.
+
+### Исходящие вызовы broadapps
+1. `GET {CLOUDPAYMENTS_API_BASE}/users/{user_id}/subscriptions` — ищется первая запись `status=="active"` с непустым `subscription_id`; не найдена → `canceled=false`, отмена не вызывается.
+2. `POST {CLOUDPAYMENTS_API_BASE}/subscriptions/{subscription_id}/cancel` (тело `{}`).
+- Bearer `CLOUDPAYMENTS_API_TOKEN`, таймаут как у checkout. Не-2xx / таймаут / сеть / нечитаемый ответ на любом шаге → `502 upstream_error` (тело/статус поставщика и токен наружу не отдаются).
+
+### Эффект у нас
+- Если у пользователя есть строка `subscriptions` — `will_renew=false`; `status`/`expires_at` **не меняются** (доступ до конца оплаченного периода).
+- ⚠️ **Так ведёт себя код, но это не согласованная норма ([TD-064](../../100-known-tech-debt.md)).** `will_renew=false` ставится **безусловно**: и при `canceled=false` (у поставщика активной подписки нет, отменять было нечего), и независимо от источника подписки — строка `subscriptions` одна на пользователя (`user_id` — PK), колонки источника нет (`src/app/models/tables.py`, класс `Subscription`). Поэтому RU-отмена у пользователя с подпиской Apple/Adapty сбрасывает флаг автопродления ЧУЖОЙ подписки, и `/policy/effective` показывает «не продлится». В волне [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) поведение не меняется: дубликат `/v1/web/cancel` ведёт себя так же.
+
+### Ответ (`CloudPaymentsCancelResponse`)
+
+```json
+{ "canceled": true, "status": "<status поставщика>", "canceledAt": "<canceled_at поставщика>", "alreadyCanceled": false, "willRenew": false }
+```
+
+Значения `status`/`canceledAt` — passthrough поставщика; их набор и формат в коде не фиксируются (не-строка → `null`).
+
+| Поле | Тип | Источник |
+|---|---|---|
+| `canceled` | bool | найдена ли активная подписка и отправлена ли отмена |
+| `status` | str \| null | `status` ответа отмены поставщика |
+| `canceledAt` | str \| null | `canceled_at` ответа поставщика (passthrough) |
+| `alreadyCanceled` | bool \| null | `already_canceled` ответа поставщика |
+| `willRenew` | bool | всегда `false` |
+
+### Коды ответа
+
+| HTTP | Код | Когда |
+|---|---|---|
+| 200 | — | отмена отправлена либо активной подписки нет (`canceled=false`) |
+| 401 | `unauthorized` | нет/невалидный JWT |
+| 429 | `rate_limited` | превышена корзина `rl:other:*` |
+| 502 | `upstream_error` | отказ поставщика на любом из двух вызовов |
+| 503 | `cloudpayments_checkout_not_configured` | инстанс не сконфигурирован |
+
+Лог исхода — `cloudpayments_cancel_outcome` (`result` ∈ `canceled`\|`no_active_subscription`\|`error`, `reason`, `userId`, `alreadyCanceled`).
+
+---
+
 ## POST /v1/billing/cloudpayments/webhook
 
 Серверный вебхук агрегатора **broadapps** в формате **CloudPayments**. **Вызывает broadapps**, не iOS-клиент. Базовый контракт — [ADR-050](../../adr/ADR-050-cloudpayments-webhook.md); **АКТУАЛЬНОЕ поведение авторизации и начисления — [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)** (пересматривает [ADR-050 §1..§6](../../adr/ADR-050-cloudpayments-webhook.md), отменяет 401 из [ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md)).
@@ -160,6 +223,7 @@
 - **Rate-limit (эндпоинт публичный):** per-source-IP `enforce_cloudpayments_webhook_limits(ip=client_ip(request))` (дефолт `CLOUDPAYMENTS_WEBHOOK_RATE_LIMIT_PER_IP=120`/мин, fail-open при недоступности Redis) → превышение `429`. Анти-амплификация исходящих `GET`.
 - **Гейт активации инстанса — `CLOUDPAYMENTS_API_TOKEN`:** пуст → `500` misconfigured (верификация невозможна) ⇒ вебхук начисляет **только на avelyra**. `CLOUDPAYMENTS_WEBHOOK_TOKEN` — легаси/опционален (не гейтит, только `matched` в логе). `CLOUDPAYMENTS_API_TOKEN`/Bearer **не логируются**.
 - **OpenAPI:** security-схема `cloudPaymentsWebhook` (`HTTPBearer`) сохраняется декоративно (замок в Swagger), реальной проверки токена нет.
+- **Дубликат `POST /v1/web/events` ([ADR-110 §3](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)):** тот же обработчик — публичный, та же верификация, тот же гейт, та же корзина `rl:cpwebhook:{ip}` (одна на оба пути), тот же дедуп по `payment_id` (колбэк, доставленный на оба пути, начисляется один раз). В OpenAPI не входит.
 
 > **Исторически (отменено [ADR-054](../../adr/ADR-054-cloudpayments-webhook-payment-verification.md)):** [ADR-050 §1](../../adr/ADR-050-cloudpayments-webhook.md) требовал `Authorization: Bearer <CLOUDPAYMENTS_WEBHOOK_TOKEN>` (constant-time, `401` на mismatch); [ADR-052](../../adr/ADR-052-cloudpayments-webhook-lenient-auth-header.md) сделал разбор терпимым к формату (`Bearer`/`Token`/сырой) + WARNING `cloudpayments_webhook_auth_denied` на 401. Диагностика показала `authScheme=none` → 401-путь снят; лог переименован в `cloudpayments_webhook_auth_observed` (DEBUG/INFO). [Q-052-1](../../99-open-questions.md) закрыт.
 

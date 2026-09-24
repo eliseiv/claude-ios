@@ -242,3 +242,20 @@
 ## Что НЕ трогать (эксперименты)
 - `service.py`/`verify.py`/`parser.py`/`auth.py` вебхука, `checkout.py` (кроме соседства в модуле), резолв `billing_common/resolve.py`, `config.py`, `errors.py`, `main.py`, миграции, Adapty/StoreKit/BYOK/policy-engine.
 - Общий лимитер `enforce_other_limits` и его ключ — не переиспользовать и не менять.
+
+---
+
+# Пути-дубликаты ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)) — D1: код написан, не закоммичен; D2: тесты пишутся, не измерено; D3: не выкачено
+
+## Фаза D1 — роутер `/v1/web` (backend)
+- `src/app/api_gateway/routers/billing_cloudpayments.py`: второй `APIRouter(prefix="/v1/web", include_in_schema=False)`; оба роутера строятся из ОДНОЙ таблицы регистрации (пары путей из [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md), функция-обработчик, `response_model`/`status_code`/`dependencies`). Регистрация нового роутера — в `create_app()` рядом с `billing_cloudpayments.router`.
+- Сервис вебхука и его лог исхода **не трогать** (поле `pathFamily` из первой редакции ADR-110 снято, [ADR-110 §5](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)).
+
+## Фаза D2 — тесты (qa)
+- По [09-testing.md §Пути-дубликаты](09-testing.md) / [ADR-110 §8](../../adr/ADR-110-ru-payment-neutral-path-aliases.md).
+
+## Фаза D3 — выкат
+- Штатный деплой на весь флот; смоук и необязательный операторский шаг смены Callback URL — [ADR-110 §7](../../adr/ADR-110-ru-payment-neutral-path-aliases.md).
+
+## Что НЕ трогать (ADR-110)
+- Действующие пути, их теги/тексты/схемы OpenAPI, коды ошибок, корзины лимитов, логику начисления, цены.

@@ -44,7 +44,7 @@
 | **Admin** | Операторские/саппорт-инструменты, `/v1/admin/*` | статический секрет | `X-Admin-Token: <ADMIN_API_SECRET>` | `adminToken` (apiKey, header `X-Admin-Token`) |
 | **Preview** | Браузер (открывает превью сайта) | подпись внутри URL (HMAC+TTL) | нет — авторизация в самой ссылке | — (публичный по signed URL) |
 | **Adapty webhook** | Сервис Adapty (M2M), `/v1/billing/adapty/webhook` | статический bearer-секрет (без HMAC-подписи payload) | `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` | отдельная http-bearer схема ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)) |
-| **CloudPayments webhook** | Агрегатор broadapps/YooKassa (RU-путь), `/v1/billing/cloudpayments/webhook` | **публичный (нет 401), [ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md)** — broadapps шлёт колбэк без auth/подписи | нет обяз. заголовка; trust-anchor = **верификация через broadapps API**; per-IP rate-limit | начисление только по подтверждённому `succeeded`-платежу; гейт активации `CLOUDPAYMENTS_API_TOKEN`; активен только на avelyra |
+| **CloudPayments webhook** | Агрегатор broadapps/YooKassa (RU-путь), `/v1/billing/cloudpayments/webhook` (дубликат `/v1/web/events`, [ADR-110](adr/ADR-110-ru-payment-neutral-path-aliases.md)) | **публичный (нет 401), [ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md)** — broadapps шлёт колбэк без auth/подписи | нет обяз. заголовка; trust-anchor = **верификация через broadapps API**; per-IP rate-limit | начисление только по подтверждённому `succeeded`-платежу; гейт активации `CLOUDPAYMENTS_API_TOKEN`; активен только на avelyra |
 
 > Эндпоинты выпуска токена `/v1/auth/register|token|refresh|apple` и `GET /v1/auth/jwks` — **public** (без `Authorization`): это точка получения JWT. Защита — per-IP rate-limit. См. [§21](#21-auth-выпуск-токена).
 
@@ -460,6 +460,16 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 
 ## 7b. Billing — CloudPayments/broadapps (RU-путь: [ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md) checkout + [ADR-050](adr/ADR-050-cloudpayments-webhook.md) webhook + [ADR-098](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md) эксперименты пейволла)
 
+> **Пути-дубликаты ([ADR-110](adr/ADR-110-ru-payment-neutral-path-aliases.md); код §1 написан в рабочем дереве, не закоммичен и не выкачен; тесты — пишутся, покрытие не измерено).** Каждая ручка раздела доступна и по нейтральному пути — тот же обработчик и тот же контракт (тело, ответ, коды ошибок, авторизация, лимит; корзина лимита у пары одна). В Swagger дубликаты не показываются.
+>
+> | Путь | Дубликат |
+> |---|---|
+> | `POST /v1/billing/cloudpayments/checkout` | `POST /v1/web/session` |
+> | `POST /v1/billing/cloudpayments/cancel` | `POST /v1/web/cancel` |
+> | `POST /v1/billing/cloudpayments/webhook` | `POST /v1/web/events` |
+> | `POST /v1/billing/cloudpayments/experiments/assign` | `POST /v1/web/offers/assign` |
+> | `POST /v1/billing/cloudpayments/experiments/paywall-shown` | `POST /v1/web/offers/shown` |
+
 ### POST /v1/billing/cloudpayments/checkout
 **Наш** эндпоинт создания платёжной ссылки RU-оплаты ([ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md)). **Вызывает iOS-клиент** (JWT). Делает исходящий вызов broadapps `POST /payments/link` и возвращает ссылку YooKassa. Активен там, где оператор задал **оба** `CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN`; иначе `503`.
 
@@ -512,6 +522,13 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 **Ответ `200`:** `{"logged": true}` — событие принято поставщиком; `{"logged": false}` — не принято (таймаут/сеть/ошибка поставщика).
 
 **Коды:** `200` (всегда при валидном запросе на настроенном инстансе), `401`, `422`, `429`, `503`. **`502` не выдаётся никогда** — отказ логирования не имеет права ломать показ пейволла, а `502` на этом префиксе означает «платёж не создан», и ложные срабатывания обесценили бы код там, где за ним деньги. Ответ этой ручки можно не дожидаться.
+
+### POST /v1/billing/cloudpayments/cancel
+Отмена автопродления активной RU-подписки у поставщика (контракт по коду — [modules/billing-cloudpayments/02-api-contracts.md](modules/billing-cloudpayments/02-api-contracts.md#post-v1billingcloudpaymentscancel)). **Вызывает iOS-клиент** (JWT), тела нет. Доступ сохраняется до конца оплаченного периода.
+
+**Ответ `200`:** `{"canceled", "status", "canceledAt", "alreadyCanceled", "willRenew": false}`; `canceled=false` — активной подписки у поставщика нет.
+
+**Коды:** `200`, `401`, `429`, `502 upstream_error` (отказ поставщика), `503 cloudpayments_checkout_not_configured`.
 
 ### POST /v1/billing/cloudpayments/webhook
 Серверный вебхук агрегатора **broadapps** (`pay.broadapps.dev`, фронтит YooKassa) в формате **CloudPayments** (**вызывает broadapps, не iOS**) — **отдельный RU-путь**. **[ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md): эндпоинт ПУБЛИЧНЫЙ (нет `401`); колбэк = ТРИГГЕР, начисление — только после ВЕРИФИКАЦИИ платежей через broadapps API.** Активен **только на avelyra** (где задан `CLOUDPAYMENTS_API_TOKEN`).
