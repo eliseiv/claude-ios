@@ -6,9 +6,11 @@ root, the source faked at ``asset_store.httpx``, jobs completed through the real
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import logging
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,27 @@ from tests.integration.test_media_generation_adr060 import _Fal
 
 def _warned(caplog: pytest.LogCaptureFixture, event: str) -> bool:
     return any(event in rec.getMessage() for rec in caplog.records)
+
+
+@contextlib.contextmanager
+def _capture_store_warnings(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    """Attach pytest's capture handler straight to the emitting logger.
+
+    The root logger is not reliable in a full run: the migration fixture's ``fileConfig`` disables
+    existing ``app.*`` loggers and the app lifespan's ``configure_logging`` clears root handlers
+    (same workaround as ``test_voice_mode_seams13_adr104``), so the handler goes on the emitter and
+    its ``disabled`` flag is cleared explicitly.
+    """
+    target = logging.getLogger(store_mod.logger.name)
+    was_disabled, was_level = target.disabled, target.level
+    target.disabled = False
+    target.setLevel(logging.WARNING)
+    target.addHandler(caplog.handler)
+    try:
+        yield
+    finally:
+        target.removeHandler(caplog.handler)
+        target.disabled, target.level = was_disabled, was_level
 
 
 @pytest.mark.asyncio
@@ -153,9 +176,9 @@ async def test_adr109_cleanup_expired_one_dir_fails_others_expire(
         return real(path)
 
     monkeypatch.setattr(store_mod, "_remove_tree", _remove)
-    caplog.set_level(logging.WARNING)
 
-    await _tick()
+    with _capture_store_warnings(caplog):
+        await _tick()
 
     assert (await _row(db_sessionmaker, good_id)).asset_store_status == "expired"
     assert not job_dir(storage, uuid.UUID(good_id)).exists()
@@ -181,9 +204,9 @@ async def test_adr109_cleanup_orphans_one_fails_others_removed(
         return real(path)
 
     monkeypatch.setattr(store_mod, "_remove_tree", _remove)
-    caplog.set_level(logging.WARNING)
 
-    await _tick()
+    with _capture_store_warnings(caplog):
+        await _tick()
 
     assert bad.exists()
     assert not good.exists()
