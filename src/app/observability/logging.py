@@ -35,6 +35,13 @@ class JsonFormatter(logging.Formatter):
 # media module) and reused by `app.media_generation.webhook`.
 PROXY_WEBHOOK_PATH_PREFIX = "/v1/media/webhooks/proxy"
 
+# ADR-113 §4: the payment-page proxy paths. ``/cp/pay/<uuid>`` — the uuid is the access key to the
+# payment page, so the access line keeps only ``/cp/pay/*``; ``/payment/return`` loses its query.
+# Declared here (the logging layer must not import the billing module) and reused by
+# ``app.billing_cloudpayments.pay_page``. ``/main.css`` and ``/main.js`` are not touched.
+PAY_PAGE_PATH_PREFIX = "/cp/pay/"
+PAY_PAGE_RETURN_PATH = "/payment/return"
+
 # The server's access logger. Under `gunicorn -k uvicorn.workers.UvicornWorker` uvicorn writes the
 # access line itself through THIS logger (the worker only swaps its handlers for gunicorn's
 # access-log handlers), as `'%s - "%s %s HTTP/%s" %d'` with args
@@ -44,38 +51,62 @@ _ACCESS_PATH_ARG = 2
 
 
 class AccessLogQueryRedactionFilter(logging.Filter):
-    """Drop the query string from access-log lines of paths whose query carries a secret.
+    """Redact secret-bearing parts of access-log paths; every other line is left byte-for-byte.
 
-    Only paths under ``prefixes`` are touched; every other access line is left byte-for-byte.
-    The record is rewritten, never dropped: the fact of the call and its status stay observable.
+    Two independent rules:
+      - ``prefixes``: the QUERY string is dropped from paths under these prefixes (their query
+        carries a secret). Applies only when the path has a ``?``.
+      - ``masked_prefixes``: a path under such a prefix is replaced by ``<prefix>*`` — the path
+        TAIL is the secret (the uuid of ``/cp/pay/<uuid>``, ADR-113 §4), so the tail and the query
+        are both replaced REGARDLESS of whether the path has a ``?``: the normal payment-page link
+        carries no query at all, and its uuid is exactly what must not reach the log.
+    The record is rewritten, never dropped: the fact of the call, its method and status stay
+    observable.
     """
 
-    def __init__(self, prefixes: tuple[str, ...]) -> None:
+    def __init__(self, prefixes: tuple[str, ...], masked_prefixes: tuple[str, ...] = ()) -> None:
         super().__init__()
         self._prefixes = prefixes
+        self._masked_prefixes = masked_prefixes
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
         if not isinstance(args, tuple) or len(args) <= _ACCESS_PATH_ARG:
             return True
         path = args[_ACCESS_PATH_ARG]
-        if not isinstance(path, str) or "?" not in path:
+        if not isinstance(path, str):
             return True
-        bare = path.split("?", 1)[0]
-        if any(bare == prefix or bare.startswith(f"{prefix}/") for prefix in self._prefixes):
-            record.args = (*args[:_ACCESS_PATH_ARG], bare, *args[_ACCESS_PATH_ARG + 1 :])
+        # Masking is checked BEFORE the "no query -> leave as is" early exit on purpose.
+        masked = next((p for p in self._masked_prefixes if path.startswith(p)), None)
+        if masked is not None:
+            replacement = f"{masked}*"
+        elif "?" not in path:
+            return True
+        else:
+            bare = path.split("?", 1)[0]
+            if not any(
+                bare == prefix or bare.startswith(f"{prefix}/") for prefix in self._prefixes
+            ):
+                return True
+            replacement = bare
+        record.args = (*args[:_ACCESS_PATH_ARG], replacement, *args[_ACCESS_PATH_ARG + 1 :])
         return True
 
 
 def install_access_log_redaction() -> None:
-    """Attach the query-redaction filter to the access logger once (idempotent).
+    """Attach the redaction filter to the access logger once (idempotent).
 
     A filter lives on the LOGGER, so it survives the worker replacing the logger's handlers.
     """
     access = logging.getLogger(_ACCESS_LOGGER)
     if any(isinstance(item, AccessLogQueryRedactionFilter) for item in access.filters):
         return
-    access.addFilter(AccessLogQueryRedactionFilter((PROXY_WEBHOOK_PATH_PREFIX,)))
+    access.addFilter(
+        AccessLogQueryRedactionFilter(
+            (PROXY_WEBHOOK_PATH_PREFIX, PAY_PAGE_RETURN_PATH),
+            masked_prefixes=(PAY_PAGE_PATH_PREFIX,),
+        )
+    )
 
 
 def configure_logging(level: str) -> None:

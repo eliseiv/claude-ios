@@ -17,6 +17,18 @@
 | Не сконфигурировано | `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN` пусты → `503` ⇒ активен только на avelyra |
 | SSRF | исходящий вызов только к фиксированному `CLOUDPAYMENTS_API_BASE` (config), не из тела клиента |
 
+## Страница оплаты на домене инстанса — ПУБЛИЧНЫЕ браузерные пути ([ADR-113](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md))
+`/cp/pay/*`, `/payment/return`, `/main.css`, `/main.js` — открывает браузер пользователя по переписанному `paymentUrl`, **без JWT**.
+
+| Аспект | Значение |
+|---|---|
+| Авторизация входа | нет (страница оплаты публична и у поставщика) |
+| Гейт инстанса | `cloudpayments_checkout_configured()` ложно ИЛИ флаг `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED` = `false` → `404` до исходящего вызова, одинаковым ответом. Без флага пути закрыты на всех инстансах, включая YooMoney / T-Банк |
+| Rate-limit | per-source-IP `rl:cppage:{ip}`, 120 на окно → `429`; fail-open |
+| Исходящая авторизация | **нет**: `Authorization`, `CLOUDPAYMENTS_API_TOKEN`, `X-Forwarded-*`, `X-Real-IP`, `Forwarded` к upstream НЕ передаются. **Контраст с checkout выше:** там Bearer `CLOUDPAYMENTS_API_TOKEN` обязателен |
+| SSRF | хост upstream — только хост `CLOUDPAYMENTS_API_BASE`, схема `https`, путь — белый список по сырому пути |
+| Чего НЕ делает | не пишет в БД, не пишет в структурные логи uuid пути/query/cookie/тела (access-лог маскируется; edge-лог на `4xx`/`5xx` — принятый риск [ADR-113 §4](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)), не следует редиректам |
+
 ## Cancel — пользовательский JWT (по коду, внесено [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md))
 `POST /v1/billing/cloudpayments/cancel` — тот же контур, что checkout: JWT (`CurrentUser`), `user_id` к поставщику = `sub`, корзина `rl:other:{user_id}`, гейт `cloudpayments_checkout_configured()` → `503`. Контракт — [02-api-contracts.md](02-api-contracts.md#post-v1billingcloudpaymentscancel).
 

@@ -44,7 +44,7 @@
 | **Admin** | Операторские/саппорт-инструменты, `/v1/admin/*` | статический секрет | `X-Admin-Token: <ADMIN_API_SECRET>` | `adminToken` (apiKey, header `X-Admin-Token`) |
 | **Preview** | Браузер (открывает превью сайта) | подпись внутри URL (HMAC+TTL) | нет — авторизация в самой ссылке | — (публичный по signed URL) |
 | **Adapty webhook** | Сервис Adapty (M2M), `/v1/billing/adapty/webhook` | статический bearer-секрет (без HMAC-подписи payload) | `Authorization: Bearer <ADAPTY_WEBHOOK_SECRET>` | отдельная http-bearer схема ([ADR-029](adr/ADR-029-adapty-subscription-webhook.md)) |
-| **CloudPayments webhook** | Агрегатор broadapps/YooKassa (RU-путь), `/v1/billing/cloudpayments/webhook` (дубликат `/v1/web/events`, [ADR-110](adr/ADR-110-ru-payment-neutral-path-aliases.md)) | **публичный (нет 401), [ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md)** — broadapps шлёт колбэк без auth/подписи | нет обяз. заголовка; trust-anchor = **верификация через broadapps API**; per-IP rate-limit | начисление только по подтверждённому `succeeded`-платежу; гейт активации `CLOUDPAYMENTS_API_TOKEN`; активен только на avelyra |
+| **CloudPayments webhook** | Агрегатор broadapps (RU-путь; провайдер оплаты задаётся у приложения в broadapps: YooMoney / T-Банк / страница broadapps), `/v1/billing/cloudpayments/webhook` (дубликат `/v1/web/events`, [ADR-110](adr/ADR-110-ru-payment-neutral-path-aliases.md)) | **публичный (нет 401), [ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md)** — broadapps шлёт колбэк без auth/подписи | нет обяз. заголовка; trust-anchor = **верификация через broadapps API**; per-IP rate-limit | начисление только по подтверждённому `succeeded`-платежу; гейт активации `CLOUDPAYMENTS_API_TOKEN`; активен только на avelyra |
 
 > Эндпоинты выпуска токена `/v1/auth/register|token|refresh|apple` и `GET /v1/auth/jwks` — **public** (без `Authorization`): это точка получения JWT. Защита — per-IP rate-limit. См. [§21](#21-auth-выпуск-токена).
 
@@ -471,13 +471,13 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 > | `POST /v1/billing/cloudpayments/experiments/paywall-shown` | `POST /v1/web/offers/shown` |
 
 ### POST /v1/billing/cloudpayments/checkout
-**Наш** эндпоинт создания платёжной ссылки RU-оплаты ([ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md)). **Вызывает iOS-клиент** (JWT). Делает исходящий вызов broadapps `POST /payments/link` и возвращает ссылку YooKassa. Активен там, где оператор задал **оба** `CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN`; иначе `503`.
+**Наш** эндпоинт создания платёжной ссылки RU-оплаты ([ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md)). **Вызывает iOS-клиент** (JWT). Делает исходящий вызов broadapps `POST /payments/link` и возвращает ссылку на оплату (провайдер задан у приложения в broadapps: YooMoney, T-Банк или страница broadapps — последняя на домене инстанса, [ADR-113](adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)). Активен там, где оператор задал **оба** `CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN`; иначе `503`.
 
 **Авторизация:** пользовательский JWT (`Authorization: Bearer <JWT>`, `bearerAuth`). **`userId` = JWT `sub`, НЕ из тела** — фикс «потерянных платежей» (колбэк [ADR-050](adr/ADR-050-cloudpayments-webhook.md) находит пользователя по этому `userId`).
 
 **Тело** (StrictModel): `productId` (валидируется allowlist `classify_product`; unknown/некредитуемый → `422`), `customerEmail` (`EmailStr`). Пример: `{"productId":"week_6.99_nottrial","customerEmail":"user@example.com"}`.
 
-**Ответ `200`** (проброс broadapps): `{"paymentId","paymentUrl","status","expiresAt":null|str}`. `paymentUrl` — ссылка YooKassa (`https://yoomoney.ru/checkout/...`).
+**Ответ `200`** (проброс broadapps): `{"paymentId","paymentUrl","status","expiresAt":null|str}`. `paymentUrl` — ссылка на оплату; открыть в браузере/веб-вью. Ссылки на платёжную страницу broadapps (`/cp/pay/…`) на инстансах с включённым `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED` приходят на домене самого инстанса (`https://<домен инстанса>/cp/pay/…`), страницу отдаёт инстанс ([ADR-113](adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)); ссылки YooMoney / T-Банк — как есть. Клиенту менять ничего не нужно.
 
 | HTTP | Код | Когда |
 |---|---|---|
@@ -531,7 +531,7 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 **Коды:** `200`, `401`, `429`, `502 upstream_error` (отказ поставщика), `503 cloudpayments_checkout_not_configured`.
 
 ### POST /v1/billing/cloudpayments/webhook
-Серверный вебхук агрегатора **broadapps** (`pay.broadapps.dev`, фронтит YooKassa) в формате **CloudPayments** (**вызывает broadapps, не iOS**) — **отдельный RU-путь**. **[ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md): эндпоинт ПУБЛИЧНЫЙ (нет `401`); колбэк = ТРИГГЕР, начисление — только после ВЕРИФИКАЦИИ платежей через broadapps API.** Активен **только на avelyra** (где задан `CLOUDPAYMENTS_API_TOKEN`).
+Серверный вебхук агрегатора **broadapps** (`pay.broadapps.dev`; провайдер оплаты задаётся у приложения в broadapps: YooMoney / T-Банк / страница broadapps) в формате **CloudPayments** (**вызывает broadapps, не iOS**) — **отдельный RU-путь**. **[ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md): эндпоинт ПУБЛИЧНЫЙ (нет `401`); колбэк = ТРИГГЕР, начисление — только после ВЕРИФИКАЦИИ платежей через broadapps API.** Активен **только на avelyra** (где задан `CLOUDPAYMENTS_API_TOKEN`).
 
 **Авторизация ([ADR-054](adr/ADR-054-cloudpayments-webhook-payment-verification.md)):** **`401` НЕ выдаётся** — broadapps шлёт колбэк без авторизации (`authScheme=none`) и без HMAC-подписи → начислять по телу нельзя. `require_cloudpayments_webhook` — наблюдательная non-blocking (лог `cloudpayments_webhook_auth_observed`). **Trust-anchor начисления — верификация**, не токен. Публичный эндпоинт → **per-IP rate-limit** (`CLOUDPAYMENTS_WEBHOOK_RATE_LIMIT_PER_IP`, дефолт 120/мин, `429`). Гейт активации — `CLOUDPAYMENTS_API_TOKEN` (пуст → `500`). `CLOUDPAYMENTS_WEBHOOK_TOKEN` — легаси/опционален.
 

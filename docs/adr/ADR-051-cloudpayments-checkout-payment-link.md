@@ -6,6 +6,8 @@
 
 > **Расширено (не отменено) [ADR-098 §1](ADR-098-broadapps-paywall-experiments-and-default-product.md):** правило «`user_id` = JWT `sub`, не из тела» с этого решения действует на **весь** исходящий контур broadapps — `/payments/link`, отмену подписки и обе ручки экспериментов пейволла. Единственный вызов не по нашему `sub` — верификация `GET /users/{X}/payments` ([ADR-054](ADR-054-cloudpayments-webhook-payment-verification.md)), где `X` пришёл в колбэке.
 
+> **§4 уточнён (не отменён) [ADR-113 §2](ADR-113-ru-payment-page-proxy-on-instance-domain.md) (2026-09-25):** `paymentUrl` — по-прежнему проброс `payment_url`, КРОМЕ ссылок на платёжную страницу broadapps (хост `CLOUDPAYMENTS_API_BASE`, путь `/cp/pay/`): при включённом `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED` их хост заменяется доменом инстанса (`SERVICE_DOMAIN`), а страница проксируется приложением. Прочие поля, коды и статусы §4 не меняются. Тело ниже не переписано (immutability).
+
 ## Context
 
 RU-путь оплаты ([ADR-050](ADR-050-cloudpayments-webhook.md)) состоит из двух половин:

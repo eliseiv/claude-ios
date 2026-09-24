@@ -259,3 +259,24 @@
 
 ## Что НЕ трогать (ADR-110)
 - Действующие пути, их теги/тексты/схемы OpenAPI, коды ошибок, корзины лимитов, логику начисления, цены.
+
+---
+
+# Страница оплаты на домене инстанса ([ADR-113](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md))
+
+## Фаза P1 — переписывание `paymentUrl` (backend)
+- `config.py`: `cloudpayments_pay_page_proxy_enabled: bool` (`CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED`, дефолт `false`).
+- Путь checkout: переписывание в ОДНОМ месте, общем для обоих путей пары ([ADR-113 §2](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)); поле `paymentUrlRewritten` в `cloudpayments_checkout_outcome`; WARNING `cloudpayments_pay_page_rewrite_skipped`.
+
+## Фаза P2 — прокси (backend)
+- Новый роутер без префикса `/v1`, `include_in_schema=False`, регистрация в `main.py`; белый список, заголовки, замена хоста в теле, `Set-Cookie`/`Location`, `502`/`429` HTML, лимитер `rl:cppage:{ip}`, заголовки безопасности, `HEAD` без `Content-Length`, расширение `AccessLogQueryRedactionFilter` в `src/app/observability/logging.py`, логи — по [ADR-113 §3–§5, §7](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md).
+
+## Фаза P3 — тесты (qa)
+- По [ADR-113 §8](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md) / [09-testing.md](09-testing.md).
+
+## Фаза P4 — выкат (devops + оператор)
+- Строка `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED` (закомментированная, дефолт `false`) в `.env.example` / `.env.prod.example`.
+- Порядок — [ADR-113 §6](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md): деплой с флагом `false` → один инстанс класса «страница broadapps» + реальный тестовый платёж → остальные инстансы класса. Откат — флаг `false`.
+
+## Что НЕ трогать (ADR-113)
+- Вебхук, верификацию, начисление, эксперименты, отмену; прочие поля и коды ответа checkout; `SecurityHeadersMiddleware` (CSP не вводится).

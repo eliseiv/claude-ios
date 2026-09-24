@@ -539,6 +539,8 @@ async def test_checkout_success_log_has_only_allowlisted_fields(
     assert fields["productId"] == "week_6.99_nottrial"
     assert fields["status"] == "pending"
     assert fields["paymentId"] == _OK_BODY["payment_id"]
+    # ADR-113 §7: a YooMoney link is never rewritten.
+    assert fields["paymentUrlRewritten"] is False
     # Allowlist: no PII / secrets / app_id in the structured record.
     assert set(fields) <= {
         "result",
@@ -547,6 +549,7 @@ async def test_checkout_success_log_has_only_allowlisted_fields(
         "productId",
         "status",
         "paymentId",
+        "paymentUrlRewritten",
         "requestId",
     }
     assert "secret-pii@example.com" not in str(fields)
@@ -578,6 +581,8 @@ async def test_checkout_error_log_has_reason_and_no_pii(
     assert fields["result"] == "error"
     assert fields["reason"] == "timeout"
     assert fields["userId"] == str(uid)
+    # ADR-113 §7: paymentUrlRewritten is written only with result=created.
+    assert "paymentUrlRewritten" not in fields
     assert set(fields) <= {
         "result",
         "reason",

@@ -159,6 +159,15 @@ def _level_for(result: str, reason: str | None) -> int:
 - В записях нет `Authorization`/токена/`app_id`/тела ответа.
 
 
+## Страница оплаты на домене инстанса ([ADR-113 §7](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md))
+- `cloudpayments_checkout_outcome`: allowlist дополнен полем `paymentUrlRewritten` (`bool`, только при `result=created`); `paymentUrl` целиком не логируется.
+- `cloudpayments_pay_page_rewrite_skipped` — один на ответ checkout (уровень: INFO при `reason=disabled` — штатное состояние после деплоя; WARNING при `path_not_proxied` и `service_domain_unset`), чья ссылка ведёт на upstream-хост и НЕ переписана: `reason` (`disabled` / `path_not_proxied` / `service_domain_unset`), `userId`, `productId`. Ссылки YooMoney / T-Банк лога не дают.
+- `cloudpayments_pay_page_proxy` — один на запрос прокси: `result` (`ok` / `error`), `reason` (`timeout` / `connect_error` / `too_large` / `rate_limited`), `pathClass` (`pay` / `return` / `asset`), `method`, `upstreamStatus`, `durationMs`, `droppedHeaders` (имена отброшенных заголовков ответа upstream, без значений; заголовки, отбрасываемые [ADR-113 §3](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md) поимённо — `Server`, `X-Powered-By`, `Date`, `Content-Encoding`, `Content-Length`, hop-by-hop, HSTS/XFO/XCTO, — в поле не попадают). Уровни: `ok` и `upstreamStatus < 500` — DEBUG; `ok` и `≥ 500` — INFO; `error` — WARNING, кроме `rate_limited` — INFO.
+- `cloudpayments_pay_page_residual_brand` — WARNING (`pathClass`, `count`): в текстовом теле после замены хоста осталась подстрока `broadapps`.
+- `cloudpayments_pay_page_rewrite_failed` — WARNING (`pathClass`, `contentType`): текстовое тело не декодировалось, отдано без замены.
+- ЗАПРЕЩЕНО в структурных логах: путь `/cp/pay/<uuid>` целиком, query, cookie, тела, значения заголовков.
+- Access-лог приложения (`uvicorn.access`): у путей под `/cp/pay/` — `/cp/pay/*` без uuid и query, в том числе когда query в пути нет, у `/payment/return` — без query; запись сохраняется. Edge-лог Traefik (`4xx`/`5xx`) путь не маскирует — принятый остаточный риск [ADR-113 §4](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md).
+
 ## Тестовые ориентиры (для qa) — вебхук
 - На **каждый** исход — ровно одна запись `"cloudpayments_webhook_outcome"` с корректными `result`/`reason`/`level`.
 - `user_not_found`, `unknown_product` → **WARNING**; `applied`/`duplicate`/технические `ignored` → INFO; `empty_body` → DEBUG.

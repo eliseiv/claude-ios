@@ -327,6 +327,13 @@ class Settings(BaseSettings):
     # coincides — separate config allows independent rotation of each side. Empty (default) =>
     # the /checkout endpoint returns 503 (not configured) so it is active only where set (avelyra).
     cloudpayments_api_token: str = Field(default="", alias="CLOUDPAYMENTS_API_TOKEN")
+    # ADR-113 §6: rewrite a broadapps payment-page link (host of cloudpayments_api_base, path
+    # /cp/pay/) onto this instance's SERVICE_DOMAIN in the checkout response (ADR-113 §2) AND
+    # serve the /cp/pay/* proxy routes (off -> 404). Default off: behaviour unchanged until the
+    # operator enables it.
+    cloudpayments_pay_page_proxy_enabled: bool = Field(
+        default=False, alias="CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED"
+    )
 
     # --- Token purchase (ADR-015, token-purchase/03) ---
     # Server-side mapping consumable productId -> credits (JSON object). Source of truth for

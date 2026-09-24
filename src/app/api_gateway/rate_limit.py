@@ -160,6 +160,29 @@ async def enforce_cloudpayments_webhook_limits(*, ip: str | None) -> bool:
         return True
 
 
+async def enforce_cloudpayments_pay_page_limits(*, ip: str | None, limit: int) -> bool:
+    """Per-source-IP rate limit on the PUBLIC payment-page proxy ``/cp/pay/*`` (ADR-113 §5).
+
+    Its own bucket ``rl:cppage:{ip}`` — the page's traffic never spends the webhook budget
+    (``rl:cpwebhook``) and vice versa. ``limit`` is a constant of the proxy module (no env). An
+    unresolved client IP shares one ``unknown`` bucket; fail-open on a Redis error, like the
+    webhook limiter it is modelled on. Window is rate_limit_window_seconds.
+    """
+    settings = get_settings()
+    client = get_redis()
+    bucket = ip or "unknown"
+    try:
+        return await _allow(
+            client,
+            f"rl:cppage:{bucket}",
+            limit,
+            settings.rate_limit_window_seconds,
+        )
+    except redis.RedisError as exc:
+        log_event(logger, logging.WARNING, "rate_limit_redis_unavailable", error=str(exc))
+        return True
+
+
 async def enforce_other_limits(*, user_id: uuid.UUID) -> bool:
     settings = get_settings()
     client = get_redis()

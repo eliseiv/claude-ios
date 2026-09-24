@@ -42,6 +42,7 @@ sequenceDiagram
     else 201 OK
         B-->>K: {payment_id, payment_url, status, expires_at}
         K-->>R: CheckoutResult
+        R->>R: rewrite_payment_url (ADR-113 §2): хост=хост API_BASE & путь /cp/pay/ & флаг & SERVICE_DOMAIN → https://SERVICE_DOMAIN/...; иначе как есть
         R-->>C: 200 {paymentId, paymentUrl, status, expiresAt}
     end
     Note over R,K: log "cloudpayments_checkout_outcome" (allowlist; без email/токена)
@@ -61,6 +62,7 @@ sequenceDiagram
   ```
   **Content-Type руками НЕ ставить** (httpx выставит boundary).
 - Таймаут `_CHECKOUT_TIMEOUT_SECONDS = 15.0`.
+- **Bearer здесь ОБЯЗАТЕЛЕН** — а в прокси платёжной страницы ([ADR-113 §3](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md), раздел ниже) `Authorization`/`CLOUDPAYMENTS_API_TOKEN` upstream передавать ЗАПРЕЩЕНО: там браузерный публичный контур. Один и тот же upstream-хост, противоположные требования — по аналогии не переносить.
 
 > **Контраст с соседним исходящим вызовом ([ADR-098 §10](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)) — по аналогии НЕ переносить:** здесь тело **multipart** (`files=`), а у обеих ручек экспериментов (`/experiments/assignments`, `/experiments/paywall-shown`) — **`application/json`** (`json=`), потому что там во вложенном объекте `context`, который в multipart не выражается. Таймаут тоже различается намеренно: `15.0`с здесь (на другом конце создаётся платёж) против `5.0`с у экспериментов (путь отрисовки пейволла).
 - Маппинг ошибок → `UpstreamError` (502): `httpx.TimeoutException`→`timeout`; `httpx.RequestError`→`connect_error`; статус не `2xx` (success=`201`; принять `200`/`201`)→`upstream_status`; `2xx` без `payment_url`/не-JSON→`malformed_response`. Наружу — generic 502, **без** upstream-тела/статуса/токена.
@@ -80,6 +82,49 @@ if kind == KIND_TOKENS and settings.token_products().get(product_id, 0) <= 0:  r
 > **Контраст с логом экспериментов ([ADR-098 §8](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)):** там в allowlist добавлен `upstreamStatus` (числовой код поставщика), здесь его **намеренно нет**. Причина: `productId` проходит серверный allowlist ДО вызова, поэтому не-2xx здесь почти всегда авария поставщика; коды экспериментов allowlist'а не имеют, и их не-2xx чаще всего — опечатка оператора в панели, отличимая только по статусу. Наружу статус не проксируется ни там, ни здесь.
 
 ---
+
+## Страница оплаты на домене инстанса ([ADR-113](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md))
+
+Нормативный текст — [ADR-113 §1–§7](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md). Здесь — раскладка для backend.
+
+### Две части
+1. **Переписывание `paymentUrl`** — в ОДНОМ месте пути checkout (обработчик или клиент), общем для `/v1/billing/cloudpayments/checkout` и `/v1/web/session`. Предикат — конъюнкция (а) флаг `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED`, (б) хост `payment_url` == хост `CLOUDPAYMENTS_API_BASE` (без учёта регистра, сравнение хоста, а не подстроки), (в) путь начинается с `/cp/pay/`, (г) `normalized_service_domain()` непуст. Домен — из `SERVICE_DOMAIN`, НЕ из `Host`/`X-Forwarded-Host`.
+2. **Прокси** — новый роутер без префикса `/v1`, `include_in_schema=False`: `/cp/pay/{rest}` (`GET`/`HEAD`/`POST`), `/payment/return`, `/main.css`, `/main.js` (`GET`/`HEAD`). Upstream — `https://<хост CLOUDPAYMENTS_API_BASE>` + тот же путь и query.
+
+### Поток прокси
+```mermaid
+sequenceDiagram
+    participant U as Браузер пользователя
+    participant P as Прокси (домен инстанса)
+    participant B as broadapps (upstream-хост)
+    U->>P: GET /cp/pay/<uuid> (cookie страницы, без JWT)
+    P->>P: cloudpayments_checkout_configured() И флаг CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED? иначе 404 (один ответ, без вызова)
+    P->>P: белый список по raw_path? иначе 404 (без вызова)
+    P->>P: лимит rl:cppage:{ip} иначе 429 (HTML)
+    P->>B: тот же метод/путь/query; allowlist заголовков; БЕЗ Authorization/токена/X-Forwarded-*; follow_redirects=False; 15 с
+    alt таймаут / ошибка соединения / тело > 5 MiB
+        P-->>U: 502 нейтральный HTML (no-store)
+    else любой статус upstream
+        B-->>P: статус + заголовки + тело
+        P->>P: текстовое тело: upstream-хост (токен, без учёта регистра) → SERVICE_DOMAIN; Set-Cookie без Domain; Location upstream→инстанс
+        P->>P: остаток "broadapps" в теле? → WARNING residual_brand
+        P-->>U: статус upstream + allowlist заголовков + тело
+    end
+    Note over P: лог cloudpayments_pay_page_proxy (pathClass, без uuid/query/cookie)
+```
+
+### Детали для backend
+- Хост upstream: `urlsplit(settings.cloudpayments_api_base).hostname`; схема — `https`; из запроса хост не берётся никогда.
+- Белый список: компоненты `[A-Za-z0-9._~-]+` через `/`; отвергаются `.`, `..`, пустая компонента, любой `%`, `\`; проверка по `scope["raw_path"]`.
+- Заголовки к upstream: `Accept`, `Accept-Language`, `Content-Type`, `User-Agent`, `Cookie`, `X-XSRF-TOKEN`, `X-CSRF-TOKEN`, `X-Requested-With`; `Origin`/`Referer` — хост инстанса → upstream-хост. `Accept-Encoding: identity`.
+- Заголовки к клиенту: `Content-Type`, `Cache-Control`, `Expires`, `Set-Cookie` (без `Domain`), `Location` (upstream-хост → хост инстанса); `Content-Length` пересчитывается, на `HEAD` не отдаётся вовсе (не `0`); `Content-Encoding`, hop-by-hop, `Server`, `X-Powered-By`, `Date` не передаются.
+- Заголовки безопасности ([ADR-113 §3](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)): HSTS / `X-Frame-Options` / `X-Content-Type-Options` upstream отбрасываются (действуют значения `SecurityHeadersMiddleware`); `Content-Security-Policy`(`-Report-Only`), `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`/`-Embedder-Policy`/`-Resource-Policy` передаются с заменой upstream-хоста в значении. Имена прочих отброшенных заголовков — в поле `droppedHeaders` лога.
+- Токен хоста в теле: левая граница — начало, символ не из `[A-Za-z0-9.-]` или `%2F` (любой регистр); правая — конец, символ не из `[A-Za-z0-9-]`, а `.` — только если за ней не `[A-Za-z0-9-]`.
+- Access-лог: расширить `AccessLogQueryRedactionFilter` / `install_access_log_redaction()` (`src/app/observability/logging.py`): под `/cp/pay/` путь в записи → `/cp/pay/*` ВСЕГДА, в том числе без `?` в пути (ранний выход фильтра по отсутствию `?` на эти пути не распространяется), у `/payment/return` — срез query; запись не удаляется ([ADR-113 §4](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)).
+- Типы для замены в теле: `text/html`, `text/css`, `text/javascript`, `application/javascript`, `application/x-javascript`, `application/json`; charset из `Content-Type`, иначе UTF-8; не декодируется → тело как есть + WARNING `cloudpayments_pay_page_rewrite_failed`.
+- Константы модуля: таймаут 15 с, предел тела 5 MiB, лимит 120 на окно `rate_limit_window_seconds`. Новый лимитер per-IP — по образцу `enforce_cloudpayments_webhook_limits`, корзина `rl:cppage:{ip}`, fail-open.
+- Новая настройка `cloudpayments_pay_page_proxy_enabled: bool` (`CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED`, дефолт `false`) рядом с блоком checkout в `config.py`; гейтит ОБЕ части: переписывание и маршруты прокси ([ADR-113 §3](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)).
+- Без миграций, без записей в БД.
 
 ## Эксперименты пейволла — исходящие вызовы broadapps ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md))
 

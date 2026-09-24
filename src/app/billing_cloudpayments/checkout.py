@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
 
 from app.billing_cloudpayments.parser import KIND_TOKENS, KIND_UNKNOWN, classify_product
+from app.billing_cloudpayments.pay_page import SKIP_DISABLED, rewrite_payment_url
 from app.config import Settings
 from app.errors import UpstreamError, ValidationFailedError
 from app.instance_config import one_time_credits, one_time_product_ids
@@ -242,6 +243,25 @@ class CloudPaymentsCheckoutClient:
         if result is None:
             raise self._upstream_error("malformed_response", user_id=user_id, product_id=product_id)
 
+        # ADR-113 §2: the ONE place both paths of the pair (/v1/billing/cloudpayments/checkout and
+        # /v1/web/session) go through. A broadapps payment-page link moves onto SERVICE_DOMAIN; any
+        # other host (YooMoney, T-Bank) passes through untouched.
+        rewrite = rewrite_payment_url(result.payment_url, settings)
+        if rewrite.skip_reason is not None:
+            # A broadapps link that stays on the broadapps host must be visible (ADR-113 §7); the
+            # URL itself is not logged. ``disabled`` is the operator's deliberate state -> INFO;
+            # ``path_not_proxied`` / ``service_domain_unset`` are misconfiguration -> WARNING.
+            log_event(
+                logger,
+                logging.INFO if rewrite.skip_reason == SKIP_DISABLED else logging.WARNING,
+                "cloudpayments_pay_page_rewrite_skipped",
+                reason=rewrite.skip_reason,
+                userId=str(user_id),
+                productId=product_id,
+            )
+        if rewrite.rewritten:
+            result = replace(result, payment_url=rewrite.url)
+
         log_event(
             logger,
             logging.INFO,
@@ -251,6 +271,7 @@ class CloudPaymentsCheckoutClient:
             productId=product_id,
             status=result.status,
             paymentId=result.payment_id,
+            paymentUrlRewritten=rewrite.rewritten,
         )
         return result
 

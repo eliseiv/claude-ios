@@ -1,7 +1,7 @@
 # billing-cloudpayments / 00 — Overview
 
 ## Назначение
-Приём серверного вебхука платёжного агрегатора **broadapps** (`pay.broadapps.dev`), который фронтит **YooKassa** и по факту успешной оплаты шлёт колбэк в **формате CloudPayments**. По событию: активировать/продлить подписку **или** начислить token-пакет, идемпотентно начислить кредиты. Это **отдельный RU-путь биллинга** ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)), независимый от Adapty ([ADR-029](../../adr/ADR-029-adapty-subscription-webhook.md)) и StoreKit.
+Приём серверного вебхука платёжного агрегатора **broadapps** (`pay.broadapps.dev`), у которого провайдер оплаты задаётся у приложения в broadapps: YooMoney / T-Банк / страница broadapps, и который по факту успешной оплаты шлёт колбэк в **формате CloudPayments**. По событию: активировать/продлить подписку **или** начислить token-пакет, идемпотентно начислить кредиты. Это **отдельный RU-путь биллинга** ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)), независимый от Adapty ([ADR-029](../../adr/ADR-029-adapty-subscription-webhook.md)) и StoreKit.
 
 ## In scope
 - **Исходящий checkout** ([ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)): наш JWT-эндпоинт `POST /v1/billing/cloudpayments/checkout` создаёт платёжную ссылку через broadapps `POST /payments/link` (multipart). `userId` из JWT `sub` (не из тела) → подставляется как `user_id`/`AccountId` → колбэк находит пользователя (фикс «потерянных платежей»). `app_id`+app token — серверные (config `CLOUDPAYMENTS_APP_ID`/`CLOUDPAYMENTS_API_TOKEN`). Passthrough без миграции; ответ `paymentUrl`. Не задан конфиг → `503` (только avelyra).
@@ -16,6 +16,8 @@
 - Ответ `{"code":0}` на всё принятое (кроме `429`/`500`).
 
 - **Пути-дубликаты `/v1/web/*`** ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)): каждая ручка модуля доступна и по нейтральному пути — тот же обработчик и контракт, в OpenAPI показаны так же, как оригиналы; старые пути не меняются.
+
+- **Страница оплаты на домене инстанса** ([ADR-113](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)): ссылка checkout на платёжную страницу broadapps (`/cp/pay/*`) переписывается на домен инстанса (`SERVICE_DOMAIN`, флаг `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED`), а приложение проксирует страницу к фиксированному upstream-хосту. Ссылки YooMoney / T-Банк не трогаются.
 
 ## Out of scope (этой итерации)
 - **Прочие ручки broadapps** (user subscription / user payments / app payment stat). **Уточнение факта ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md), решение не меняется):** «subscription cancel» здесь больше не вне scope — `POST /v1/billing/cloudpayments/cancel` реализован в коде (`71b12bf`) без отдельного ADR; контракт по коду — [02-api-contracts.md](02-api-contracts.md#post-v1billingcloudpaymentscancel).

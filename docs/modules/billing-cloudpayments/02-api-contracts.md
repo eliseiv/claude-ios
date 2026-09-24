@@ -5,6 +5,8 @@
 - **Входящая** — `POST /v1/billing/cloudpayments/webhook` ([ADR-050](../../adr/ADR-050-cloudpayments-webhook.md)): broadapps присылает колбэк о состоявшейся оплате.
 - **Эксперименты пейволла** — `POST /v1/billing/cloudpayments/experiments/assign` и `POST /v1/billing/cloudpayments/experiments/paywall-shown` ([ADR-098](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)): passthrough к broadapps, денег не касаются.
 
+- **Страница оплаты на домене инстанса** — браузерные пути `/cp/pay/*`, `/payment/return`, `/main.css`, `/main.js` ([ADR-113](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)): приложение проксирует платёжную страницу broadapps, на которую ведёт переписанный `paymentUrl`. Не API, в OpenAPI не показываются.
+
 - **Отмена RU-подписки** — `POST /v1/billing/cloudpayments/cancel` (реализована коммитом `71b12bf`; до [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) в `docs/` не была описана — уточнение факта, контракт ниже зафиксирован по коду).
 
 > **Нейтральные пути-дубликаты ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)).** Каждая из пяти ручек доступна ещё и по второму пути — тот же обработчик, тот же контракт (тело, ответ, коды ошибок, auth, корзина лимита); в OpenAPI дубликаты показаны так же, как оригиналы — тот же тег, `summary`/`description` и модели ([ADR-110 §2](../../adr/ADR-110-ru-payment-neutral-path-aliases.md), решение владельца по Q-110-2):
@@ -23,7 +25,7 @@
 
 ## POST /v1/billing/cloudpayments/checkout
 
-**Наш** эндпоинт создания платёжной ссылки RU-оплаты. **Вызывает iOS-клиент** (JWT). Делает один исходящий вызов broadapps `POST /payments/link` и возвращает `paymentUrl` (ссылка YooKassa). Контракт целиком — [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md). Активен там, где оператор задал **оба** `CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN` (предикат `cloudpayments_checkout_configured()`); состав таких инстансов — операторский и здесь не фиксируется ([07-deployment.md](../../07-deployment.md)).
+**Наш** эндпоинт создания платёжной ссылки RU-оплаты. **Вызывает iOS-клиент** (JWT). Делает один исходящий вызов broadapps `POST /payments/link` и возвращает `paymentUrl` (ссылка на оплату; для страниц broadapps — на домене инстанса, [ADR-113](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)). Контракт целиком — [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md). Активен там, где оператор задал **оба** `CLOUDPAYMENTS_APP_ID`+`CLOUDPAYMENTS_API_TOKEN` (предикат `cloudpayments_checkout_configured()`); состав таких инстансов — операторский и здесь не фиксируется ([07-deployment.md](../../07-deployment.md)).
 
 ### Авторизация
 - Пользовательский **JWT** (`Authorization: Bearer <JWT>`, `bearerAuth`, `CurrentUser`) — как прочие `/v1/*`. Нет/невалидный → `401`.
@@ -43,7 +45,7 @@
 
 **Валидация `productId`** (симметрия с вебхуком, [03-architecture §Валидация productId](03-architecture.md)): `classify_product(productId, billing_interval_unit=None, frozenset(token_products()))`; `unknown` → `422`; `tokens` с `token_products().get(productId,0)<=0` → `422`. `productId` НЕ определяет сумму гранта (только allowlist-гейт).
 
-### Ответ (`CloudPaymentsCheckoutResponse`, StrictModel) — проброс полей broadapps
+### Ответ (`CloudPaymentsCheckoutResponse`, StrictModel) — проброс полей broadapps (кроме хоста `paymentUrl` страниц broadapps, [ADR-113 §2](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md))
 
 ```json
 { "paymentId": "e3d7ffe4-...", "paymentUrl": "https://yoomoney.ru/checkout/payments/v2/contract?orderId=...", "status": "pending", "expiresAt": null }
@@ -52,7 +54,7 @@
 | Поле | Тип | Источник (broadapps) |
 |---|---|---|
 | `paymentId` | str | `payment_id` |
-| `paymentUrl` | str | `payment_url` (ссылка YooKassa; тип `str`, не `HttpUrl` — passthrough) |
+| `paymentUrl` | str | `payment_url` (тип `str`, не `HttpUrl`). Проброс как есть, КРОМЕ ссылки на платёжную страницу broadapps (хост `CLOUDPAYMENTS_API_BASE`, путь `/cp/pay/`): при `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED=true` и непустом `SERVICE_DOMAIN` хост заменяется на `SERVICE_DOMAIN`, путь/query/fragment — байт-в-байт ([ADR-113 §2](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)). Ссылки YooMoney / T-Банк не трогаются |
 | `status` | str | `status` |
 | `expiresAt` | str \| null | `expires_at` (nullable, passthrough без парсинга) |
 
@@ -73,6 +75,25 @@
 > **Контраст с соседней ручкой [ADR-098 §6](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md):** здесь `502 upstream_error` означает «платёжная ссылка не создана» — реакция на него обязательна. У `POST .../experiments/paywall-shown` при том же классе отказа `502` **не выдаётся никогда** (`200 {"logged": false}`) именно для того, чтобы телеметрия не обесценила этот код. Правило не переносить ни в ту, ни в другую сторону.
 
 > **Контракт исходящего вызова — сверить живьём ([Q-051-1](../../99-open-questions.md)):** имена multipart-полей и shape `201`-ответа взяты из спеки заказчика; после деплоя прислать тестовый checkout и убедиться, что broadapps вернул `payment_url`.
+
+
+## Страница оплаты на домене инстанса (прокси, [ADR-113 §3](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md))
+
+Браузерные маршруты вне `/v1` (не API; `include_in_schema=False`). Открывает их браузер пользователя по переписанному `paymentUrl`, без JWT. Нормативный текст — [ADR-113 §3–§5](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md); здесь — сводка.
+
+| Метод | Путь | Upstream |
+|---|---|---|
+| `GET`, `HEAD`, `POST` | `/cp/pay/{rest}` | `https://<хост CLOUDPAYMENTS_API_BASE>/cp/pay/{rest}` |
+| `GET`, `HEAD` | `/payment/return` | `https://<хост>/payment/return` |
+| `GET`, `HEAD` | `/main.css`, `/main.js` | `https://<хост>/main.css`, `/main.js` |
+
+- `{rest}` — компоненты из `[A-Za-z0-9._~-]` через `/`; `.`/`..`, пустые компоненты, `%`-кодирование, `\` → `404` без исходящего вызова (проверка по сырому пути). Query — байт-в-байт; query, не собираемый в URL upstream (не-ASCII байт, `#`), → тот же `404`.
+- Гейт: `cloudpayments_checkout_configured()` ложно ИЛИ флаг `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED` = `false` → `404` до исходящего вызова, одинаковым ответом ([ADR-113 §3](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md), гейт маршрутов). При откате флага уже выданные переписанные ссылки перестают открываться.
+- Статус и тело upstream передаются клиенту (тело текстовых типов — с заменой upstream-хоста как токена на `SERVICE_DOMAIN`, включая формы `https:\/\/` и `%2F`); `Set-Cookie` — без `Domain`; `Location` на upstream-хост — на хост инстанса. На `HEAD` заголовка `Content-Length` нет.
+- Заголовки безопасности: HSTS / `X-Frame-Options` / `X-Content-Type-Options` — значения приложения (upstream отбрасываются); CSP, `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-*` upstream (сегодня не приходят) — передаются с заменой хоста в значении; прочее вне allowlist отбрасывается ([ADR-113 §3](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)).
+- Access-лог приложения: у `/cp/pay/*` в строке остаётся `/cp/pay/*` без uuid и query — в том числе когда query нет, у `/payment/return` срезается query ([ADR-113 §4](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md)).
+- Отказ транспорта (таймаут 15 с, ошибка соединения, тело > 5 MiB) → `502` нейтральная HTML-страница, `Cache-Control: no-store`; лимит per-IP `rl:cppage:{ip}` (120 на окно) → `429` тот же HTML.
+- Upstream не получает `Authorization`, `CLOUDPAYMENTS_API_TOKEN`, `X-Forwarded-*`, `X-Real-IP`, `Forwarded`.
 
 ---
 

@@ -28,6 +28,7 @@ from app.api_gateway.routers import (
     chat,
     chat_voice,
     chats,
+    cloudpayments_pay_page,
     documents,
     health,
     media,
@@ -416,6 +417,9 @@ def create_app() -> FastAPI:
     # functions, built from the same table as `billing_cloudpayments.router`; shown in OpenAPI
     # exactly like the originals.
     app.include_router(billing_cloudpayments.web_router)
+    # ADR-113 §3: browser routes of the broadapps payment page on this instance's domain
+    # (/cp/pay/*, /payment/return, /main.css, /main.js) — outside /v1, not in OpenAPI.
+    app.include_router(cloudpayments_pay_page.router)
     app.include_router(health.router)
     _document_voice_mode(app)
 
