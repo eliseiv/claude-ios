@@ -164,7 +164,7 @@
 
 ## POST /v1/billing/cloudpayments/cancel
 
-Отмена автопродления активной RU-подписки у broadapps. **Вызывает iOS-клиент** (JWT). Контракт зафиксирован **по коду** (`src/app/api_gateway/routers/billing_cloudpayments.py::cloudpayments_cancel`, `src/app/billing_cloudpayments/checkout.py::CloudPaymentsCheckoutClient.cancel_subscription`, схема `CloudPaymentsCancelResponse`); собственного ADR у ручки нет, в `docs/` она внесена [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) (уточнение факта). Дубликат — `POST /v1/web/cancel`.
+Отмена автопродления активной RU-подписки у broadapps. **Вызывает iOS-клиент** (JWT). Контракт зафиксирован **по коду** (`src/app/api_gateway/routers/billing_cloudpayments.py::cloudpayments_cancel`, `src/app/billing_cloudpayments/checkout.py::CloudPaymentsCheckoutClient.cancel_subscription`, схема `CloudPaymentsCancelResponse`); в `docs/` она внесена [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) (уточнение факта), норма эффекта и поля `willRenew` — [ADR-111](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md). Дубликат — `POST /v1/web/cancel`.
 
 ### Авторизация, гейт, лимит
 - Пользовательский **JWT** (`CurrentUser`); нет/невалидный → `401`. `user_id` исходящих вызовов = JWT `sub` (инвариант [ADR-098 §1](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)).
@@ -178,8 +178,8 @@
 - Bearer `CLOUDPAYMENTS_API_TOKEN`, таймаут как у checkout. Не-2xx / таймаут / сеть / нечитаемый ответ на любом шаге → `502 upstream_error` (тело/статус поставщика и токен наружу не отдаются).
 
 ### Эффект у нас
-- Если у пользователя есть строка `subscriptions` — `will_renew=false`; `status`/`expires_at` **не меняются** (доступ до конца оплаченного периода).
-- ⚠️ **Так ведёт себя код, но это не согласованная норма ([TD-064](../../100-known-tech-debt.md)).** `will_renew=false` ставится **безусловно**: и при `canceled=false` (у поставщика активной подписки нет, отменять было нечего), и независимо от источника подписки — строка `subscriptions` одна на пользователя (`user_id` — PK), колонки источника нет (`src/app/models/tables.py`, класс `Subscription`). Поэтому RU-отмена у пользователя с подпиской Apple/Adapty сбрасывает флаг автопродления ЧУЖОЙ подписки, и `/policy/effective` показывает «не продлится». В волне [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md) поведение не меняется: дубликат `/v1/web/cancel` ведёт себя так же.
+- **Норма ([ADR-111](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)):** `will_renew=false` пишется ТОЛЬКО когда поставщик нашёл и отменил активную RU-подписку (`found=True`, ответ `canceled=true`) и строка `subscriptions` существует; `status`/`expires_at` **не меняются** (доступ до конца оплаченного периода). `canceled=false` → локальная строка не трогается. Отказ поставщика (`502`) → не трогается. Оригинал и `/v1/web/cancel` — одно поведение.
+- Код по норме **написан в рабочем дереве, не закоммичен, в `main` не слит и не выкачен; автотесты пишутся** (состояние на 2026-09-24T18:05Z — поэлементно в шапке [ADR-111](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)); [TD-064](../../100-known-tech-debt.md) закрыт нормативно. Остаточный риск (одновременные RU- и Apple-подписки, колонки источника нет) — [Q-111-1](../../99-open-questions.md).
 
 ### Ответ (`CloudPaymentsCancelResponse`)
 
@@ -189,13 +189,15 @@
 
 Значения `status`/`canceledAt` — passthrough поставщика; их набор и формат в коде не фиксируются (не-строка → `null`).
 
+`willRenew` — значение флага ПОСЛЕ операции ([ADR-111 §3](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)): `canceled=true` → `false`; `canceled=false` → текущее `subscriptions.will_renew`, строки нет → `false`; `will_renew IS NULL` → `false` (поле не nullable, строка не меняется). Код написан в рабочем дереве, не слит (шапка ADR-111).
+
 | Поле | Тип | Источник |
 |---|---|---|
 | `canceled` | bool | найдена ли активная подписка и отправлена ли отмена |
 | `status` | str \| null | `status` ответа отмены поставщика |
 | `canceledAt` | str \| null | `canceled_at` ответа поставщика (passthrough) |
 | `alreadyCanceled` | bool \| null | `already_canceled` ответа поставщика |
-| `willRenew` | bool | всегда `false` |
+| `willRenew` | bool | значение автопродления ПОСЛЕ операции ([ADR-111 §3](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)): `canceled=true` → `false`; `canceled=false` → текущее (строки нет → `false`) |
 
 ### Коды ответа
 

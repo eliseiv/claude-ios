@@ -254,8 +254,15 @@ class FalClient:
         return hosted
 
     async def download_asset(self, url: str) -> bytes:
-        """Download a generated asset only from the configured fal asset-host allowlist."""
-        if not self._upload_host_allowed(url):
+        """Download a task RESULT asset (avatar preparation reads the cutout, ADR-112).
+
+        A result URL is checked against the default result-host list
+        ``FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES`` — on a proxy instance results
+        (even for the fal route) come from the proxy relay host. The SSRF boundary is unchanged:
+        host + https checked BEFORE any request, no redirects, no fal key, size limit in
+        ``_get_bytes``. ``upload`` / ``rehost_reference_image`` stay on the fal-only list.
+        """
+        if not fal_asset_host_allowed(url):
             raise self._upstream_error("untrusted_asset_url", endpoint=_REHOST_ENDPOINT)
         return await self._get_bytes(url)
 
@@ -263,7 +270,9 @@ class FalClient:
         """Download a trusted-host still. The fal key is not sent: result CDNs are public."""
         try:
             async with (
-                httpx.AsyncClient(timeout=self._settings.fal_timeout_seconds) as client,
+                httpx.AsyncClient(
+                    timeout=self._settings.fal_timeout_seconds, follow_redirects=False
+                ) as client,
                 client.stream("GET", url) as response,
             ):
                 self._raise_for_status(response, endpoint=_REHOST_ENDPOINT)

@@ -387,6 +387,12 @@
 | Q-110-3 | Отдавать ли на дубликатах нейтральные коды ошибок вместо `cloudpayments_checkout_not_configured` / `cloudpayments_webhook_misconfigured` / `cloudpayments_verification_unavailable`? Цена — выбор кода по пути (второй контракт у одного обработчика) и ветвление клиента. | Open — для владельца | Коды те же ([ADR-110 §2](adr/ADR-110-ru-payment-neutral-path-aliases.md)) | Нет |
 | Q-110-4 | Менять ли Callback URL в панели broadapps на `/v1/web/events` и когда (вебхук вызывает поставщик, а не приложение)? | Open — для владельца/оператора | Не менять; старый URL работает ([ADR-110 §7](adr/ADR-110-ru-payment-neutral-path-aliases.md)) | Нет |
 
+## Открытые вопросы RU-отмены подписки (2026-09-24, [ADR-111](adr/ADR-111-ru-cancel-will-renew-only-on-found.md))
+
+| ID | Вопрос | Статус | Принятый дефолт (если есть) | Блокирует backend? |
+|---|---|---|---|---|
+| Q-111-1 | Вводить ли колонку источника подписки в `subscriptions` (RU / Apple-Adapty), чтобы RU-отмена не сбрасывала `will_renew` Apple-подписки у пользователя, у которого одновременно активны обе? Писатели общей строки: RU — `cloudpayments_cancel` (`will_renew=false`) и webhook-upsert оплаты (`src/app/billing_cloudpayments/service.py`: `expires_at = EXCLUDED.expires_at, will_renew = true`); Apple/Adapty — `src/app/billing_adapty/service.py`. Цена — миграция схемы и правка всех писателей строки. | Open — для владельца | Колонки нет; `will_renew=false` пишется при `found=True` без проверки источника ([ADR-111 §1](adr/ADR-111-ru-cancel-will-renew-only-on-found.md)) | Нет |
+
 ## Блокеры (для orchestrator)
 - ~~**Q-015-1 (покупка токенов × policy)**~~ — **Closed (2026-06-02, вариант б):** покупка токенов требует активной подписки (`403 subscription_required` до grant), [ADR-002](adr/ADR-002-access-policy-state-machine.md) без изменений. Требует backend-доработки: policy-guard перед `WalletService.grant` в token-purchase. См. [ADR-015 §Доступность](adr/ADR-015-consumable-token-iap.md).
 - **Q-016-2 (web search)** — блокирует **только** фичу веб-поиска: нет выбора провайдера → нет контракта server-side tool. Остальное расширение не блокирует.

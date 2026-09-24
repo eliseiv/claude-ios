@@ -984,9 +984,10 @@ class Settings(BaseSettings):
         """Default result-host allowlist: ``FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES``.
 
         ADR-108 §7: the download route, the client-facing signed URL and the webhook asset filter
-        read THIS union. The fal-only list stays only where it is passed explicitly
-        (``FalClient._upload_host_allowed``). With an empty ``MEDIA_RESULT_HOST_SUFFIXES`` the
-        union equals the fal list, i.e. the behaviour before ADR-108.
+        read THIS union; so does ``FalClient.download_asset`` (task result read, ADR-112). The
+        fal-only list stays only where it is passed explicitly (``FalClient._upload_host_allowed``).
+        With an empty ``MEDIA_RESULT_HOST_SUFFIXES`` the union equals the fal list, i.e. the
+        behaviour before ADR-108.
         """
         merged: list[str] = []
         for suffix in (*self.fal_upload_host_suffixes(), *self.media_result_host_suffixes()):

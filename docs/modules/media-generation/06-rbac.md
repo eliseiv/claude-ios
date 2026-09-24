@@ -35,7 +35,7 @@
 - `FAL_API_KEY` — не в логах (redaction покрывает `*key*`), не в ответах, не в БД. Так же `PROXY_API_KEY` и `PROXY_WEBHOOK_SECRET` ([ADR-108 §10](../../adr/ADR-108-media-generation-via-proxy.md)); значение `token` колбэка и тело колбэка целиком в структурные логи не пишутся.
 - Тело ответа провайдера наверх не проксируется; исключение — текст `422`, который содержит только имя проблемного параметра (обрезается до 500 символов).
 - Промт пользователя хранится в `media_jobs.prompt` (нужен для листинга) и **не** попадает в структурные логи.
-- Полный URL CDN fal и signed token download-роута не логируются. Исходящий fetch только на хосты из `FAL_UPLOAD_HOST_SUFFIXES`, без follow-redirect.
+- Полный URL CDN fal и signed token download-роута не логируются. Исходящий fetch — только `https`, без follow-redirect: чтение результата задачи (download-роут, подготовка аватара, своя копия) — по хостам `FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES` ([ADR-108 §7](../../adr/ADR-108-media-generation-via-proxy.md), [ADR-112](../../adr/ADR-112-result-read-allowlist-for-avatar-preparation.md); для подготовки аватара код написан в рабочем дереве, не слит и не выкачен — шапка ADR-112), слот загрузки и перехост кадра — только `FAL_UPLOAD_HOST_SUFFIXES` (уточнение факта 2026-09-24, решение не меняется).
 - **Скачивание своей копии ([ADR-109 §3](../../adr/ADR-109-media-asset-local-storage-30d.md), код написан; не слит и не выкачен):** тот же allowlist, что у download-роута (`FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES`, [ADR-108 §7](../../adr/ADR-108-media-generation-via-proxy.md)), только `https`, без follow-redirect, предел `MEDIA_ASSET_MAX_BYTES`; в логах — ни URL целиком, ни путь каталога хоста.
 
 ## Валидация референсных изображений

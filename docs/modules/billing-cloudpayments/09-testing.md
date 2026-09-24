@@ -55,7 +55,7 @@
 - один платёж на оба пути → одно начисление;
 - `/openapi.json` без `/v1/web/`, операции оригиналов не изменились;
 - `POST .../cancel` (до ADR-110 без автотестов): нет активной подписки → `canceled=false`; отказ поставщика → `502`; успех → `will_renew=false` без смены `status`/`expires_at`;
-- `POST .../cancel` при `canceled=false` и СУЩЕСТВУЮЩЕЙ локальной строке `subscriptions` (в т. ч. подписки Apple/Adapty): исход **не закрепляется** — поведение открыто ([TD-064](../../100-known-tech-debt.md)); кейс обязан проверять только паритет пары путей, а не значение `will_renew`;
+- `POST .../cancel` при `canceled=false` и СУЩЕСТВУЮЩЕЙ локальной строке `subscriptions` с `will_renew=true` (в т. ч. подписки Apple/Adapty): ЗАКРЕПЛЯЕТСЯ — `will_renew` остаётся `true`, ответ `willRenew=true`; на обоих путях пары ([ADR-111](../../adr/ADR-111-ru-cancel-will-renew-only-on-found.md)); `canceled=false` без строки → `willRenew=false`, строка не создаётся; возврат безусловной записи обязан уронить кейс;
 - снятие регистрации любого дубликата роняет хотя бы один кейс.
 
 ## Swagger-чистота

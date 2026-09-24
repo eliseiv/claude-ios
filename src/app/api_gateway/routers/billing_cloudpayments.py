@@ -188,16 +188,20 @@ async def cloudpayments_cancel(
     if not await enforce_other_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
     result = await client.cancel_subscription(user_id=current.user_id)
-    # Reflect auto-renew off locally (keep status/expires_at) so /policy/effective shows willRenew.
+    # ADR-111: the flag is written only when the provider confirmed and canceled an active RU
+    # subscription (found=True) and the local row exists; status/expires_at are kept. On
+    # found=False nothing was canceled, so the local row (possibly an Apple/Adapty one) is left
+    # untouched. willRenew echoes the flag AFTER the operation (no row -> False).
     sub = await session.scalar(select(Subscription).where(Subscription.user_id == current.user_id))
-    if sub is not None:
+    if sub is not None and result.found:
         sub.will_renew = False
+    will_renew = bool(sub.will_renew) if sub is not None else False
     return CloudPaymentsCancelResponse(
         canceled=result.found,
         status=result.status,
         canceledAt=result.canceled_at,
         alreadyCanceled=result.already_canceled,
-        willRenew=False,
+        willRenew=will_renew,
     )
 
 

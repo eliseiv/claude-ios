@@ -526,7 +526,7 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 ### POST /v1/billing/cloudpayments/cancel
 Отмена автопродления активной RU-подписки у поставщика (контракт по коду — [modules/billing-cloudpayments/02-api-contracts.md](modules/billing-cloudpayments/02-api-contracts.md#post-v1billingcloudpaymentscancel)). **Вызывает iOS-клиент** (JWT), тела нет. Доступ сохраняется до конца оплаченного периода.
 
-**Ответ `200`:** `{"canceled", "status", "canceledAt", "alreadyCanceled", "willRenew": false}`; `canceled=false` — активной подписки у поставщика нет.
+**Ответ `200`:** `{"canceled", "status", "canceledAt", "alreadyCanceled", "willRenew"}`; `canceled=false` — активной подписки у поставщика нет. `willRenew` (bool) — значение автопродления после операции; при `canceled=false` — текущее.
 
 **Коды:** `200`, `401`, `429`, `502 upstream_error` (отказ поставщика), `503 cloudpayments_checkout_not_configured`.
 
