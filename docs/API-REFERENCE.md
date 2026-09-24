@@ -460,7 +460,7 @@ Request/Response — как у [`/v1/chat/tool-result`](#post-v1chattool-result)
 
 ## 7b. Billing — CloudPayments/broadapps (RU-путь: [ADR-051](adr/ADR-051-cloudpayments-checkout-payment-link.md) checkout + [ADR-050](adr/ADR-050-cloudpayments-webhook.md) webhook + [ADR-098](adr/ADR-098-broadapps-paywall-experiments-and-default-product.md) эксперименты пейволла)
 
-> **Пути-дубликаты ([ADR-110](adr/ADR-110-ru-payment-neutral-path-aliases.md); код §1 в `main` (`67bfd66`), выкачен (CI `36020854651`, джоб `ssh deploy` — `success`); автотесты — 12 функций `test_` в `tests/integration/test_billing_web_aliases_adr110.py`, покрытие не измерено).** Каждая ручка раздела доступна и по нейтральному пути — тот же обработчик и тот же контракт (тело, ответ, коды ошибок, авторизация, лимит; корзина лимита у пары одна). В Swagger дубликаты не показываются.
+> **Пути-дубликаты ([ADR-110](adr/ADR-110-ru-payment-neutral-path-aliases.md); код §1 в `main` (`67bfd66`), выкачен (CI `36020854651`, джоб `ssh deploy` — `success`); автотесты — 12 функций `test_` в `tests/integration/test_billing_web_aliases_adr110.py`, покрытие не измерено).** Каждая ручка раздела доступна и по нейтральному пути — тот же обработчик и тот же контракт (тело, ответ, коды ошибок, авторизация, лимит; корзина лимита у пары одна). В Swagger дубликаты показаны так же, как оригиналы: тот же раздел, те же описания и модели; отличаются только путём.
 >
 > | Путь | Дубликат |
 > |---|---|

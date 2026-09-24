@@ -4,7 +4,7 @@
 
 ## Нейтральные пути-дубликаты ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md))
 
-- Каждый из пяти маршрутов роутера `src/app/api_gateway/routers/billing_cloudpayments.py` регистрируется вторым путём на роутере с префиксом `/v1/web` (`include_in_schema=False`): `checkout`→`/session`, `cancel`→`/cancel`, `webhook`→`/events`, `experiments/assign`→`/offers/assign`, `experiments/paywall-shown`→`/offers/shown`.
+- Каждый из пяти маршрутов роутера `src/app/api_gateway/routers/billing_cloudpayments.py` регистрируется вторым путём на роутере с префиксом `/v1/web` (в OpenAPI показан так же, как оригинал: тот же тег `Billing (CloudPayments)`, те же `summary`/`description` из общей таблицы, `operationId` — дефолтный FastAPI, у пары различен; [ADR-110 §2](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)): `checkout`→`/session`, `cancel`→`/cancel`, `webhook`→`/events`, `experiments/assign`→`/offers/assign`, `experiments/paywall-shown`→`/offers/shown`.
 - **Тот же обработчик**, без копирования логики. Оба роутера строятся из ОДНОЙ таблицы регистрации (суффиксы пары, функция, параметры маршрута); у пары побуквенно совпадают метод, `response_model`, `status_code`, `dependencies` (у вебхука — `require_cloudpayments_webhook`) — [ADR-110 §1](../../adr/ADR-110-ru-payment-neutral-path-aliases.md).
 - Корзины лимитов ключуются не путём (`rl:other`, `rl:experiments`, `rl:cpwebhook`), поэтому у пары одна корзина — это требование, а не совпадение ([ADR-110 §3–§4](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)).
 - Лог исхода вебхука и сигнатура `CloudPaymentsWebhookService.handle(raw)` **не меняются**: путь запроса наблюдаем по access-логу приложения (`uvicorn.access`), [ADR-110 §5](../../adr/ADR-110-ru-payment-neutral-path-aliases.md).

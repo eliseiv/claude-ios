@@ -15,7 +15,7 @@
 - Санитизация PII (карт-данные/`API_TOKEN`/тело verify не логируются/не персистятся) + audit `cloudpayments_payment`.
 - Ответ `{"code":0}` на всё принятое (кроме `429`/`500`).
 
-- **Пути-дубликаты `/v1/web/*`** ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)): каждая ручка модуля доступна и по нейтральному пути — тот же обработчик и контракт, вне OpenAPI; старые пути не меняются.
+- **Пути-дубликаты `/v1/web/*`** ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)): каждая ручка модуля доступна и по нейтральному пути — тот же обработчик и контракт, в OpenAPI показаны так же, как оригиналы; старые пути не меняются.
 
 ## Out of scope (этой итерации)
 - **Прочие ручки broadapps** (user subscription / user payments / app payment stat). **Уточнение факта ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md), решение не меняется):** «subscription cancel» здесь больше не вне scope — `POST /v1/billing/cloudpayments/cancel` реализован в коде (`71b12bf`) без отдельного ADR; контракт по коду — [02-api-contracts.md](02-api-contracts.md#post-v1billingcloudpaymentscancel).

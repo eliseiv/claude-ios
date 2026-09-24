@@ -26,7 +26,8 @@ router, ``web_router`` (``/webhook`` -> ``/events``, ``/checkout`` -> ``/session
 ``/offers/shown``). It is the SAME function with the SAME route parameters, so the response, error
 codes, auth and rate-limit buckets are identical on both paths (the buckets are keyed by user/IP,
 never by path). Both routers are built from ONE table, ``_ROUTES``, so the pair cannot drift. The
-alias router is hidden from OpenAPI (``include_in_schema=False``).
+alias paths are shown in OpenAPI exactly like the originals (same tags, summary, description and
+response model).
 """
 
 from __future__ import annotations
@@ -76,9 +77,11 @@ from app.schemas.billing_cloudpayments import (
     PaywallShownResponse,
 )
 
-router = APIRouter(prefix="/v1/billing/cloudpayments", tags=["Billing (CloudPayments)"])
-# ADR-110 §1/§2: neutral-path duplicates of the same handlers, hidden from the OpenAPI schema.
-web_router = APIRouter(prefix="/v1/web", include_in_schema=False)
+_TAG = "Billing (CloudPayments)"
+router = APIRouter(prefix="/v1/billing/cloudpayments", tags=[_TAG])
+# ADR-110 §1/§2: neutral-path duplicates of the same handlers, shown in the OpenAPI schema exactly
+# like the originals (same tags; summary/description/response_model come from the shared table).
+web_router = APIRouter(prefix="/v1/web", tags=[_TAG])
 
 
 async def cloudpayments_webhook(

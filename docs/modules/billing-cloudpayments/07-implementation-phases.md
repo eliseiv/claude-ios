@@ -248,7 +248,7 @@
 # Пути-дубликаты ([ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)) — D1: код в `main` (`67bfd66`); D2: 12 функций `test_` в `tests/integration/test_billing_web_aliases_adr110.py`, покрытие не измерено; D3: выкачено (CI `36020854651`, `ssh deploy` — `success`)
 
 ## Фаза D1 — роутер `/v1/web` (backend)
-- `src/app/api_gateway/routers/billing_cloudpayments.py`: второй `APIRouter(prefix="/v1/web", include_in_schema=False)`; оба роутера строятся из ОДНОЙ таблицы регистрации (пары путей из [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md), функция-обработчик, `response_model`/`status_code`/`dependencies`). Регистрация нового роутера — в `create_app()` рядом с `billing_cloudpayments.router`.
+- `src/app/api_gateway/routers/billing_cloudpayments.py`: второй `APIRouter(prefix="/v1/web")` с тем же тегом, что у основного роутера, и видимый в OpenAPI (решение владельца по Q-110-2, [ADR-110 §2](../../adr/ADR-110-ru-payment-neutral-path-aliases.md); прежнее `include_in_schema=False` отменено); оба роутера строятся из ОДНОЙ таблицы регистрации (пары путей из [ADR-110](../../adr/ADR-110-ru-payment-neutral-path-aliases.md), функция-обработчик, `response_model`/`status_code`/`dependencies`). Регистрация нового роутера — в `create_app()` рядом с `billing_cloudpayments.router`.
 - Сервис вебхука и его лог исхода **не трогать** (поле `pathFamily` из первой редакции ADR-110 снято, [ADR-110 §5](../../adr/ADR-110-ru-payment-neutral-path-aliases.md)).
 
 ## Фаза D2 — тесты (qa)

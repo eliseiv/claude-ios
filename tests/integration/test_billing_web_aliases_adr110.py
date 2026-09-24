@@ -12,8 +12,9 @@ Covers ADR-110 §8 / billing-cloudpayments/09-testing.md «Пути-дублик
 (success + 401/503/422/502 and ``{"logged": false}``), webhook on ``/v1/web/events`` (no 401,
 forged callback credits nothing, empty token -> 500, malformed body -> 200 ``{"code":0}``), one
 bucket per pair for ``rl:cpwebhook`` / ``rl:other`` / ``rl:experiments``, dedup across the two
-webhook paths, OpenAPI without ``/v1/web/``, and ``/cancel`` (no active subscription, upstream
-refusal, success keeps ``status``/``expires_at``). ``/cancel`` with ``canceled=false`` and an
+webhook paths, OpenAPI showing the ``/v1/web/*`` duplicates like the originals (owner
+decision), and ``/cancel`` (no active subscription, upstream refusal, success keeps
+``status``/``expires_at``). ``/cancel`` with ``canceled=false`` and an
 EXISTING local subscription row is checked for pair parity only (TD-064: outcome not decided).
 """
 
@@ -494,18 +495,54 @@ async def test_alternating_old_and_new_path_drain_one_bucket(
 # ========================= OpenAPI =========================
 
 
-async def test_openapi_hides_web_aliases_and_keeps_originals(client: AsyncClient) -> None:
+def _pair_ops(schema: dict[str, Any]) -> list[tuple[Any, dict[str, Any], dict[str, Any]]]:
     from app.api_gateway.routers.billing_cloudpayments import _ROUTES
+
+    paths = schema["paths"]
+    return [
+        (spec, paths[f"{_OLD}{spec.billing_path}"], paths[f"{_NEW}{spec.web_path}"])
+        for spec in _ROUTES
+    ]
+
+
+async def test_openapi_shows_web_aliases_and_keeps_originals(client: AsyncClient) -> None:
+    """Owner decision: the five /v1/web/* duplicates ARE in the schema, like the originals."""
+    from fastapi.openapi.utils import get_openapi
+
+    from app.api_gateway.routers import billing_cloudpayments as cp
 
     schema = (await client.get("/openapi.json")).json()
     paths = schema["paths"]
-    assert not [p for p in paths if p.startswith("/v1/web/") or p == "/v1/web"]
-    assert "/v1/web/" not in json.dumps(schema)
-    for spec in _ROUTES:
-        op = paths[f"{_OLD}{spec.billing_path}"]
-        assert set(op) == {"post"}
-        assert op["post"]["tags"] == ["Billing (CloudPayments)"]
-        assert op["post"]["summary"] == spec.summary
+    for spec in cp._ROUTES:
+        assert f"{_NEW}{spec.web_path}" in paths, spec.web_path
+        assert set(paths[f"{_NEW}{spec.web_path}"]) == {"post"}
+        assert set(paths[f"{_OLD}{spec.billing_path}"]) == {"post"}
+    web_paths = sorted(p for p in paths if p.startswith(f"{_NEW}/"))
+    assert web_paths == sorted(f"{_NEW}{spec.web_path}" for spec in cp._ROUTES)
+
+    op_ids = [op["operationId"] for item in paths.values() for op in item.values()]
+    assert len(op_ids) == len(set(op_ids)), "duplicate operationId in /openapi.json"
+
+    # Originals and components are unchanged by adding the duplicates: the schema built from the
+    # original router alone equals the one built from both routers on every original path and on
+    # every component.
+    alone = get_openapi(title="t", version="1", routes=cp.router.routes)
+    both = get_openapi(title="t", version="1", routes=[*cp.router.routes, *cp.web_router.routes])
+    for spec in cp._ROUTES:
+        path = f"{_OLD}{spec.billing_path}"
+        assert both["paths"][path] == alone["paths"][path], path
+        assert paths[path]["post"]["summary"] == spec.summary
+        assert paths[path]["post"]["description"] == spec.description
+    assert both.get("components") == alone.get("components")
+
+
+async def test_openapi_alias_pairs_match_except_operation_id(client: AsyncClient) -> None:
+    schema = (await client.get("/openapi.json")).json()
+    for spec, old, new in _pair_ops(schema):
+        o, n = old["post"], new["post"]
+        for field in ("tags", "summary", "description", "requestBody", "responses"):
+            assert o.get(field) == n.get(field), f"{spec.web_path}: {field}"
+        assert o["operationId"] != n["operationId"]
 
 
 # ========================= /cancel semantics (ADR-110 §8) =========================
