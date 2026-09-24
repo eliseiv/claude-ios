@@ -136,14 +136,19 @@ def webhook_error_message(body: dict[str, Any]) -> str:
 
 
 def parse_vendor_price(body: dict[str, Any]) -> decimal.Decimal | None:
-    """Actual vendor cost of the run, if the callback reports one (ADR-108 §8)."""
+    """Actual vendor cost of the run in USD, if the callback reports one (ADR-108 §8).
+
+    ``data.creditsConsumed`` is deliberately NOT read: by name it is vendor credits spent, not
+    money, and ``vendor_price`` must stay a homogeneous USD column (the source is not stored, so
+    mixed units could never be told apart afterwards).
+    """
     for key in ("vendor_price", "vendorPrice", "cost"):
         parsed = _as_decimal(body.get(key))
         if parsed is not None:
             return parsed
     data = body.get("data")
     if isinstance(data, dict):
-        for key in ("vendor_price", "vendorPrice", "cost", "creditsConsumed"):
+        for key in ("vendor_price", "vendorPrice", "cost"):
             parsed = _as_decimal(data.get(key))
             if parsed is not None:
                 return parsed

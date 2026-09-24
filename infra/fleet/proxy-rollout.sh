@@ -4,6 +4,7 @@
 #
 #   proxy-rollout.sh <инстанс> [--apply] [--proxy-key-from-stdin | --proxy-key-file <путь>]
 #                              [--replace-key] [--restart] [--no-proxy-jobs-in-flight]
+#                              [--result-hosts <суффиксы>] [--replace-result-hosts]
 #
 # По умолчанию — сухой прогон (--dry-run): печатает, ЧТО будет сделано, и ничего не пишет.
 #
@@ -34,6 +35,13 @@
 # можно только с --no-proxy-jobs-in-flight, получив 0 по запросу из ADR-108 §Порядок выката п.5.
 # Скрипт сам в БД не ходит. Перенос секрета на резерв ключ подписи основного не меняет.
 #
+# Хосты результата. Прокси отдаёт файлы результата со СВОЕГО хоста (relay1/relay2/…
+# .mediabackender.com, факт боевого пилота 2026-09-24), а allowlist результата (ADR-108 §7) знает
+# только fal-хосты: при пустом MEDIA_RESULT_HOST_SUFFIXES КАЖДАЯ задача на прокси закрывается
+# no_usable_asset с возвратом. Поэтому --result-hosts выставляет значение ОДИНАКОВЫМ на оба
+# сервера, а запись PROXY_API_KEY при пустом значении после плана отказывает (код 7). Непустое
+# значение по ADR-108 §2.1 п.1 включает и маршруты sosana/kie для Nano Banana. Значение не секрет.
+#
 # Значения секретов и их хэши в вывод не попадают: значения идут с сервера на сервер через
 # конвейер ssh | ssh, наружу печатаются только состояния («пуст», «задан», «совпадает»).
 # Перезапуск api — только по --restart и только на основном (у резерва api выключен намеренно).
@@ -46,11 +54,11 @@ die() { echo "[$INST] $2" >&2; exit "$1"; }
 
 INST="${1:-}"
 case "$INST" in
-  ""|-*) echo "использование: proxy-rollout.sh <инстанс> [--apply] [--proxy-key-from-stdin | --proxy-key-file <путь>] [--replace-key] [--restart] [--no-proxy-jobs-in-flight]" >&2; exit 2;;
+  ""|-*) echo "использование: proxy-rollout.sh <инстанс> [--apply] [--proxy-key-from-stdin | --proxy-key-file <путь>] [--replace-key] [--restart] [--no-proxy-jobs-in-flight] [--result-hosts <суффиксы>] [--replace-result-hosts]" >&2; exit 2;;
   *[!a-z0-9_-]*) echo "недопустимое имя инстанса" >&2; exit 2;;
 esac
 shift
-APPLY=0; KEY_SRC=""; KEY_FILE=""; REPLACE_KEY=0; RESTART=0; NO_JOBS=0
+APPLY=0; KEY_SRC=""; KEY_FILE=""; REPLACE_KEY=0; RESTART=0; NO_JOBS=0; RH=""; REPLACE_RH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) APPLY=0;;
@@ -60,6 +68,8 @@ while [ $# -gt 0 ]; do
     --replace-key) REPLACE_KEY=1;;
     --restart) RESTART=1;;
     --no-proxy-jobs-in-flight) NO_JOBS=1;;
+    --result-hosts) RH="${2:?суффиксы хостов результата через запятую}"; shift;;
+    --replace-result-hosts) REPLACE_RH=1;;
     *) echo "неизвестный аргумент: $1" >&2; exit 2;;
   esac
   shift
@@ -144,9 +154,32 @@ case "$W_PLAN" in
     fi;;
 esac
 
+# --- 3б. Хосты результата (не секрет — значения печатаются).
+R_P="$(rcall_n "$PH" "gv MEDIA_RESULT_HOST_SUFFIXES" | tr -d '')"
+R_S="$(rcall_n "$SH" "gv MEDIA_RESULT_HOST_SUFFIXES" | tr -d '')"
+echo "  MEDIA_RESULT_HOST_SUFFIXES: $PH '${R_P:-<пусто>}', $SH '${R_S:-<пусто>}'"
+RH_WRITE=""
+if [ -n "$RH" ]; then
+  case "$RH" in *[!A-Za-z0-9.,-]*|,*|*,|*,,*) die 2 "--result-hosts: только суффиксы хостов через запятую, без пробелов";; esac
+  for pair in "$PH|$R_P" "$SH|$R_S"; do
+    h="${pair%%|*}"; cur="${pair#*|}"
+    if [ "$cur" = "$RH" ]; then echo "  план: MEDIA_RESULT_HOST_SUFFIXES на $h уже '$RH' — не трогать"
+    elif [ -z "$cur" ]; then echo "  план: вписать MEDIA_RESULT_HOST_SUFFIXES='$RH' на $h"; RH_WRITE="$RH_WRITE $h"
+    elif [ "$REPLACE_RH" = "1" ]; then echo "  план: ЗАМЕНИТЬ MEDIA_RESULT_HOST_SUFFIXES '$cur' -> '$RH' на $h"; RH_WRITE="$RH_WRITE $h"
+    else die 8 "на $h уже задано ДРУГОЕ MEDIA_RESULT_HOST_SUFFIXES='$cur' — нужен --replace-result-hosts"
+    fi
+  done
+  R_P_AFTER="$RH"; R_S_AFTER="$RH"
+else
+  R_P_AFTER="$R_P"; R_S_AFTER="$R_S"
+  [ "$R_P" = "$R_S" ] || echo "  ВНИМАНИЕ: MEDIA_RESULT_HOST_SUFFIXES на серверах различается — выровнять через --result-hosts"
+fi
+
 # --- 4. План по ключу прокси (только по явному флагу).
 KEY=""
 if [ -n "$KEY_SRC" ]; then
+  # Без хоста результата генерация на прокси сломана целиком (каждая задача -> no_usable_asset).
+  [ -n "$R_P_AFTER" ] && [ -n "$R_S_AFTER" ] ||     die 7 "ОТКАЗ: MEDIA_RESULT_HOST_SUFFIXES после плана пуст на $PH или $SH — ключ прокси не вписывается; укажите --result-hosts .mediabackender.com"
   [ "$F_P" = "${F_P#h:}" ] || [ "$F_S" = "${F_S#h:}" ] && \
     die 5 "FAL_API_KEY не задан на обоих серверах — ключ прокси не вписывается (ADR-108 §1)"
   [ "$D_P" = "${D_P#h:}" ] && die 5 "SERVICE_DOMAIN не задан на $PH — колбэку некуда прийти (ADR-108 §1)"
@@ -183,6 +216,10 @@ case "$W_PLAN" in
   p2s) rcall_n "$PH" "gv PROXY_WEBHOOK_SECRET" | rcall "$SH" "wr PROXY_WEBHOOK_SECRET" || die 1 "не удалось перенести секрет на $SH";;
   s2p) rcall_n "$SH" "gv PROXY_WEBHOOK_SECRET" | rcall "$PH" "wr PROXY_WEBHOOK_SECRET" || die 1 "не удалось перенести секрет на $PH";;
 esac
+for h in $RH_WRITE; do
+  printf '%s
+' "$RH" | rcall "$h" "wr MEDIA_RESULT_HOST_SUFFIXES" || die 1 "не удалось записать MEDIA_RESULT_HOST_SUFFIXES на $h"
+done
 if [ -n "$KEY" ]; then
   for pair in "$PH:$K_P" "$SH:$K_S"; do
     h="${pair%%:*}"; cur="${pair#*:}"
@@ -197,6 +234,11 @@ W_P="$(field "$(state "$PH")" PROXY_WEBHOOK_SECRET)"; W_S="$(field "$(state "$SH
 case "$W_P" in h:*) ;; *) die 1 "после записи секрет на $PH не задан";; esac
 [ "$W_P" = "$W_S" ] || die 3 "после записи секрет на $PH и $SH РАЗНЫЙ — проверить руками"
 echo "[$INST] PROXY_WEBHOOK_SECRET: совпадает на $PH и $SH"
+if [ -n "$RH" ]; then
+  a="$(rcall_n "$PH" "gv MEDIA_RESULT_HOST_SUFFIXES" | tr -d '')"; b="$(rcall_n "$SH" "gv MEDIA_RESULT_HOST_SUFFIXES" | tr -d '')"
+  [ "$a" = "$RH" ] && [ "$b" = "$RH" ] || die 1 "после записи MEDIA_RESULT_HOST_SUFFIXES не равен '$RH' на обоих"
+  echo "[$INST] MEDIA_RESULT_HOST_SUFFIXES='$RH' на $PH и $SH"
+fi
 if [ -n "$KEY_SRC" ]; then
   K_P="$(field "$(state "$PH")" PROXY_API_KEY)"; K_S="$(field "$(state "$SH")" PROXY_API_KEY)"
   [ "$K_P" = "$KEY_H" ] && [ "$K_S" = "$KEY_H" ] || die 1 "после записи PROXY_API_KEY не совпадает с введённым"

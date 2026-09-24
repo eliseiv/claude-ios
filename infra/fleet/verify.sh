@@ -220,12 +220,13 @@ echo
 echo "ПРОКСИ ГЕНЕРАЦИИ:"
 hook_bad=0; hook_cand_bad=0; hook_proxy=0; hook_cand=0
 hook_path="/v1/media/webhooks/proxy/00000000-0000-0000-0000-000000000000"
-# Удалённый фрагмент печатает одну строку: P=<0|1|2> F=<0|1|2> W=<0|1> H=<sha256|-> D=<домен|->.
+# Удалённый фрагмент печатает одну строку: P=<0|1|2> F=<0|1|2> W=<0|1> H=<sha256|-> D=<домен|->
+# R=<MEDIA_RESULT_HOST_SUFFIXES|-> (хосты результата — не секрет).
 # Текст фрагмента без одинарных кавычек: он передаётся внутри двойных.
-flag_snippet='c(){ v=$(grep -m1 "^$1=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); case "$v" in "") printf 0;; \<*) printf 2;; *) printf 1;; esac; }; w=$(grep -m1 "^PROXY_WEBHOOK_SECRET=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); if [ -n "$w" ]; then wh=$(printf %s "$w" | sha256sum | cut -c1-64); wf=1; else wh=-; wf=0; fi; w=; d=$(grep -m1 "^SERVICE_DOMAIN=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); l=$(printf %s "$d" | tr "[:upper:]" "[:lower:]"); case "$l" in https://*) d=${d#????????};; http://*) d=${d#???????};; esac; d=$(printf %s "$d" | sed "s#^/*##; s#/*\$##"); printf "P=%s F=%s W=%s H=%s D=%s\n" "$(c PROXY_API_KEY)" "$(c FAL_API_KEY)" "$wf" "$wh" "${d:--}"'
+flag_snippet='c(){ v=$(grep -m1 "^$1=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); case "$v" in "") printf 0;; \<*) printf 2;; *) printf 1;; esac; }; w=$(grep -m1 "^PROXY_WEBHOOK_SECRET=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); if [ -n "$w" ]; then wh=$(printf %s "$w" | sha256sum | cut -c1-64); wf=1; else wh=-; wf=0; fi; w=; d=$(grep -m1 "^SERVICE_DOMAIN=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); l=$(printf %s "$d" | tr "[:upper:]" "[:lower:]"); case "$l" in https://*) d=${d#????????};; http://*) d=${d#???????};; esac; d=$(printf %s "$d" | sed "s#^/*##; s#/*\$##"); r=$(grep -m1 "^MEDIA_RESULT_HOST_SUFFIXES=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); printf "P=%s F=%s W=%s H=%s D=%s R=%s\n" "$(c PROXY_API_KEY)" "$(c FAL_API_KEY)" "$wf" "$wh" "${d:--}" "${r:--}"'
 flags_of() {  # flags_of ХОСТ ИНСТАНС — строка признаков или пусто
   ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$1" "cd /opt/$2 2>/dev/null || exit 1; $flag_snippet" 2>/dev/null \
-    | tr -d '\r' | grep -m1 -E '^P=[012] F=[012] W=[01] H=([0-9a-f]{64}|-) D=[A-Za-z0-9.:-]+$'
+    | tr -d '\r' | grep -m1 -E '^P=[012] F=[012] W=[01] H=([0-9a-f]{64}|-) D=[A-Za-z0-9.:-]+ R=[A-Za-z0-9.,-]+$'
 }
 fval() { printf '%s\n' "$1" | tr ' ' '\n' | awk -F= -v k="$2" '$1==k{print substr($0, length(k)+2); exit}'; }
 while IFS=$'\t' read -r inst domain port primary; do
@@ -246,6 +247,11 @@ while IFS=$'\t' read -r inst domain port primary; do
   # Состояние ключа прокси (0/1/2 — не значение и не хэш) обязано совпадать: обрыв записи между
   # серверами (proxy-rollout.sh пишет ключ по очереди) иначе всплыл бы только при повышении резерва.
   [ -n "$sfl" ] && [ "$p_sb" != "$f_proxy" ] && probs="$probs ключ-прокси-на-серверах-различается"
+  # Хосты результата: прокси отдаёт файлы со своего хоста (*.mediabackender.com, пилот
+  # 2026-09-24); без MEDIA_RESULT_HOST_SUFFIXES каждая задача на прокси -> no_usable_asset.
+  r_pri="$(fval "$fl" R)"; r_sb="$(fval "$sfl" R)"
+  [ -n "$sfl" ] && [ "$r_pri" != "$r_sb" ] && probs="$probs хосты-результата-на-серверах-различаются"
+  [ "$f_proxy" != "0" ] && [ "$r_pri" = "-" ] && probs="$probs на-прокси-без-хоста-результата"
   [ "$f_fal" = "2" ] && probs="$probs FAL_API_KEY-заглушка"
   [ "$f_proxy" = "2" ] && probs="$probs PROXY_API_KEY-заглушка"
   if [ "$f_proxy" != "0" ]; then cls="на прокси"; hook_proxy=$((hook_proxy+1))

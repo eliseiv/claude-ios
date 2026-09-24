@@ -363,6 +363,9 @@ def test_callback_classification(body: dict[str, Any], expected: str) -> None:
     [
         ({"vendor_price": 0.028}, decimal.Decimal("0.028000")),
         ({"data": {"cost": "1.5"}}, decimal.Decimal("1.500000")),
+        # ADR-108 §8: vendor credits are not money — never read as a USD price.
+        ({"data": {"creditsConsumed": 12}}, None),
+        ({"creditsConsumed": 12}, None),
         ({"vendor_price": -1}, None),
         ({"vendor_price": "NaN"}, None),
         ({"vendor_price": 10**13}, None),

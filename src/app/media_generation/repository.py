@@ -26,6 +26,12 @@ STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 
 TERMINAL_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED})
+
+# `media_jobs.provider_cost_usd` is NUMERIC(12,6): at most 6 integer digits.
+_PROVIDER_COST_LIMIT = decimal.Decimal(10) ** 6
+# ADR-108 §8: proxy services whose `vendor_price` is CONFIRMED to be USD (pilot 2026-09-24). Only
+# for them the callback price replaces the cost CRM reads; `kie` joins when Q-108-12 confirms it.
+USD_CONFIRMED_PROXY_SERVICES = frozenset({"fal", "sosana"})
 NON_TERMINAL_STATUSES = frozenset({STATUS_QUEUED, STATUS_RUNNING})
 
 
@@ -149,17 +155,25 @@ class MediaJobsRepository:
         """Reload a row after a rolled-back savepoint expired its attributes."""
         await self._session.refresh(job)
 
-    async def store_pending_result(
-        self,
-        job: MediaJob,
-        *,
-        pending_result: dict[str, Any],
-        vendor_price: decimal.Decimal | None,
-    ) -> None:
+    async def store_pending_result(self, job: MediaJob, *, pending_result: dict[str, Any]) -> None:
         """Record the callback result before the shared completion path runs (ADR-108 §4.3)."""
         job.pending_result = pending_result
-        if vendor_price is not None:
-            job.vendor_price = vendor_price
+        job.updated_at = _now()
+        await self._session.flush()
+
+    async def record_vendor_price(self, job: MediaJob, *, vendor_price: decimal.Decimal) -> None:
+        """Record the vendor's actual price; for USD-confirmed services make it the CRM cost.
+
+        ADR-108 §8: ``vendor_price`` always keeps the callback value as is. ``provider_cost_usd``
+        — the only cost column CRM reads — is REPLACED only when ``job.provider`` is in
+        ``USD_CONFIRMED_PROXY_SERVICES``; for ``kie`` and any other service the submit-time
+        estimate stays, otherwise CRM would silently get a cost in foreign units. A value the
+        ``NUMERIC(12,6)`` of ``provider_cost_usd`` cannot hold leaves the estimate in place too: a
+        write that overflows would fail the whole callback transaction.
+        """
+        job.vendor_price = vendor_price
+        if job.provider in USD_CONFIRMED_PROXY_SERVICES and vendor_price < _PROVIDER_COST_LIMIT:
+            job.provider_cost_usd = vendor_price
         job.updated_at = _now()
         await self._session.flush()
 

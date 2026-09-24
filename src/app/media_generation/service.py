@@ -1013,6 +1013,14 @@ class MediaGenerationService:
     async def _apply_callback(self, job: MediaJob, body: dict[str, Any]) -> str:
         if job.status in TERMINAL_STATUSES:
             return WEBHOOK_DUPLICATE_TERMINAL
+        # ADR-108 §8: the vendor's price is recorded for EVERY outcome that carries it —
+        # `completed`, `failed`, `no_usable_asset`, a repeated delivery — BEFORE branching: the
+        # purchase at the vendor happened even when the user's credits are refunded. Same
+        # transaction as the rest of the callback; a callback without a price leaves the
+        # submit-time estimate alone. Credits are not affected.
+        vendor_price = parse_vendor_price(body)
+        if vendor_price is not None:
+            await self._repo.record_vendor_price(job, vendor_price=vendor_price)
         classified = webhook_outcome(body)
         pending = job.pending_result
         if isinstance(pending, dict):
@@ -1030,9 +1038,7 @@ class MediaGenerationService:
         if not _assets_from_result(result):
             await self._fail(job, error=NO_OUTPUT_ERROR)
             return WEBHOOK_NO_USABLE_ASSET
-        await self._repo.store_pending_result(
-            job, pending_result=result, vendor_price=parse_vendor_price(body)
-        )
+        await self._repo.store_pending_result(job, pending_result=result)
         return await self._complete_in_savepoint(job, result)
 
     async def _complete_in_savepoint(self, job: MediaJob, result: dict[str, Any]) -> str:

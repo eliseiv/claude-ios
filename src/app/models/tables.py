@@ -864,7 +864,13 @@ class MediaJob(Base):
     # ADR-108 §5: normalized result of a `completed` callback not yet applied by the shared
     # completion path (post-moderation / handler failed transiently); NULL after the terminal.
     # The download route never reads it — an asset is reachable only from `result`.
-    pending_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # `none_as_null=True` is load-bearing (TD-061; same class as `chat_steps.usage`, migration
+    # 0034): with the default a Python `None` is stored as the JSON scalar `null`, for which
+    # `pending_result IS NULL` is FALSE — the §6/§10 predicates (and the
+    # `media_proxy_jobs_awaiting_callback` gauge) would then never see a job without a result.
+    pending_result: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )
