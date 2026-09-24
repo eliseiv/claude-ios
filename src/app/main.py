@@ -58,6 +58,7 @@ from app.instance_config import (
     refresh_snapshot_from_pool,
     reset_snapshot,
 )
+from app.media_generation.asset_store import asset_store_loop
 from app.media_generation.reconciler import reconciler_loop
 from app.observability.context import get_request_id
 from app.observability.logging import configure_logging, log_event
@@ -82,6 +83,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reconciler_task = asyncio.create_task(
             reconciler_loop(stop, settings), name="media-reconciler"
         )
+    # ADR-109 §3: the asset-store loop (store + cleanup of our own 30-day copy) — in every worker,
+    # executed by one at a time; not started at all while storage is off (empty storage dir).
+    asset_store_task: asyncio.Task[None] | None = None
+    if settings.media_asset_store_interval_seconds > 0 and settings.media_asset_storage_enabled():
+        asset_store_task = asyncio.create_task(
+            asset_store_loop(stop, settings), name="media-asset-store"
+        )
     scheduled_chat_task: asyncio.Task[None] | None = None
     if settings.scheduled_chat_poll_seconds > 0:
         scheduled_chat_task = asyncio.create_task(
@@ -105,7 +113,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         stop.set()
-        for task in (reconciler_task, scheduled_chat_task, overrides_task):
+        for task in (reconciler_task, asset_store_task, scheduled_chat_task, overrides_task):
             if task is None:
                 continue
             try:

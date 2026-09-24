@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    REGISTRY,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 
 chat_run_latency_seconds = Histogram(
     "chat_run_latency_seconds",
@@ -257,4 +264,82 @@ media_price_legacy_overquote = Gauge(
 media_proxy_jobs_awaiting_callback = Gauge(
     "media_proxy_jobs_awaiting_callback",
     "Proxy media jobs without a callback for longer than an hour (ADR-108 §10).",
+)
+# ADR-109 §9 — own 30-day copy of media results. The four Gauges are set by EVERY worker on EVERY
+# tick of the asset-store loop BEFORE it tries to take the execution right, from state shared by
+# all processes (the storage filesystem, `media_jobs` rows) — so any worker answering /metrics
+# reports the same value (±1 period). Consumers: alert rules in
+# infra/observability/rules/alerts.yml and the storage section of infra/fleet/verify.sh (devops).
+# `media_asset_storage_free_bytes` is NOT published while storage is off: an unset label-less
+# Gauge would be exported as 0 and trip the «free space low» rule on every instance, so it is
+# created unregistered and published by `set_media_asset_storage_free_bytes()` — called only
+# by the loop, which runs only with a non-empty MEDIA_ASSET_STORAGE_DIR.
+media_asset_storage_free_bytes = Gauge(
+    "media_asset_storage_free_bytes",
+    "Free bytes on the filesystem of the media asset storage directory (ADR-109 §9).",
+    registry=None,
+)
+# 1 when the `pg_system_identifier` line of the storage-root marker is absent or differs from the
+# current database (ADR-109 §6.3: orphan cleanup blocked), else 0. Same «not published while
+# storage is off» rule as the free-bytes Gauge.
+media_asset_cleanup_blocked = Gauge(
+    "media_asset_cleanup_blocked",
+    "1 when orphan cleanup is blocked: storage marker does not match the database (ADR-109 §6.3).",
+    registry=None,
+)
+_media_asset_storage_gauges_registered = False
+_media_asset_free_bytes_registered = False
+
+
+def publish_media_asset_storage_gauges() -> None:
+    """Register ``media_asset_cleanup_blocked`` in the default registry (idempotent)."""
+    global _media_asset_storage_gauges_registered
+    if _media_asset_storage_gauges_registered:
+        return
+    REGISTRY.register(media_asset_cleanup_blocked)
+    _media_asset_storage_gauges_registered = True
+
+
+def set_media_asset_storage_free_bytes(value: int | None) -> None:
+    """Publish a MEASURED free-bytes value; ``None`` (measurement failed) withdraws the series.
+
+    Registered on the first successful measurement, unregistered when a measurement fails: an
+    exported 0 would trip the «free space low» rule although nobody measured anything.
+    """
+    global _media_asset_free_bytes_registered
+    if value is None:
+        if _media_asset_free_bytes_registered:
+            REGISTRY.unregister(media_asset_storage_free_bytes)
+            _media_asset_free_bytes_registered = False
+        return
+    media_asset_storage_free_bytes.set(value)
+    if not _media_asset_free_bytes_registered:
+        REGISTRY.register(media_asset_storage_free_bytes)
+        _media_asset_free_bytes_registered = True
+
+
+media_asset_store_pending = Gauge(
+    "media_asset_store_pending",
+    "Media jobs whose own copy is still waiting to be stored (ADR-109 §9).",
+)
+media_asset_store_failed = Gauge(
+    "media_asset_store_failed",
+    "Media jobs whose own copy failed to store, within the retention period (ADR-109 §9).",
+)
+media_asset_missing = Gauge(
+    "media_asset_missing",
+    "Media jobs marked stored whose file is absent on disk, within retention (ADR-109 §9).",
+)
+# Per-process diagnostics (ADR-109 §9): no alert rule is built on these Counters.
+# producer: one store attempt of the loop executor; outcome ∈ the §3 outcome table.
+media_asset_store_total = Counter(
+    "media_asset_store_total",
+    "Media asset store attempts by outcome (ADR-109 §3).",
+    ["outcome"],
+)
+# producer: the signed download route (ADR-109 §5); source ∈ {local, remote, local_missing}.
+media_asset_download_total = Counter(
+    "media_asset_download_total",
+    "Media asset downloads by the source the bytes came from (ADR-109 §5).",
+    ["source"],
 )

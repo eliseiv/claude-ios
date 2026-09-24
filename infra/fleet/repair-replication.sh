@@ -61,10 +61,25 @@ for inst in "$@"; do
   r "$sh_" "cp -a /opt/$inst/.env /opt/$inst/.env.bak-$ts" 2>/dev/null
   ssh -o BatchMode=yes "$ph" "cat /opt/$inst/.env" | ssh -o BatchMode=yes "$sh_" "cat > /opt/$inst/.env"
   r "$sh_" "/opt/fleet/provision.sh adapt $inst $standby" >/dev/null 2>&1
+  # Своя копия результатов генерации (ADR-109 §6 «сервер, вернувшийся после аварии»). На резерве
+  # api не работает, поэтому цикл очистки здесь не идёт никогда: файлы, оставшиеся с тех пор, как
+  # этот сервер был основным (в том числе байты уже удалённых задач и пользователей), не вычистил
+  # бы никто. Содержимое удаляется, маркер `.media-assets-root` остаётся — каталог подготовлен
+  # (adapt выше создаёт каталог и маркер, если их нет). Путь строится только из имени инстанса,
+  # найденного в instances.tsv. ВНИМАНИЕ: при введении репликации файлов на резерв (ADR-109 Q-109-1)
+  # этот шаг обязан быть пересмотрен — он стёр бы реплицированные копии.
+  if r "$sh_" "d=/opt/$inst/media-assets; if [ -d \"\$d\" ] && [ ! -L \"\$d\" ]; then find \"\$d\" -mindepth 1 -maxdepth 1 ! -name .media-assets-root -exec rm -rf -- {} +; fi"; then
+    echo "    [$inst] media-assets на $standby очищен (маркер оставлен)"
+  else
+    echo "    [$inst] ВНИМАНИЕ: очистка media-assets на $standby не удалась — выполнить вручную (ADR-109 §6)"
+  fi
   ssh -o BatchMode=yes "$ph" "tar -C /opt/$inst -cf - .secrets certs 2>/dev/null" | \
     ssh -o BatchMode=yes "$sh_" "tar -C /opt/$inst -xf - 2>/dev/null; chown -R 10001:10001 /opt/$inst/.secrets 2>/dev/null"
 
   r "$sh_" "/opt/fleet/replication.sh init $inst $(ip_of "$primary") $pg_port '$pw'" 2>&1 | sed 's/^/    /'
-  echo "[$inst] готово"
+  # Резерв теперь физическая копия основного; строку pg_system_identifier маркера (ADR-109 §6.3)
+  # сверяет и выравнивает на обоих серверах media-assets-rollout.sh (он же остановится, если
+  # идентификаторы баз разошлись).
+  echo "[$inst] готово. Маркер хранения: media-assets-rollout.sh $inst (сухой прогон, затем --apply)"
   sleep 5
 done

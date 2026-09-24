@@ -31,6 +31,8 @@ _TTS_DEFAULT_AUDIO_FORMAT = "mp3"
 # ADR-105 §B3: default deadline of a media job (6 h). ONE value: the field default and the
 # fallback of a non-positive env both read it, so the two cannot drift apart.
 _DEFAULT_MEDIA_JOB_DEADLINE_SECONDS = 21600
+# ADR-109 §1.1: default lifetime of our own copy of a generation result, days.
+_DEFAULT_MEDIA_ASSET_RETENTION_DAYS = 30
 
 
 def _dedup_nonempty(*values: str) -> tuple[str, ...]:
@@ -537,6 +539,25 @@ class Settings(BaseSettings):
     # After expiry the client re-polls the job and gets a fresh URL. Secret is PREVIEW_URL_SECRET.
     media_download_ttl_seconds: int = Field(default=86400, alias="MEDIA_DOWNLOAD_TTL_SECONDS")
 
+    # --- Own 30-day copy of generation results on the instance disk (ADR-109 §1.1 — the one
+    # normative place of these defaults; other documents refer there). ---
+    # PUBLIC: storage directory inside the `api` container. Empty (default) => storage is OFF and
+    # the module behaves exactly as before: no background loop, the download route never reads
+    # the disk, new rows keep `asset_store_status = ''`.
+    media_asset_storage_dir: str = Field(default="", alias="MEDIA_ASSET_STORAGE_DIR")
+    # PUBLIC: how long our copy lives, in days, counted from `completed`. Raw string: `<= 0` or a
+    # non-number falls back to the default — a typo must neither switch cleanup off nor make the
+    # storage eternal (`media_asset_retention_days()`).
+    media_asset_retention_days_raw: str = Field(default="30", alias="MEDIA_ASSET_RETENTION_DAYS")
+    # PUBLIC: cap of ONE stored file; a larger result is not stored (outcome `too_large`).
+    media_asset_max_bytes: int = Field(default=268435456, alias="MEDIA_ASSET_MAX_BYTES")
+    # PUBLIC: lower bound of free space on the directory's filesystem — below it no write starts.
+    media_asset_min_free_bytes: int = Field(default=21474836480, alias="MEDIA_ASSET_MIN_FREE_BYTES")
+    # PUBLIC: period of the store/cleanup loop; `<= 0` disables the loop (tests).
+    media_asset_store_interval_seconds: float = Field(
+        default=5.0, alias="MEDIA_ASSET_STORE_INTERVAL_SECONDS"
+    )
+
     # --- APNs push (ADR-067 / TD-011) ---
     # Empty credentials => device-token CRUD still works; send is a no-op (warning logged).
     # SECRET: AuthKey_*.p8 contents (\\n-escaped) or path via APNS_AUTH_KEY_PATH.
@@ -925,6 +946,23 @@ class Settings(BaseSettings):
         if seconds == 0:
             return None
         return seconds if seconds > 0 else False
+
+    def media_asset_storage_enabled(self) -> bool:
+        """Whether our own copy of results is stored (ADR-109 §1.1: non-empty storage dir)."""
+        return bool(self.media_asset_storage_dir.strip())
+
+    def media_asset_retention_days(self) -> int:
+        """``MEDIA_ASSET_RETENTION_DAYS``; ``<= 0``, blank or not a number → the default 30.
+
+        ADR-109 §1.1: a typo must neither switch expiry cleanup off nor make the copy eternal.
+        Pure (no I/O).
+        """
+        raw = self.media_asset_retention_days_raw.strip()
+        try:
+            days = int(raw)
+        except ValueError:
+            return _DEFAULT_MEDIA_ASSET_RETENTION_DAYS
+        return days if days > 0 else _DEFAULT_MEDIA_ASSET_RETENTION_DAYS
 
     def fal_upload_host_suffixes(self) -> tuple[str, ...]:
         """Host suffixes an upload URL from fal may live on (ADR-062 §4).

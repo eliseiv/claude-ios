@@ -162,9 +162,22 @@ services:
     # docs/07-deployment.md §Prod-readiness checklist (must-configure-before-launch), applied per
     # live instance of the registry table docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop;
     # the STEPS are the §Apple root CA provisioning runbook in .env.prod.example.
+    #
+    # Own copy of media-generation results, 30 days (ADR-109 §1, §Порядок выката п.2). READ-WRITE:
+    # the api (uid 10001) writes files here. Storage is OFF unless the instance's `.env` sets
+    # MEDIA_ASSET_STORAGE_DIR=/data/media-assets (empty -> the app never touches this dir), so the
+    # mount itself changes nothing. Each instance mounts ONLY its own /opt/<instance>/media-assets
+    # — isolation between instances is this separate bind-mount. The host dir + the marker
+    # `.media-assets-root` are created by infra/fleet/provision.sh (new/adapt) and, for existing
+    # instances, by infra/fleet/media-assets-rollout.sh — on BOTH servers. If the dir is missing,
+    # Docker creates it as root WITHOUT the marker: the app then reports `deferred_unavailable`
+    # (harmless, storage just does not work) until media-assets-rollout.sh fixes owner + marker.
+    # Short syntax on purpose: long syntax with `create_host_path: false` would refuse to START
+    # api on an unprepared server, turning a storage gap into an outage.
     volumes:
       - ./.secrets:/app/.secrets:ro
       - ./certs/appstore:/etc/appstore-certs:ro
+      - ./media-assets:/data/media-assets
     # api binds inside the container to 0.0.0.0:8000 (Dockerfile CMD / Gunicorn).
     # NO `ports:` mapping — we MUST NOT publish 80/443 or any host port (ADR-017 req. 1:
     # conflict with Traefik). Only `expose` the internal 8000 so Traefik can reach it over

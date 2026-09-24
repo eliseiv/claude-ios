@@ -871,6 +871,32 @@ class MediaJob(Base):
     pending_result: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
+    # ADR-109 §7: state and metadata of OUR copy of the result on the instance disk (the bytes
+    # themselves live on disk, never in the DB). '' — storage never applied to the row (rows
+    # before migration 0039, jobs that are not `completed`, storage switched off). Our own state
+    # domain, hence the CHECK (unlike `status`/`provider`, whose sets are external contracts).
+    asset_store_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=sa_text("''")
+    )
+    # Number of `retry` outcomes so far (ADR-109 §3).
+    asset_store_attempts: Mapped[int] = mapped_column(nullable=False, server_default=sa_text("0"))
+    # Not earlier than this moment the next store attempt runs.
+    asset_store_next_attempt_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # End of our copy's lifetime = `completed` + MEDIA_ASSET_RETENTION_DAYS; set once, never moved.
+    assets_expire_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    assets_stored_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    assets_stored_bytes: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    # `[{index, bytes, contentType}]`. `none_as_null=True` for the same reason as `pending_result`
+    # (TD-061): "no value" must be SQL NULL, not the JSON scalar `null`.
+    stored_assets: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_now
     )
@@ -882,6 +908,24 @@ class MediaJob(Base):
         CheckConstraint(
             "status IN ('queued', 'running', 'completed', 'failed')",
             name="ck_media_jobs_status",
+        ),
+        CheckConstraint(
+            "asset_store_status IN ('', 'pending', 'stored', 'failed', 'missing', 'expired')",
+            name="ck_media_jobs_asset_store_status",
+        ),
+        # ADR-109 §7: store candidates (§3) and expiry cleanup (§6.1). Both predicates are false
+        # on every row that existed before the migration.
+        Index(
+            "ix_media_jobs_asset_store_pending",
+            "asset_store_next_attempt_at",
+            postgresql_where=sa_text("asset_store_status = 'pending'"),
+        ),
+        Index(
+            "ix_media_jobs_assets_expire",
+            "assets_expire_at",
+            postgresql_where=sa_text(
+                "asset_store_status IN ('stored', 'pending', 'failed', 'missing')"
+            ),
         ),
         # Owner-scoped listing, newest first (GET /v1/media/jobs).
         Index("ix_media_jobs_user_created", "user_id", "created_at"),

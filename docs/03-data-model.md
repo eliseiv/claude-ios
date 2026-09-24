@@ -575,6 +575,24 @@ ALTER TABLE media_jobs ADD COLUMN moderation JSONB NULL;
 ```
 > Вердикт модерации UGC: `{status, stage, categories, checkedAt, provider, model}` ([ADR-086 §10](adr/ADR-086-ugc-moderation.md)). Expand-only, **без backfill**: `NULL` = «не проверялось» (строка создана до фичи либо инстанс с `MODERATION_ENABLED=false`) и отдаётся клиенту как `status: "unchecked"` — **никогда** как `passed`. Номер ревизии определяется на момент реализации (следующий свободный, single head; перечень ревизий в `docs/` не ведётся — [07-deployment.md §Миграции](07-deployment.md#миграции)). Полный DDL таблицы — [modules/media-generation/04-data-model.md](modules/media-generation/04-data-model.md).
 
+## Колонки своей копии результата в `media_jobs` (expand-only, [ADR-109 §7](adr/ADR-109-media-asset-local-storage-30d.md), модуль `media-generation`, **в коде и миграции `0039_media_asset_store` есть; не выкачено**)
+```sql
+ALTER TABLE media_jobs
+  ADD COLUMN asset_store_status TEXT NOT NULL DEFAULT ''
+    CHECK (asset_store_status IN ('', 'pending', 'stored', 'failed', 'missing', 'expired')),
+  ADD COLUMN asset_store_attempts INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN asset_store_next_attempt_at TIMESTAMPTZ NULL,
+  ADD COLUMN assets_expire_at TIMESTAMPTZ NULL,
+  ADD COLUMN assets_stored_at TIMESTAMPTZ NULL,
+  ADD COLUMN assets_stored_bytes BIGINT NULL,
+  ADD COLUMN stored_assets JSONB NULL;
+CREATE INDEX ix_media_jobs_asset_store_pending ON media_jobs (asset_store_next_attempt_at)
+  WHERE asset_store_status = 'pending';
+CREATE INDEX ix_media_jobs_assets_expire ON media_jobs (assets_expire_at)
+  WHERE asset_store_status IN ('stored', 'pending', 'failed', 'missing');
+```
+> Состояние и метаданные своей копии результата; сами байты — на диске инстанса, не в БД. Без DML и без backfill: константные дефолты верны для всех прежних строк (хранение к ним не применялось). Смысл колонок — [modules/media-generation/04-data-model.md](modules/media-generation/04-data-model.md); `CONCURRENTLY` у индексов — выбор `backend` по размеру таблицы ([ADR-109 §7](adr/ADR-109-media-asset-local-storage-30d.md)).
+
 ## Таблица `chat_documents` (миграция `0027`, [ADR-090](adr/ADR-090-chat-documents.md), модуль `documents`)
 
 ### 22. chat_documents (модуль `documents`)

@@ -80,9 +80,25 @@
 9. **devops:** шаблоны env, провижининг `PROXY_WEBHOOK_SECRET` и `PROXY_API_KEY` по [ADR-108 §Порядок выката](../../adr/ADR-108-media-generation-via-proxy.md), self-probe вебхука в `infra/fleet/verify.sh`, правило алерта, prod-checklist.
 10. **Тесты:** [09-testing.md §Транспорт через прокси](09-testing.md#integration--транспорт-через-прокси-adr-108).
 
+<a id="phase-10--своё-хранение-результатов-30-дней-adr-109-docs-only"></a>
+## Phase 10 — Своё хранение результатов 30 дней ([ADR-109](../../adr/ADR-109-media-asset-local-storage-30d.md))
+
+**Состояние на 2026-09-24 (поэлементно, [ADR-109 §Статус](../../adr/ADR-109-media-asset-local-storage-30d.md)):** код и миграция `0039_media_asset_store` написаны в рабочем дереве, не закоммичены; инфраструктура (compose, `provision.sh`, `verify.sh`, `alerts.yml`, `media-assets-rollout.sh`) написана, не закоммичена; на инстансы не выкачено; автотесты — `tests/integration/test_media_asset_store_adr109.py`, 31 функция `test_adr109*` (прогон и покрытие не измерены, `qa` пишет ещё); ревью кода — не измеряется.
+
+Код, миграция и инфраструктура **не написаны**. Порядок обязателен: **код безопасен к выкату без env** (пустой `MEDIA_ASSET_STORAGE_DIR` → хранение выключено, поведение прежнее), включение — per-instance ([ADR-109 §Порядок выката](../../adr/ADR-109-media-asset-local-storage-30d.md)).
+
+1. **Config:** `MEDIA_ASSET_STORAGE_DIR`, `MEDIA_ASSET_RETENTION_DAYS`, `MEDIA_ASSET_MAX_BYTES`, `MEDIA_ASSET_MIN_FREE_BYTES`, `MEDIA_ASSET_STORE_INTERVAL_SECONDS` — дефолты и смысл только в [ADR-109 §1.1](../../adr/ADR-109-media-asset-local-storage-30d.md). Зона `backend`.
+2. **Миграция** (expand-only, single head, без DML и без backfill): колонки и частичные индексы [ADR-109 §7](../../adr/ADR-109-media-asset-local-storage-30d.md); `stored_assets` — `JSONB(none_as_null=True)`. Зона `backend`.
+3. **`mark_completed`** — одно присваивание [ADR-109 §2](../../adr/ADR-109-media-asset-local-storage-30d.md); шаги общего пути завершения не меняются. Зона `backend`.
+4. **Фоновый цикл** — сохранение [§3](../../adr/ADR-109-media-asset-local-storage-30d.md) (один исполнитель на инстанс, без транзакции во время сети, атомарная запись, исходы по таблице), диск [§4](../../adr/ADR-109-media-asset-local-storage-30d.md), очистка [§6](../../adr/ADR-109-media-asset-local-storage-30d.md). Зона `backend`.
+5. **Download-роут** — ветка своей копии [§5](../../adr/ADR-109-media-asset-local-storage-30d.md) (Range/`If-Range`/`HEAD`, тот же набор заголовков), иначе путь источника. Зона `backend`.
+6. **Наблюдаемость** — метрики и лог-события [§9](../../adr/ADR-109-media-asset-local-storage-30d.md) (`backend`); правила алертов по ним и раздел хранения в `infra/fleet/verify.sh` (`devops`).
+7. **devops:** каталог `/opt/<инстанс>/media-assets` (`10001:10001`, `0750`) с маркером `.media-assets-root` на ОБОИХ серверах — в `provision.sh` (`new`, `adapt`) и разовым шагом для существующих; bind-mount `./media-assets:/data/media-assets` у `api` в `docker-compose.prod.yml`; сверка значения `MEDIA_ASSET_STORAGE_DIR` на основном и резерве в `verify.sh`; очистка каталога — шагом отката и шагом пересборки вернувшегося сервера ([ADR-109 §6](../../adr/ADR-109-media-asset-local-storage-30d.md)); маркер `.media-assets-root` со строкой `pg_system_identifier=<system_identifier базы>` в корне каталога — тем же шагом провижининга, значение сверяется на основном и резерве; правила алертов — только на Gauge §9, по `media_asset_missing` — только по росту, его уровень — в `verify.sh`.
+8. **Тесты:** [09-testing.md §Своё хранение результатов](09-testing.md#integration--своё-хранение-результатов-adr-109). Зона `qa`.
+
 ## Post-MVP (не в этой поставке)
 
 - ~~**Фоновая доводка «зависших» задач**~~ — **сделано:** фоновый согласователь ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md), закрыл [Q-060-2](../../99-open-questions.md)); предел жизни задачи, на которую провайдер не даёт конечного ответа, — Phase 8 ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).
-- **Собственное хранение ассетов** — сейчас отдаются ссылки CDN провайдера; их срок жизни на его стороне ([Q-060-1](../../99-open-questions.md)).
+- ~~**Собственное хранение ассетов**~~ — **спроектировано:** [Phase 10](#phase-10--своё-хранение-результатов-30-дней-adr-109-docs-only) ([ADR-109](../../adr/ADR-109-media-asset-local-storage-30d.md), закрыл [Q-060-1](../../99-open-questions.md)); код написан, не слит и не выкачен.
 - **Второй провайдер** — контракт `/v1/media/*` уже провайдер-агностичен (нормализация результата + реестр), понадобится второй клиент и признак провайдера в реестре.
 - **Генерация как инструмент tool-loop** — чтобы ассистент мог сгенерировать картинку внутри диалога; сейчас это отдельная поверхность.

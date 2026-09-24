@@ -27,7 +27,7 @@
 | `USER_AVATAR_MAX_COUNT` | `20` | Потолок сохранённых аватаров пользователя |
 
 Avatar speech требует одновременно `FAL_API_KEY` и `OPENAI_API_KEY`; makeup — `FAL_API_KEY`.
-[ADR-108](../../adr/ADR-108-media-generation-via-proxy.md): на инстансе с `PROXY_API_KEY` задачи `rembg` / `sync-lipsync` / `makeup-application` ставятся через прокси, маршрут только `fal`, payload прежний; `FAL_API_KEY` по-прежнему обязателен — загрузки аватара, аудио и фото идут в хранилище fal. Completion handler подготовки аватара вызывается общим путём завершения — и из вебхука, и из опроса.
+[ADR-108](../../adr/ADR-108-media-generation-via-proxy.md): на инстансе с `PROXY_API_KEY` задачи `rembg` / `sync-lipsync` / `makeup-application` ставятся через прокси, маршрут только `fal`, payload прежний; `FAL_API_KEY` по-прежнему обязателен — загрузки аватара, аудио и фото идут в хранилище fal. Completion handler подготовки аватара вызывается общим путём завершения — и из вебхука, и из опроса. [ADR-109](../../adr/ADR-109-media-asset-local-storage-30d.md) (код написан; не слит и не выкачен): результаты features-задач (`completed` с ассетами) хранятся на диске инстанса наравне с генерациями; completion handler работает до сохранения и своей копией не пользуется.
 Неположительная цена безопасно деградирует до 10.
 
 ## Каталоги и пользовательские аватары

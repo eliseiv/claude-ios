@@ -18,6 +18,8 @@
 
 **[ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) (реализовано) добавляет:** исходящий клиент прокси (`POST {PROXY_BASE}/api/v1/tasks`), модуль маршрутизации (публичная модель → `fal`/`kie`/`sosana` + endpoint вендора, цены маршрутов), подпись и разбор колбэка, отдельный роутер `POST /v1/media/webhooks/proxy/{jobId}` (вне гейта, вне OpenAPI), метод репозитория «строка по id под `FOR UPDATE`» и миграцию `provider`/`vendor_price`/`pending_result`. Имена модулей образца: `proxy_client.py`, `routing.py`, `webhook.py`, `routers/media_webhooks.py` (ai-media-upscaler). Порядок шагов — [§Транспорт через прокси](#транспорт-через-прокси-adr-108).
 
+**[ADR-109](../../adr/ADR-109-media-asset-local-storage-30d.md) (код написан; не слит и не выкачен) добавит:** фоновый цикл хранилища ассетов (сохранение + очистка) рядом с согласователем, ветку «своя копия» в download-роуте и колонки состояния копии в `media_jobs` — [§Своё хранение результатов](#своё-хранение-результатов-adr-109). Имена модулей выбирает `backend`.
+
 Wiring — `deps.build_media_generation_service` (единственная сборка сервиса — request-путь и согласователь, [ADR-105 §B6](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)), `deps.get_media_generation_service` (её обёртка-зависимость FastAPI), `deps.get_fal_client`.
 
 ## Поток постановки задачи
@@ -77,6 +79,9 @@ GET /v1/media/jobs/{jobId}   (тот же путь _advance — у фоново�
        │                       │            media-ready push НЕ шлётся
        │                       ├─ flagged → mark_completed, ассеты выдаются, возврата НЕТ
        │                       └─ passed  → mark_completed (как раньше)
+       │                          (ADR-109 §2: при включённом хранении mark_completed
+       │                           ещё ставит asset_store_status='pending' + assets_expire_at;
+       │                           скачивание — ПОСЛЕ коммита, фоновым циклом, §Своё хранение)
        ├─ FAILED / CANCELED → wallet.grant(key=media-refund:{jobId}) → mark_failed
        ├─ IN_QUEUE / IN_PROGRESS → mark_running          ┐ опрос НЕ дал конечного
        └─ любое иное исключение (5xx, 429, 401/403,      │ состояния:
@@ -106,7 +111,7 @@ GET /v1/media/jobs/{jobId}   (тот же путь _advance — у фоново�
 
 `GET /v1/media/jobs` (лента) провайдера **не опрашивает**: N задач не должны разворачиваться в N исходящих вызовов. Пагинация keyset-курсорная по `(created_at, id)`: лента растёт с головы, и при `offset` вставка новой задачи между запросами дала бы дубли и пропуски.
 
-`DELETE /v1/media/jobs/{jobId}` удаляет только нашу строку и только у терминальной задачи: возврат кредитов привязан к строке и срабатывает при опросе, поэтому удаление незавершённой уничтожило бы единственное место, где этот возврат может произойти ([ADR-063 §4](../../adr/ADR-063-media-feed-edit-chains-and-job-deletion.md)).
+`DELETE /v1/media/jobs/{jobId}` удаляет только нашу строку и только у терминальной задачи: возврат кредитов привязан к строке и срабатывает при опросе, поэтому удаление незавершённой уничтожило бы единственное место, где этот возврат может произойти ([ADR-063 §4](../../adr/ADR-063-media-feed-edit-chains-and-job-deletion.md)). С [ADR-109 §6](../../adr/ADR-109-media-asset-local-storage-30d.md) (код написан; не слит и не выкачен) удаление строки делает сиротой и нашу копию результата на диске — её стирает фоновая очистка, сам запрос диска не касается.
 
 ## Цена генерации после [ADR-099](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md)
 
@@ -229,7 +234,8 @@ POST /v1/media/images|videos | submit_custom | chat-tool media.generate_*
         ├─ UPDATE pending_result, vendor_price
         └─ SAVEPOINT: ОБЩИЙ ПУТЬ ЗАВЕРШЕНИЯ
               пост-модерация (image) → blocked? _blocked_by_moderation
-              → completion handler → mark_completed (pending_result := NULL)
+              → completion handler → mark_completed (pending_result := NULL;
+                 ADR-109 §2: + asset_store_status='pending', assets_expire_at)
               → request_logs.finish_media → media_generation_completed → push (claim push_sent_at)
               ├─ задача completed → 200 (media_webhook_outcome=completed)
               ├─ задача failed (blocked / ValidationFailedError handler) → 200 (completion_failed)
@@ -249,3 +255,80 @@ POST /v1/media/images|videos | submit_custom | chat-tool media.generate_*
 ```
 
 Диаграммы выше — **полный** порядок: общий путь завершения — это сегодняшняя ветка `COMPLETED` §Поток опроса без изменения шагов; сервис для вебхука собирается `deps.build_media_generation_service` ([ADR-105 §B6](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)). **Контраст транзакционных границ (обе стороны помечены):** в вебхуке общий путь идёт под `SAVEPOINT`, и его отказ НЕ откатывает `pending_result`; в `_advance` отказ у задачи моложе дедлайна откатывает запрос целиком, как сегодня. Согласователь берёт незавершённые строки `provider <> '' ∨ fal_configured ∨ created_at < now − MEDIA_JOB_DEADLINE_SECONDS`, старейшие первыми; proxy-строки — через `FOR UPDATE SKIP LOCKED` (занятая вебхуком или `GET` строка пропускается до следующего тика — иначе захват, живущий до коммита пакета, и `UPDATE wallets` возврата дают взаимоблокировку с вебхуком); клиентский `GET` и вебхук ждут обычный `FOR UPDATE` ([ADR-108 §6](../../adr/ADR-108-media-generation-via-proxy.md)).
+
+## Своё хранение результатов (ADR-109)
+
+Норма — [ADR-109](../../adr/ADR-109-media-asset-local-storage-30d.md) (**код, миграция и инфраструктура написаны; не слиты и не выкачены**); здесь — полный порядок шагов для точки чтения реализации. Хранение выключено (`MEDIA_ASSET_STORAGE_DIR` пуст) → ничего из этого раздела не выполняется, поведение модуля бит-в-бит прежнее.
+
+**Путь завершения (опрос и вебхук) — одно присваивание, шагов не добавляется:**
+
+```
+общий путь завершения (ADR-108 §5, шаги и порядок прежние)
+  └─ mark_completed(result)  при включённом хранении и непустых assets:
+        asset_store_status := 'pending'
+        assets_expire_at   := now() + MEDIA_ASSET_RETENTION_DAYS × 86400 s   (один раз, не сдвигается)
+  ↓ коммит терминала — сохранение НИКОГДА не откатывает и не откладывает завершение
+```
+
+**Фоновый цикл «хранилище ассетов»** (lifespan, период `MEDIA_ASSET_STORE_INTERVAL_SECONDS`; исполняет ОДИН воркер инстанса за раз; ни одной открытой транзакции во время сети и записи файла):
+
+```
+тик (в КАЖДОМ воркере)
+  ├─ Gauge (ДО права исполнения, ADR-109 §9): media_asset_storage_free_bytes,
+  │     media_asset_store_pending, media_asset_store_failed, media_asset_missing,
+  │     media_asset_cleanup_blocked — из ФС и БД (free_bytes при провале измерения
+  │     снимается, а не ставится в 0)
+  ├─ право исполнения не получено (другой воркер исполняет) → конец тика
+  ├─ корень недоступен (нет каталога / не пишется / нет маркера .media-assets-root)
+  │                                            → deferred_unavailable (строки не трогаются)
+  ├─ короткая транзакция: кандидаты status='completed' ∧ asset_store_status='pending'
+  │     ∧ (next_attempt_at IS NULL ∨ ≤ now), старейшие первыми, пакет 5
+  ├─ для каждого (вне транзакции):
+  │     ├─ assets_expire_at прошёл           → expired (без скачивания)
+  │     ├─ БЕЗ СЕТИ, до любого запроса:
+  │     │     ├─ хост вне FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES / не https
+  │     │     │                                → failed (host_rejected)
+  │     │     └─ свободно − MEDIA_ASSET_MAX_BYTES < MEDIA_ASSET_MIN_FREE_BYTES
+  │     │                                      → deferred_low_disk (next_attempt_at = now + 300 s)
+  │     ├─ GET https, без redirect, предел MEDIA_ASSET_MAX_BYTES
+  │     │     ├─ 404/410            → failed (gone)
+  │     │     ├─ больше предела     → failed (too_large), частичный файл удалён
+  │     │     ├─ свободно − Content-Length < MIN_FREE → deferred_low_disk, чтение прервано
+  │     │     ├─ таймаут/5xx/IO     → attempts + 1 < 12 → retry (пауза min(2^attempts·30 s, 3600 s))
+  │     │     │                       attempts + 1 = 12 → failed (exhausted)
+  │     │     └─ ok → tmp в каталоге назначения → fsync → rename в <index>
+  │     └─ все ассеты задачи записаны → короткая транзакция:
+  │           UPDATE … SET stored, assets_stored_at, assets_stored_bytes, stored_assets
+  │           WHERE asset_store_status='pending'   (строку удалили → 0 строк, файлы — сироты §6.3)
+  └─ не чаще раза в 3600 s — очистка:
+        ├─ assets_expire_at < now ∧ status ∈ {stored,pending,failed,missing}
+        │     → rm -r <dir>/<shard>/<jobId> (ENOENT — не ошибка) → затем expired, stored_assets := NULL
+        ├─ tmp-файлы старше 3600 s → удалить
+        └─ только если pg_system_identifier маркера = system_identifier текущей базы:
+              <jobId> без строки media_jobs и mtime старше 3600 s → удалить (DELETE / каскад users);
+           иначе → пропускается ТОЛЬКО этот шаг (media_asset_cleanup_aborted,
+              media_asset_cleanup_blocked = 1; выход — оператор переписывает маркер)
+   Вне сервера с работающим api и включённым хранением цикла нет: откат чистит каталог
+   тем же шагом, вернувшийся сервер — при пересборке (ADR-109 §6, Q-109-7).
+```
+
+**Download-роут:**
+
+```
+GET|HEAD /v1/media/jobs/{jobId}/assets/{index}/{token}
+  ├─ нет строки / нет index         → 404        ┐ как сегодня
+  ├─ токен невалиден                → 401        ┘
+  ├─ хранение выключено             → диск не читается → путь источника          source=remote
+  ├─ корень недоступен (нет каталога / не пишется / нет маркера .media-assets-root)
+  │     → WARNING media_asset_storage_unavailable, статус НЕ меняется → источник  source=remote
+  ├─ status ∈ {stored, missing} ∧ now < assets_expire_at ∧ файл читается
+  │     (missing → UPDATE … SET 'stored' — переход обратим)
+  │     → байты с диска (Range/If-Range → 206, HEAD, тот же набор заголовков;
+  │       невыполнимый Range → 404, 304 не отдаётся)                             source=local
+  ├─ stored ∧ в сроке ∧ файла НЕТ   → WARNING media_asset_local_missing,
+  │     UPDATE … SET 'missing' WHERE status='stored' → путь источника           source=local_missing
+  ├─ иная ошибка чтения файла       → WARNING, статус не меняется → путь источника source=remote
+  └─ иначе                          → stream_fal_asset как сегодня               source=remote
+```
+
+Диаграммы выше — **полный** порядок. **Контраст (обе стороны помечены):** пост-модерация и completion handler стоят ВНУТРИ общего пути завершения и вправе его отложить ([ADR-108 §5](../../adr/ADR-108-media-generation-via-proxy.md)); сохранение стоит СНАРУЖИ, после коммита, и ни отложить, ни откатить завершение не может — переносить скачивание в общий путь ЗАПРЕЩЕНО ([ADR-109 §2](../../adr/ADR-109-media-asset-local-storage-30d.md)). Провал сохранения кредитов не возвращает ([ADR-109 §8](../../adr/ADR-109-media-asset-local-storage-30d.md)). Вход правки по `sourceJobId` по-прежнему URL провайдера ([Q-109-5](../../99-open-questions.md)).

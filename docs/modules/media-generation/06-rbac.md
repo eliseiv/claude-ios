@@ -4,7 +4,7 @@
 
 Все эндпоинты `/v1/media/*`, кроме обложек шаблонов и **download ассета**, требуют `Authorization: Bearer <accessToken>` (JWT RS256). Идентичность берётся исключительно из проверенного claim `sub` ([ADR-007](../../adr/ADR-007-lazy-user-provisioning.md)); поля `userId` в телах запросов **нет** — подделать владельца задачи нечем. Нет/невалидный токен → `401 unauthorized`.
 
-`GET`/`HEAD /v1/media/jobs/{jobId}/assets/{index}/{token}` **без JWT** ([ADR-085](../../adr/ADR-085-media-asset-download-proxy.md)): авторизация — HMAC в пути (тот же `PREVIEW_URL_SECRET`, канон `media-asset|{jobId}|{ownerUserId}|{index}|{exp}`). Подпись привязана к владельцу строки `media_jobs`. Битый/просроченный токен → `401`; нет job / нет index / хост stored URL вне allowlist → `404`. Preview-токен на этот роут не принимается.
+`GET`/`HEAD /v1/media/jobs/{jobId}/assets/{index}/{token}` **без JWT** ([ADR-085](../../adr/ADR-085-media-asset-download-proxy.md)): авторизация — HMAC в пути (тот же `PREVIEW_URL_SECRET`, канон `media-asset|{jobId}|{ownerUserId}|{index}|{exp}`). Подпись привязана к владельцу строки `media_jobs`. Битый/просроченный токен → `401`; нет job / нет index / хост stored URL вне allowlist → `404`. Preview-токен на этот роут не принимается. **[ADR-109 §5, §10](../../adr/ADR-109-media-asset-local-storage-30d.md) (код написан; не слит и не выкачен):** своя копия результата на диске инстанса отдаётся **только** этим роутом и после той же проверки строки и токена; статической раздачи каталога нет; путь файла строится из `jobId` и `index` строки БД, не из запроса. После `DELETE` задачи или удаления пользователя копия недостижима сразу (строки нет → `404`).
 
 `POST /v1/media/webhooks/proxy/{jobId}` ([ADR-108 §4](../../adr/ADR-108-media-generation-via-proxy.md)) **без JWT**: авторизация — query `token` = HMAC-SHA256 по `jobId` на `PROXY_WEBHOOK_SECRET` (иначе `PROXY_API_KEY`). **Контраст (обе стороны помечены):** download-токен подписан `PREVIEW_URL_SECRET`, выдаётся клиенту и привязан к владельцу; токен колбэка подписан другим секретом, клиенту не выдаётся никогда и разрешает только применение исхода к одной задаче. Неверный токен → `401` до обращения к БД; задачи нет или она не принималась прокси → `404`. Скоупа по `user_id` у ручки нет — владелец задачи колбэком не выбирается и не меняется.
 
@@ -36,6 +36,7 @@
 - Тело ответа провайдера наверх не проксируется; исключение — текст `422`, который содержит только имя проблемного параметра (обрезается до 500 символов).
 - Промт пользователя хранится в `media_jobs.prompt` (нужен для листинга) и **не** попадает в структурные логи.
 - Полный URL CDN fal и signed token download-роута не логируются. Исходящий fetch только на хосты из `FAL_UPLOAD_HOST_SUFFIXES`, без follow-redirect.
+- **Скачивание своей копии ([ADR-109 §3](../../adr/ADR-109-media-asset-local-storage-30d.md), код написан; не слит и не выкачен):** тот же allowlist, что у download-роута (`FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES`, [ADR-108 §7](../../adr/ADR-108-media-generation-via-proxy.md)), только `https`, без follow-redirect, предел `MEDIA_ASSET_MAX_BYTES`; в логах — ни URL целиком, ни путь каталога хоста.
 
 ## Валидация референсных изображений
 

@@ -291,3 +291,105 @@ while IFS=$'\t' read -r inst domain port primary; do
   fi
 done < instances.tsv
 echo "  на прокси: $hook_proxy; кандидатов: $hook_cand; нарушений: $hook_bad; кандидатов не готово к переключению: $hook_cand_bad"
+
+# --- Своё хранение результатов генерации (ADR-109 §1.1, §4, §6, §9, §10) --------------------
+# Хранение включается записью MEDIA_ASSET_STORAGE_DIR в .env основного И резерва одинаково;
+# значение — цель bind-mount'а /data/media-assets (docker-compose.prod.yml). Любое другое значение
+# пишет файлы мимо тома. Каталог /opt/<инстанс>/media-assets с маркером `.media-assets-root`
+# (10001:10001; каталог 0750) обязан быть на ОБОИХ серверах: без маркера хранение на сервере считается
+# неподготовленным, в том числе на резерве после переключения.
+#
+# С .env читаются ТОЛЬКО несекретные ключи (MEDIA_ASSET_STORAGE_DIR, MEDIA_ASSET_MIN_FREE_BYTES,
+# COMPOSE_PROJECT_NAME, POSTGRES_USER, POSTGRES_DB); значения секретов не читаются и не печатаются.
+# Уровни берутся из метрик api основного (Gauge ADR-109 §9, одинаковы в любом воркере); токен
+# сбора читается ВНУТРИ контейнера из его окружения и передаётся curl через stdin (-H @-), а не
+# аргументом: наружу приходят только строки media_asset_*. Уровень media_asset_missing здесь —
+# единственное место, где он виден: алерт строится только на его РОСТЕ (после известного
+# переключения уровень держится до 30 дней и действием оператора не снимается).
+# Нарушения:
+#   ключ-хранения-на-серверах-различается / ключ-хранения≠/data/media-assets;
+#   включено: каталог основного или резерва не готов; метрик нет; мало места (< 2 × граница);
+#             файлы-на-резерве (пересборка вернувшегося сервера их не вычистила, ADR-109 §6);
+#   выключено: файлы в каталоге на любом сервере (чистить их некому, ADR-109 §6).
+#   включено: базы основного и резерва с разным system_identifier; строка pg_system_identifier
+#             маркера на любом сервере не равна базе основного (очистка сирот заблокирована, §6.3);
+#             media_asset_cleanup_blocked = 1.
+# «Не подготовлен» при выключенном хранении — не нарушение, а незавершённый шаг выката (п. 2).
+echo
+echo "ХРАНЕНИЕ РЕЗУЛЬТАТОВ:"
+store_snippet='d=media-assets; M=.media-assets-root; e=$(grep -m1 "^MEDIA_ASSET_STORAGE_DIR=" .env 2>/dev/null | cut -d= -f2- | tr -d "\047\042[:space:]"); mf=$(grep -m1 "^MEDIA_ASSET_MIN_FREE_BYTES=" .env 2>/dev/null | cut -d= -f2- | tr -dc "0-9"); if [ -L "$d" ]; then s="D=link"; elif [ ! -e "$d" ]; then s="D=absent"; elif [ ! -d "$d" ]; then s="D=notdir"; else if [ -f "$d/$M" ] && [ ! -L "$d/$M" ]; then mk=1; mo=$(stat -c %u:%g "$d/$M"); else mk=0; mo=-; fi; b=$(du -sb "$d" 2>/dev/null | cut -f1); s="D=dir O=$(stat -c %u:%g "$d") A=$(stat -c %a "$d") MK=$mk MO=$mo N=$(find "$d" -mindepth 1 -maxdepth 1 ! -name "$M" | wc -l) B=${b:-0}"; fi; fr=$(df -B1 --output=avail . 2>/dev/null | tail -1 | tr -dc "0-9"); mi=$(if [ -f "$d/$M" ] && [ ! -L "$d/$M" ]; then timeout 5 grep -m1 "^pg_system_identifier=" -- "$d/$M" 2>/dev/null; fi | cut -d= -f2- | tr -dc "0-9"); p=$(grep -m1 "^COMPOSE_PROJECT_NAME=" .env | cut -d= -f2-); p=${p:-$(basename "$PWD")}; u=$(grep -m1 "^POSTGRES_USER=" .env | cut -d= -f2-); db=$(grep -m1 "^POSTGRES_DB=" .env | cut -d= -f2-); si=$(docker exec "${p}-postgres-1" psql -U "$u" -d "$db" -tAc "SELECT system_identifier FROM pg_control_system()" 2>/dev/null | tr -dc "0-9"); printf "E=%s MF=%s FREE=%s SI=%s MI=%s %s\n" "${e:--}" "${mf:--}" "${fr:-0}" "${si:--}" "${mi:--}" "$s"'
+metrics_snippet='p=$(grep -m1 "^COMPOSE_PROJECT_NAME=" .env | cut -d= -f2-); p=${p:-$(basename "$PWD")}; docker exec "${p}-api-1" sh -c "printf \"X-Scrape-Token: %s\n\" \"\$METRICS_SCRAPE_TOKEN\" | curl -fsS --max-time 5 -H @- http://127.0.0.1:8000/metrics" 2>/dev/null | grep -E "^media_asset_(storage_free_bytes|store_pending|store_failed|missing|cleanup_blocked) " | awk "{printf \"%s=%.0f \", \$1, \$2}"'
+store_of() {  # store_of ХОСТ ИНСТАНС — строка состояния или пусто
+  ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$1" "cd /opt/$2 2>/dev/null || exit 1; $store_snippet" 2>/dev/null \
+    | tr -d '\r' | grep -m1 -E '^E=[^ ]+ MF=[0-9-]+ FREE=[0-9]+ SI=([0-9]+|-) MI=([0-9]+|-) D=(absent|link|notdir|dir( [A-Z]+=[^ ]+)+)$'
+}
+st_ready() {  # каталог и маркер по ADR-109 §10
+  [ "$(fval "$1" D)" = dir ] && [ "$(fval "$1" O)" = 10001:10001 ] && [ "$(fval "$1" A)" = 750 ] \
+    && [ "$(fval "$1" MK)" = 1 ] && [ "$(fval "$1" MO)" = 10001:10001 ]
+}
+st_on=0; st_bad=0; st_unprep=0; st_nodata=0
+st_free_A=""; st_free_B=""; st_bytes_A=0; st_bytes_B=0
+while IFS=$'\t' read -r inst domain port primary; do
+  case "$inst" in ""|\#*) continue;; esac
+  [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
+  sb="$(other "$primary")"
+  sp="$(store_of "app${primary}" "$inst")"; ss="$(store_of "app${sb}" "$inst")"
+  if [ -z "$sp" ] || [ -z "$ss" ]; then
+    st_nodata=$((st_nodata+1))
+    printf "  %-14s нет данных (ssh/каталог) на %s\n" "$inst" "$( [ -z "$sp" ] && echo "основном " )$( [ -z "$ss" ] && echo резерве )"
+    continue
+  fi
+  # Сводка по серверам: свободно на ФС (одно на сервер по смыслу) и занято всеми каталогами.
+  for pair in "$primary|$sp" "$sb|$ss"; do
+    srv="${pair%%|*}"; s="${pair#*|}"; fr="$(fval "$s" FREE)"; by="$(fval "$s" B)"; by="${by:-0}"
+    if [ "$srv" = A ]; then st_bytes_A=$((st_bytes_A+by)); { [ -z "$st_free_A" ] || [ "$fr" -lt "$st_free_A" ]; } && st_free_A="$fr"
+    else st_bytes_B=$((st_bytes_B+by)); { [ -z "$st_free_B" ] || [ "$fr" -lt "$st_free_B" ]; } && st_free_B="$fr"; fi
+  done
+  e_p="$(fval "$sp" E)"; e_s="$(fval "$ss" E)"; probs=""; info=""
+  # Тождество базы (ADR-109 §6.3): резерв — физическая копия, system_identifier обязан совпадать;
+  # строка маркера на ОБОИХ серверах — идентификатор базы основного. Значения не печатаются.
+  si_p="$(fval "$sp" SI)"; si_s="$(fval "$ss" SI)"; mi_p="$(fval "$sp" MI)"; mi_s="$(fval "$ss" MI)"
+  if [ "$si_p" = "-" ] || [ "$si_s" = "-" ]; then id_state="база-не-прочитана"
+  elif [ "$si_p" != "$si_s" ]; then id_state="идентификатор-базы-основной≠резерв"
+  else id_state=""; fi
+  [ "$e_p" = "$e_s" ] || probs="$probs ключ-хранения-на-серверах-различается"
+  for e in "$e_p" "$e_s"; do
+    case "$e" in -|/data/media-assets) ;; *) probs="$probs ключ-хранения≠/data/media-assets"; break;; esac
+  done
+  if [ "$e_p" != "-" ]; then
+    st_on=$((st_on+1))
+    st_ready "$sp" || probs="$probs каталог-основного-не-готов"
+    st_ready "$ss" || probs="$probs каталог-резерва-не-готов"
+    [ -n "$id_state" ] && probs="$probs $id_state"
+    [ "$si_p" != "-" ] && [ "$mi_p" != "$si_p" ] && probs="$probs маркер-основного≠базе"
+    [ "$si_p" != "-" ] && [ "$mi_s" != "$si_p" ] && probs="$probs маркер-резерва≠базе"
+    [ "$(fval "$ss" N)" = "0" ] || [ "$(fval "$ss" D)" != dir ] || probs="$probs файлы-на-резерве:$(fval "$ss" N)"
+    mf="$(fval "$sp" MF)"; [ "$mf" = "-" ] && mf=21474836480   # дефолт кода, ADR-109 §1.1
+    [ "$(fval "$sp" FREE)" -lt $((2*mf)) ] && probs="$probs мало-места:$(fval "$sp" FREE)б"
+    m="$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "app${primary}" "cd /opt/$inst 2>/dev/null || exit 1; $metrics_snippet" 2>/dev/null | tr -d '\r')"
+    if [ -z "$m" ]; then
+      probs="$probs нет-метрик-хранения"
+    else
+      mv_="$(fval "$m" media_asset_missing)"; pv="$(fval "$m" media_asset_store_pending)"; fv_="$(fval "$m" media_asset_store_failed)"
+      info="в очереди ${pv:-?}, не сохранено ${fv_:-?}, missing ${mv_:-?}, занято $(fval "$sp" B)б"
+      case "$mv_" in ""|0) ;; *) probs="$probs missing:$mv_";; esac
+      case "$pv" in ""|*[!0-9]*) ;; *) [ "$pv" -gt 50 ] && probs="$probs очередь:$pv";; esac
+      [ "$(fval "$m" media_asset_cleanup_blocked)" = 1 ] && probs="$probs очистка-сирот-заблокирована"
+    fi
+  else
+    for pair in "основной|$sp" "резерв|$ss"; do
+      s="${pair#*|}"
+      [ "$(fval "$s" D)" = dir ] && [ "$(fval "$s" N)" != "0" ] && probs="$probs файлы-при-выключенном-хранении(${pair%%|*}):$(fval "$s" N)"
+    done
+    if ! st_ready "$sp" || ! st_ready "$ss" || [ -n "$id_state" ] || [ "$mi_p" != "$si_p" ] || [ "$mi_s" != "$si_p" ]; then
+      st_unprep=$((st_unprep+1)); info="не подготовлен (каталог/маркер/идентификатор; ADR-109 §Порядок выката п. 2)"
+    fi
+  fi
+  if [ -n "$probs" ]; then
+    st_bad=$((st_bad+1)); printf "  %-14s%s%s\n" "$inst" "$probs" "${info:+ [$info]}"
+  elif [ -n "$ONE" ] || [ "$e_p" != "-" ]; then
+    printf "  %-14s %s\n" "$inst" "${info:-выключено, каталог готов}"
+  fi
+done < instances.tsv
+echo "  сервер A: свободно ${st_free_A:-?}б, занято каталогами ${st_bytes_A}б; сервер B: свободно ${st_free_B:-?}б, занято каталогами ${st_bytes_B}б"
+echo "  хранение включено: $st_on; нарушений: $st_bad; не подготовлено (выключено): $st_unprep; нет данных: $st_nodata"

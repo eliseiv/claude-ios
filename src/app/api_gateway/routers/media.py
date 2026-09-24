@@ -28,7 +28,7 @@ from app.deps import (
     require_media_generation_configured,
 )
 from app.errors import AppError, RateLimitedError, UnauthorizedError, ValidationFailedError
-from app.media_generation.asset_proxy import stream_fal_asset
+from app.media_generation.asset_local import serve_media_asset
 from app.media_generation.catalog import (
     KIND_IMAGE,
     KIND_VIDEO,
@@ -482,13 +482,13 @@ async def download_media_asset(
     if not verify_token(job_id=job.id, owner_user_id=job.user_id, index=index, token=token):
         raise UnauthorizedError("unauthorized")
     method: Literal["GET", "HEAD"] = "HEAD" if request.method == "HEAD" else "GET"
-    return await stream_fal_asset(
-        url=asset.url,
+    return await serve_media_asset(
+        job=job,
+        index=index,
+        asset=asset,
         method=method,
         range_header=request.headers.get("range"),
         if_range=request.headers.get("if-range"),
-        content_type_hint=asset.content_type,
-        job_id=str(job.id),
     )
 
 
@@ -497,8 +497,9 @@ async def download_media_asset(
     response_model=MediaJobDeleteResponse,
     summary="Удалить задачу генерации",
     description=(
-        "Убирает завершённую задачу из ленты. Удаляется только запись у нас — сам файл остаётся "
-        "у провайдера до истечения его срока хранения, мы им не владеем. Задачу в статусе "
+        "Убирает завершённую задачу из ленты. Удаляется запись и наша копия результата: ссылки "
+        "на файлы задачи перестают открываться сразу (`404`), а сама копия стирается с сервера "
+        "фоновой очисткой. Копия у провайдера живёт по его сроку хранения. Задачу в статусе "
         "`queued`/`running` удалить нельзя (`409 job_not_terminal`): возврат кредитов при провале "
         "у провайдера привязан к этой записи и срабатывает при опросе, поэтому сначала доведите "
         "задачу опросом до `completed`/`failed`. Чужая или уже удалённая задача — `404`. "

@@ -102,6 +102,73 @@ groups:
           summary: "Proxy media jobs without callback on {{ $labels.instance }}"
           description: "media_proxy_jobs_awaiting_callback > 0 for 15m — proxy jobs older than 1h got no webhook callback (ADR-108 §10)."
 
+      # --- Own copy of media-generation results, 30 days (ADR-109 §9). ---
+      # Built ONLY on Gauges: the metric registry has no multiprocess mode, /metrics is answered
+      # by whichever gunicorn worker the scrape hits, and each Gauge below is recomputed in EVERY
+      # worker every tick from a shared source (FS of the storage dir, DB rows). Counters
+      # (media_asset_store_total, media_asset_download_total) are per-process -> diagnostics only,
+      # no rules on them. With storage OFF (MEDIA_ASSET_STORAGE_DIR empty) the free-bytes gauge
+      # is not published and the counts stay 0, so nothing fires.
+
+      # The storage dir sits on the server's ROOT partition shared with Postgres of every
+      # instance. Threshold = 2 x MEDIA_ASSET_MIN_FREE_BYTES at its code default (20 GiB,
+      # ADR-109 §1.1) = 42949672960 bytes; an instance that overrides the env var in .env is
+      # NOT reflected here (a rule cannot read .env) — verify.sh compares against the real value.
+      - alert: MediaAssetStorageFreeLow
+        expr: media_asset_storage_free_bytes < 42949672960
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Media asset storage: low free space on {{ $labels.instance }}"
+          description: "media_asset_storage_free_bytes < 2 x MEDIA_ASSET_MIN_FREE_BYTES (default 40 GiB) for 10m — the partition is shared with Postgres; below 20 GiB new results stop being stored (ADR-109 §4)."
+
+      # Backlog of results waiting to be stored (not yet `stored`/`failed`).
+      - alert: MediaAssetStorePendingHigh
+        expr: media_asset_store_pending > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Media asset storage backlog on {{ $labels.instance }}"
+          description: "media_asset_store_pending > 50 for 15m — store loop stuck or deferred (dir unavailable / low disk), see media_asset_store_deferred logs (ADR-109 §3)."
+
+      # Growth of unexpired `failed` rows: gone / too_large / host_rejected / exhausted.
+      - alert: MediaAssetStoreFailedGrowth
+        expr: delta(media_asset_store_failed[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Media results failed to be stored on {{ $labels.instance }}"
+          description: "media_asset_store_failed grew within 1h — see media_asset_store_failed logs (outcome gone on a fresh job = relay host keeps files shorter than our first attempt, Q-109-4)."
+
+      # GROWTH, not level: after one known failover the level stays up to 30 days and no operator
+      # action clears it, so a level rule would page forever. The level is shown by the storage
+      # section of infra/fleet/verify.sh. One firing is expected when storage is re-enabled after
+      # a rollback (wiped files are correctly marked missing on first download, ADR-109 §Порядок
+      # выката п.5).
+      - alert: MediaAssetMissingGrowth
+        expr: delta(media_asset_missing[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stored media results missing on disk on {{ $labels.instance }}"
+          description: "media_asset_missing grew within 15m — failover to standby or lost files with storage enabled (ADR-109 §5, §9); check infra/fleet/verify.sh storage section."
+
+      # Orphan cleanup blocked: the `pg_system_identifier` line of the marker `.media-assets-root`
+      # is absent or does not match the current DB (ADR-109 §6.3). LEVEL, not growth: cleared by an
+      # operator action — make sure api uses the instance's own DB, then rewrite the marker line
+      # with infra/fleet/media-assets-rollout.sh <instance> [--rewrite-identity] --apply. While it
+      # fires, bytes of deleted jobs/users stay on disk.
+      - alert: MediaAssetCleanupBlocked
+        expr: media_asset_cleanup_blocked == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Media asset orphan cleanup blocked on {{ $labels.instance }}"
+          description: "media_asset_cleanup_blocked = 1 for 15m — marker identity absent or != DB system_identifier; orphan files are not deleted (ADR-109 §6.3). Fix with media-assets-rollout.sh."
+
       # Readiness flapping inferred from scrape health is covered by BackendTargetDown.
       # Anthropic/Apple/KMS dependency outages surface as wallet/debit failures and
       # elevated chat_run_latency; add provider-specific probes when those exporters exist.

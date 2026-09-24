@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
 
+from app.config import get_settings
 from app.media_generation.cursor import MediaJobCursor
 from app.models import MediaJob
 
@@ -33,6 +34,24 @@ _PROVIDER_COST_LIMIT = decimal.Decimal(10) ** 6
 # for them the callback price replaces the cost CRM reads; `kie` joins when Q-108-12 confirms it.
 USD_CONFIRMED_PROXY_SERVICES = frozenset({"fal", "sosana"})
 NON_TERMINAL_STATUSES = frozenset({STATUS_QUEUED, STATUS_RUNNING})
+
+# ADR-109 §7: states of OUR copy of a result (`media_jobs.asset_store_status`).
+ASSET_STORE_NONE = ""
+ASSET_STORE_PENDING = "pending"
+ASSET_STORE_STORED = "stored"
+ASSET_STORE_FAILED = "failed"
+ASSET_STORE_MISSING = "missing"
+ASSET_STORE_EXPIRED = "expired"
+
+
+def _has_assets(result: dict[str, Any] | None) -> bool:
+    """Whether a normalized result carries at least one asset with a URL (ADR-109 §1)."""
+    if not isinstance(result, dict):
+        return False
+    return any(
+        isinstance(item, dict) and isinstance(item.get("url"), str) and item.get("url")
+        for item in result.get("assets") or []
+    )
 
 
 @dataclass(frozen=True)
@@ -101,6 +120,14 @@ class MediaJobsRepository:
             provider=provider,
             vendor_price=None,
             pending_result=None,
+            # ADR-109 §7 — set explicitly for the same reason as `provider` above.
+            asset_store_status=ASSET_STORE_NONE,
+            asset_store_attempts=0,
+            asset_store_next_attempt_at=None,
+            assets_expire_at=None,
+            assets_stored_at=None,
+            assets_stored_bytes=None,
+            stored_assets=None,
         )
         self._session.add(row)
         await self._session.flush()
@@ -257,7 +284,17 @@ class MediaJobsRepository:
         job.pending_result = None
         if moderation is not None:
             job.moderation = moderation
-        job.updated_at = _now()
+        now = _now()
+        # ADR-109 §2: the ONLY change of the completion path — with storage on and a non-empty
+        # result the row is queued for the background store loop and its retention is fixed
+        # once, from this moment. No download, no network call, no new failure here.
+        settings = get_settings()
+        if settings.media_asset_storage_enabled() and _has_assets(result):
+            job.asset_store_status = ASSET_STORE_PENDING
+            job.assets_expire_at = now + datetime.timedelta(
+                days=settings.media_asset_retention_days()
+            )
+        job.updated_at = now
         await self._session.flush()
 
     async def mark_failed(
