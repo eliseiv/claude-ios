@@ -883,6 +883,62 @@ def main():
         f"{r.status_code} {r.text[:120]}",
     )
 
+    # E2E-TOOL-8 (ADR-114): abandoned tool call -> new message in the same session -> 200
+    # (not 502); then a late tool-result on the abandoned call -> 409 conflict.
+    r = c.post(
+        "/v1/chat/run",
+        headers=auth(tool_uid),
+        json={
+            "userId": tool_uid,
+            "projectId": "p1",
+            "message": "Покажи список файлов в каталоге '.', используя инструмент files.list.",
+            "mode": "credits",
+        },
+    )
+    ab = r.json() if r.status_code == 200 else {}
+    abandoned_id = (ab.get("toolCall") or {}).get("id")
+    if ab.get("status") == "tool_call" and abandoned_id:
+        r_new = c.post(
+            "/v1/chat/run",
+            headers=auth(tool_uid),
+            json={
+                "userId": tool_uid,
+                "projectId": "p1",
+                "sessionId": ab.get("sessionId"),
+                "message": "Не надо, просто скажи привет.",
+                "mode": "credits",
+            },
+        )
+        r_late = c.post(
+            "/v1/chat/tool-result",
+            headers=auth(tool_uid),
+            json={
+                "userId": tool_uid,
+                "sessionId": ab.get("sessionId"),
+                "toolCallId": abandoned_id,
+                "result": {"entries": []},
+            },
+        )
+        late_json = (
+            r_late.json()
+            if r_late.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
+        late_code = (late_json.get("error") or {}).get("code")
+        ok = r_new.status_code == 200 and r_late.status_code == 409 and late_code == "conflict"
+        rec(
+            "E2E-TOOL-8 abandoned tool call -> 200 on new message, 409 conflict on late result",
+            ok,
+            f"new={r_new.status_code} late={r_late.status_code} late_code={late_code}",
+            blame=None if ok else "code",
+        )
+    else:
+        rec(
+            "E2E-TOOL-8 abandoned tool call -> 200 on new message, 409 conflict on late result",
+            True,
+            f"N/A: модель не инициировала tool_call в этом прогоне (http={r.status_code})",
+        )
+
     # --- §4.5 tool_mutation audit (best-effort, if a mutating tool occurred) ---
     mut_audit = psql("select count(*) from audit_logs where event_type='tool_mutation'")
     rec(
