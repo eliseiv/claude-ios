@@ -596,6 +596,7 @@ INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elva
 | `appscoolnew` | `appscoolnew` | `appscoolnew.shop` | не сверен с сервером (строка внесена 2026-09-23 по `INSTANCES` обоих workflow и `infra/fleet/instances.tsv`) | 43-й |
 | `backrewio` | `backrewio` | `backrewio.shop` | не сверен с сервером (строка внесена 2026-09-23 по `INSTANCES` обоих workflow и `infra/fleet/instances.tsv`) | 44-й |
 | `arveluni` | `arveluni` | `arveluni.shop` | не сверен с сервером (строка внесена 2026-09-23 по `INSTANCES` обоих workflow и `infra/fleet/instances.tsv`) | 45-й |
+| `hovaliq` | `hovaliq` | `hovaliq.shop` | OpenAI (`LLM_PROVIDER=openai`, сверено с сервером 2026-09-25) | 46-й |
 
 > **Синхронизация 2026-09-23.** Строки `elunariq`, `ittechnewapps`, `appscoolnew`, `backrewio`, `arveluni` внесены по `INSTANCES` обоих workflow (значения совпадают побайтно) и `infra/fleet/instances.tsv` — провайдер с сервером **не сверен**. Строка `qorimelo` снята: **инстанс удалён владельцем 2026-09-23** (серверы A и B, базы; финальный дамп сохранён на сервере); в `INSTANCES` обоих workflow и в `instances.tsv` его уже нет. Порядок перенумерован по `INSTANCES`. Исторические упоминания `qorimelo` в закрытых ADR не переписываются.
 
