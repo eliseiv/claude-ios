@@ -439,6 +439,18 @@ _CHAT_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
+#: Only the two tool-result routes can answer 409 for a superseded turn.
+_TOOL_RESULT_CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
+    409: {
+        "description": (
+            "`conflict`: ход, к которому относятся результаты, уже продолжен новым сообщением "
+            "пользователя. Результаты не приняты и не сохранены; отбросьте их и не повторяйте "
+            "запрос."
+        )
+    },
+}
+
+
 def _tool_call_schema(call: Any) -> ToolCallSchema:
     """Один вызов инструмента для клиента; признак подтверждения проставляет СЕРВЕР (ADR-094).
 
@@ -971,6 +983,7 @@ async def chat_v2_run_stream(
     responses={
         200: {"content": {"application/json": {"examples": _TOOL_RESULT_RESPONSE_EXAMPLES}}},
         **_CHAT_RESPONSES,
+        **_TOOL_RESULT_CONFLICT_RESPONSE,
     },
 )
 async def chat_tool_result(
@@ -1033,6 +1046,7 @@ async def chat_tool_result(
     responses={
         200: {"content": {"application/json": {"examples": _V2_TOOL_RESULT_RESPONSE_EXAMPLES}}},
         **_CHAT_RESPONSES,
+        **_TOOL_RESULT_CONFLICT_RESPONSE,
     },
 )
 async def chat_v2_tool_result(

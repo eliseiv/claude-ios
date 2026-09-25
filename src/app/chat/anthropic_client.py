@@ -358,12 +358,29 @@ class AnthropicClient:
         the continuation history's id pair is consistent.
         """
         out: list[dict[str, Any]] = []
+        # Index in ``out`` of the last user message built HERE from a NeutralMessage (raw dicts are
+        # never merged). ADR-114 §2: consecutive user messages of the neutral history (tool results,
+        # then the next user step) are merged into one, tool_result blocks first.
+        mergeable_user: int | None = None
+
+        def append_user(content: list[dict[str, Any]]) -> None:
+            nonlocal mergeable_user
+            if mergeable_user is not None and mergeable_user == len(out) - 1:
+                previous = out[mergeable_user]
+                out[mergeable_user] = {"role": "user", "content": [*previous["content"], *content]}
+                return
+            out.append({"role": "user", "content": content})
+            mergeable_user = len(out) - 1
+
         for msg in messages:
             if isinstance(msg, dict):
                 out.append(msg)
                 continue
             if msg.role == "user":
-                out.append({"role": msg.role, "content": msg.content_blocks})
+                if isinstance(msg.content_blocks, list):
+                    append_user(msg.content_blocks)
+                else:  # pragma: no cover - persisted user content is always a block list
+                    out.append({"role": msg.role, "content": msg.content_blocks})
             elif msg.role == "assistant":
                 replayed = _replay_assistant_blocks(msg.content_blocks)
                 # A foreign step that carries nothing Anthropic can read (no text, no call) is
@@ -377,18 +394,15 @@ class AnthropicClient:
                 else:
                     content = json.dumps(msg.result)
                     is_error = False
-                out.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg.provider_tool_use_id,
-                                "content": content,
-                                "is_error": is_error,
-                            }
-                        ],
-                    }
+                append_user(
+                    [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": msg.provider_tool_use_id,
+                            "content": content,
+                            "is_error": is_error,
+                        }
+                    ]
                 )
         return out
 

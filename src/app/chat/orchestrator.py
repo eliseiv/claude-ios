@@ -95,10 +95,12 @@ from app.chat.tools import (
     validate_tool_args,
 )
 from app.chat.transcription import TranscriptionClient
+from app.chats.provider_blocks import to_domain_blocks
 from app.config import get_settings
 from app.documents import DocumentsService
 from app.errors import (
     CharactersDisabledError,
+    ConflictError,
     ContentPolicyViolationError,
     InsufficientCreditsError,
     MediaGenerationNotConfiguredError,
@@ -902,6 +904,120 @@ def _fold_turn_media_jobs(refs: list[dict[str, Any]]) -> list[dict[str, Any]] | 
         # the slot of the first appearance is kept — exactly the rule above, without a second pass.
         folded[job_id] = dict(ref)
     return list(folded.values()) or None
+
+
+#: Replay-only error payload of the synthetic result that closes a SUPERSEDED tool call (ADR-114
+#: §2, see ``_neutral_history_from_steps``). It never leaves the process: it is read only by the
+#: provider (Anthropic ``tool_result`` with ``is_error``; OpenAI ``role=tool`` /
+#: ``function_call_output``) so the model knows the tool did not answer.
+_SUPERSEDED_TOOL_RESULT_ERROR: dict[str, Any] = {
+    "code": "tool_result_missing",
+    "message": "Результат инструмента не получен.",
+}
+
+
+def _tool_step_message(payload: dict[str, Any]) -> NeutralMessage:
+    return NeutralMessage(
+        role="tool",
+        tool_call_id=payload.get("toolCallId"),
+        provider_tool_use_id=payload["providerToolUseId"],
+        tool_name=payload.get("toolName"),
+        result=payload.get("result"),
+        error=payload.get("error"),
+    )
+
+
+def _replayable_tool_calls(blocks: Any) -> list[tuple[str, str]]:
+    """``(provider id, wire name)`` of the tool calls an assistant step replays to a provider.
+
+    Read through the one shared recognizer (``to_domain_blocks``, ADR-105 §A3) so every stored
+    form counts the same calls as the clients do; a call without a string id and name is skipped —
+    exactly the calls ``OpenAIResponsesClient`` drops from replay, so a synthetic result can never
+    point at a call that was not sent.
+    """
+    calls: list[tuple[str, str]] = []
+    for block in to_domain_blocks(blocks):
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        call_id, name = block.get("id"), block.get("name")
+        if isinstance(call_id, str) and call_id and isinstance(name, str) and name:
+            calls.append((call_id, name))
+    return calls
+
+
+def _neutral_history_from_steps(steps: list[ChatStep]) -> list[NeutralMessage]:
+    """Provider-neutral history of ``chat_steps`` with SUPERSEDED tool calls closed (ADR-114).
+
+    A tool call is SUPERSEDED (ADR-114 §1) when a ``user`` step follows its assistant step and no
+    ``tool`` step with the same ``providerToolUseId`` lies between that assistant step and the
+    nearest following ``user`` step. For each such call a synthetic ``role=tool`` message with
+    ``_SUPERSEDED_TOOL_RESULT_ERROR`` is inserted right after the assistant step and the real
+    results of its turn, i.e. before the next non-tool step (§2) — otherwise every provider
+    rejects the open call (400 → 502) and the chat stays poisoned.
+
+    Replay-only and idempotent: nothing is written (``tool_calls.status`` stays ``pending``). A call
+    of the CURRENT turn (no ``user`` step after it) is left open — the ADR-025 barrier closes it.
+    A ``tool`` step persisted after the call was already closed synthetically (a late result
+    written before ADR-114 §3 rejected it) is skipped, so a call never gets two results.
+    Histories without superseded calls are replayed exactly as before.
+    """
+    # For each position: index of the nearest user step at or after it (None — current turn).
+    next_user: list[int | None] = [None] * len(steps)
+    upcoming: int | None = None
+    for i in range(len(steps) - 1, -1, -1):
+        if steps[i].role == "user":
+            upcoming = i
+        next_user[i] = upcoming
+    tool_indices: dict[str, list[int]] = {}
+    for i, step in enumerate(steps):
+        if step.role == "tool":
+            provider_id = step.payload.get("providerToolUseId")
+            if isinstance(provider_id, str):
+                tool_indices.setdefault(provider_id, []).append(i)
+
+    messages: list[NeutralMessage] = []
+    open_calls: list[tuple[str, str]] = []
+    closed_synthetically: set[str] = set()
+
+    def close_superseded(index: int) -> None:
+        # §1 (a): a user step must exist at/after this boundary; otherwise it is the current turn
+        # and its calls stay open for the ADR-025 barrier. §1 (b): a call whose real result still
+        # lies before that user step is not superseded and is replayed as before.
+        user_index = next_user[index]
+        if user_index is None:
+            return
+        still_open: list[tuple[str, str]] = []
+        for provider_id, name in open_calls:
+            if any(index < i < user_index for i in tool_indices.get(provider_id, [])):
+                still_open.append((provider_id, name))
+                continue
+            closed_synthetically.add(provider_id)
+            messages.append(
+                NeutralMessage(
+                    role="tool",
+                    provider_tool_use_id=provider_id,
+                    tool_name=name,
+                    error=dict(_SUPERSEDED_TOOL_RESULT_ERROR),
+                )
+            )
+        open_calls[:] = still_open
+
+    for index, step in enumerate(steps):
+        payload = step.payload
+        if step.role == "tool":
+            provider_id = payload.get("providerToolUseId")
+            if provider_id in closed_synthetically:
+                continue
+            open_calls[:] = [call for call in open_calls if call[0] != provider_id]
+            messages.append(_tool_step_message(payload))
+        elif step.role == "user":
+            close_superseded(index)
+            messages.append(NeutralMessage(role="user", content_blocks=payload["content"]))
+        elif step.role == "assistant":
+            close_superseded(index)
+            messages.append(NeutralMessage(role="assistant", content_blocks=payload["content"]))
+            open_calls.extend(_replayable_tool_calls(payload["content"]))
+    return messages
 
 
 @dataclass(frozen=True)
@@ -2435,6 +2551,22 @@ class ChatOrchestrator:
             else _effective_generation_mode("general", use_generation_v2=False)
         )
 
+        # ADR-114 §3: a late result for a turn whose barrier is still open but which a newer user
+        # step has superseded is rejected BEFORE anything is written — no tool step, no provider
+        # call, no billing. A turn already closed by the barrier keeps the ADR-025 idempotency.
+        turn_calls_before = await self._deps.repo.list_tool_calls_for_step(
+            session_id, message_step_id
+        )
+        open_client_ids = {
+            tc.provider_tool_use_id
+            for tc in turn_calls_before
+            if tc.tool_name not in SERVER_SIDE_TOOLS
+            and tc.tool_name not in GLOBAL_SERVER_SIDE_TOOLS
+            and tc.status not in ("completed", "errored")
+        }
+        if open_client_ids and await self._turn_superseded(session_id, message_step_id):
+            raise ConflictError("tool call superseded by a newer user message")
+
         # Apply each result (per-item idempotency, ADR-005): already completed/errored → skip
         # the write (do NOT overwrite, do NOT re-audit). New ones transition pending → done.
         for item, tool_call in resolved:
@@ -2506,6 +2638,13 @@ class ChatOrchestrator:
                 generation_mode=generation_mode,
                 documents_accumulated=None,
             )
+
+        # ADR-114 §3, check 2: this request closed the barrier → re-read the steps before the
+        # continuation; a user step that landed after check 1 supersedes the turn → no
+        # continuation, 409. Raising rolls the request's writes back (request-scoped session), so
+        # the tool step is not kept; any tool step that did land later is dropped by the replay.
+        if open_client_ids and await self._turn_superseded(session_id, message_step_id):
+            raise ConflictError("tool call superseded by a newer user message")
 
         mode = Mode(sess.mode)
         generation_credit_cost = _turn_credit_cost(sess.model or None)
@@ -3057,25 +3196,23 @@ class ChatOrchestrator:
         tool_use ↔ tool_result on replay, never a domain UUID).
         """
         steps = await self._deps.repo.list_steps(session_id)
-        messages: list[NeutralMessage] = []
-        for step in steps:
-            payload = step.payload
-            if step.role == "user":
-                messages.append(NeutralMessage(role="user", content_blocks=payload["content"]))
-            elif step.role == "assistant":
-                messages.append(NeutralMessage(role="assistant", content_blocks=payload["content"]))
-            elif step.role == "tool":
-                messages.append(
-                    NeutralMessage(
-                        role="tool",
-                        tool_call_id=payload.get("toolCallId"),
-                        provider_tool_use_id=payload["providerToolUseId"],
-                        tool_name=payload.get("toolName"),
-                        result=payload.get("result"),
-                        error=payload.get("error"),
-                    )
-                )
-        return messages
+        return _neutral_history_from_steps(steps)
+
+    async def _turn_superseded(self, session_id: uuid.UUID, message_step_id: uuid.UUID) -> bool:
+        """ADR-114 §3 predicate of the TURN: is there a user step after the turn's assistant step?
+
+        Fresh read of the steps. The anchor is the turn's assistant tool step
+        (``assistant_tool_step_id`` — the latest assistant step of ``message_step_id``); where the
+        turn's tool steps lie does not matter. No anchor → not superseded.
+        """
+        anchor_id = await self._deps.repo.assistant_tool_step_id(session_id, message_step_id)
+        if anchor_id is None:
+            return False
+        steps = await self._deps.repo.list_steps(session_id)
+        for index, step in enumerate(steps):
+            if step.id == anchor_id:
+                return any(later.role == "user" for later in steps[index + 1 :])
+        return False
 
     async def _credits_llm_with_failover(
         self,

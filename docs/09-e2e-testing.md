@@ -206,6 +206,7 @@ Anthropic; `StoreKit-test` = нужен `STOREKIT_TEST_MODE`; `—` = незав
 | E2E-TOOL-5 | `tool-result` с `result`, нарушающим схему tool | `422` | — |
 | E2E-TOOL-6 | **Parallel tool use ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** промпт, провоцирующий несколько client-side tool_use в одном ходе (напр. два `files.write`) | ответ `tool_call` с `toolCalls[]` (≥2); continuation к Claude **только** после батч `tool-result` на все вызовы (барьер хода); ровно 1 debit на весь ход | **Claude** |
 | E2E-TOOL-7 | **max_tokens-обрезка ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** запрос с искусственно малым `ANTHROPIC_MAX_TOKENS` (через env), провоцирующий `stop_reason="max_tokens"` | `200 status=blocked`, `blockReason=max_tokens`, `usage`/`messageStepId`/`stepId` присутствуют, `toolCalls` отсутствуют, **кредит не списан** | **Claude** |
+| E2E-TOOL-8 | Брошенный вызов инструмента ([ADR-114](adr/ADR-114-superseded-client-tool-calls-in-history-replay.md)): ход вернул `tool_call` клиентского инструмента, результат не прислан → новое сообщение в ту же сессию; затем `tool-result` на брошенный вызов | `200` на новое сообщение (не `502`); `409` `conflict` на запоздалый `tool-result` | — |
 
 ### 4.6 BYOK set/toggle/delete + routing (AC-5, BR-4)
 | ID | Сценарий | Ожидание | Зависимость |
