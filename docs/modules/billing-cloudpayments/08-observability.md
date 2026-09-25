@@ -166,6 +166,7 @@ def _level_for(result: str, reason: str | None) -> int:
 - `cloudpayments_pay_page_residual_brand` — WARNING (`pathClass`, `count`): в текстовом теле после замены хоста осталась подстрока `broadapps`.
 - `cloudpayments_pay_page_rewrite_failed` — WARNING (`pathClass`, `contentType`): текстовое тело не декодировалось, отдано без замены.
 - ЗАПРЕЩЕНО в структурных логах: путь `/cp/pay/<uuid>` целиком, query, cookie, тела, значения заголовков.
+- INFO-лог исходящего запроса `httpx` (`HTTP Request: …`): те же правила маскировки, что у access-лога ниже; прочие исходящие вызовы байт-в-байт. DEBUG-трейс `httpcore` не маскируется — [Q-113-5](../../99-open-questions.md).
 - Access-лог приложения (`uvicorn.access`): у путей под `/cp/pay/` — `/cp/pay/*` без uuid и query, в том числе когда query в пути нет, у `/payment/return` — без query; запись сохраняется. Edge-лог Traefik (`4xx`/`5xx`) путь не маскирует — принятый остаточный риск [ADR-113 §4](../../adr/ADR-113-ru-payment-page-proxy-on-instance-domain.md).
 
 ## Тестовые ориентиры (для qa) — вебхук

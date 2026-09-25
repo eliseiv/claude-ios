@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.observability.context import get_request_id, request_id_var, session_id_var, user_id_var
 from app.observability.redaction import redact
@@ -109,6 +110,50 @@ def install_access_log_redaction() -> None:
     )
 
 
+# The outgoing-request logger of httpx: every client call is logged at INFO as
+# ``'HTTP Request: %s %s "%s %d %s"'`` with args (method, url, http_version, status, reason).
+_HTTPX_LOGGER = "httpx"
+_HTTPX_URL_ARG = 1
+
+
+class OutgoingRequestLogRedactionFilter(logging.Filter):
+    """Mask the payment-page proxy URL in httpx's ``HTTP Request:`` line (ADR-113 §4).
+
+    The proxy's outgoing call targets ``https://<upstream>/cp/pay/<uuid>[?query]``; the uuid is the
+    access key to the payment page and must not reach any log. Same rules as the access-log mask:
+    a path under ``/cp/pay/`` becomes ``/cp/pay/*`` (tail and query replaced, with or without a
+    ``?``); ``/payment/return`` loses its query. Every other outgoing call (any other path) keeps
+    its line byte-for-byte, and its level is untouched. The record is rewritten, never dropped:
+    the fact of the call, the host and the upstream status stay observable.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) <= _HTTPX_URL_ARG:
+            return True
+        url = str(args[_HTTPX_URL_ARG])
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return True
+        if parts.path.startswith(PAY_PAGE_PATH_PREFIX):
+            masked = f"{parts.scheme}://{parts.netloc}{PAY_PAGE_PATH_PREFIX}*"
+        elif parts.path == PAY_PAGE_RETURN_PATH and "?" in url:
+            masked = f"{parts.scheme}://{parts.netloc}{PAY_PAGE_RETURN_PATH}"
+        else:
+            return True
+        record.args = (*args[:_HTTPX_URL_ARG], masked, *args[_HTTPX_URL_ARG + 1 :])
+        return True
+
+
+def install_outgoing_request_log_redaction() -> None:
+    """Attach the httpx URL-masking filter to the ``httpx`` logger once (idempotent)."""
+    outgoing = logging.getLogger(_HTTPX_LOGGER)
+    if any(isinstance(item, OutgoingRequestLogRedactionFilter) for item in outgoing.filters):
+        return
+    outgoing.addFilter(OutgoingRequestLogRedactionFilter())
+
+
 def configure_logging(level: str) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
@@ -117,6 +162,7 @@ def configure_logging(level: str) -> None:
     root.addHandler(handler)
     root.setLevel(level.upper())
     install_access_log_redaction()
+    install_outgoing_request_log_redaction()
 
 
 def get_logger(name: str) -> logging.Logger:
