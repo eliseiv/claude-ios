@@ -1,6 +1,6 @@
 # ADR-116 — Креденшлы и инфраструктурно-продуктовые настройки инстанса в БД-оверлее, управляемые из CRM без перезапуска
 
-- **Статус:** Accepted. **Состояние реализации, поэлементно, снято 2026-09-26 на `f38c9e6`:** (1) **код** — не написан: таблицы `admin_credentials` нет (`grep -n 'admin_credentials' src/app/models/tables.py` пуст), реестр `src/app/instance_config/settings_registry.py` объявляет прежние 14 строк; (2) **слито в `main` / выкачено** — нечего; (3) **ревью** — не измеряется этим проходом, переносится без изменений. До реализации действует [ADR-099 §8](ADR-099-crm-admin-economics-and-instance-settings.md) в прежней редакции.
+- **Статус:** Accepted. **Состояние реализации, поэлементно, снято 2026-09-26 (рабочее дерево поверх `f38c9e6`):** (1) **код написан в рабочем дереве и НЕ закоммичен** — `git status --porcelain` показывает неотслеживаемые `src/app/instance_config/credentials.py`, `src/app/instance_config/effective.py`, `migrations/versions/20260926_0040_admin_credentials.py` и изменённые `src/app/admin/economics_service.py`, `src/app/subscription/storekit.py`, `src/app/instance_config/snapshot.py`, `settings_registry.py`, `src/app/observability/metrics.py` и др.; реестр настроек объявляет 21 строку (`grep -c 'setting_id=SETTING_' src/app/instance_config/settings_registry.py` = 21); `FEATURES` содержит `credentials.read`/`credentials.write` (`src/app/admin/economics_service.py:178-179`); (2) **в `main` не слито, не выкачено**; (3) **ревью** — не измеряется этим проходом. Известные расхождения кода с этим ADR перечислены там, где норма их касается (§4.2, §2.3), и переданы `backend`. До слияния и выката на инстансах действует [ADR-099 §8](ADR-099-crm-admin-economics-and-instance-settings.md) в прежней редакции.
 - **Дата:** 2026-09-26
 - **Супессирует частично:** [ADR-099 §8](ADR-099-crm-admin-economics-and-instance-settings.md) — правило отбора поверхности (предикат `CRM ADR-110 §4`, применённый поимённо) и классы §8.2 **(а)** (часть креденшлов), **(д)** (часть параметров StoreKit/CloudPayments), **(ж)** (`LLM_PROVIDER`/`LLM_PROVIDERS`) — в объёме §1 ниже. Тело ADR-099 не переписывается; в его шапке стоит ссылка сюда. Остальное в ADR-099 (оверлеи, снимок, `reason`, 14 объявленных строк, классы (б), (в), (г), (е), (з)) действует без изменений.
 - **Сторона CRM:** та же норма в `broad-crm` живёт в **broad-crm ADR-110 §4** («Что в эту поверхность НЕ входит и почему»); её супессия — обязанность ADR `broad-crm`, который проектируется после этого (нумерация репозиториев независима). Новая версия контракта CRM для `/v1/admin/credentials` получает номер там же — следующий после максимального занятого **по всему `broad-crm`** (v1.3 живёт в модуле `backend-costs`, а не рядом с v1.1/v1.2/v1.4/v1.5).
@@ -85,8 +85,12 @@
   | в значении есть пробельный или управляющий символ — ограничение **не объявлено** и объявить его нечем: замороженный набор ключей `constraints` — `max_length`/`min_items`/`max_items` (broad-crm ADR-110 §5) | `400` | `undeclared_bound` |
   | межэлементный инвариант §4.3 | `400` | `conflict` |
   | в окружении инстанса нет величины, без которой запись опасна (§4.3, `proxy.api_key`) | `400` | `environment_missing` |
+  | пуст `KMS_LOCAL_MASTER_KEY` — записать значение зашифрованным нечем | `400` | `environment_missing` |
+  | гонка первой записи: два запроса одновременно создают строку одного `credential_id` (второй падает на первичном ключе) | `409` | `conflict` |
 
-- проверка ключа сетевым вызовом провайдера **не делается** (ключ может быть заведён до пополнения счёта) — Q-116-2;
+  ⚠️ **Строка про `KMS_LOCAL_MASTER_KEY` — требование к коду, которое он сегодня не выполняет.** `get_kms_client()` при пустом ключе бросает `RuntimeError` (`src/app/byok/kms.py`), а `patch_credential` зовёт его без перехвата (`src/app/admin/economics_service.py`, ветка записи: `encrypt_credential(get_kms_client(), …)`), поэтому ответ сейчас `500`. Требуемое поведение — проверка **до** записи и `400 environment_missing`: мастер-ключ — величина окружения инстанса (E2), CRM её не правит, лечится доступом к серверу. Это третий производитель `environment_missing` (к двум из §4.3). Передано `backend`. Гонка первой записи уже даёт `409` — тем же механизмом `_flush_or_conflict`, что у ручек ADR-099.
+
+- проверка ключа сетевым вызовом провайдера **не делается** — решение, [Q-116-2](../99-open-questions.md) закрыт. Ключ может быть заведён до пополнения счёта, а проверка на записи отвергла бы годный ключ. Такая проверка и не доказывала бы ничего о следующей минуте: неработающий ключ всё равно виден по отказам хода (`llm_upstream_errors_total`) и по ротации на резервный ([ADR-074](ADR-074-provider-key-failover.md));
 - авторизация, корзина лимита `rl:admin_econ`, правило «сначала факт, потом ответ» — как у ручек ADR-099.
 
 #### §2.4. Чтение обратно — только метаданные, значения — никогда
@@ -104,7 +108,7 @@
 
 #### §2.5. Аудит и логи
 
-Действия `admin_credential_set` и `admin_credential_cleared` (в стиле действий ADR-099); деталь — `credential_id`, `source` до→после, `fingerprint` до→после. **Значение — ни в аудит, ни в лог, ни в метрику, ни в текст отказа.** Все имена полей подпадают под денилист redaction (`key`/`secret`/`token`).
+Действия `admin_credential_set` и `admin_credential_cleared` (`src/app/audit/service.py`). Деталь аудита — ключи **`scope`** (`credentials`), **`id`** (идентификатор креденшла), **`source`** и **`fingerprint`** в виде «до->после», **`actorClaim`** (`_audit_credential`, `src/app/admin/economics_service.py`). ⚠️ **Поле называется `id`, а не `credential_id`, намеренно:** денилист редакции `src/app/observability/redaction.py` (`_DENY_SUBSTRINGS`, в нём есть `credential`) стёр бы значение поля с таким именем, и аудит потерял бы, **какой** креденшл правили. Имена полей деталей обязаны лежать вне денилиста, а **значение** креденшла не попадает ни в аудит, ни в лог, ни в метрику, ни в текст отказа.
 
 #### §2.6. Как CRM узнаёт, что инстанс поддерживает `/credentials`
 
@@ -128,7 +132,7 @@
 |---|---|---|---|---|
 | `llm.provider` | `enum` | `openai`, `anthropic` | `LLM_PROVIDER` | `Settings._normalized_llm_provider()` / `credits_providers()`, `chat/llm_client.py` (`get_llm_client`, `get_generation_llm_client`), `byok/service.py`, `api_gateway/routers/chat.py` |
 | `llm.dual_enabled` | `bool` | — | `true`, если `LLM_PROVIDERS` называет второй провайдер | `credits_providers()` ([ADR-073](ADR-073-dual-credits-llm-providers.md)): `true` ⇔ второй провайдер = тот из `openai`/`anthropic`, что не `llm.provider` |
-| `storekit.mode` | `enum` | `sandbox`, `production` | `production`, если `APPSTORE_ENVIRONMENT=production`, иначе `sandbox` | `subscription/storekit.py` (`StoreKitVerifier`), §4.2 |
+| `storekit.mode` | `enum` | `sandbox`, `production` | без строки оверлея — **отображение по env-флагам**, §4.2 «Что показывается без строки»: `sandbox` / `production` при точном совпадении с колонкой, иначе `null` | `subscription/storekit.py` (`StoreKitVerifier`), §4.2 |
 | `storekit.bundle_id` | `string` | `max_length: 255` | `APPSTORE_BUNDLE_ID` | проверка `bundleId` транзакции (§4.2); `apple_audience_resolved()` (Sign in with Apple, фолбэк при пустом `APPLE_AUDIENCE`) |
 | `cloudpayments.app_id` | `string` | `max_length: 128` | `CLOUDPAYMENTS_APP_ID` | `billing_cloudpayments/{checkout,experiments}.py`; гейт RU-пути (`config.py`: `app_id ∧ api_token`) |
 | `cloudpayments.pay_page_proxy_enabled` | `bool` | — | `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED` | `billing_cloudpayments/pay_page.py`, `api_gateway/routers/cloudpayments_pay_page.py` ([ADR-113](ADR-113-ru-payment-page-proxy-on-instance-domain.md)) |
@@ -144,6 +148,22 @@
 | Привязка цепочки x5c к корню Apple | **нет** (`STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION=true`) | **да** (корни из `APPSTORE_ROOT_CERT_DIR`) |
 | Тестовая ветка HS256 | вкл. (`STOREKIT_TEST_MODE=true`; действует, только если задан `STOREKIT_TEST_SECRET`) | **выкл.** |
 | Проверка `bundleId` транзакции | **нет** (независимо от `storekit.bundle_id`) | **да**, против `storekit.bundle_id` |
+
+⛔ **Таблица действует ТОЛЬКО когда в оверлее есть строка `storekit.mode`.** Без неё верификатор ведёт себя **бит-в-бит как до этого ADR** — по флагам из env, независимо друг от друга:
+
+- `bundleId` сверяется, если `APPSTORE_BUNDLE_ID` непуст, **при любом** `APPSTORE_ENVIRONMENT`;
+- тестовая ветка HS256 активна, если `STOREKIT_TEST_MODE=true` и задан `STOREKIT_TEST_SECRET`, **при любом** `APPSTORE_ENVIRONMENT`;
+- привязка цепочки пропускается, если `STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION=true` и `APPSTORE_ENVIRONMENT ≠ production` (прежний второй барьер).
+
+Иначе выкат изменил бы проверку покупок на инстансах, где из CRM ничего не трогали, — ровно тот класс регресса, против которого ADR-099 держит правило «пустой оверлей = сегодняшний день бит-в-бит». ⚠️ **Код сейчас эту норму нарушает, передано `backend`:** `src/app/subscription/storekit.py:153` (`self._check_bundle_id = production`) выключает сверку `bundleId` на env-песочнице с непустым `APPSTORE_BUNDLE_ID`, а `:159` (`… and not production`) выключает тестовую ветку на env-production с включённым флагом. Условия `production` в этих строках обязаны зависеть от наличия строки `storekit.mode` в снимке, а не от `APPSTORE_ENVIRONMENT` (регрессия подтверждена `backend-reviewer`, исправляет `backend`).
+
+**Что показывается в `GET /v1/admin/settings` без строки `storekit.mode`.** На флоте есть env-комбинации, не совпадающие ни с одной колонкой таблицы: песочница без тестовой ветки, песочница с тестовой веткой, но с проверкой цепочки, production с тестовой веткой, песочница с заданным bundle. Показать такому инстансу `sandbox` или `production` значило бы назвать режим, которого на инстансе нет. Оператор, поверивший надписи, не узнает, что проверка покупок работает иначе, чем он видит. **Решение:**
+
+- `value = "sandbox"` — **только** если env совпадает с колонкой `sandbox` точно: `APPSTORE_ENVIRONMENT ≠ production`, `STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION=true`, `STOREKIT_TEST_MODE=true`, `APPSTORE_BUNDLE_ID` пуст (нынешняя база флота из `provision.sh`);
+- `value = "production"` — **только** если `APPSTORE_ENVIRONMENT=production`, `STOREKIT_TEST_MODE=false` и `APPSTORE_BUNDLE_ID` непуст (флаг пропуска цепочки в production код игнорирует и в сравнение не входит);
+- **иначе `value = null`** — «режим из CRM не задан, флаги сервера не совпадают ни с одним из двух режимов». `null` допустимое значение контракта (broad-crm ADR-110 §5: `value` допускает `null`), поэтому новое значение в `options` не нужно. Значение вне `options` сделало бы строку невозвратимой: выбрать его обратно нечем (правило реестра, `settings_registry.py`, ADR-099 §8). Отдельный признак рядом со строкой не добавляется: состав полей элемента заморожен контрактом.
+- `description` строки несёт фиксированную фразу: «Пусто — режим из CRM не задан, а настройки сервера не совпадают ни с одним из двух режимов; выбор режима заменит их». Точные флаги оператору не показываются: это конфигурация сервера, а решение оператора — выбрать один из двух режимов.
+- **Выбор значения из CRM записывает строку оверлея**, и с этого момента действует таблица выше. Проверки §4.3 применяются как к любой записи.
 
 - **`sandbox` = нынешняя база флота** (`infra/fleet/provision.sh` режим `new`: `APPSTORE_ENVIRONMENT=sandbox`, `STOREKIT_TEST_MODE=true`, `STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION=true`, `APPSTORE_BUNDLE_ID=""`). **Почему это и есть «отключена вся проверка подписи»:** без привязки к корню Apple подпись проверяется ключом листового сертификата, лежащего **в самой транзакции** (`_verify_real_transaction`, `src/app/subscription/storekit.py`), — транзакция, подписанная любым самодельным сертификатом, проходит. Проверки подлинности нет; остаётся только проверка внутренней целостности JWS. Буквальный режим «не разбирать подпись вовсе» не вводится: он не снимает ни одной проверки подлинности сверх уже снятых и добавил бы третью ветку кода. Трактовка подтверждена владельцем 2026-09-26: «ДА, все верно архитектор понял» ([Q-116-1](../99-open-questions.md) закрыт).
 - **`storekit.bundle_id` в `sandbox` сохраняется**, хоть и не проверяется у транзакций: он же — фолбэк аудитории Sign in with Apple. Сегодняшнее обнуление `APPSTORE_BUNDLE_ID` в песочнице отключало и этот фолбэк; с разделением проверки и значения фолбэк работает в обоих режимах.
@@ -163,6 +183,10 @@
 | `PATCH credentials/proxy.api_key` | действующий `PROXY_WEBHOOK_SECRET` пуст (ключ прокси служит ключом подписи колбэков, §2.1) — **`400`, `reason=environment_missing`** |
 | `storekit.mode = production` | корневые сертификаты Apple не загружены (`APPSTORE_ROOT_CERT_DIR` пуст) — **`400`, `reason=environment_missing`** (новое значение, см. ниже) |
 
+**Порядок проверок для `storekit.mode = production`:** сначала `conflict` (пуст `storekit.bundle_id`), затем `environment_missing` (не загружены корни Apple) — `src/app/admin/economics_service.py`, ветка `SETTING_STOREKIT_MODE`. Порядок нормативный: пустой bundle чинится из той же формы CRM, корни — только на сервере, поэтому оператор сначала видит то, что может исправить сам.
+
+**`llm.dual_enabled` → `LLM_PROVIDERS`:** `true` задаёт `LLM_PROVIDERS` = второй провайдер пары (тот, что не `llm.provider`), `false` — пустое значение (`overlay_updates`, `src/app/instance_config/effective.py`). Включит ли код второй провайдер на деле, решает `credits_providers()` по его действующему ключу.
+
 **«Действующий ключ» определён ОДИН раз — так, как его уже определяет код:** непустой **основной** ключ провайдера (`X.api_key`) после наложения оверлея, ровно предикат `Settings._credits_api_key_configured` (`src/app/config.py:1404-1407`), по которому `credits_providers()` (`:1421-1439`) решает, включать ли второй провайдер. Резервный ключ (`X.api_key_backup`) действующим **не считается**: код строит второй провайдер только при непустом основном, а резервный работает лишь как второе звено цепочки ротации (`openai_api_key_chain()`, `anthropic_api_key_chain()`, [ADR-074](ADR-074-provider-key-failover.md)). Меняется сторона документа, код остаётся прежним; правка резервного ключа инварианта не нарушает никогда.
 
 **`environment_missing` — новое место несоответствия, а не похожий случай** (правило [ADR-099 §10.0](ADR-099-crm-admin-economics-and-instance-settings.md): новое место расширяет перечень одним значением). Предикат: форма, объявленные и необъявленные границы, данные источника и соседние элементы — в порядке, но в **окружении инстанса** (файл на сервере или величина `.env`, которую CRM не правит) нет того, без чего значение нерабочее или опасное. Производителей два: корневые сертификаты Apple для `storekit.mode = production` и `PROXY_WEBHOOK_SECRET` для `PATCH proxy.api_key`. Отнести к `conflict` нельзя: лечится не правкой другого элемента в CRM, а доступом к серверу. [ADR-115 §5](ADR-115-crm-managed-instance-and-server-lifecycle.md) требует класть сертификат и генерировать `PROXY_WEBHOOK_SECRET` всегда, поэтому на инстансах ADR-115 обе ветки недостижимы — они защищают унаследованные инстансы.
@@ -176,6 +200,11 @@
 - **Снимок** ([ADR-099 §2](ADR-099-crm-admin-economics-and-instance-settings.md), `src/app/instance_config/snapshot.py`) дополнительно читает `admin_credentials` и расшифровывает значения в памяти процесса — ровно там, где сегодня живут значения из `.env`. Окно применения — до `ADMIN_OVERRIDES_REFRESH_SECONDS` (дефолт 30 с) на каждый воркер; наружу — `effective_after_seconds`.
 - **Клиенты-синглтоны пересоздаются по отпечатку входов:** клиенты, захватывающие ключ при создании (`_anthropic_singleton`, `_openai_singleton` в `chat/llm_client.py`/`chat/anthropic_client.py`, `get_speech_client()`, `get_embedding_client()`, `get_moderation_service()` в `deps.py`/`memory/embedding.py`, `StoreKitVerifier`), при смене отпечатка своих входов создаются заново при следующем обращении; вызов, уже идущий на старом клиенте, завершается на нём. Клиенты, создаваемые на вызов (`FalClient`, `ProxyClient` в `deps.py`, `TranscriptionClient`), получают действующие настройки без дополнительной меры.
 - **Отказ расшифровки строки** (мастер-ключ сменён, строка повреждена): строка игнорируется, лог `admin_credential_undecryptable` (ERROR) + счётчик; действует **прежнее** значение снимка, если оно было (правило ADR-099 «отказ обновления не откатывает»), иначе — env. Переход на env при холодном старте назван: он может переключить инстанс на старый ключ из `.env` — поэтому тревога по счётчику обязательна.
+- **Строка `admin_credentials` с неизвестным `credential_id`** (снята из реестра или повреждена) при сборке снимка игнорируется: лог `admin_override_value_ignored` с `reason=unknown_id` (`src/app/instance_config/snapshot.py`), как у настроек ADR-099.
+- **Наблюдаемость (у каждой серии назван producer → consumer):**
+  - `admin_credential_undecryptable_total{credential_id}` (counter; лейбл — идентификатор из закрытого реестра §2.1, 8 значений; `src/app/observability/metrics.py`) — producer: ветка отказа расшифровки при сборке снимка; consumer: **тревога `AdminCredentialUndecryptable`** — `increase(admin_credential_undecryptable_total[15m]) > 0`, severity `critical`. Инстанс работает не на ключе, выбранном в CRM (прежнее значение снимка или ключ из `.env`), а деньги за ход при этом уходят на чужой счёт или ход падает. Правило — в `infra/observability/rules/alerts.yml`, передано `devops`;
+  - `admin_overrides_active{scope="credentials"}` — число строк оверлея креденшлов; тот же gauge, что у ADR-099, с новым значением `scope`;
+  - `admin_override_rejected_total{scope="credentials",reason}` — отказы записи креденшлов; `reason` из того же разбиения ADR-099 §10.0 с добавленным `environment_missing`.
 
 ### §6. Что остаётся от обоснований broad-crm ADR-110 §4 — честный баланс
 
@@ -213,12 +242,10 @@
 
 ## Открытые вопросы
 
-- **Q-116-2** — проверять ли ключ провайдера сетевым вызовом при записи.
-
-Закрыты решениями владельца 2026-09-26: Q-116-1 (`sandbox` = нынешняя база флота), Q-116-3 (отдельного admin-ключа нет). Формулировки и дефолты — [99-open-questions.md](../99-open-questions.md#открытые-вопросы-жизненного-цикла-инстансов-и-серверов-2026-09-26-adr-115-adr-116).
+Открытых вопросов нет. Закрыты 2026-09-26: Q-116-1 и Q-116-3 — решениями владельца (`sandbox` = нынешняя база флота; отдельного admin-ключа нет), Q-116-2 — решением по существу (§2.3: сетевой проверки ключа при записи нет). Формулировки — [99-open-questions.md](../99-open-questions.md#открытые-вопросы-жизненного-цикла-инстансов-и-серверов-2026-09-26-adr-115-adr-116).
 
 ## Фронт работ
 
-1. **`backend`:** миграция `admin_credentials`; `credentials.read`/`credentials.write` в `FEATURES` (§2.6); расшифровка в снимке; «действующие настройки» и перевод всех потребителей величин §2.1/§4.1 на них (свип по имени поля, в т.ч. алиасов); пересоздание синглтонов по отпечатку; ручки `GET`/`PATCH /v1/admin/credentials`; 7 строк реестра настроек; инварианты §4.3 и значение `reason=environment_missing`; режим StoreKit §4.2; аудит и лог-события §2.5/§6.
+1. **`backend`** (код написан, не закоммичен; остаются: поведение StoreKit при пустом оверлее — §4.2, `400 environment_missing` при пустом `KMS_LOCAL_MASTER_KEY` — §2.3): миграция `admin_credentials`; `credentials.read`/`credentials.write` в `FEATURES` (§2.6); расшифровка в снимке; «действующие настройки» и перевод всех потребителей величин §2.1/§4.1 на них (свип по имени поля, в т.ч. алиасов); пересоздание синглтонов по отпечатку; ручки `GET`/`PATCH /v1/admin/credentials`; 7 строк реестра настроек; инварианты §4.3 и значение `reason=environment_missing`; режим StoreKit §4.2; аудит и лог-события §2.5/§6.
 2. **`qa`:** по каждому инварианту §4.3 — кейс отказа и кейс успеха; применение без рестарта (смена ключа видна новому вызову в окне `effective_after_seconds`); отсутствие значения в ответе, аудите и логах; `sandbox`/`production` — по четыре строки §4.2.
 3. **`broad-crm`:** супессия broad-crm ADR-110 §4; определение поддержки по `features` (§2.6); новая версия контракта для `/v1/admin/credentials`; хранение ключей и сравнение по `fingerprint`.
