@@ -3,6 +3,18 @@
 ## Артефакт
 Один Docker-образ (multi-stage, base `python:3.12-slim`), запускается через Gunicorn + UvicornWorker. Stateless — состояние в PostgreSQL/Redis. Образ **собирается на сервере** из исходников в `/opt/<service>` (явный `docker compose build api migrate`, затем `up -d --no-build` — см. [§Процедура деплоя](#процедура-деплоя-github-actions--ssh)), не пушится из registry ([ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)).
 
+## Целевой жизненный цикл флота ([ADR-115](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md), [ADR-116](adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md)) — не реализован
+
+Решения владельца 2026-09-26. **До выполнения фронта работ ([ADR-115 §15](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md)) действуют разделы ниже в нынешнем виде**; места, которые решение меняет, помечены ссылкой. Кратко, что меняется:
+
+- **Порядок:** новый CI (inventory, GHCR, пересоздаёт только `api`, `.role` не читает) выкатывается **первым** — до любых изменений Postgres и до удаления `.role` ([ADR-115 §11](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md), фаза 3 — после импорта состава в CRM, фаза 2). Прежний CI пересоздал бы Postgres на всех серверах разом, а без `.role` поднял бы `api` на резервах. `wal-g` подключается к Postgres отдельным оверлеем поинстансно, а не правкой `docker-compose.prod.yml`.
+- **Размещение:** инстанс живёт на одном сервере без резерва; репликация A/B снимается порядком фаз [ADR-115 §11](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md) — резерв инстанса **не** останавливается, пока у него нет полной копии в хранилище, работающего архива WAL и успешной проверки восстановления, а слот `standby_slot` удаляется **тем же шагом**, что останавливается резерв.
+- **Состав флота** — в CRM, а не в репозитории: `INSTANCES`, `infra/fleet/instances.tsv`, `infra/fleet/ports.txt` уходят; CI берёт inventory у CRM и **краснеет**, если CRM недоступна или хоть один `active` инстанс не получил образ прогона ([ADR-115 §10](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md)).
+- **Образ** собирается один раз в CI и публикуется в GHCR; серверы только тянут его. CI **не** пересоздаёт `postgres`/`redis`.
+- **Бэкапы:** `wal-g` в образе Postgres — ночная полная копия + непрерывный архив WAL в один бакет Hetzner Object Storage (`hel1`), шифрование на клиенте, окно восстановления 30 суток, еженедельная проверка восстановления ([ADR-115 §8](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md)).
+- **Создание, стирание, маршрут на R** — операции CRM через инструменты флота по SSH ([ADR-115 §7, §9, §6, §13](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md)); восстановление после отказа сервера — ручной runbook [ADR-115 §12](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md).
+- **`.env`:** классы E1–E5 [ADR-115 §5](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md); ключи провайдеров, CloudPayments, Adapty, fal, прокси, провайдер/dual и режим StoreKit переезжают в БД-оверлей и меняются из CRM без перезапуска ([ADR-116](adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md)).
+
 ## Топология MVP — общий сервер за внешним Traefik
 Deploy-target зафиксирован ([ADR-017](adr/ADR-017-shared-server-traefik-deploy.md), решение владельца инфраструктуры 2026-06-02, ревизует [TD-005](100-known-tech-debt.md)): сервис размещается на **общем Linux-сервере** (Ubuntu 22.04, `87.239.135.154`, root), где уже работают другие сервисы (`music-backend`) и **общий edge-прокси Traefik** в `/opt/edge`. Наш сервис — каталог `/opt/<service>` (например `/opt/claude-ios`), встраивается в Traefik через docker-labels и внешнюю сеть `web`.
 
@@ -24,7 +36,7 @@ graph TD
 Состав нашего `docker compose`-стека в `/opt/<service>` (Traefik — **вне** нашего стека):
 - **Traefik** — НЕ наш контейнер. Общий edge-прокси владельца сервера (`/opt/edge`): держит порты 80/443, терминирует TLS, авто-выпускает Let's Encrypt-сертификаты, роутит по доменам. Наш стек **не содержит** reverse-proxy и **не управляет** TLS/ACME.
 - **api** — Docker-образ приложения (Gunicorn + UvicornWorker). `expose: 8000` (uvicorn/gunicorn), **без** `ports:` для 80/443 (конфликт с Traefik запрещён). Подключён к двум сетям: `web` (`external: true`, общая с Traefik) и `default` (внутренняя для PG/Redis). Снаружи доступен **только** через Traefik по сети `web`.
-- **postgres** — PostgreSQL 16 в контейнере с persistent volume. **Только** в сети `default`, **без публикации портов** (бэкап — `pg_dump` по cron на хосте + offsite-копия).
+- **postgres** — PostgreSQL 16 в контейнере с persistent volume. **Только** в сети `default`, **без публикации портов** (бэкап — `pg_dump` по cron на хосте + offsite-копия). ⚠️ **Факт на 2026-09-26: бэкапов нет** — в `infra/` `pg_dump` встречается только в разовом переносе (`infra/fleet/import-from-old.sh`), вторая копия данных — реплика на соседнем сервере ([MIGRATION-3-SERVERS.md](MIGRATION-3-SERVERS.md)). Целевая схема бэкапов — [ADR-115 §8](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md).
 - **redis** — Redis 7 в контейнере (rate limit, idempotency, policy cache). **Только** в сети `default`, **без публикации портов**.
 - **migrate** — одноразовый job (`alembic upgrade head`), запускается до старта `api` при каждом релизе.
 - Single-region, single-host (общий с другими сервисами). Состояние — в volume PostgreSQL + Redis; образ `api` — stateless. **С [ADR-109](adr/ADR-109-media-asset-local-storage-30d.md) (код в `main` (`f90d871`), выкачен (CI `36015691825` на `48f9018`, джоб `ssh deploy` — `success`)):** при включённом `MEDIA_ASSET_STORAGE_DIR` `api` пишет копии результатов генерации в bind-mount `/opt/<инстанс>/media-assets` (30 дней); каталог не входит в бэкап `pg_dump` и на резерв не реплицируется ([TD-062](100-known-tech-debt.md)).
@@ -78,6 +90,8 @@ Reverse-proxy / LB (в нашей схеме — **внешний Traefik**) **�
 **Изоляция origin (операционно, [Q-010-3](99-open-questions.md), не блокер):** старт — single-origin `/v1/preview/*` + sandbox-заголовки (самодостаточно). Prod-рекомендация — вынести превью на отдельный поддомен `preview.<domain>`, чтобы даже при обходе CSP пользовательский JS не имел same-origin доступа к API. При вводе поддомена то же требование pass-through заголовков и запрет cookies сохраняется.
 
 ## Конфигурация (env)
+> **Классы переменных и БД-оверлей ([ADR-115 §5](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md), [ADR-116](adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md), не реализовано):** после реализации `OPENAI_API_KEY`/`OPENAI_API_KEY_BACKUP`, `ANTHROPIC_API_KEY`/`ANTHROPIC_API_KEY_BACKUP`, `FAL_API_KEY`, `PROXY_API_KEY`, `CLOUDPAYMENTS_API_TOKEN`, `ADAPTY_WEBHOOK_SECRET`, `LLM_PROVIDER`/`LLM_PROVIDERS`, `APPSTORE_ENVIRONMENT`/`APPSTORE_BUNDLE_ID`/`STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION`/`STOREKIT_TEST_MODE` (через `storekit.mode`), `CLOUDPAYMENTS_APP_ID`, `CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED`, `MAPS_TOOLS_ENABLED` берутся **сначала из БД-оверлея**, затем из `.env`: после первой записи величины из CRM правка её в `.env` перестаёт действовать. Материал подписи и шифрования (`KMS_LOCAL_MASTER_KEY`, JWT-ключи, `ADMIN_API_SECRET`, `PREVIEW_URL_SECRET`, `METRICS_SCRAPE_TOKEN`, `PROXY_WEBHOOK_SECRET`) остаётся только в `.env`.
+
 | Переменная | Назначение |
 |---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://<POSTGRES_USER>:<POSTGRES_PASSWORD>@postgres:5432/<POSTGRES_DB>` — **собирается из `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` целиком**; все три должны совпадать со значением URL. На клоне — свои значения (см. [clone `.env`-контракт](#clone-env-контракт-ключи-claude-ios)). |
@@ -286,6 +300,8 @@ Devops заводит/обновляет артефакты под тополо�
 > - [`infra/legacy/deploy-vps.sh`](../infra/legacy/deploy-vps.sh) — VPS/SSH-специализация под registry+immutable-tag; заменена GitHub Actions SSH workflow (per-instance loop: `git pull --ff-only` → explicit `build` → `migrate` → `up -d --no-build` → readiness-gate, см. [§Процедура деплоя](#процедура-деплоя-github-actions--ssh)). DEPRECATED.
 
 ## Процедура деплоя (GitHub Actions → SSH)
+> **Целевая схема — [ADR-115](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md) (2026-09-26, НЕ реализована на `f38c9e6`).** Образ собирается один раз в CI и публикуется в GHCR, состав берётся из inventory CRM, `.role` не читается, `postgres`/`redis` деплоем не пересоздаются — [ADR-115 §10](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md). До реализации действует описание ниже.
+
 Деплой на общий сервер ([ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)). Образ **собирается на сервере** из исходников (нет registry/immutable-tag).
 
 **Триггер деплоя — gated job в `ci.yml`, не отдельный параллельный workflow.** `deploy`-job в [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) объявлен с `needs: [quality, test, build-image]` и `if: github.ref == 'refs/heads/main' && success()`: deploy выполняется **только после** успешного прохождения всех CI-jobs (lint/format/type-check + test + build-image) на ветке `main`. При красном CI (любой fail в `quality`/`test`/`build-image`) deploy **не стартует** — нет выкатки непрошедшего проверки кода. Ручной запуск без нового коммита — через `deploy.yml` (`workflow_dispatch`, см. [§Prod-артефакты](#prod-артефакты-источник-истины--реальные-файлы-в-репозитории)).
@@ -353,6 +369,8 @@ GitHub Secrets (обязательны для workflow): `SSH_HOST` — адре
 > **Источник истины готовности — readiness-gate, не rc `up`.** Переход с прежнего совмещённого `docker compose up -d --build` на явные шаги build → migrate → `up -d --no-build` → readiness-gate устранил инцидент: совмещённая команда фьюзила в один exit code три разные операции (BuildKit-сборку, one-shot `migrate`-зависимость с `restart:"no"`, старт `api`) и отдавала транзиентный non-zero сразу после `api Started`, что под прежним `set -e`/`script_stop:true` обрывало loop **до** второго инстанса и ложно краснило job, хотя `api` поднимался healthy. Теперь build/migrate — явные шаги с rc-проверкой (ловят **реальные** ошибки), а готовность `api` верифицируется readiness-gate'ом (а не ненадёжным rc `up`).
 
 ## Единая сборка образа + порционная выкатка (инцидент 2026-08-25)
+> **Целевая схема — [ADR-115](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md) (2026-09-26, НЕ реализована на `f38c9e6`).** Сборка на сервере заменяется публикацией образа в GHCR одним джобом CI; порционность выкатки сохраняется ([ADR-115 §10.2](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md) п. 3).
+
 
 **Образ собирается ОДИН раз на весь цикл, инстансы только проставляют ему тег.**
 
@@ -379,6 +397,8 @@ GitHub Secrets (обязательны для workflow): `SSH_HOST` — адре
 **Связь с правилом ёмкости.** Порционность лечит пик, а не причину: 27 инстансов на шести ядрах остаются перегруженной конфигурацией. Решение о ёмкости (больше ядер либо разнос по машинам) — за владельцем сервера.
 
 ## Мульти-инстанс / клонирование сервиса
+> **Целевая схема — [ADR-115](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md) (2026-09-26, НЕ реализована на `f38c9e6`).** Провижининг инстанса (включая `infra/fleet/provision.sh new`) заменяется операцией CRM «Создать инстанс» ([ADR-115 §7](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md)), вывод — «Стереть» ([ADR-115 §9](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md)). До реализации действует процедура ниже.
+
 
 > Расширение [ADR-017](adr/ADR-017-shared-server-traefik-deploy.md) (раздел «Мульти-инстанс», 2026-06-10). Паттерн портирован из соседнего сервиса lovable-ai и **упрощён** под архитектуру claude-ios (`api`+`postgres`+`redis`+`migrate`+per-instance `.secrets/` JWT keypair — без build-фермы, egress-proxy, worker/beat, S3, host-dir провижининга). Статус выката второго инстанса — [Q-017-3](99-open-questions.md).
 
@@ -534,6 +554,8 @@ docker compose -f docker-compose.prod.yml --env-file .env config
 - **Top-level `name:` в compose не добавлять** — он переопределит basename для живого инстанса.
 
 ## CI/CD-контракт: INSTANCES-loop (мульти-инстанс)
+> **Целевая схема — [ADR-115](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md) (2026-09-26, НЕ реализована на `f38c9e6`).** Хардкод `INSTANCES` в обоих workflow и эта таблица уходят: CI получает состав от CRM (`FLEET_INVENTORY_URL` + `FLEET_INVENTORY_TOKEN`), падает явно при недоступности CRM, пустом или противоречивом ответе и сверяет образ каждого `active` инстанса после выкатки ([ADR-115 §10](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md)). CRM импортирует состав из живой таблицы ролей на R, а не из этой таблицы ([ADR-115 §11](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md) фаза 2) — до выкатки нового CI. Токены: `FLEET_INVENTORY_TOKEN` (чтение состава) и `FLEET_DEPLOY_REPORT_TOKEN` (запись `last_deployed_sha` после зелёного прогона). **До реализации эта секция остаётся нормативной.**
+
 
 > Спецификация для devops. Существующий single-instance deploy переходит на итерацию по списку инстансов с **сохранением backward-compat**.
 
@@ -695,6 +717,8 @@ GitHub Secrets для деплоя: `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`. �
 - `GET /metrics` — Prometheus exposition (защищён сетевой политикой / scrape-токеном).
 
 ## Откат
+> **Целевая схема — [ADR-115](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md) (2026-09-26, НЕ реализована на `f38c9e6`).** Откат кода — перевыкатка прежнего тега образа из GHCR; откат данных — восстановление на момент времени в пределах 30 суток по runbook [ADR-115 §12](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md).
+
 - Образ собирается на сервере из исходников (нет immutable registry-tag, [ADR-017](adr/ADR-017-shared-server-traefik-deploy.md)). Rollback = `git checkout <prev-commit>` в `/opt/<service>` + пересборка/перезапуск. Ручной rollback использует ту же последовательность, что и deploy-loop — **build → (при необходимости) migrate → up --no-build**:
   ```
   cd /opt/<service>
@@ -761,7 +785,7 @@ GitHub Secrets для деплоя: `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`. �
 
 **Данные / инфра:**
 - [ ] Миграции применены **до head** (`docker compose -p <proj> ... run --rm migrate`); head — из [`migrations/versions/`](../migrations/versions/), в чек-листе не перечисляется (см. [§Миграции](#миграции)). Проверка: повторный прогон `migrate` не применяет ничего.
-- [ ] Бэкап контейнерного PostgreSQL настроен (`pg_dump` по cron + offsite-копия).
+- [ ] Бэкап контейнерного PostgreSQL настроен (`pg_dump` по cron + offsite-копия). **Не выполнено ни на одном инстансе на 2026-09-26**; целевая форма — архив WAL + ночная полная копия в Hetzner Object Storage и успешная проверка восстановления ([ADR-115 §8](adr/ADR-115-crm-managed-instance-and-server-lifecycle.md)).
 - [ ] Внешний Traefik выпустил валидный TLS-сертификат для `<домен>`; `api` не доступен из интернета напрямую (нет публикации портов, доступ только через Traefik по сети `web`).
 - [ ] Smoke: `https://<домен>/healthz`, `https://<домен>/ready` (db=ok, redis=ok) зелёные через публичный домен.
 

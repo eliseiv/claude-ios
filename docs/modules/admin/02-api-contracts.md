@@ -10,7 +10,7 @@ JWT не авторизует admin-действия.** Отдельный rate 
 | Корзина | Потолок | Пути |
 |---|---|---|
 | `rl:admin:{ip}` | `ADMIN_RATE_LIMIT_PER_MIN`, дефолт **10** | саппорт-действия: гранты кредитов и подписки, кошелёк, карточка пользователя, оплаты, запросы, `stats`, `costs/daily` |
-| `rl:admin_econ:{ip}` | `ADMIN_ECONOMICS_RATE_LIMIT_PER_MIN`, дефолт **120** | восемь ручек экономики и настроек (`products`, `pricing`, `capabilities`, `settings`) |
+| `rl:admin_econ:{ip}` | `ADMIN_ECONOMICS_RATE_LIMIT_PER_MIN`, дефолт **120** | восемь ручек экономики и настроек (`products`, `pricing`, `capabilities`, `settings`); после реализации [ADR-116](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md) — ещё две ручки `credentials` (§ниже) |
 
 Правило — **по форме вызова**: отдельную корзину получает путь, который CRM зовёт **пачкой при
 отрисовке одной страницы** (6 вызовов на загрузку + правки), а не единичным операторским
@@ -467,6 +467,7 @@ Read-only. Сколько бизнес заплатил AI-провайдера�
 }
 ```
 
+- ⚠️ **После реализации [ADR-116 §2.6](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md)** к `features` добавляются `credentials.read` и `credentials.write`: по ним CRM поинстансно узнаёт, поддерживает ли инстанс `/v1/admin/credentials` (флот обновляется не одновременно);
 - `features` — **единственный** источник, из которого CRM выводит право записи (fail-closed):
   значение объявляется только там, где путь реализован. Парной `settings.read` в контракте нет;
 - `limits` — **runtime-данные этого инстанса**, а не константы контракта: заморожены только имена
@@ -526,6 +527,8 @@ Read-only. Сколько бизнес заплатил AI-провайдера�
 **Ручки «прочитай/запиши переменную окружения по имени» нет и не будет** — allowlist, который
 отдаёт `GET /v1/admin/settings`, и есть техническая граница поверхности.
 
+> ⚠️ **Частично супессировано [ADR-116](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md) (2026-09-26, не реализовано).** Решением владельца из CRM начинают управляться ключи провайдеров (с резервными), fal, прокси, CloudPayments API token, секрет вебхука Adapty — **отдельной** поверхностью `/v1/admin/credentials` (только на запись, ниже), — а в `/v1/admin/settings` добавляются 7 строк (`llm.provider`, `llm.dual_enabled`, `storekit.mode`, `storekit.bundle_id`, `cloudpayments.app_id`, `cloudpayments.pay_page_proxy_enabled`, `chat.maps_tools_enabled`; реестр 14 → 21). **Остаются недостижимыми** материал подписи JWT, мастер-ключ шифрования, admin-секреты, строки подключения, таймауты, лимиты и величины продуктов/цен. До реализации действует абзац выше.
+
 ### PATCH /v1/admin/settings/{setting_id}
 
 **Request:** `{"value": <по типу>, "if_updated_at": ISO?}`.
@@ -554,6 +557,26 @@ Read-only. Сколько бизнес заплатил AI-провайдера�
   бы оператору ни одного пути вперёд ([ADR-099 §8.1](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md)).
   Об этом же предупреждает `description` строки; CRM ничего специального не делает — она просто
   показывает вернувшееся `value`. Ни одна другая строка присланное значение не меняет.
+
+### GET /v1/admin/credentials — [ADR-116](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md), НЕ реализовано
+
+Креденшлы инстанса. Самоописываемо, как `/settings`. **Значения не отдаются никогда.**
+
+**Response (200):** `{"items": [...]}`, элемент: `credential_id` (str, ключ пути `PATCH`), `label` (str), `group` (str \| null), `description` (str \| null), `constraints` (`{max_length}`), `configured` (bool — действующее значение непусто), `source` (`overlay` \| `env` \| `unset`), `fingerprint` (str — первые 12 hex SHA-256 действующего значения \| null при `unset`), `updated_at` (ISO \| null).
+
+**Реестр — 8** (`credential_id`): `openai.api_key`, `openai.api_key_backup`, `anthropic.api_key`, `anthropic.api_key_backup`, `fal.api_key`, `proxy.api_key`, `cloudpayments.api_token`, `adapty.webhook_secret`. Соответствие переменным окружения и точки применения — [ADR-116 §2.1](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md).
+
+### PATCH /v1/admin/credentials/{credential_id} — [ADR-116](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md), НЕ реализовано
+
+**Request:** `{"value": <string | null>}`. Строка (в т.ч. `""` — явно выключено, перекрывает `.env`) записывается в оверлей зашифрованной; `null` удаляет строку оверлея (величина снова из `.env`).
+**Response (200):** элемент креденшла + `changed` (bool) + `effective_after_seconds` (int).
+
+- одна ветка — один код и один `reason` ([ADR-116 §2.3](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md)): неизвестный `credential_id` → `400` `unknown_id`; `value` не строка и не `null` → `422` `type_mismatch`; длина сверх объявленного `constraints.max_length` → `422` `out_of_range`; пробельный или управляющий символ (граница не объявлена и не объявима в замороженном наборе ключей `constraints`) → `400` `undeclared_bound`;
+- `400` `conflict` — правка **основного** ключа `X.api_key`, после которой у выбранного провайдера (`llm.provider`, а при `llm.dual_enabled` — и у второго) не остаётся действующего ключа. «Действующий ключ» — непустой основной ключ, как в `credits_providers()`; резервный не считается, и его правка инвариант не нарушает никогда ([ADR-116 §4.3](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md));
+- `400` `environment_missing` — `PATCH proxy.api_key` при пустом `PROXY_WEBHOOK_SECRET` на инстансе: в этом случае ключ прокси подписывает колбэки задач, и его смена сломала бы задачи в полёте;
+- сетевой проверки ключа нет ([Q-116-2](../../99-open-questions.md)); значение не попадает ни в ответ, ни в аудит, ни в логи. Аудит: `admin_credential_set` / `admin_credential_cleared` с `credential_id`, `source` и `fingerprint` до→после.
+
+**Новые строки `PATCH /v1/admin/settings/{setting_id}` ([ADR-116 §4](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md)):** межэлементные инварианты — `400` (`reason=conflict`): `llm.provider` без действующего ключа у выбранного провайдера; `llm.dual_enabled=true` без ключа второго; `storekit.mode=production` при пустом `storekit.bundle_id` и обратная правка; `storekit.mode=production` без загруженных корневых сертификатов Apple — `400` с новым `reason=environment_missing`.
 
 ### Правила, общие для всех пишущих вызовов
 
