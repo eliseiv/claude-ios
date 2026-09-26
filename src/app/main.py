@@ -64,6 +64,7 @@ from app.media_generation.reconciler import reconciler_loop
 from app.observability.context import get_request_id
 from app.observability.logging import configure_logging, log_event
 from app.scheduled_chats.worker import worker_loop as scheduled_chat_worker_loop
+from app.subscription.storekit import get_storekit_verifier
 
 logger = logging.getLogger("app.main")
 
@@ -72,12 +73,9 @@ logger = logging.getLogger("app.main")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
-    if settings.storekit_test_mode and settings.storekit_test_secret:
-        # test-mode: TD-007 (09-e2e-testing.md §2.4). Secret is never logged.
-        logger.warning(
-            "STOREKIT_TEST_MODE is ENABLED — accepting HS256 test transactions. "
-            "MUST be false in production."
-        )
+    # test-mode: TD-007 (09-e2e-testing.md §2.4). The actual HS256 test-branch state is logged by
+    # StoreKitVerifier at every (re)build (`storekit_verifier_built`, WARNING when enabled): the
+    # mode is managed from the CRM (ADR-116 §4.2), so an env-only start-up warning would lie.
     stop = asyncio.Event()
     reconciler_task: asyncio.Task[None] | None = None
     if settings.media_reconcile_interval_seconds > 0:
@@ -104,6 +102,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await refresh_snapshot_from_pool(settings)
     except Exception:  # noqa: BLE001 — недоступная БД не должна мешать /health отвечать
         logger.exception("instance_config_initial_load_failed")
+    # Верификатор StoreKit строится после загрузки снимка: его первое построение пишет
+    # `storekit_verifier_built` с ФАКТИЧЕСКИМ режимом тестовой ветки при старте (ADR-116 §4.2),
+    # последующие пересоздания — при смене режима из CRM.
+    try:
+        get_storekit_verifier()
+    except Exception:  # noqa: BLE001 — сбой чтения корней Apple не должен мешать старту
+        logger.exception("storekit_verifier_initial_build_failed")
     # Обновитель запускается ВСЕГДА: величина окна — это окно, а не выключатель. Нулём его
     # «отключить» нельзя, иначе `effective_after_seconds` объявил бы CRM мгновенное применение
     # при процессах, которые не обновятся никогда (см. `admin_overrides_refresh_window`).

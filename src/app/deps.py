@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import ipaddress
 import uuid
-from collections.abc import AsyncIterator
-from functools import lru_cache
-from typing import Annotated
+from collections.abc import AsyncIterator, Callable, Hashable
+from typing import Annotated, Generic, TypeVar
 
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials
@@ -37,10 +36,12 @@ from app.chat.repository import ChatRepository
 from app.chat.speech import SpeechClient, SpeechSynthesisService
 from app.chats.repository import ChatsRepository
 from app.chats.service import ChatsService
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import session_scope
 from app.documents import DocumentsService
 from app.errors import ForbiddenError, MediaGenerationNotConfiguredError, UnauthorizedError
+from app.instance_config.client_retirement import retire_when_unreferenced, sdk_clients_of
+from app.instance_config.effective import effective_settings
 from app.media_generation.fal_client import FalClient
 from app.media_generation.features_repository import MediaFeaturesRepository
 from app.media_generation.features_service import (
@@ -71,6 +72,52 @@ from app.website.service import WebsiteService
 from app.website.tools import SiteToolHandlers
 from app.workspaces.repository import WorkspacesRepository
 from app.workspaces.service import WorkspacesService
+
+
+def _effective() -> Settings:
+    """Действующие настройки (ADR-116 §5): `get_settings()` + оверлей креденшлов и строк
+    провайдера/StoreKit/CloudPayments. Сервисы, читающие величины ADR-116, получают ИХ."""
+    return effective_settings(get_settings())
+
+
+_T = TypeVar("_T")
+
+
+class _RebuildOnChange(Generic[_T]):
+    """Процессный клиент, пересоздаваемый при смене отпечатка своих входов (ADR-116 §5).
+
+    Замена ``lru_cache(maxsize=1)``: клиент, захвативший ключ при создании, после смены ключа
+    из CRM пересоздаётся при следующем обращении; вызов, уже идущий на старом клиенте,
+    завершается на нём. ``cache_clear()`` сохранён — им пользуется изоляция тестов.
+    """
+
+    def __init__(
+        self,
+        build: Callable[[Settings], _T],
+        inputs: Callable[[Settings], Hashable],
+        *,
+        pool_attributes: tuple[str, ...] = ("_client",),
+    ) -> None:
+        self._build = build
+        self._inputs = inputs
+        self._pool_attributes = pool_attributes
+        self._cached: tuple[Hashable, _T] | None = None
+
+    def __call__(self) -> _T:
+        settings = _effective()
+        key = self._inputs(settings)
+        cached = self._cached
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        client = self._build(settings)
+        self._cached = (key, client)
+        if cached is not None:
+            # Пул прежнего клиента закрывается, когда на нём не останется идущих вызовов.
+            retire_when_unreferenced(cached[1], sdk_clients_of(cached[1], *self._pool_attributes))
+        return client
+
+    def cache_clear(self) -> None:
+        self._cached = None
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
@@ -158,7 +205,7 @@ def get_token_issuer() -> TokenIssuer:
 
 
 def get_auth_service(session: DbSession) -> AuthService:
-    return AuthService(session, get_token_issuer(), get_settings(), get_apple_verifier())
+    return AuthService(session, get_token_issuer(), _effective(), get_apple_verifier())
 
 
 def get_audit(session: DbSession) -> AuditService:
@@ -197,14 +244,14 @@ def get_adapty_webhook_service(session: DbSession) -> AdaptyWebhookService:
         session,
         WalletService(session, audit),
         audit,
-        get_settings(),
+        _effective(),
     )
 
 
 def get_cloudpayments_verify_client() -> CloudPaymentsVerifyClient:
     # ADR-054: outgoing broadapps payment-verification GET — no DbSession (no persisted state);
     # needs only settings (api_base / api_token).
-    return CloudPaymentsVerifyClient(get_settings())
+    return CloudPaymentsVerifyClient(_effective())
 
 
 def get_cloudpayments_webhook_service(session: DbSession) -> CloudPaymentsWebhookService:
@@ -213,7 +260,7 @@ def get_cloudpayments_webhook_service(session: DbSession) -> CloudPaymentsWebhoo
         session,
         WalletService(session, audit),
         audit,
-        get_settings(),
+        _effective(),
         get_cloudpayments_verify_client(),
     )
 
@@ -221,25 +268,25 @@ def get_cloudpayments_webhook_service(session: DbSession) -> CloudPaymentsWebhoo
 def get_cloudpayments_checkout_client() -> CloudPaymentsCheckoutClient:
     # ADR-051: passthrough outgoing call to broadapps — no DbSession (no persisted state); needs
     # only settings (api_base / app_id / api_token).
-    return CloudPaymentsCheckoutClient(get_settings())
+    return CloudPaymentsCheckoutClient(_effective())
 
 
 def get_broadapps_experiments_client() -> BroadappsExperimentsClient:
     # ADR-098: passthrough outgoing calls to broadapps — no DbSession (no persisted state); needs
     # only settings (api_base / app_id / api_token), the same three the checkout client uses.
-    return BroadappsExperimentsClient(get_settings())
+    return BroadappsExperimentsClient(_effective())
 
 
 def get_fal_client() -> FalClient:
     # ADR-060: outgoing fal.ai queue calls — no DbSession (no persisted state); needs only
     # settings (api key / queue base / timeout).
-    return FalClient(get_settings())
+    return FalClient(_effective())
 
 
 def get_proxy_client() -> ProxyClient:
     # ADR-108: outgoing proxy-service calls — no DbSession (no persisted state); needs only
     # settings (key / base / timeout / service domain).
-    return ProxyClient(get_settings())
+    return ProxyClient(_effective())
 
 
 def require_media_generation_configured() -> None:
@@ -252,7 +299,7 @@ def require_media_generation_configured() -> None:
     templates (``/v1/media/templates/*``, ADR-066) and the proxy webhook
     (``/v1/media/webhooks/proxy/*``, ADR-108 §4.2) sit on separate routers without this gate.
     """
-    if not get_settings().media_generation_configured():
+    if not _effective().media_generation_configured():
         raise MediaGenerationNotConfiguredError("media generation is not configured")
 
 
@@ -283,19 +330,27 @@ def get_scheduled_chats_service(session: DbSession) -> ScheduledChatsService:
     return ScheduledChatsService(session)
 
 
-@lru_cache(maxsize=1)
-def get_moderation_service() -> ModerationService:
-    """Единственный экземпляр клиента модерации на процесс (ADR-086).
+def _moderation_inputs(settings: Settings) -> Hashable:
+    return (
+        settings.moderation_api_key_resolved(),
+        settings.moderation_base_url,
+        settings.moderation_timeout_seconds,
+        settings.moderation_max_retries,
+    )
 
-    Кэшируется как прочие исходящие клиенты: HTTP-пул и настройки не зависят от запроса, а
-    пересоздание клиента на каждый вызов стоило бы нового соединения на горячем пути генерации.
-    """
-    return ModerationService(settings=get_settings())
+
+# Единственный экземпляр клиента модерации на процесс (ADR-086). Кэшируется как прочие исходящие
+# клиенты: HTTP-пул и настройки не зависят от запроса, а пересоздание клиента на каждый вызов
+# стоило бы нового соединения на горячем пути генерации. Ключ модерации при пустом собственном
+# следует за ключом OpenAI, управляемым из CRM (ADR-116 §2.1), — отсюда пересоздание по отпечатку.
+get_moderation_service: _RebuildOnChange[ModerationService] = _RebuildOnChange(
+    lambda settings: ModerationService(settings=settings), _moderation_inputs
+)
 
 
 def get_documents_service(session: DbSession) -> DocumentsService:
     """Документы чата (ADR-090) на той же request-scoped сессии, что и остальной домен."""
-    return DocumentsService(session, get_settings())
+    return DocumentsService(session, _effective())
 
 
 get_documents_service_dep = Annotated[DocumentsService, Depends(get_documents_service)]
@@ -323,7 +378,7 @@ def build_media_generation_service(
         repo=MediaJobsRepository(session),
         fal=get_fal_client(),
         wallet=WalletService(session, AuditService(session)),
-        settings=get_settings(),
+        settings=_effective(),
         push=get_media_push_service(session),
         request_logs=request_logs,
         moderation=get_moderation_service(),
@@ -352,7 +407,7 @@ def get_media_features_service(
         media=media,
         fal=get_fal_client(),
         speech=get_speech_client(),
-        settings=get_settings(),
+        settings=_effective(),
         moderation=get_moderation_service(),
     )
 
@@ -361,7 +416,7 @@ def get_media_templates_service(session: DbSession) -> MediaTemplatesService:
     # ADR-066: gallery templates catalog — independent of fal; same request-scoped session.
     return MediaTemplatesService(
         repo=MediaTemplatesRepository(session),
-        settings=get_settings(),
+        settings=_effective(),
     )
 
 
@@ -398,14 +453,22 @@ def get_preferences_service(session: DbSession) -> PreferencesService:
     return PreferencesService(session)
 
 
-@lru_cache(maxsize=1)
-def get_speech_client() -> SpeechClient:
-    """Process-wide synthesis client (ADR-100 §8), like the moderation client.
+def _speech_inputs(settings: Settings) -> Hashable:
+    return (
+        settings.openai_api_key,
+        settings.tts_model,
+        # Сырое поле, а не `resolved_tts_audio_format()`: резолвер пишет WARNING на недопустимое
+        # значение, и вызов на каждом обращении к фабрике размножил бы его (было — один раз).
+        settings.tts_audio_format,
+        settings.tts_timeout_seconds,
+    )
 
-    The HTTP pool and the settings do not depend on the request, and rebuilding the client per
-    call would cost a fresh connection on a path that already waits on an external provider.
-    """
-    return SpeechClient(get_settings())
+
+# Process-wide synthesis client (ADR-100 §8), like the moderation client. The HTTP pool and the
+# settings do not depend on the request, and rebuilding the client per call would cost a fresh
+# connection on a path that already waits on an external provider. The OpenAI key is managed from
+# the CRM (ADR-116 §2.1), so the client is rebuilt when its inputs change.
+get_speech_client: _RebuildOnChange[SpeechClient] = _RebuildOnChange(SpeechClient, _speech_inputs)
 
 
 def get_speech_service(session: DbSession) -> SpeechSynthesisService:
@@ -416,7 +479,7 @@ def get_speech_service(session: DbSession) -> SpeechSynthesisService:
         preferences=PreferencesService(session),
         wallet=WalletService(session, AuditService(session)),
         client=get_speech_client(),
-        settings=get_settings(),
+        settings=_effective(),
     )
 
 
@@ -445,7 +508,7 @@ def get_orchestrator(session: DbSession) -> ChatOrchestrator:
         # ignores generation_mode, so research would otherwise be billed and never attached).
         anthropic_client=(
             get_generation_llm_client()
-            if get_settings().chat_legacy_web_search_enabled
+            if _effective().chat_legacy_web_search_enabled
             else get_llm_client()
         ),
         site_tools=SiteToolHandlers(session, website, audit),

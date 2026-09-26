@@ -1,13 +1,22 @@
-# CI gate + gated deploy (07-deployment.md §CI/CD, 06-testing-strategy.md §CI gate, ADR-017).
-# Platform: GitHub Actions (CI platform not fixed in docs -> reasonable default).
+# CI gate + gated deploy (07-deployment.md §CI/CD, 06-testing-strategy.md §CI gate, ADR-115 §10).
 # Any failure on lint / format / type-check / tests / coverage blocks merge AND blocks deploy.
 #
-# DEPLOY ORDERING (incident fix): deploy is a JOB IN THIS WORKFLOW with
-# `needs: [quality, test, build-image]`, so GitHub will NOT start it until ALL CI jobs have
-# succeeded. Previously deploy was a SEPARATE workflow also triggered on push:main, so it ran
-# in PARALLEL with CI and could deploy a red build. With `needs` + `if: ...success()` the deploy
-# is deterministically gated: a failing CI job fails the workflow and deploy never starts.
-# Manual / out-of-band redeploys live in deploy.yml (workflow_dispatch only — no push trigger).
+# DEPLOY ORDERING: deploy is a JOB IN THIS WORKFLOW with `needs: [quality, test, publish-image]`,
+# so GitHub will NOT start it until ALL CI jobs have succeeded. Manual / out-of-band redeploys live
+# in deploy.yml (workflow_dispatch only — no push trigger).
+#
+# ADR-115 §10 (Р5): образ собирается ОДИН раз здесь и публикуется в GHCR
+# (ghcr.io/<владелец>/claude-ios:<sha>); серверы образ НЕ собирают. Состав флота берётся из
+# inventory CRM (FLEET_INVENTORY_URL + FLEET_INVENTORY_TOKEN), а не из хардкода: при недоступной
+# CRM, пустом или противоречивом ответе прогон КРАСНЕЕТ, не тронув ни одного сервера. Деплой
+# пересоздаёт только api (`--no-deps api`), .role не читает; после раскатки CI заново запрашивает
+# inventory и сверяет образ api КАЖДОГО active инстанса — это и есть «изменения применились для
+# всех инстансов», проверенное, а не предположенное. Логика — infra/fleet/ci/deploy-fleet.sh.
+#
+# ⛔ ADR-115 §11 фаза 3: этот файл выкатывается ПОСЛЕ импорта состава флота в CRM (фаза 2) и ДО
+# любых изменений Postgres и .role. workflow_dispatch deploy.yml на ref'е старше этого слияния
+# ЗАПРЕЩЁН — он вернул бы `up -d` всех сервисов и чтение .role.
+
 name: ci
 
 on:
@@ -43,10 +52,9 @@ jobs:
     name: lint • format • types
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -67,32 +75,6 @@ jobs:
       - name: Type-check (mypy)
         run: uv run mypy src
 
-      # Список инстансов живёт в ДВУХ рабочих потоках: автоматический деплой в ci.yml и ручной
-      # перезапуск в deploy.yml. Инстансы заводятся по одному, и правится при этом обычно только
-      # ci.yml — к 2026-09-07 deploy.yml отстал на восемь записей, то есть ручной перезапуск
-      # молча пропускал восемь живых инстансов. Отставание не видно, пока перезапуск не
-      # понадобится, а нужен он как раз в аварии. Сверяем машинно.
-      - name: Списки инстансов в ci.yml и deploy.yml совпадают
-        run: |
-          # Берём СТРОКУ ПРИСВАИВАНИЯ, а не текст образца: образец, записанный здесь буквально,
-          # находит сам себя — шаг стоит в файле раньше самого списка. Строка присваивания
-          # начинается с INSTANCES= (с точностью до отступа), строки этой проверки — нет.
-          # Хвостовой возврат каретки снимается: deploy.yml хранится с CRLF, и без этого
-          # сравнение расходилось бы всегда.
-          get() { grep -E '^[[:space:]]*INSTANCES=' "$1" | head -1 | tr -d '\015' | sed 's/^[[:space:]]*//'; }
-          a="$(get .github/workflows/ci.yml)"
-          b="$(get .github/workflows/deploy.yml)"
-          if [ -z "$a" ] || [ -z "$b" ]; then
-            echo "::error::список инстансов не найден в одном из потоков"; exit 1
-          fi
-          if [ "$a" != "$b" ]; then
-            echo "::error::списки инстансов разошлись между ci.yml и deploy.yml"
-            echo "ci.yml:     $a"
-            echo "deploy.yml: $b"
-            exit 1
-          fi
-          echo "списки совпадают"
-
   test:
     name: test • coverage gate
     runs-on: ubuntu-latest
@@ -106,10 +88,9 @@ jobs:
       # интеграционные тесты, хотя код был исправен. Отключение убирает и зависимость, и pull.
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -143,393 +124,98 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-xml
           path: coverage.xml
           if-no-files-found: ignore
 
-  build-image:
-    name: build docker image (validation only)
+  # ADR-115 §10.2 п. 1: образ приложения собирается ОДИН раз и публикуется в GHCR с тегом SHA.
+  # На pull_request — только проверка сборки, без публикации.
+  publish-image:
+    name: build + publish image (GHCR)
     runs-on: ubuntu-latest
     needs: [quality, test]
-    # ADR-017: the deployable image is BUILT ON THE SERVER (`docker compose up -d --build`),
-    # NOT pushed to a registry. This job only VALIDATES that the Dockerfile builds — it does
-    # not log in to or push to any registry (no `packages: write`, no GHCR). Deploy is a
-    # separate workflow (.github/workflows/deploy.yml: SSH -> git pull -> compose up --build).
     permissions:
       contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Имя образа в fleet.conf (его читают инструменты на серверах) и имя, под которым публикует
+      # этот джоб, обязаны совпадать: иначе серверы тянули бы образ, которого нет.
+      - name: Имя образа совпадает с infra/fleet/fleet.conf
+        id: img
+        run: |
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          want="ghcr.io/${owner}/claude-ios"
+          have="$(sed -n 's/^APP_IMAGE_REPO=//p' infra/fleet/fleet.conf | tr -d '\r')"
+          if [ "$want" != "$have" ]; then
+            echo "::error::APP_IMAGE_REPO в infra/fleet/fleet.conf ($have) ≠ публикуемому образу ($want)"; exit 1
+          fi
+          echo "repo=$want" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Login to GHCR
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build image (no push — validation)
-        uses: docker/build-push-action@v6
+      - name: Build (and push on main)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile
-          push: false
-          load: false
-          tags: claude-ios-backend:ci
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.img.outputs.repo }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   # ---------------------------------------------------------------------------------------------
-  # Gated deploy — shared server + external Traefik via SSH (docs/07-deployment.md §Процедура
-  # деплоя, ADR-017). This job is the FULL deploy and is GATED by `needs` on every CI job:
-  # GitHub will not even queue it until quality + test + build-image have all succeeded. Combined
-  # with `if: ... && success()` and the branch guard, it runs ONLY on a green push to main.
-  #
-  # Image is BUILT ON THE SERVER (`docker compose up -d --build`), not pulled from a registry
-  # (ADR-017 — no immutable registry tag; rollback = git checkout <prev-commit> + rebuild).
-  #
-  # Flow: SSH -> for each instance in $INSTANCES: cd /opt/<dir> -> git pull -> compose -p <proj>
-  #       run --rm migrate -> compose -p <proj> up -d --build -> smoke /healthz.
-  #
-  # MULTI-INSTANCE (ADR-017 §CI/CD INSTANCES-loop): the single-instance deploy is generalised to a
-  # loop over $INSTANCES, a space-separated `dir:project` list with claude-ios FIRST. For the live
-  # instance `claude-ios:claude-ios` -> `-p claude-ios` is the SAME project name as the previous
-  # deploy with no `-p` (basename of /opt/claude-ios) => a NO-OP for broadnova.shop (backward-
-  # compat). Every other entry of $INSTANCES is a clone provisioned on the server (clone .env +
-  # .secrets/ per docs/07-deployment.md §Процедура провижининга клона) and is in the loop, so every
-  # push to main auto-deploys ALL instances. The per-instance roster (dir / project / domain /
-  # provider) is NOT restated in this comment — it is the $INSTANCES value below, mirrored by
-  # docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop.
-  # veltrio (veltriohub.shop) was decommissioned 2026-07-18 — its domain now belongs to a different
-  # service on the same server; it MUST stay out of $INSTANCES.
-  #
-  # GitHub Secrets (Settings -> Secrets and variables -> Actions): NEVER hardcode these.
-  #   SSH_HOST=<адрес сервера A>,<адрес сервера B> — ОБА прикладных сервера через запятую
-  #     (appleboy/ssh-action выполняет скрипт на каждом по очереди). Один адрес = половина
-  #     флота остаётся на старом коммите при зелёном прогоне; форма секрета проверяется
-  #     шагом «Проверить, что SSH_HOST называет оба прикладных сервера» ниже.
-  #   SSH_USER=root / SSH_PRIVATE_KEY (public half in authorized_keys ОБОИХ серверов)
-  #
-  # PER-INSTANCE SMOKE (docs/07-deployment.md §CI/CD INSTANCES-loop: "Smoke-gate выполняется на
-  # каждый инстанс по его SERVICE_DOMAIN"): the smoke check runs INSIDE the SSH loop, once per
-  # instance, against the domain read from THAT instance's /opt/<dir>/.env (`SERVICE_DOMAIN=`).
-  # It is NOT the global repo Variable `vars.SERVICE_DOMAIN`: a single repo-wide value carries one
-  # domain, so it cannot cover a fleet whose instances each have their own SERVICE_DOMAIN — it
-  # would smoke one domain and silently skip the rest. Smoke is NON-FATAL (warning, not failure):
-  # on a first deploy the A-record / Traefik Let's Encrypt cert may still be settling. If an
-  # instance's .env has no SERVICE_DOMAIN, its smoke is skipped for that instance only.
-  #
-  # ROLLBACK (no registry/immutable tag) — PER INSTANCE, verbatim with infra/deploy/README.md
-  # §Rollback: run it in the /opt/<dir> of the instance being rolled back, with that instance's
-  # -p <project>. Other instances stay on the current commit unless rolled back too. The
-  # dir:project pair of the instance you are rolling back is an entry of $INSTANCES below
-  # (roster: docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop).
-  #   cd /opt/<dir>
-  #   git log --oneline -n 5                # find the previous good commit
-  #   git checkout <prev-commit>
-  #   docker compose -p <project> -f docker-compose.prod.yml --env-file .env run --rm migrate   # if needed
-  #   docker compose -p <project> -f docker-compose.prod.yml --env-file .env up -d --build
-  #   curl -fsS https://${SERVICE_DOMAIN}/healthz
-  #   # return to the branch tip once a fix is ready: git checkout main && git pull
-  # Schema is NOT reverted (expand/contract migrations keep the old code compatible). See
-  # docs/07-deployment.md §Откат and infra/deploy/README.md §Rollback.
+  # Gated deploy по inventory CRM (ADR-115 §10.2). Запускается ТОЛЬКО на зелёном push в main.
+  # Секреты (GitHub Secrets; значения не печатаются):
+  #   FLEET_INVENTORY_URL, FLEET_INVENTORY_TOKEN   — чтение состава флота (§10.1);
+  #   FLEET_DEPLOY_REPORT_URL, FLEET_DEPLOY_REPORT_TOKEN — запись last_deployed_sha (§10.2 п. 8);
+  #   SSH_USER, SSH_PRIVATE_KEY                    — вход на серверы и R; host-ключи закрепляются
+  #                                                  по inventory, секрет SSH_HOST больше не нужен.
+  # Откат кода — перевыкатка прежнего тега образа из GHCR (deploy.yml на нужном ref, §Откат 07-deployment).
   deploy:
-    name: ssh deploy (shared server + Traefik)
+    name: deploy by CRM inventory
     runs-on: ubuntu-latest
-    # Hard gate: do not start until ALL CI jobs pass (deterministic ordering — fixes the incident
-    # where deploy ran in parallel with / ahead of CI).
-    needs: [quality, test, build-image]
-    # Deploy only from main, and only if the needed jobs all succeeded (a failed `needs` would
-    # normally skip this, but `success()` makes the intent explicit and guards against re-runs).
-    if: ${{ github.ref == 'refs/heads/main' && success() }}
-    # Optional GitHub Environment for required reviewers / protection rules on prod deploys.
+    needs: [quality, test, publish-image]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && success() }}
     environment: production
     permissions:
       contents: read
-    # Single in-flight deploy; do NOT cancel one mid-run (avoid half-applied state). This is a
-    # Группа джобы: две выкатки не идут одновременно и не отменяют друг друга. Она НЕ защищает
-    # от отмены всего прогона — от неё защищает `cancel-in-progress: false` на уровне workflow
-    # (см. врезку про инцидент 2026-08-28 в шапке файла).
+    # Две выкатки не идут одновременно и не отменяют друг друга; от отмены всего прогона защищает
+    # `cancel-in-progress: false` на уровне workflow (инцидент 2026-08-28).
     concurrency:
       group: deploy-production
       cancel-in-progress: false
+    timeout-minutes: 300
     steps:
-      # Флот живёт на ДВУХ прикладных серверах, и какой инстанс основной на каком — решают файлы
-      # .role на самих машинах. Если SSH_HOST называет только одну машину, прогон честно зеленеет,
-      # выкатив ровно её инстансы, а основные на второй машине молча остаются на прежнем коммите.
-      # Именно так и случилось 2026-08-28: секрет содержал один адрес, деплой обновил 28 инстансов
-      # сервера B, а пять инстансов, основных на сервере A, остались на коммите недельной давности
-      # — при полностью зелёном CI. Проверка стоит ДО выкатки и валит прогон на конфигурации, а не
-      # оставляет расщеплённый флот. Значение секрета не печатается: сравнивается только его форма.
-      - name: Проверить, что SSH_HOST называет оба прикладных сервера
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Ключ SSH CI
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          set -u
-          if [ -z "${SSH_HOST}" ]; then
-            echo "::error title=SSH_HOST пуст::секрет не задан — выкатывать некуда"
-            exit 1
-          fi
-          hosts=$(printf '%s' "${SSH_HOST}" | awk -F, '{n=0; for (i=1; i<=NF; i++) if ($i ~ /[^[:space:]]/) n++; print n}')
-          if [ "$hosts" -lt 2 ]; then
-            echo "::error title=SSH_HOST называет $hosts сервер::Флот развёрнут на двух прикладных серверах. Задайте оба адреса через запятую, иначе инстансы второго сервера останутся на старом коммите при зелёном прогоне."
-            exit 1
-          fi
-          echo "SSH_HOST называет серверов: $hosts"
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ci_key"
 
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          # ДВА прикладных сервера (docs/MIGRATION-3-SERVERS.md §Топология). appleboy/ssh-action
-          # принимает список хостов через запятую и выполняет скрипт на КАЖДОМ по очереди — так
-          # обновление доезжает и до основного экземпляра инстанса, и до резервного.
-          # КАКОЙ из двух основной — решает файл /opt/<dir>/.role НА САМОМ СЕРВЕРЕ, а не этот
-          # workflow: при переключении роли меняется маркер на машине, а CI остаётся прежним.
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          # command_timeout MUST be set explicitly: appleboy/ssh-action defaults to 10m, and the
-          # INSTANCES loop needs longer than that — it builds, migrates and health-gates EVERY
-          # instance sequentially. At 22 instances the run already took 9-11m, i.e. it was passing
-          # by luck; the pgvector image pull pushed it over and the loop was killed mid-flight
-          # after 16 instances ("Run Command Timeout"), leaving the remaining 6 on the old
-          # revision while the earlier 16 moved on — the worst outcome, a SPLIT fleet.
-          # The value must exceed (per-instance build+migrate+readiness) x len(INSTANCES); raise it
-          # when instances are added, or the loop starts getting truncated again.
-          command_timeout: 90m
-          # script_stop MUST be false. appleboy/ssh-action's `script_stop: true` injects `set -e`
-          # into the remote script REGARDLESS of the `set -uo pipefail` declared below — i.e. it
-          # would override our design and abort on the FIRST non-zero command. We deliberately do
-          # NOT want `-e`: the INSTANCES loop must run through ALL instances, recording per-instance
-          # failures in FAILED instead of bailing on the first one (which would drop avelyra).
-          # With script_stop:false the remote shell behaviour is governed solely by our own
-          # `set -uo pipefail` (note: NO `-e`). Loop resilience is therefore INTENTIONAL by design,
-          # not an accident of every failing command happening to be guarded.
-          # INVARIANT: a single instance's failure is captured in FAILED and does NOT abort the
-          # others; real failures are caught by explicit rc checks (`if ! build`, `if ! migrate`) +
-          # the api readiness gate, and the job goes RED via the final `exit 1` when FAILED is
-          # non-empty. That final `exit 1` is OUTSIDE any guard, so real failures always go red.
-          script_stop: false
-          script: |
-            set -uo pipefail   # NO `-e` on purpose — see script_stop note above (loop must visit ALL instances)
-            DEPLOY_SHA="${{ github.sha }}"
-            # INCIDENT (2026-06-10) ROOT CAUSE & FIX
-            # -----------------------------------------------------------------------------------
-            # The combined `docker compose up -d --build` step exited 1 right after
-            # "claude-ios-api-1 Started", aborting the loop under `set -euo pipefail` BEFORE the
-            # second instance (avelyra) was reached — even though api came up healthy. The step
-            # fused THREE concerns into one exit code: (a) the BuildKit image build, (b) the
-            # one-shot `migrate` service (restart:"no") that `api` depends on via
-            # `service_completed_successfully` — `up` waits for it and can surface a non-zero from
-            # the build/one-shot path, and (c) starting api. A non-zero from (a)/(b) thus aborted
-            # the deploy despite api being fine.
-            #
-            # FIX: decouple the three concerns and gate the step on ACTUAL api readiness, not on
-            # the fused exit code of `up --build`:
-            #   1. `compose build` explicitly  — a REAL build failure fails the instance.
-            #   2. `compose run --rm migrate`   — a REAL migration failure fails the instance.
-            #   3. `compose up -d --no-build`    — start only; its rc is recorded but NOT trusted
-            #      (a transient one-shot/up quirk must not abort the loop).
-            #   4. Readiness gate: poll api container health; if api does NOT become healthy ->
-            #      this instance REALLY failed -> record it. Real failures still turn the job red.
-            # This does NOT mask real failures: build error, migration error and api-not-healthy
-            # all fail the instance; only the spurious `up --build` exit code is no longer trusted.
-            # Backward-compat for claude-ios is preserved (same `-p claude-ios`, same images/labels;
-            # verified on the server: migrate exits 0, api becomes healthy, /healthz=200).
-            #
-            # INSTANCES — space-separated `dir:project` list, claude-ios FIRST (ADR-017 §CI/CD
-            # INSTANCES-loop). `-p claude-ios` == basename of /opt/claude-ios => no-op vs the
-            # previous no-`-p` deploy (backward-compat for the live broadnova.shop). Every other
-            # entry is a clone provisioned on the server: same code, same per-instance
-            # deploy/readiness/smoke — only its /opt/<dir>/.env differs (its SERVICE_DOMAIN and, on
-            # an OpenAI clone, LLM_PROVIDER=openai + OPENAI_* — ADR-033). Which clone runs which
-            # provider/domain is NOT narrated here: the value below IS the roster, mirrored by
-            # docs/07-deployment.md §CI/CD-контракт: INSTANCES-loop (a narrated copy goes stale on
-            # the next instance added).
-            # veltrio (veltriohub.shop) was decommissioned 2026-07-18: the domain was handed over to
-            # a different service on the same server. It MUST stay out of this loop — redeploying it
-            # would re-create its Traefik router and take the domain back.
-            INSTANCES="claude-ios:claude-ios avelyra:avelyra orvianix:orvianix elvarixa:elvarixa corvionet:corvionet modavira:modavira artolixo:artolixo lunexoro:lunexoro ravionet:ravionet vireluma:vireluma taluneri:taluneri webmoria:webmoria velunixa:velunixa ravelumi:ravelumi zenquelo:zenquelo novirell:novirell selquro:selquro marqelio:marqelio livonexa:livonexa lumirexa:lumirexa qoravena:qoravena benovalo:benovalo appbackend:appbackend stackstores:stackstores codecarts:codecarts devsupplyr:devsupplyr favorappbek:favorappbek probotit:probotit probotappbek:probotappbek newweraar:newweraar fanappsnew:fanappsnew newnewappps:newnewappps belunexa:belunexa joraliqo:joraliqo reluniqo:reluniqo boraveli:boraveli firunavo:firunavo solariqo:solariqo terunavo:terunavo ulaviqor:ulaviqor elunariq:elunariq ittechnewapps:ittechnewapps appscoolnew:appscoolnew backrewio:backrewio arveluni:arveluni hovaliq:hovaliq"
-            # ---- Единая сборка образа (инцидент 2026-08-25) ------------------------------------
-            # ВСЕ инстансы выкатываются на ОДИН коммит ($DEPLOY_SHA) из одного Dockerfile, поэтому
-            # образ у них побайтово одинаковый — различаются только .env и имя проекта. Раньше цикл
-            # собирал его заново на каждом инстансе: 27 идентичных сборок подряд. Это и есть та
-            # нагрузка, что дважды за сутки укладывала хост (не память и не диск — CPU-голодание).
-            # Теперь собираем ОДИН раз и дальше только проставляем тег: 26 сборок из 27 исчезают.
-            # nice/ionice — сборка это фоновая работа, она не должна вытеснять обслуживание живых
-            # запросов на той же машине.
-            set -- $INSTANCES
-            FIRST_DIR="${1%%:*}"
-            BASE_IMAGE="claude-ios-deploy:$DEPLOY_SHA"
-            echo "[deploy] единая сборка образа $BASE_IMAGE из /opt/$FIRST_DIR"
-            if ! cd "/opt/$FIRST_DIR"; then
-              echo "::error title=prebuild cd failed::/opt/$FIRST_DIR missing"; exit 1
-            fi
-            git fetch --quiet origin "$DEPLOY_SHA" || git fetch --quiet origin || true
-            if ! git checkout --quiet --detach "$DEPLOY_SHA"; then
-              echo "::error title=prebuild checkout failed::$DEPLOY_SHA not checked out"; exit 1
-            fi
-            if ! nice -n 19 ionice -c 3 docker build -q -t "$BASE_IMAGE" -f Dockerfile . ; then
-              echo "::error title=prebuild failed::single image build failed; ни один инстанс не тронут"; exit 1
-            fi
-            echo "[deploy] образ собран, дальше инстансы только помечают его тегом"
-            # Пред-полётная проверка: не начинать выкатку на уже перегруженной машине. Сборка выше
-            # сама даёт пик, а после перезагрузки хоста 240 контейнеров стартуют одновременно и
-            # держат load трёхзначным минуты — заходить в цикл в этот момент значит повторить отказ.
-            wait_for_calm
-            FAILED=""   # collect instances that REALLY failed; job goes red at the end if non-empty
-            # ---- Порционная выкатка (инцидент 2026-08-25) --------------------------------------
-            # Цикл идёт по инстансам ПОДРЯД: пересборка образа + миграции + перезапуск на каждом.
-            # На 27 инстансах это перегружает машину настолько, что dockerd перестаёт успевать
-            # обслуживать контейнеры, следом отваливается sshd, и хост требует hard reboot из
-            # панели хостера. Так было дважды за сутки (утром при смене образа Postgres, днём при
-            # обычном деплое на 27). Диагноз оба раза одинаковый: не память и не диск, а
-            # CPU-голодание — 6 ядер на 230+ контейнеров.
-            # Поэтому после каждой порции ждём, пока load average опустится ниже числа ядер.
-            # Потолок берём из nproc, а не константой: добавят ядра — порог поднимется сам.
-            BATCH_SIZE=4
-            LOAD_CEILING=$(nproc)
-            BATCH_WAIT_MAX=60          # максимум 60 x 10s = 10 минут ожидания на порцию
-            BATCH_N=0
-            load1() { awk '{printf "%d", $1}' /proc/loadavg; }
-            wait_for_calm() {
-              i=0
-              while [ "$(load1)" -ge "$LOAD_CEILING" ] && [ "$i" -lt "$BATCH_WAIT_MAX" ]; do
-                [ "$i" -eq 0 ] && echo "[deploy] порция завершена, load=$(load1) >= $LOAD_CEILING — ждём разгрузки"
-                sleep 10; i=$((i+1))
-              done
-              if [ "$i" -ge "$BATCH_WAIT_MAX" ]; then
-                echo "::warning title=Load did not settle::load=$(load1) всё ещё >= $LOAD_CEILING после $((BATCH_WAIT_MAX*10))s; продолжаем, чтобы не зависнуть навсегда"
-              else
-                echo "[deploy] load=$(load1) — продолжаем"
-              fi
-            }
-            for entry in $INSTANCES; do
-              dir="${entry%%:*}"; proj="${entry##*:}"
-              echo "[deploy] === instance dir=/opt/$dir project=$proj ==="
-              cd "/opt/$dir" || { echo "::error title=cd failed ($proj)::/opt/$dir missing"; FAILED="$FAILED $proj"; continue; }
-              # Выкладываем ТОЧНЫЙ коммит, запустивший этот прогон, а не «текущий origin/main».
-              # `git pull` тянул HEAD ветки НА МОМЕНТ PULL: пока цикл идёт по 23 инстансам (минуты),
-              # в main успевает попасть новый коммит — и очередной инстанс уезжает на него. Так на
-              # ravionet (2026-08-24) уехал коммит, чей CI УПАЛ: гейт needs: не пускает свою джобу
-              # деплоя, но уже идущий цикл он не останавливает. Detached HEAD — то же состояние,
-              # что и в rollback-процедуре, возврат к ветке: git checkout main && git pull.
-              # Инстанс сюда ещё не переехал: каталог есть, наполнения нет. Во время переезда это
-              # штатное состояние, а не отказ — иначе весь прогон краснеет из-за инстансов,
-              # которых на этом сервере пока просто нет.
-              if [ ! -f .env ]; then
-                echo "::notice title=skip ($proj)::/opt/$dir/.env отсутствует — инстанс здесь не развёрнут"
-                continue
-              fi
-              # Роль ЭТОГО экземпляра на ЭТОМ сервере. У резервного база работает на чтение:
-              # миграцию там выполнить невозможно, и не нужно — схема приезжает потоком
-              # репликации вместе с данными. Запускать его api тоже нельзя: он писал бы в реплику.
-              ROLE="$(cat .role 2>/dev/null || echo primary)"
-              # Оверлей публикует порт инстанса на адрес туннеля — он нужен только там, где
-              # маршрутизатор вынесен на отдельную машину. Признак — наличие API_HOST_PORT в .env.
-              CF="-f docker-compose.prod.yml"
-              if grep -q "^API_HOST_PORT=" .env; then CF="$CF -f docker-compose.fleet.yml"; fi
-              echo "[deploy:$proj] роль=$ROLE checkout $DEPLOY_SHA"
-              if ! git fetch --quiet origin "$DEPLOY_SHA" && ! git fetch --quiet origin; then
-                echo "::error title=git fetch failed ($proj)::cannot fetch $DEPLOY_SHA in /opt/$dir"; FAILED="$FAILED $proj"; continue
-              fi
-              if ! git checkout --quiet --detach "$DEPLOY_SHA"; then
-                echo "::error title=git checkout failed ($proj)::$DEPLOY_SHA not checked out in /opt/$dir"; FAILED="$FAILED $proj"; continue
-              fi
-              # (1) Build image on the server (REAL build failure => fail this instance).
-              echo "[deploy:$proj] build (image built on the server)"
-              # Образ уже собран ОДИН раз (см. блок единой сборки выше) — здесь только метка.
-              # Раньше каждый инстанс собирал СВОЙ тег из того же коммита: 27 одинаковых сборок,
-              # и именно они клали машину (CPU-голодание, 6 ядер на 240 контейнеров, 2026-08-25).
-              # Имя тега берём ИЗ .env, а не из -p: compose подставляет в image именно
-              # ${COMPOSE_PROJECT_NAME:-claude-ios}. Если эти два источника разойдутся, compose
-              # будет искать тег, которого нет, и молча полезет собирать — то есть вернёт ровно ту
-              # нагрузку, которую мы убираем. Расхождение источников уже случалось (2026-08-25).
-              img_proj=$(grep -m1 "^COMPOSE_PROJECT_NAME=" .env | cut -d= -f2-)
-              [ -z "$img_proj" ] && img_proj="claude-ios"
-              if ! docker tag "$BASE_IMAGE" "${img_proj}-backend:prod"; then
-                echo "::error title=tag failed ($proj)::docker tag $BASE_IMAGE -> ${img_proj}-backend:prod returned non-zero"; FAILED="$FAILED $proj"; continue
-              fi
-              # (2) Migrate explicitly BEFORE api (REAL migration failure => fail this instance).
-              echo "[deploy:$proj] migrate (alembic upgrade head)"
-              # Без --build compose НЕ собирает: у `run` сборка опциональна и включается флагом
-              # --build, а флага --no-build у неё нет вовсе (проверено: `docker compose run --help`
-              # на сервере). Попытка передать его роняла миграцию на каждом инстансе — прогон
-              # 32857631288, все 27 в FAILED за доли секунды.
-              if [ "$ROLE" = "primary" ]; then
-                if ! docker compose -p "$proj" $CF --env-file .env run --rm migrate; then
-                  echo "::error title=migrate failed ($proj)::alembic upgrade head returned non-zero"; FAILED="$FAILED $proj"; continue
-                fi
-              else
-                echo "[deploy:$proj] резерв — миграция пропущена (реплика доступна только на чтение)"
-              fi
-              # (3) Start only (no build here — already built in step 1). The one-shot `migrate`
-              #     service runs again as an api dependency and EXITS; `up`'s rc can be non-zero
-              #     for benign reasons (one-shot exit / BuildKit session), so we record but do NOT
-              #     trust it — the readiness gate (4) is the source of truth.
-              echo "[deploy:$proj] up -d --no-build (rc recorded, not trusted; readiness gate decides)"
-              up_rc=0
-              if [ "$ROLE" = "primary" ]; then
-                docker compose -p "$proj" $CF --env-file .env up -d --no-build || up_rc=$?
-              else
-                # На резерве поднимаем только хранилища: postgres работает репликой и принимает
-                # поток изменений, api остаётся выключенным до повышения роли.
-                docker compose -p "$proj" $CF --env-file .env up -d --no-build postgres redis || up_rc=$?
-                docker compose -p "$proj" $CF --env-file .env stop api >/dev/null 2>&1 || true
-              fi
-              echo "[deploy:$proj] up rc=$up_rc (informational)"
-              # (4) Deterministic readiness gate: api MUST become healthy (compose healthcheck =
-              #     GET /ready: db+redis). If it does not within ~60s, this is a REAL failure.
-              if [ "$ROLE" != "primary" ]; then
-                echo "[deploy:$proj] резерв — гейт готовности и smoke пропущены (api намеренно выключен)"
-                continue
-              fi
-              echo "[deploy:$proj] readiness gate: api container health"
-              ready=0
-              for i in $(seq 1 30); do
-                h="$(docker inspect "${proj}-api-1" --format '{{.State.Health.Status}}' 2>/dev/null || echo none)"
-                if [ "$h" = "healthy" ]; then echo "[deploy:$proj] api healthy ($i)"; ready=1; break; fi
-                echo "[deploy:$proj] api health=$h ($i/30) — retrying in 2s"; sleep 2
-              done
-              if [ "$ready" -ne 1 ]; then
-                echo "::error title=api not healthy ($proj)::api did not become healthy within ~60s (up rc=$up_rc). Last logs:"
-                docker logs "${proj}-api-1" --tail 40 2>&1 || true
-                FAILED="$FAILED $proj"; continue
-              fi
-              # Per-instance public smoke check through Traefik (TLS + Host routing), against THIS
-              # instance's own SERVICE_DOMAIN read from its /opt/$dir/.env — NOT a single global
-              # domain (so a second instance is smoke-checked on its own domain, not claude-ios's).
-              # NON-FATAL: on a first deploy the A-record / Traefik Let's Encrypt cert may still be
-              # settling; retry 12 x 5s = 60s, then emit a ::warning:: instead of failing deploy.
-              # If this instance's .env has no SERVICE_DOMAIN, skip smoke for it only.
-              inst_domain="$(grep -E '^SERVICE_DOMAIN=' .env | head -n1 | cut -d= -f2- | tr -d '\"'"'"' ' || true)"
-              if [ -z "$inst_domain" ]; then
-                echo "::warning title=Smoke skipped ($proj)::no SERVICE_DOMAIN in /opt/$dir/.env — skipping smoke for this instance"
-              else
-                url="https://$inst_domain/healthz"
-                echo "[smoke:$proj] GET $url"
-                smoke_ok=0
-                for i in $(seq 1 12); do
-                  if curl -fsS --max-time 5 "$url" >/dev/null; then
-                    echo "[smoke:$proj] healthz OK"
-                    smoke_ok=1
-                    break
-                  fi
-                  echo "[smoke:$proj] not ready ($i/12) — retrying in 5s"
-                  sleep 5
-                done
-                if [ "$smoke_ok" -ne 1 ]; then
-                  echo "::warning title=Smoke /healthz not green ($proj)::$url did not return 200 within 60s. The deploy (build+migrate+up) for $proj succeeded and api is healthy in-container; public DNS/A-record propagation or Traefik's Let's Encrypt cert (resolver 'le') may still be settling on the first deploy. Re-run this workflow once they are ready."
-                fi
-              fi
-              # Конец обработки инстанса: считаем порцию и ждём разгрузки перед следующей.
-              BATCH_N=$((BATCH_N+1))
-              if [ "$((BATCH_N % BATCH_SIZE))" -eq 0 ]; then
-                wait_for_calm
-              fi
-            done
-            echo "[deploy] prune dangling build layers (best-effort)"
-            docker image prune -f || true
-            # Job verdict: red iff at least one instance REALLY failed (build/migrate/api-health).
-            if [ -n "$FAILED" ]; then
-              echo "::error title=Deploy failed::instance(s) failed:$FAILED"
-              exit 1
-            fi
-            echo "[deploy] all instances deployed and healthy"
+      - name: Deploy (inventory → серверы → повторный inventory → сверка образа → отчёт)
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          FLEET_INVENTORY_URL: ${{ secrets.FLEET_INVENTORY_URL }}
+          FLEET_INVENTORY_TOKEN: ${{ secrets.FLEET_INVENTORY_TOKEN }}
+          FLEET_DEPLOY_REPORT_URL: ${{ secrets.FLEET_DEPLOY_REPORT_URL }}
+          FLEET_DEPLOY_REPORT_TOKEN: ${{ secrets.FLEET_DEPLOY_REPORT_TOKEN }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY_FILE: ${{ runner.temp }}/ci_key
+        run: bash infra/fleet/ci/deploy-fleet.sh
+
+      - name: Удалить ключ SSH
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ci_key"

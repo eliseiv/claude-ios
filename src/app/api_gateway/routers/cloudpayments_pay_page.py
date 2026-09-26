@@ -32,12 +32,13 @@ from app.billing_cloudpayments.pay_page import (
 )
 from app.config import get_settings
 from app.deps import client_ip
+from app.instance_config.effective import effective_settings
 
 router = APIRouter(include_in_schema=False)
 
 
 async def _serve(request: Request, path_class: str) -> Response:
-    settings = get_settings()
+    settings = effective_settings(get_settings())
     if (
         not settings.cloudpayments_checkout_configured()
         or not settings.cloudpayments_pay_page_proxy_enabled

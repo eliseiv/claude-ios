@@ -235,6 +235,9 @@ _TABLES = (
     "admin_products",
     "admin_tariffs",
     "admin_settings",
+    # ADR-116 (миграция 0040): зашифрованный оверлей креденшлов — та же операторская таблица;
+    # строка, оставленная одним тестом, подменила бы ключ провайдера всем последующим.
+    "admin_credentials",
     "request_logs",
     "audit_logs",
     "tool_calls",

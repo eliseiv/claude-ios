@@ -1,0 +1,11 @@
+# Время уточняется drop-in'ом offset.conf: воскресенье 04:00 UTC + backup_offset_min (ADR-115 §2).
+[Unit]
+Description=Флот: еженедельная проверка восстановления
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

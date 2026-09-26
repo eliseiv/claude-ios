@@ -1,0 +1,96 @@
+# Образ Postgres с wal-g (ADR-115 §8.2, §11 фаза 1). Публикуется в GHCR ОТДЕЛЬНО от образа
+# приложения: тег — версия образа, записанная в docker-compose.walg.yml, а не SHA коммита. Смена
+# образа Postgres — инфраструктурная выкатка порциями инструментами флота, а не штатный деплой.
+#
+# Тег неизменяем: если образ с этим тегом уже опубликован, джоб его НЕ перезаписывает (серверы,
+# уже работающие на нём, не должны молча получить другой бинарник под тем же именем). Изменили
+# infra/postgres-walg — поднимите тег в docker-compose.walg.yml, иначе джоб покраснеет.
+#
+# Этот workflow не касается деплоя приложения и безопасен до ввода inventory CRM.
+name: images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/postgres-walg/**"
+      - "docker-compose.walg.yml"
+      - ".github/workflows/images.yml"
+  pull_request:
+    paths:
+      - "infra/postgres-walg/**"
+      - "docker-compose.walg.yml"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-walg:
+    name: postgres + wal-g image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0   # сравнение с github.event.before в шаге публикации
+
+      - name: Тег из docker-compose.walg.yml
+        id: tag
+        run: |
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          img="$(awk '/^[[:space:]]*image:[[:space:]]*/ {print $2; exit}' docker-compose.walg.yml)"
+          case "$img" in
+            "ghcr.io/${owner}/claude-ios-postgres:"?*) ;;
+            *) echo "::error::image в docker-compose.walg.yml ($img) не ghcr.io/${owner}/claude-ios-postgres:<тег>"; exit 1;;
+          esac
+          echo "image=$img" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build (load for smoke)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: infra/postgres-walg
+          push: false
+          load: true
+          tags: ${{ steps.tag.outputs.image }}
+
+      # Фактические версии внутри собранного образа — до публикации (правило devops: версия
+      # рантайма сверяется запуском, а не по имени тега). Мажор Postgres обязан остаться 16.
+      - name: Smoke — версии и обёртки
+        run: |
+          img='${{ steps.tag.outputs.image }}'
+          docker run --rm --entrypoint sh "$img" -c 'postgres --version; wal-g --version; fleet-walg --self-test; id -g postgres'
+          docker run --rm --entrypoint postgres "$img" --version | grep -q 'PostgreSQL) 16\.' || { echo "::error::мажор Postgres ≠ 16"; exit 1; }
+
+      - name: Login to GHCR
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish (тег неизменяем)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          img='${{ steps.tag.outputs.image }}'
+          event='${{ github.event_name }}'
+          before='${{ github.event.before }}'
+          if docker manifest inspect "$img" >/dev/null 2>&1; then
+            # Ручной запуск на уже опубликованном теге — не ошибка: публиковать нечего.
+            if [ "$event" = "workflow_dispatch" ]; then
+              echo "::notice::$img уже опубликован — тег неизменяем, публикация не нужна"; exit 0
+            fi
+            # push: база сравнения — прежняя вершина ветки; у нового ref она нулевая, тогда — родитель.
+            case "$before" in ""|0000000000000000000000000000000000000000) base="$(git rev-parse HEAD^ 2>/dev/null || true)";; *) base="$before";; esac
+            if [ -n "$base" ] && git diff --quiet "$base" HEAD -- infra/postgres-walg; then
+              echo "::notice::$img уже опубликован, infra/postgres-walg не менялся — пропуск"; exit 0
+            fi
+            echo "::error::$img уже опубликован, а infra/postgres-walg изменён. Тег неизменяем — поднимите тег в docker-compose.walg.yml"; exit 1
+          fi
+          docker push "$img"

@@ -1,0 +1,11 @@
+# Только на R. Время уточняется drop-in'ом offset.conf (fleet-route setup).
+[Unit]
+Description=Флот: ночной бэкап конфигурации R
+
+[Timer]
+OnCalendar=*-*-* 01:00:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

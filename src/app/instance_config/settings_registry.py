@@ -11,6 +11,9 @@
    ничего не делает, — то же мёртвое объявление, что метрика без эмиссии.
 
 Что в поверхность НЕ входит и почему — ADR-099 §8.2 (свип по всем переменным сервиса).
+ADR-116 §4 добавляет семь строк провайдера, StoreKit, CloudPayments и карт (реестр 14 → 21):
+их значения доходят до потребителей через «действующие настройки»
+(``app.instance_config.effective``), а не через отдельные функции чтения.
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ from app.config import (
     SUPPORTED_ANTHROPIC_THINKING_DISPLAYS,
     SUPPORTED_REASONING_LEVELS,
     Settings,
-    get_settings,
 )
 
 TYPE_BOOL = "bool"
@@ -35,6 +37,12 @@ TYPE_STRING = "string"
 # меняется без нашего релиза, поэтому ограничение стоит на ДЛИНЕ СТРОКИ, а не на перечне: оно
 # защищает форму ввода и колонку JSONB, не решая за провайдера, какие категории существуют.
 BLOCK_CATEGORIES_MAX_LENGTH = 512
+# ADR-116 §4.1: объявленные верхние границы строковых строк StoreKit и CloudPayments.
+STOREKIT_BUNDLE_ID_MAX_LENGTH = 255
+CLOUDPAYMENTS_APP_ID_MAX_LENGTH = 128
+
+STOREKIT_MODE_SANDBOX = "sandbox"
+STOREKIT_MODE_PRODUCTION = "production"
 
 # Значения `limits` в GET /v1/admin/capabilities — runtime-величины ЭТОГО инстанса, а не
 # константы контракта (заморожены только имена ключей и типы).
@@ -132,6 +140,84 @@ SETTING_CHAT_DISABLED_TOOL_FAMILIES = "chat.disabled_tool_families"
 SETTING_MODERATION_ENABLED = "moderation.enabled"
 SETTING_MODERATION_BLOCK_CATEGORIES = "moderation.block_categories"
 SETTING_CATALOG_PRESETS_LOCALE = "catalog.presets_default_locale"
+# ADR-116 §4.1.
+SETTING_LLM_PROVIDER = "llm.provider"
+SETTING_LLM_DUAL_ENABLED = "llm.dual_enabled"
+SETTING_STOREKIT_MODE = "storekit.mode"
+SETTING_STOREKIT_BUNDLE_ID = "storekit.bundle_id"
+SETTING_CLOUDPAYMENTS_APP_ID = "cloudpayments.app_id"
+SETTING_CLOUDPAYMENTS_PAY_PAGE_PROXY = "cloudpayments.pay_page_proxy_enabled"
+SETTING_CHAT_MAPS_TOOLS_ENABLED = "chat.maps_tools_enabled"
+
+# Строки, которые накладываются на ``Settings`` («действующие настройки», ADR-116 §5). При
+# сборке снимка они проверяются и накладываются ДО остальных строк (§4.3): модельные строки
+# обязаны проверяться против провайдера, выбранного в CRM.
+INFRA_SETTING_IDS = frozenset(
+    {
+        SETTING_LLM_PROVIDER,
+        SETTING_LLM_DUAL_ENABLED,
+        SETTING_STOREKIT_MODE,
+        SETTING_STOREKIT_BUNDLE_ID,
+        SETTING_CLOUDPAYMENTS_APP_ID,
+        SETTING_CLOUDPAYMENTS_PAY_PAGE_PROXY,
+        SETTING_CHAT_MAPS_TOOLS_ENABLED,
+    }
+)
+
+_PROVIDER_OPTIONS: tuple[tuple[str, str], ...] = (("openai", "OpenAI"), ("anthropic", "Anthropic"))
+_STOREKIT_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
+    (STOREKIT_MODE_SANDBOX, "Песочница"),
+    (STOREKIT_MODE_PRODUCTION, "Production"),
+)
+
+_AFTER_WRITE_NOTE = (
+    " После правки из панели значение из конфигурации сервера больше не действует, пока правка "
+    "не удалена."
+)
+
+
+def _provider_options(_settings: Settings) -> tuple[tuple[str, str], ...]:
+    return _PROVIDER_OPTIONS
+
+
+def _storekit_mode_options(_settings: Settings) -> tuple[tuple[str, str], ...]:
+    return _STOREKIT_MODE_OPTIONS
+
+
+def _env_provider(settings: Settings) -> str:
+    return settings._normalized_llm_provider()
+
+
+def _env_dual_enabled(settings: Settings) -> bool:
+    """`true`, если CSV провайдеров называет второй провайдер пары (ADR-116 §4.1)."""
+    from app.instance_config.effective import other_provider, providers_named
+
+    second = other_provider(settings._normalized_llm_provider())
+    return second in providers_named(settings.llm_providers_raw)
+
+
+def _env_storekit_mode(settings: Settings) -> str | None:
+    """Режим StoreKit без строки оверлея — по env-флагам, ТОЛЬКО при точном совпадении (§4.2).
+
+    На флоте есть env-комбинации, не совпадающие ни с одной колонкой таблицы §4.2; назвать им
+    режим значило бы показать оператору проверку покупок, которой на инстансе нет. Поэтому:
+    ``sandbox`` — окружение ≠ production, пропуск цепочки и тестовая ветка включены, bundle
+    пуст; ``production`` — окружение production, тестовая ветка выключена, bundle задан (флаг
+    пропуска цепочки в production код игнорирует и в сравнение не входит); иначе ``None``.
+    """
+    production = settings.appstore_environment.strip().lower() == STOREKIT_MODE_PRODUCTION
+    bundle_set = bool(settings.appstore_bundle_id.strip())
+    if production:
+        if not settings.storekit_test_mode and bundle_set:
+            return STOREKIT_MODE_PRODUCTION
+        return None
+    if (
+        settings.storekit_dev_skip_cert_chain_verification
+        and settings.storekit_test_mode
+        and not bundle_set
+    ):
+        return STOREKIT_MODE_SANDBOX
+    return None
 
 
 _SPECS: tuple[SettingSpec, ...] = (
@@ -280,20 +366,118 @@ _SPECS: tuple[SettingSpec, ...] = (
         env_value=lambda s: s.resolved_presets_default_locale(),
         options=_preset_locale_options,
     ),
+    SettingSpec(
+        setting_id=SETTING_LLM_PROVIDER,
+        type=TYPE_ENUM,
+        label="Провайдер",
+        group="Провайдер",
+        description=(
+            "Провайдер модели по умолчанию. Переключение отвергается, если у выбранного провайдера "
+            "нет основного ключа. Выбранные ранее модели другого провайдера перестают применяться "
+            "до нового выбора." + _AFTER_WRITE_NOTE
+        ),
+        env_value=_env_provider,
+        options=_provider_options,
+    ),
+    SettingSpec(
+        setting_id=SETTING_LLM_DUAL_ENABLED,
+        type=TYPE_BOOL,
+        label="Два провайдера",
+        group="Провайдер",
+        description=(
+            "Предлагать модели обоих провайдеров. Включение отвергается, если у второго "
+            "провайдера нет основного ключа." + _AFTER_WRITE_NOTE
+        ),
+        env_value=_env_dual_enabled,
+    ),
+    SettingSpec(
+        setting_id=SETTING_STOREKIT_MODE,
+        type=TYPE_ENUM,
+        label="Режим проверки покупок App Store",
+        group="Покупки в App Store",
+        description=(
+            "Песочница — подлинность транзакции не проверяется, идентификатор приложения в "
+            "транзакции не сверяется; только для тестирования. Production — полная проверка "
+            "подписи Apple и идентификатора приложения. Пусто — режим из CRM не задан, а "
+            "настройки сервера не совпадают ни с одним из двух режимов; выбор режима заменит "
+            "их." + _AFTER_WRITE_NOTE
+        ),
+        env_value=_env_storekit_mode,
+        options=_storekit_mode_options,
+    ),
+    SettingSpec(
+        setting_id=SETTING_STOREKIT_BUNDLE_ID,
+        type=TYPE_STRING,
+        label="Идентификатор приложения (bundle)",
+        group="Покупки в App Store",
+        description=(
+            "Идентификатор приложения в App Store. В режиме Production обязателен и сверяется с "
+            "каждой транзакцией; служит и аудиторией входа через Apple." + _AFTER_WRITE_NOTE
+        ),
+        env_value=lambda s: s.appstore_bundle_id,
+        constraints={"max_length": STOREKIT_BUNDLE_ID_MAX_LENGTH},
+    ),
+    SettingSpec(
+        setting_id=SETTING_CLOUDPAYMENTS_APP_ID,
+        type=TYPE_STRING,
+        label="Идентификатор приложения CloudPayments",
+        group="CloudPayments",
+        description=(
+            "Идентификатор приложения у платёжного партнёра. Оплата картой доступна, когда "
+            "задан и он, и токен CloudPayments." + _AFTER_WRITE_NOTE
+        ),
+        env_value=lambda s: s.cloudpayments_app_id,
+        constraints={"max_length": CLOUDPAYMENTS_APP_ID_MAX_LENGTH},
+    ),
+    SettingSpec(
+        setting_id=SETTING_CLOUDPAYMENTS_PAY_PAGE_PROXY,
+        type=TYPE_BOOL,
+        label="Страница оплаты на домене инстанса",
+        group="CloudPayments",
+        description=(
+            "Открывать страницу оплаты на собственном домене инстанса." + _AFTER_WRITE_NOTE
+        ),
+        env_value=lambda s: s.cloudpayments_pay_page_proxy_enabled,
+    ),
+    SettingSpec(
+        setting_id=SETTING_CHAT_MAPS_TOOLS_ENABLED,
+        type=TYPE_BOOL,
+        label="Инструменты карт",
+        group="Чат",
+        description=(
+            "Предлагать модели инструменты карт. Включайте только там, где приложение их "
+            "поддерживает." + _AFTER_WRITE_NOTE
+        ),
+        env_value=lambda s: s.maps_tools_enabled,
+    ),
 )
 
 _BY_ID: dict[str, SettingSpec] = {spec.setting_id: spec for spec in _SPECS}
 
 
+def _cfg(settings: Settings | None) -> Settings:
+    """Настройки для реестра: переданные — как есть, иначе действующие (ADR-116 §5).
+
+    Доступность строк и ``options`` зависят от провайдера, выбранного в CRM. Переданные
+    настройки НЕ пересчитываются: сборка снимка передаёт сюда настройки, собранные из
+    СОБИРАЕМОГО снимка, и наложение текущего (прежнего) снимка поверх них было бы ошибкой.
+    """
+    if settings is not None:
+        return settings
+    from app.instance_config.effective import get_effective_settings
+
+    return get_effective_settings()
+
+
 def declared_settings(settings: Settings | None = None) -> tuple[SettingSpec, ...]:
     """Строки, объявляемые ЭТИМ инстансом, в порядке отображения."""
-    cfg = settings or get_settings()
+    cfg = _cfg(settings)
     return tuple(spec for spec in _SPECS if spec.available(cfg))
 
 
 def find_setting(setting_id: str, settings: Settings | None = None) -> SettingSpec | None:
     """Объявленная строка по идентификатору, либо ``None`` (→ `400`, настройка не создаётся)."""
-    cfg = settings or get_settings()
+    cfg = _cfg(settings)
     spec = _BY_ID.get(setting_id)
     if spec is None or not spec.available(cfg):
         return None
@@ -378,7 +562,7 @@ def resolve_setting(
     """Значение настройки по единственному порядку: **оверлей → env → дефолт кода**."""
     from app.instance_config.snapshot import get_snapshot
 
-    cfg = settings or get_settings()
+    cfg = _cfg(settings)
     spec = find_setting(setting_id, cfg)
     if spec is None:
         raise KeyError(setting_id)

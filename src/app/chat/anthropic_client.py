@@ -42,7 +42,7 @@ from app.chat.tools import (
     to_domain_tool_name,
 )
 from app.chats.provider_blocks import to_domain_blocks
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.errors import UpstreamError, ValidationFailedError
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import anthropic_upstream_errors_total, llm_upstream_errors_total
@@ -321,7 +321,11 @@ class AnthropicClient:
     """
 
     def __init__(self) -> None:
-        settings = get_settings()
+        from app.instance_config.effective import effective_settings
+
+        # ADR-116 §5: ключ — из действующих настроек (оверлей CRM → env).
+        settings = effective_settings(get_settings())
+        self._inputs = anthropic_client_inputs(settings)
         self._default_model = settings.anthropic_model
         self._max_tokens = settings.anthropic_max_tokens
         self._service_key = settings.anthropic_api_key
@@ -736,6 +740,20 @@ class AnthropicClient:
 # ``anthropic_client._anthropic_singleton = fake``); ``get_llm_client()`` honors it on the anthropic
 # path so a patched fake is used uniformly (ADR-033 §8 — factory shares this singleton).
 _anthropic_singleton: AnthropicClient | None = None
+# Экземпляр, собранный ЭТОЙ фабрикой. Подменённый тестом `_anthropic_singleton` (фейк) по
+# отпечатку входов НЕ пересоздаётся.
+_anthropic_built: AnthropicClient | None = None
+
+
+def anthropic_client_inputs(settings: Settings) -> tuple[object, ...]:
+    """Входы, захватываемые клиентом при создании (ADR-116 §5: пересоздание по отпечатку)."""
+    return (
+        settings.anthropic_api_key,
+        settings.anthropic_model,
+        settings.anthropic_max_tokens,
+        settings.anthropic_timeout_seconds,
+        settings.anthropic_max_retries,
+    )
 
 
 def get_anthropic_client() -> AnthropicClient:
@@ -745,7 +763,24 @@ def get_anthropic_client() -> AnthropicClient:
     delegates here on the anthropic path), so patching ``_anthropic_singleton`` in tests overrides
     both this helper and the provider factory.
     """
-    global _anthropic_singleton
-    if _anthropic_singleton is None:
+    global _anthropic_singleton, _anthropic_built
+    if _anthropic_singleton is not None and _anthropic_singleton is not _anthropic_built:
+        return _anthropic_singleton
+    from app.instance_config.effective import effective_settings
+
+    inputs = anthropic_client_inputs(effective_settings(get_settings()))
+    # Идущий вызов завершается на прежнем клиенте; новый вызов получает клиента с новым ключом.
+    if _anthropic_singleton is None or _anthropic_singleton._inputs != inputs:
+        previous = _anthropic_singleton
         _anthropic_singleton = AnthropicClient()
+        _anthropic_built = _anthropic_singleton
+        if previous is not None:
+            # Пул прежнего клиента закрывается, когда на нём не останется идущих вызовов.
+            from app.instance_config.client_retirement import (
+                retire_when_unreferenced,
+                sdk_clients_of,
+            )
+
+            retire_when_unreferenced(previous, sdk_clients_of(previous, "_client"))
+            del previous
     return _anthropic_singleton

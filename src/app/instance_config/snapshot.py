@@ -31,9 +31,10 @@ from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.models import AdminProduct, AdminSetting, AdminTariff
+from app.models import AdminCredential, AdminProduct, AdminSetting, AdminTariff
 from app.observability.logging import log_event
 from app.observability.metrics import (
+    admin_credential_undecryptable_total,
     admin_overrides_active,
     admin_overrides_refresh_failures_total,
     admin_overrides_snapshot_age_seconds,
@@ -44,6 +45,7 @@ logger = logging.getLogger("app.instance_config")
 SCOPE_PRODUCTS = "products"
 SCOPE_TARIFFS = "tariffs"
 SCOPE_SETTINGS = "settings"
+SCOPE_CREDENTIALS = "credentials"
 
 
 @dataclass(frozen=True)
@@ -85,13 +87,30 @@ class SettingOverlay:
 
 
 @dataclass(frozen=True)
+class CredentialOverlay:
+    """Строка ``admin_credentials``, РАСШИФРОВАННАЯ в памяти процесса (ADR-116 §5).
+
+    Значение живёт ровно там, где сегодня живут значения из `.env`, — в памяти процесса. Оно не
+    попадает ни в ``repr``, ни в лог: ``repr=False`` защищает от случайной печати снимка.
+    """
+
+    credential_id: str
+    value: str = field(repr=False)
+    fingerprint: str
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class InstanceConfigSnapshot:
-    """Неизменяемый снимок трёх таблиц-оверлеев."""
+    """Неизменяемый снимок таблиц-оверлеев."""
 
     products: Mapping[str, ProductOverlay] = field(default_factory=dict)
     tariffs: Mapping[str, TariffOverlay] = field(default_factory=dict)
     settings: Mapping[str, SettingOverlay] = field(default_factory=dict)
     loaded_at: float | None = None
+    # ADR-116 §5: креденшлы — отдельная область; поле последнее и со значением по умолчанию,
+    # чтобы прежние конструкторы снимка оставались корректными.
+    credentials: Mapping[str, CredentialOverlay] = field(default_factory=dict)
 
     def composition(self) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         """Состав оверлеев: идентификаторы по трём областям, в стабильном порядке."""
@@ -100,6 +119,10 @@ class InstanceConfigSnapshot:
             tuple(sorted(self.tariffs)),
             tuple(sorted(self.settings)),
         )
+
+    def credential_ids(self) -> tuple[str, ...]:
+        """Состав креденшлов оверлея (только идентификаторы — значения наружу не идут)."""
+        return tuple(sorted(self.credentials))
 
 
 EMPTY_SNAPSHOT = InstanceConfigSnapshot()
@@ -143,7 +166,11 @@ def install_snapshot(snapshot: InstanceConfigSnapshot) -> None:
     admin_overrides_active.labels(scope=SCOPE_PRODUCTS).set(len(snapshot.products))
     admin_overrides_active.labels(scope=SCOPE_TARIFFS).set(len(snapshot.tariffs))
     admin_overrides_active.labels(scope=SCOPE_SETTINGS).set(len(snapshot.settings))
-    if previous.composition() != snapshot.composition():
+    admin_overrides_active.labels(scope=SCOPE_CREDENTIALS).set(len(snapshot.credentials))
+    if (
+        previous.composition() != snapshot.composition()
+        or previous.credential_ids() != snapshot.credential_ids()
+    ):
         # Состав логируется на ИЗМЕНЕНИИ, а не на каждом тике окна: тик раз в 30 секунд на 41
         # инстансе — это поток строк, в котором настоящее изменение состава уже не видно.
         # Обесценивание канала стоит ровно столько же, сколько молчание.
@@ -155,6 +182,7 @@ def install_snapshot(snapshot: InstanceConfigSnapshot) -> None:
             products=list(products),
             tariffs=list(tariffs),
             settings=list(settings_ids),
+            credentials=list(snapshot.credential_ids()),
         )
 
 
@@ -167,13 +195,15 @@ async def load_snapshot(
     session: AsyncSession, settings: Settings | None = None
 ) -> InstanceConfigSnapshot:
     """Прочитать три таблицы целиком и собрать снимок. Ошибки БД НЕ перехватываются здесь."""
+    from app.instance_config.effective import apply_overlay, base_settings_of
     from app.instance_config.settings_registry import (
+        INFRA_SETTING_IDS,
         SettingValueError,
         find_setting,
         validate_setting_value,
     )
 
-    cfg = settings or get_settings()
+    base = base_settings_of(settings or get_settings())
     products = {
         row.product_id: ProductOverlay(
             product_id=row.product_id,
@@ -191,8 +221,26 @@ async def load_snapshot(
         )
         for row in (await session.scalars(select(AdminTariff))).all()
     }
-    resolved_settings: dict[str, SettingOverlay] = {}
-    for row in (await session.scalars(select(AdminSetting))).all():
+    credentials = await _load_credentials(session)
+    setting_rows = list((await session.scalars(select(AdminSetting))).all())
+    # ⚠️ ПОРЯДОК СБОРКИ ОБЯЗАТЕЛЕН (ADR-116 §4.3): строки провайдера/инфраструктуры и
+    # креденшлы накладываются ДО проверки остальных строк. Модельные строки проверяются против
+    # провайдера, ВЫБРАННОГО В CRM, а не против провайдера из `.env`; иначе после смены
+    # провайдера дефолтная модель прежнего провайдера применялась бы к новому.
+    infra_settings: dict[str, SettingOverlay] = {}
+    for row in setting_rows:
+        if row.setting_id not in INFRA_SETTING_IDS:
+            continue
+        overlay = _coerce_setting_row(row, base)
+        if overlay is not None:
+            infra_settings[row.setting_id] = overlay
+    cfg = apply_overlay(
+        base, InstanceConfigSnapshot(settings=infra_settings, credentials=credentials)
+    )
+    resolved_settings: dict[str, SettingOverlay] = dict(infra_settings)
+    for row in setting_rows:
+        if row.setting_id in INFRA_SETTING_IDS:
+            continue
         # Строка игнорируется во ВСЕХ исходах ниже — оверлей не имеет права уронить инстанс
         # (§9). Различается только ЛЕЙБЛ: `reason` берётся из того же закрытого перечня, что и
         # у отказов правки (§10.0), и обязан следовать из наблюдаемого факта СВОЕЙ ветки.
@@ -226,7 +274,96 @@ async def load_snapshot(
         tariffs=tariffs,
         settings=resolved_settings,
         loaded_at=time.time(),
+        credentials=credentials,
     )
+
+
+def _coerce_setting_row(row: AdminSetting, cfg: Settings) -> SettingOverlay | None:
+    """Строка ``admin_settings`` провайдера/инфраструктуры, приведённая к объявлению.
+
+    Те же исходы и те же лейблы, что у остальных строк (см. цикл в ``load_snapshot``): такая
+    строка от выбранного провайдера не зависит, поэтому проверяется по базовым настройкам.
+    """
+    from app.instance_config.settings_registry import (
+        SettingValueError,
+        find_setting,
+        validate_setting_value,
+    )
+
+    spec = find_setting(row.setting_id, cfg)
+    if spec is None:
+        _log_ignored_setting(row.setting_id, "unknown_id")
+        return None
+    try:
+        value = validate_setting_value(spec, row.value, cfg)
+    except SettingValueError as exc:
+        _log_ignored_setting(
+            row.setting_id, "out_of_range" if exc.constraint is not None else "type_mismatch"
+        )
+        return None
+    return SettingOverlay(setting_id=row.setting_id, value=value, updated_at=row.updated_at)
+
+
+async def _load_credentials(session: AsyncSession) -> dict[str, CredentialOverlay]:
+    """Прочитать и расшифровать ``admin_credentials`` (ADR-116 §5).
+
+    **Отказ расшифровки строки** (мастер-ключ сменён, строка повреждена, KMS не настроен):
+    строка игнорируется, пишется ERROR ``admin_credential_undecryptable`` и счётчик; действует
+    ПРЕЖНЕЕ значение снимка, если оно было (правило «отказ обновления не откатывает»), иначе —
+    `.env`. Переход на `.env` при холодном старте может вернуть инстанс на старый ключ, поэтому
+    тревога по счётчику обязательна.
+
+    KMS-клиент запрашивается ТОЛЬКО при непустой таблице: инстанс без строк оверлея обязан
+    работать ровно как до выката, в том числе там, где мастер-ключ не задан.
+    """
+    from app.instance_config.credentials import decrypt_credential, find_credential
+
+    rows = list((await session.scalars(select(AdminCredential))).all())
+    if not rows:
+        return {}
+    previous = _current.credentials
+    kms: Any = None
+    try:
+        from app.byok.kms import get_kms_client
+
+        kms = get_kms_client()
+    except (RuntimeError, ValueError):
+        kms = None
+    loaded: dict[str, CredentialOverlay] = {}
+    for row in rows:
+        if find_credential(row.credential_id) is None:
+            # Креденшл снят с реестра: применить его некому (тот же исход, что у сироты
+            # настроек, тот же лейбл из перечня отказов).
+            _log_ignored_setting(row.credential_id, "unknown_id")
+            continue
+        try:
+            if kms is None:
+                raise RuntimeError("KMS is not configured")
+            value = decrypt_credential(
+                kms, row.credential_id, row.encrypted_value, row.encrypted_dek
+            )
+        except Exception as exc:  # noqa: BLE001 — любой отказ расшифровки: строка игнорируется
+            admin_credential_undecryptable_total.labels(credential_id=row.credential_id).inc()
+            # Текст исключения НЕ пишется, только класс: ни значение, ни материал ключа в лог не
+            # попадают ни при каком исходе.
+            log_event(
+                logger,
+                logging.ERROR,
+                "admin_credential_undecryptable",
+                id=row.credential_id,
+                error_class=type(exc).__name__,
+            )
+            kept = previous.get(row.credential_id)
+            if kept is not None:
+                loaded[row.credential_id] = kept
+            continue
+        loaded[row.credential_id] = CredentialOverlay(
+            credential_id=row.credential_id,
+            value=value,
+            fingerprint=row.fingerprint,
+            updated_at=row.updated_at,
+        )
+    return loaded
 
 
 def _log_ignored_setting(setting_id: str, reason: str) -> None:

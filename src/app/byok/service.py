@@ -54,7 +54,10 @@ def _active_model_for(key_status: str, provider: str | None) -> str | None:
     settings = get_settings()
     if provider is None:
         # Legacy row: provider unknown without decrypting the key → active-instance default.
-        return settings.byok_default_model_for(settings.llm_provider.strip().lower())
+        from app.instance_config.effective import effective_settings
+
+        active = effective_settings(settings).llm_provider.strip().lower()
+        return settings.byok_default_model_for(active)
     return settings.byok_default_model_for(provider)
 
 

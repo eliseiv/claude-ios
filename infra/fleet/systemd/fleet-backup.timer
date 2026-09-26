@@ -1,0 +1,11 @@
+# Время уточняется drop-in'ом offset.conf: 01:00 UTC + backup_offset_min сервера (ADR-115 §2.1 ш. 2).
+[Unit]
+Description=Флот: ночная полная копия инстансов
+
+[Timer]
+OnCalendar=*-*-* 01:00:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

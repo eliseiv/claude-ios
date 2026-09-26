@@ -64,6 +64,7 @@ from app.deps import (
     get_cloudpayments_webhook_service,
 )
 from app.errors import CloudPaymentsCheckoutNotConfiguredError, RateLimitedError
+from app.instance_config.effective import effective_settings
 from app.models import Subscription
 from app.schemas.billing_cloudpayments import (
     CloudPaymentsCancelResponse,
@@ -107,7 +108,7 @@ async def cloudpayments_checkout(
 ) -> CloudPaymentsCheckoutResponse:
     # userId comes ONLY from the verified JWT subject (never the request body) — the core fix that
     # guarantees the callback (ADR-050) can find this user and credit the right account.
-    if not settings.cloudpayments_checkout_configured():
+    if not effective_settings(settings).cloudpayments_checkout_configured():
         raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
     if not await enforce_other_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
@@ -135,7 +136,7 @@ async def experiments_assign(
     # Same order of checks on both experiment endpoints: JWT (dependency) -> instance gate ->
     # rate limit -> locale -> upstream call. The user id sent upstream is the verified JWT
     # subject, never a body field: every outgoing broadapps call carries that one identity.
-    if not settings.cloudpayments_checkout_configured():
+    if not effective_settings(settings).cloudpayments_checkout_configured():
         raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
     if not await enforce_experiment_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
@@ -165,7 +166,7 @@ async def experiments_paywall_shown(
     # this endpoint answers 200 {"logged": bool} and NEVER 502. A refused impression log must not
     # break the impression, and a false 502 here would devalue the code that means "payment link
     # not created" on the same prefix. The refusal is not lost — it is a WARNING in our log.
-    if not settings.cloudpayments_checkout_configured():
+    if not effective_settings(settings).cloudpayments_checkout_configured():
         raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
     if not await enforce_experiment_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")
@@ -186,7 +187,7 @@ async def cloudpayments_cancel(
     client: Annotated[CloudPaymentsCheckoutClient, Depends(get_cloudpayments_checkout_client)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CloudPaymentsCancelResponse:
-    if not settings.cloudpayments_checkout_configured():
+    if not effective_settings(settings).cloudpayments_checkout_configured():
         raise CloudPaymentsCheckoutNotConfiguredError("cloudpayments checkout not configured")
     if not await enforce_other_limits(user_id=current.user_id):
         raise RateLimitedError("rate limit exceeded")

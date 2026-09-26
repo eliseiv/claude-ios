@@ -14,7 +14,8 @@
 
 from __future__ import annotations
 
-from app.config import Settings, get_settings
+from app.config import Settings
+from app.instance_config.effective import effective_settings
 from app.instance_config.settings_registry import (
     SETTING_CHAT_DEFAULT_MODEL,
     SETTING_CHAT_MODELS_OFFERED,
@@ -34,7 +35,7 @@ def instance_default_model(
     каталога), НЕ применяется: строка-сирота переживает временное исчезновение варианта, но не
     имеет права направить ход на модель, которую инстанс не умеет обслужить.
     """
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     snap = snapshot if snapshot is not None else get_snapshot()
     value = resolve_setting(SETTING_CHAT_DEFAULT_MODEL, settings=cfg, snapshot=snap)
     if isinstance(value, str) and value in cfg.allowed_models_union():
@@ -48,7 +49,7 @@ def offered_model_ids(
     snapshot: InstanceConfigSnapshot | None = None,
 ) -> tuple[str, ...]:
     """Модели, предлагаемые витриной, в порядке отображения: дефолт первым."""
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     snap = snapshot if snapshot is not None else get_snapshot()
     union = cfg.allowed_models_union()
     selected = resolve_setting(SETTING_CHAT_MODELS_OFFERED, settings=cfg, snapshot=snap)
@@ -69,7 +70,7 @@ def catalog_rows(
     При пустом оверлее результат поэлементно равен ``Settings.catalog_models()`` — витрина по
     умолчанию воспроизводит встроенный каталог бит-в-бит.
     """
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     snap = snapshot if snapshot is not None else get_snapshot()
     base = {row[0]: row for row in cfg.catalog_models()}
     union = cfg.allowed_models_union()

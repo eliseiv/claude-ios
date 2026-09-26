@@ -23,6 +23,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import (
+    EVENT_ADMIN_CREDENTIAL_CLEARED,
+    EVENT_ADMIN_CREDENTIAL_SET,
     EVENT_ADMIN_PRODUCT_ARCHIVED,
     EVENT_ADMIN_PRODUCT_CREATED,
     EVENT_ADMIN_PRODUCT_UPDATED,
@@ -31,15 +33,47 @@ from app.audit.service import (
     AuditEvent,
     AuditService,
 )
-from app.config import Settings, get_settings
+from app.byok.kms import KmsClient
+from app.config import Settings
 from app.instance_config import models as chat_models
 from app.instance_config import products as product_catalog
 from app.instance_config import tariffs as tariff_registry
+from app.instance_config.credentials import (
+    CREDENTIAL_ANTHROPIC_API_KEY,
+    CREDENTIAL_MAX_LENGTH,
+    CREDENTIAL_OPENAI_API_KEY,
+    CREDENTIAL_PROXY_API_KEY,
+    SOURCE_ENV,
+    SOURCE_OVERLAY,
+    SOURCE_UNSET,
+    CredentialSpec,
+    credential_fingerprint,
+    declared_credentials,
+    decrypt_credential,
+    encrypt_credential,
+    env_credential_value,
+    find_credential,
+    has_undeclared_character,
+)
+from app.instance_config.effective import (
+    apply_overlay,
+    base_settings_of,
+    effective_settings,
+    other_provider,
+    providers_named,
+)
 from app.instance_config.settings_registry import (
+    INFRA_SETTING_IDS,
     PRODUCT_TOKENS_MAX,
     SETTING_CHAT_ADVERTISED_MODES,
     SETTING_CHAT_DEFAULT_MODEL,
     SETTING_CHAT_MODELS_OFFERED,
+    SETTING_LLM_DUAL_ENABLED,
+    SETTING_LLM_PROVIDER,
+    SETTING_STOREKIT_BUNDLE_ID,
+    SETTING_STOREKIT_MODE,
+    STOREKIT_MODE_PRODUCTION,
+    STOREKIT_MODE_SANDBOX,
     TARIFF_DECIMAL_PLACES,
     TARIFF_TOKENS_MAX,
     SettingSpec,
@@ -52,16 +86,22 @@ from app.instance_config.settings_registry import (
 )
 from app.instance_config.snapshot import (
     EMPTY_SNAPSHOT,
+    CredentialOverlay,
     InstanceConfigSnapshot,
     SettingOverlay,
     get_snapshot,
     refresh_snapshot,
 )
-from app.models import AdminProduct, AdminSetting, AdminTariff
+from app.models import AdminCredential, AdminProduct, AdminSetting, AdminTariff
 from app.observability.logging import log_event
 from app.observability.metrics import admin_override_rejected_total
 from app.schemas.admin_economics import (
     AdminCapabilitiesResponse,
+    AdminCredentialConstraints,
+    AdminCredentialItem,
+    AdminCredentialListResponse,
+    AdminCredentialPatchRequest,
+    AdminCredentialWriteResponse,
     AdminProductCreateRequest,
     AdminProductCreateResponse,
     AdminProductItem,
@@ -82,6 +122,7 @@ from app.schemas.admin_economics import (
 SCOPE_PRODUCTS = "products"
 SCOPE_TARIFFS = "tariffs"
 SCOPE_SETTINGS = "settings"
+SCOPE_CREDENTIALS = "credentials"
 
 # Причины отказа (замороженный набор метрики §10) и их коды. Перечень — РАЗБИЕНИЕ по одному
 # измерению «ГДЕ лежит несоответствие» (§10.0): идентификатор → форма присланного → объявленная
@@ -115,6 +156,15 @@ REASON_SOURCE_KIND_MISSING = "source_kind_missing"  # -> 400 (источник �
 # смешение сделало бы серию непригодной как измерение цены TD-043.
 REASON_UNSUPPORTED_FIELD = "unsupported_field"  # -> 400 (поля контракта сервис не поддерживает)
 REASON_CONFLICT = "conflict"  # -> 409 (версия) и 400 (дубликат / межэлементный)
+# ⚠️ ОКРУЖЕНИЕ ИНСТАНСА — отдельное место (ADR-116 §4.3), а не «похожий случай» `conflict`:
+# форма, границы, данные источника и соседние элементы в порядке, но на сервере нет того, без
+# чего значение нерабочее или опасное (файл корневых сертификатов Apple; секрет подписи
+# колбэков прокси). Лечится доступом к серверу, а не правкой другого элемента в CRM.
+# Производители: `storekit.mode = production`, `PATCH proxy.api_key` и запись креденшла
+# без мастер-ключа шифрования.
+REASON_ENVIRONMENT_MISSING = "environment_missing"  # -> 400
+# Третий производитель — решение main chat 2026-09-26: `PATCH /credentials` со строкой при
+# незаданном мастер-ключе шифрования (без него значение не зашифровать).
 
 # Объявляются ТОЛЬКО реализованные пути: `features` — единственный источник права записи для
 # CRM, и он fail-closed.
@@ -127,6 +177,10 @@ FEATURES = (
     "pricing.write_tokens",
     "settings.write",
     "requests.costs",
+    # ADR-116 §2.6: поинстансный признак поддержки `/v1/admin/credentials` — флот обновляется
+    # порциями, и версия контракта CRM для флота не атомарна.
+    "credentials.read",
+    "credentials.write",
 )
 CONTRACT_VERSION = 1
 
@@ -200,7 +254,10 @@ class AdminEconomicsService:
 
     def __init__(self, session: AsyncSession, settings: Settings | None = None) -> None:
         self._session = session
-        self._settings = settings or get_settings()
+        # ADR-116 §5: действующие настройки — `options` моделей, доступность строк и
+        # межэлементные инварианты считаются для провайдера, выбранного в CRM.
+        self._settings = effective_settings(settings)
+        self._base_settings = base_settings_of(self._settings)
         self._audit = AuditService(session)
 
     # --- отказы ---------------------------------------------------------------------------
@@ -975,6 +1032,7 @@ class AdminEconomicsService:
             raise self._reject(SCOPE_SETTINGS, reason, 422, str(exc)) from exc
         value = _normalized_setting_value(spec, value)
         await self._check_model_invariant(spec, value)
+        await self._check_infra_invariant(spec, value)
 
         # «Прежнее значение» — тоже из БД: строка, изменённая другим процессом внутри окна,
         # ещё не попала в снимок, и дельта аудита указала бы неверное направление.
@@ -1041,6 +1099,21 @@ class AdminEconomicsService:
         )
         await self._commit_and_refresh()
         self._log_applied(SCOPE_SETTINGS, setting_id, previous_value, value, actor_claim)
+        if (
+            setting_id == SETTING_STOREKIT_MODE
+            and value == STOREKIT_MODE_SANDBOX
+            and previous_value != STOREKIT_MODE_SANDBOX
+        ):
+            # ADR-116 §6 (в): в песочнице подлинность транзакции не проверяется, и покупку можно
+            # подделать самодельным сертификатом — денежный риск, поэтому WARNING, а не INFO.
+            log_event(
+                logger,
+                logging.WARNING,
+                "admin_storekit_mode_changed",
+                previous=_short(previous_value),
+                next=_short(value),
+                actorClaim=actor_claim,
+            )
         # Из ЗАПИСАННЫХ значений, а не из перечитанного снимка (см. `create_product`): та же
         # форма дефекта, тот же адресат — оператор, которому правка показалась непринятой.
         return AdminSettingWriteResponse(
@@ -1048,6 +1121,466 @@ class AdminEconomicsService:
             previous_value=previous_value,
             changed=changed,
             effective_after_seconds=self._effective_after(),
+        )
+
+    # --- инварианты провайдера и StoreKit (ADR-116 §4.3) ------------------------------------
+
+    async def _db_overlay_snapshot(self) -> InstanceConfigSnapshot:
+        """Оверлей ADR-116 (строки провайдера/инфраструктуры и креденшлы), прочитанный из БД.
+
+        Решение о ЗАПИСИ принимается по состоянию БД, а не по снимку процесса: снимок отстаёт
+        на окно обновления, и соседняя правка внутри окна была бы не видна барьеру (та же форма
+        дефекта, что у ``_check_model_invariant``). Строка креденшла, которую не удалось
+        расшифровать, в снимок не входит — действует `.env`, как и при сборке снимка процесса.
+        """
+        overlays: dict[str, SettingOverlay] = {}
+        for row in (
+            await self._session.scalars(
+                select(AdminSetting).where(AdminSetting.setting_id.in_(sorted(INFRA_SETTING_IDS)))
+            )
+        ).all():
+            coerced = coerce_stored_setting_value(row.setting_id, row.value, self._base_settings)
+            if coerced is None:
+                continue
+            overlays[row.setting_id] = SettingOverlay(
+                setting_id=row.setting_id, value=coerced, updated_at=row.updated_at
+            )
+        credentials: dict[str, CredentialOverlay] = {}
+        rows = list((await self._session.scalars(select(AdminCredential))).all())
+        if rows:
+            from app.byok.kms import get_kms_client
+
+            try:
+                kms = get_kms_client()
+            except (RuntimeError, ValueError):
+                kms = None
+            for cred_row in rows:
+                if kms is None or find_credential(cred_row.credential_id) is None:
+                    continue
+                try:
+                    value = decrypt_credential(
+                        kms,
+                        cred_row.credential_id,
+                        cred_row.encrypted_value,
+                        cred_row.encrypted_dek,
+                    )
+                except Exception:  # noqa: BLE001 — нерасшифруемая строка = действует `.env`
+                    continue
+                credentials[cred_row.credential_id] = CredentialOverlay(
+                    credential_id=cred_row.credential_id,
+                    value=value,
+                    fingerprint=cred_row.fingerprint,
+                    updated_at=cred_row.updated_at,
+                )
+        return InstanceConfigSnapshot(settings=overlays, credentials=credentials)
+
+    @staticmethod
+    def _with_setting(
+        snapshot: InstanceConfigSnapshot, setting_id: str, value: Any
+    ) -> InstanceConfigSnapshot:
+        now = datetime.datetime.now(tz=datetime.UTC)
+        settings = dict(snapshot.settings)
+        settings[setting_id] = SettingOverlay(setting_id=setting_id, value=value, updated_at=now)
+        return InstanceConfigSnapshot(settings=settings, credentials=snapshot.credentials)
+
+    @staticmethod
+    def _with_credential(
+        snapshot: InstanceConfigSnapshot, credential_id: str, value: str | None
+    ) -> InstanceConfigSnapshot:
+        credentials = dict(snapshot.credentials)
+        if value is None:
+            credentials.pop(credential_id, None)
+        else:
+            credentials[credential_id] = CredentialOverlay(
+                credential_id=credential_id,
+                value=value,
+                fingerprint=credential_fingerprint(value),
+                updated_at=datetime.datetime.now(tz=datetime.UTC),
+            )
+        return InstanceConfigSnapshot(settings=snapshot.settings, credentials=credentials)
+
+    @staticmethod
+    def _dual_enabled(cfg: Settings) -> bool:
+        """`llm.dual_enabled` действующих настроек: CSV провайдеров называет второй провайдер."""
+        second = other_provider(cfg._normalized_llm_provider())
+        return second in providers_named(cfg.llm_providers_raw)
+
+    def _reject_no_key(self, scope: str, provider: str) -> HTTPException:
+        return self._reject(
+            scope,
+            REASON_CONFLICT,
+            400,
+            f"у провайдера «{provider}» нет основного ключа: сначала запишите ключ",
+        )
+
+    @staticmethod
+    def _apple_roots_loaded(cfg: Settings) -> bool:
+        from app.subscription.storekit import apple_root_certificates_loaded
+
+        return apple_root_certificates_loaded(cfg.appstore_root_cert_dir)
+
+    async def _check_infra_invariant(self, spec: SettingSpec, value: Any) -> None:
+        """Межэлементные инварианты строк провайдера и StoreKit (ADR-116 §4.3).
+
+        Правки, после которых инстанс перестал бы работать, отвергаются ДО записи. «Действующий
+        ключ» — непустой ОСНОВНОЙ ключ провайдера после наложения оверлея, ровно предикат
+        ``Settings._credits_api_key_configured``; резервный ключ действующим не считается.
+        """
+        if spec.setting_id not in INFRA_SETTING_IDS:
+            return
+        snapshot = self._with_setting(await self._db_overlay_snapshot(), spec.setting_id, value)
+        cfg = apply_overlay(self._base_settings, snapshot)
+        if spec.setting_id == SETTING_LLM_PROVIDER:
+            provider = cfg._normalized_llm_provider()
+            if not cfg._credits_api_key_configured(provider):
+                raise self._reject_no_key(SCOPE_SETTINGS, provider)
+        elif spec.setting_id == SETTING_LLM_DUAL_ENABLED:
+            if value is True:
+                second = other_provider(cfg._normalized_llm_provider())
+                if not cfg._credits_api_key_configured(second):
+                    raise self._reject_no_key(SCOPE_SETTINGS, second)
+        elif spec.setting_id == SETTING_STOREKIT_MODE:
+            if value == STOREKIT_MODE_PRODUCTION:
+                if not cfg.appstore_bundle_id.strip():
+                    raise self._reject(
+                        SCOPE_SETTINGS,
+                        REASON_CONFLICT,
+                        400,
+                        "режим Production требует идентификатор приложения: сначала задайте его",
+                    )
+                if not self._apple_roots_loaded(cfg):
+                    raise self._reject(
+                        SCOPE_SETTINGS,
+                        REASON_ENVIRONMENT_MISSING,
+                        400,
+                        "на сервере не загружены корневые сертификаты Apple: режим Production "
+                        "недоступен до их установки",
+                    )
+        elif spec.setting_id == SETTING_STOREKIT_BUNDLE_ID:
+            mode = resolve_setting(SETTING_STOREKIT_MODE, settings=cfg, snapshot=snapshot)
+            if isinstance(value, str) and not value.strip() and mode == STOREKIT_MODE_PRODUCTION:
+                raise self._reject(
+                    SCOPE_SETTINGS,
+                    REASON_CONFLICT,
+                    400,
+                    "в режиме Production идентификатор приложения обязателен: сначала "
+                    "переключите режим",
+                )
+
+    # --- креденшлы (ADR-116 §2) ---------------------------------------------------------
+
+    @staticmethod
+    def _credential_constraints() -> AdminCredentialConstraints:
+        return AdminCredentialConstraints(max_length=CREDENTIAL_MAX_LENGTH)
+
+    def _env_credential_state(self, spec: CredentialSpec) -> tuple[str, str | None, bool]:
+        """``(source, fingerprint, configured)`` значения из конфигурации сервера."""
+        value = env_credential_value(spec, self._base_settings)
+        if not value.strip():
+            return SOURCE_UNSET, None, False
+        return SOURCE_ENV, credential_fingerprint(value), True
+
+    def _credential_item_of(
+        self,
+        spec: CredentialSpec,
+        *,
+        source: str,
+        fingerprint: str | None,
+        configured: bool,
+        updated_at: datetime.datetime | None,
+    ) -> AdminCredentialItem:
+        return AdminCredentialItem(
+            credential_id=spec.credential_id,
+            label=spec.label,
+            group=spec.group,
+            description=spec.description,
+            constraints=self._credential_constraints(),
+            configured=configured,
+            source=source,
+            fingerprint=fingerprint,
+            updated_at=_iso_z(updated_at),
+        )
+
+    def _credential_item(self, spec: CredentialSpec) -> AdminCredentialItem:
+        overlay = get_snapshot().credentials.get(spec.credential_id)
+        if overlay is not None:
+            return self._credential_item_of(
+                spec,
+                source=SOURCE_OVERLAY,
+                fingerprint=overlay.fingerprint,
+                configured=bool(overlay.value.strip()),
+                updated_at=overlay.updated_at,
+            )
+        source, fingerprint, configured = self._env_credential_state(spec)
+        return self._credential_item_of(
+            spec, source=source, fingerprint=fingerprint, configured=configured, updated_at=None
+        )
+
+    def list_credentials(self) -> AdminCredentialListResponse:
+        """Только метаданные: значение не отдаётся никогда (ADR-116 §2.4)."""
+        return AdminCredentialListResponse(
+            items=[self._credential_item(spec) for spec in declared_credentials()]
+        )
+
+    def _validate_credential_value(self, value: Any) -> str | None:
+        """Одна ветка — один `reason` и один код (ADR-116 §2.3). Текст отказа значения не несёт."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise self._reject(
+                SCOPE_CREDENTIALS, REASON_TYPE_MISMATCH, 422, "ожидается строка или null"
+            )
+        if len(value) > CREDENTIAL_MAX_LENGTH:
+            raise self._reject(
+                SCOPE_CREDENTIALS,
+                REASON_OUT_OF_RANGE,
+                422,
+                f"длиннее {CREDENTIAL_MAX_LENGTH} символов",
+            )
+        if has_undeclared_character(value):
+            raise self._reject(
+                SCOPE_CREDENTIALS,
+                REASON_UNDECLARED_BOUND,
+                400,
+                "значение содержит пробельный или управляющий символ",
+            )
+        return value
+
+    async def _check_credential_invariant(self, spec: CredentialSpec, value: str | None) -> None:
+        """Инварианты записи креденшла (ADR-116 §4.3), в порядке таблицы §2.3.
+
+        Основной ключ выбранного провайдера (а при двух провайдерах — и второго) не может стать
+        пустым; резервный ключ инвариант не нарушает никогда. Ключ прокси при пустом секрете
+        подписи колбэков служит и ключом подписи — его смена сломала бы задачи в полёте.
+        """
+        provider_of = {
+            CREDENTIAL_OPENAI_API_KEY: "openai",
+            CREDENTIAL_ANTHROPIC_API_KEY: "anthropic",
+        }
+        provider = provider_of.get(spec.credential_id)
+        if provider is not None:
+            snapshot = self._with_credential(
+                await self._db_overlay_snapshot(), spec.credential_id, value
+            )
+            cfg = apply_overlay(self._base_settings, snapshot)
+            active = cfg._normalized_llm_provider()
+            required = provider == active or (
+                self._dual_enabled(cfg) and provider == other_provider(active)
+            )
+            if required and not cfg._credits_api_key_configured(provider):
+                raise self._reject(
+                    SCOPE_CREDENTIALS,
+                    REASON_CONFLICT,
+                    400,
+                    f"провайдер «{provider}» выбран на инстансе, и без основного ключа он "
+                    "перестанет работать: сначала смените провайдера",
+                )
+        if (
+            spec.credential_id == CREDENTIAL_PROXY_API_KEY
+            and not self._base_settings.proxy_webhook_secret.strip()
+        ):
+            raise self._reject(
+                SCOPE_CREDENTIALS,
+                REASON_ENVIRONMENT_MISSING,
+                400,
+                "на сервере не задан отдельный секрет подписи колбэков прокси: ключ прокси "
+                "подписывает колбэки задач, и его смена сломала бы задачи в полёте",
+            )
+
+    async def patch_credential(
+        self,
+        credential_id: str,
+        body: AdminCredentialPatchRequest,
+        *,
+        actor_claim: str | None,
+    ) -> AdminCredentialWriteResponse:
+        """Записать (строка) или удалить (``null``) строку оверлея креденшла (ADR-116 §2.3).
+
+        Значение не попадает ни в ответ, ни в аудит, ни в лог, ни в текст отказа (§2.5).
+        """
+        spec = find_credential(credential_id)
+        if spec is None:
+            raise self._reject(
+                SCOPE_CREDENTIALS,
+                REASON_UNKNOWN_ID,
+                400,
+                f"креденшл «{credential_id}» на этом инстансе неизвестен",
+            )
+        value = self._validate_credential_value(body.value)
+        await self._check_credential_invariant(spec, value)
+        # Шифрование требует мастер-ключа на сервере: без него запись невозможна, и это место
+        # несоответствия — ОКРУЖЕНИЕ инстанса (лечится доступом к серверу), а не правка в CRM.
+        # Проверяется ДО любой записи; удаление строки (`null`) мастер-ключа не требует.
+        kms = self._kms_or_reject() if value is not None else None
+
+        stored = await self._session.scalar(
+            select(AdminCredential).where(AdminCredential.credential_id == credential_id)
+        )
+        env_source, env_fingerprint, env_configured = self._env_credential_state(spec)
+        previous_source: str = env_source
+        previous_fingerprint: str | None = env_fingerprint
+        if stored is not None:
+            previous_source, previous_fingerprint = SOURCE_OVERLAY, stored.fingerprint
+
+        if value is None:
+            if stored is None:
+                return AdminCredentialWriteResponse(
+                    **self._credential_item_of(
+                        spec,
+                        source=env_source,
+                        fingerprint=env_fingerprint,
+                        configured=env_configured,
+                        updated_at=None,
+                    ).model_dump(),
+                    changed=False,
+                    effective_after_seconds=self._effective_after(),
+                )
+            await self._session.delete(stored)
+            await self._session.flush()
+            await self._audit_credential(
+                EVENT_ADMIN_CREDENTIAL_CLEARED,
+                credential_id,
+                previous=(previous_source, previous_fingerprint),
+                next_state=(env_source, env_fingerprint),
+                actor_claim=actor_claim,
+            )
+            await self._commit_and_refresh()
+            self._log_applied(
+                SCOPE_CREDENTIALS,
+                credential_id,
+                f"{previous_source}:{previous_fingerprint}",
+                f"{env_source}:{env_fingerprint}",
+                actor_claim,
+            )
+            return AdminCredentialWriteResponse(
+                **self._credential_item_of(
+                    spec,
+                    source=env_source,
+                    fingerprint=env_fingerprint,
+                    configured=env_configured,
+                    updated_at=None,
+                ).model_dump(),
+                changed=True,
+                effective_after_seconds=self._effective_after(),
+            )
+
+        assert kms is not None  # value is a string here, so the KMS client was resolved above
+        fingerprint = credential_fingerprint(value)
+        if stored is not None and self._stored_equals(kms, stored, value):
+            # Холостой повтор по существующей строке БД не трогает: иначе сдвинулся бы
+            # `updated_at` без изменения значения.
+            return AdminCredentialWriteResponse(
+                **self._credential_item_of(
+                    spec,
+                    source=SOURCE_OVERLAY,
+                    fingerprint=stored.fingerprint,
+                    configured=bool(value.strip()),
+                    updated_at=stored.updated_at,
+                ).model_dump(),
+                changed=False,
+                effective_after_seconds=self._effective_after(),
+            )
+        encrypted_value, encrypted_dek = encrypt_credential(kms, credential_id, value)
+        now = datetime.datetime.now(tz=datetime.UTC).replace(microsecond=0)
+        if stored is None:
+            self._session.add(
+                AdminCredential(
+                    credential_id=credential_id,
+                    encrypted_value=encrypted_value,
+                    encrypted_dek=encrypted_dek,
+                    fingerprint=fingerprint,
+                    updated_at=now,
+                )
+            )
+        else:
+            stored.encrypted_value = encrypted_value
+            stored.encrypted_dek = encrypted_dek
+            stored.fingerprint = fingerprint
+            stored.updated_at = now
+        await self._flush_or_conflict(
+            SCOPE_CREDENTIALS, status_code=409, detail=_VERSION_CONFLICT_DETAIL
+        )
+        await self._audit_credential(
+            EVENT_ADMIN_CREDENTIAL_SET,
+            credential_id,
+            previous=(previous_source, previous_fingerprint),
+            next_state=(SOURCE_OVERLAY, fingerprint),
+            actor_claim=actor_claim,
+        )
+        await self._commit_and_refresh()
+        self._log_applied(
+            SCOPE_CREDENTIALS,
+            credential_id,
+            f"{previous_source}:{previous_fingerprint}",
+            f"{SOURCE_OVERLAY}:{fingerprint}",
+            actor_claim,
+        )
+        return AdminCredentialWriteResponse(
+            **self._credential_item_of(
+                spec,
+                source=SOURCE_OVERLAY,
+                fingerprint=fingerprint,
+                configured=bool(value.strip()),
+                updated_at=now,
+            ).model_dump(),
+            changed=True,
+            effective_after_seconds=self._effective_after(),
+        )
+
+    def _kms_or_reject(self) -> KmsClient:
+        """KMS-клиент либо `400 environment_missing`, если мастер-ключ на сервере не задан."""
+        from app.byok.kms import get_kms_client
+
+        try:
+            return get_kms_client()
+        except (RuntimeError, ValueError) as exc:
+            raise self._reject(
+                SCOPE_CREDENTIALS,
+                REASON_ENVIRONMENT_MISSING,
+                400,
+                "на сервере не задан ключ шифрования: записать значение невозможно",
+            ) from exc
+
+    @staticmethod
+    def _stored_equals(kms: KmsClient, stored: AdminCredential, value: str) -> bool:
+        """Совпадает ли записанное значение с присланным. Нерасшифруемая строка — «нет»."""
+        if stored.fingerprint != credential_fingerprint(value):
+            return False
+        try:
+            current = decrypt_credential(
+                kms, stored.credential_id, stored.encrypted_value, stored.encrypted_dek
+            )
+        except Exception:  # noqa: BLE001 — не расшифровалась: перезаписываем
+            return False
+        return current == value
+
+    async def _audit_credential(
+        self,
+        event_type: str,
+        credential_id: str,
+        *,
+        previous: tuple[str, str | None],
+        next_state: tuple[str, str | None],
+        actor_claim: str | None,
+    ) -> None:
+        """Аудит правки креденшла: идентификатор, источник и отпечаток до→после (§2.5).
+
+        ⚠️ Имена полей деталей подобраны вне денилиста редакции (``*key*``/``*token*``/
+        ``*secret*``/``*credential*``): иначе редакция стёрла бы саму деталь. Значение здесь не
+        появляется ни в каком виде.
+        """
+        await self._audit.record(
+            AuditEvent(
+                user_id=None,
+                event_type=event_type,
+                payload={
+                    "scope": SCOPE_CREDENTIALS,
+                    "id": credential_id,
+                    "source": f"{previous[0]}->{next_state[0]}",
+                    "fingerprint": f"{previous[1]}->{next_state[1]}",
+                    "actorClaim": actor_claim,
+                },
+            )
         )
 
     # --- общее ----------------------------------------------------------------------------

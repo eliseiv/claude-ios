@@ -10,7 +10,8 @@
 
 from __future__ import annotations
 
-from app.config import Settings, get_settings, parse_moderation_block_categories
+from app.config import Settings, parse_moderation_block_categories
+from app.instance_config.effective import effective_settings
 from app.instance_config.settings_registry import (
     SETTING_CATALOG_PRESETS_LOCALE,
     SETTING_CHAT_ADVERTISED_MODES,
@@ -110,7 +111,7 @@ def anthropic_thinking_display(
     *, settings: Settings | None = None, snapshot: InstanceConfigSnapshot | None = None
 ) -> str:
     """Строка объявляется только на Anthropic-инстансах; на прочих читается env-значение."""
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     if find_setting(SETTING_CHAT_THINKING_DISPLAY, cfg) is None:
         return cfg.resolved_anthropic_thinking_display()
     value = resolve_setting(SETTING_CHAT_THINKING_DISPLAY, settings=cfg, snapshot=snapshot)

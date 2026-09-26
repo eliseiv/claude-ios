@@ -19,6 +19,7 @@ from app.billing_cloudpayments.service import CloudPaymentsWebhookService
 from app.config import get_settings
 from app.deps import client_ip, get_auth_service, get_cloudpayments_webhook_service
 from app.errors import NotFoundError, RateLimitedError
+from app.instance_config.effective import effective_settings
 from app.observability.logging import log_event
 from app.schemas.auth import (
     AppleSignInRequest,
@@ -55,7 +56,8 @@ async def _reconcile_ru_payments(
     **Никогда не роняет вход.** Провайдер недоступен, медленный или ответил ерундой — человек
     всё равно должен войти в приложение. Ошибка уходит в журнал предупреждением, а не наружу.
     """
-    if not get_settings().cloudpayments_api_token:
+    # ADR-116 §2.1: токен CloudPayments управляется из CRM — действующие настройки.
+    if not effective_settings(get_settings()).cloudpayments_api_token:
         return
     # Провайдер адресует устройство UUID'ом. `deviceId` у нас — свободная строка, и не всякая
     # ею является: у такого устройства оплат в broadapps быть не может, спрашивать не о чем.

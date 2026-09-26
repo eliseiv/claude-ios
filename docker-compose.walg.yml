@@ -1,0 +1,45 @@
+# Оверлей непрерывного архива WAL и бэкапов инстанса (ADR-115 §8.2).
+#
+# Подключается ПОИНСТАНСНО и только там, где его включил инструмент `fleet-instance
+# enable-archive` (или `fleet-instance create` для нового инстанса). ПРИЗНАК подключения —
+# непустой INSTANCE_UID в .env инстанса; по нему набор файлов compose собирают ВСЕ вызывающие
+# (новый CI, инструменты флота — infra/fleet/lib/common.sh: compose_files). Общий
+# docker-compose.prod.yml НЕ меняется до ADR-115 §11 фазы 9: его правка на ближайшем деплое
+# пересоздала бы Postgres на всех серверах разом, включая резервы.
+#
+# Что меняет оверлей у сервиса postgres:
+#   image       — производный образ с wal-g (infra/postgres-walg/Dockerfile), из GHCR. Смена
+#                 тега — инфраструктурная выкатка порциями, а не штатный деплой (ADR-115 §10.2
+#                 п. 5): CI пересоздаёт только api (`--no-deps api`).
+#   command     — archive_mode/archive_command/archive_timeout. Смена archive_mode требует
+#                 ПЕРЕЗАПУСКА Postgres, отсюда порционность включения (ADR-115 §11 фаза 4).
+#   environment — входы обёртки fleet-walg. Подстановки `${…:?}` ОБЯЗАТЕЛЬНЫ: пустое значение
+#                 роняет compose, а не сливает префиксы разных инстансов в один (первый слой
+#                 защиты префикса, ADR-115 §8.2). Префикс s3://<бакет>/instances/<UID>/g<N>/wal-g
+#                 собирает обёртка из этих величин и имени бакета сервера (/etc/fleet/walg/bucket).
+#                 env_file НЕ используется намеренно: он передал бы в контейнер postgres весь .env
+#                 приложения (KMS-ключ, секреты подписи), которые Postgres не нужны.
+#   volumes     — каталог кредов /etc/fleet/walg монтируется ЦЕЛИКОМ и только на чтение: `mv`
+#                 при замене кредов создаёт новый inode, и смонтированный ФАЙЛ отдавал бы старое
+#                 содержимое (тот же дефект описан в infra/fleet/router/roles-docker-compose.yml).
+#                 Каталог и файлы читаются по группе пользователя postgres образа (root:<gid> 0750
+#                 / 0640, ADR-115 §8.2); gid снимает `fleet-server bootstrap` из этого образа.
+services:
+  postgres:
+    image: ghcr.io/eliseiv/claude-ios-postgres:16.15-walg3.0.9-r1
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=fleet-wal-push %p
+      - -c
+      - archive_timeout=60
+      - -c
+      - wal_level=replica
+    environment:
+      FLEET_INSTANCE_UID: ${INSTANCE_UID:?INSTANCE_UID не задан в .env — оверлей архива без него не подключается}
+      FLEET_INSTANCE_GENERATION: ${INSTANCE_GENERATION:?INSTANCE_GENERATION не задан в .env}
+      FLEET_WALG_KEY_ID: ${WALG_KEY_ID:?WALG_KEY_ID не задан в .env}
+    volumes:
+      - /etc/fleet/walg:/etc/fleet/walg:ro

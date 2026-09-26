@@ -1,0 +1,12 @@
+# Установлен инструментами флота (ADR-115 §8). Не править руками: bootstrap перезапишет.
+[Unit]
+Description=Флот: ночной бэкап конфигурации маршрутизатора R (ADR-115 §6.3)
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fleet-route backup-config
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle

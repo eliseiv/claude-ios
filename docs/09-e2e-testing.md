@@ -78,8 +78,7 @@ unit/integration-пирамиду из [06-testing-strategy.md](06-testing-strat
 
 ### 2.4 Безопасность test-mode (защита от случайного включения в prod)
 - Флаг **по умолчанию `false`** → prod fail-closed сохраняется без конфигурации.
-- При старте приложения, если `STOREKIT_TEST_MODE=true` → **WARNING в лог** на старте:
-  `"STOREKIT_TEST_MODE is ENABLED — accepting HS256 test transactions. MUST be false in production."`
+- Включённая тестовая ветка видна в логе событием **`storekit_verifier_built`** уровня **WARNING** (`testMode=true`). Событие пишется при каждом (пере)создании верификатора, в том числе при старте ([ADR-116 §4.2](adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md)): режим меняется из CRM без рестарта. Прежнее стартовое предупреждение, вычислявшееся по env (`STOREKIT_TEST_MODE is ENABLED …`), снято (код ADR-116 в рабочем дереве, не закоммичен на 2026-09-26).
 - Test-mode активен **только** при одновременном `STOREKIT_TEST_MODE=true` **и** непустом
   `STOREKIT_TEST_SECRET`. Один флаг без секрета test-mode не включает.
 - `STOREKIT_TEST_SECRET` — секрет (env / secret manager), под redaction-allowlist

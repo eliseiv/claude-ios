@@ -66,6 +66,7 @@ from app.errors import (
     VoiceModeDisabledError,
     VoiceModeNotConfiguredError,
 )
+from app.instance_config.effective import effective_settings
 from app.observability.context import set_session_id, set_user_id
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import voice_mode_connections, voice_mode_turns_total
@@ -192,7 +193,8 @@ class _VoiceSession:
         self._send_lock = asyncio.Lock()
         self._alive = True
 
-        self._settings = get_settings()
+        # ADR-116 §5: провайдер и ключ OpenAI — из действующих настроек.
+        self._settings = effective_settings(get_settings())
         self._start: VoiceStartFrame | None = None
         self._session_id: uuid.UUID | None = None
         self._voice: Voice | None = None
@@ -1513,7 +1515,7 @@ async def _handshake(websocket: WebSocket) -> tuple[uuid.UUID, str | None]:
         raise _Denied(exc) from exc
     set_user_id(str(user.user_id))
 
-    settings = get_settings()
+    settings = effective_settings(get_settings())
     missing = voice_mode_missing_flags(settings=settings)
     if missing:
         log_event(

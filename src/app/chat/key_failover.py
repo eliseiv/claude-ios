@@ -117,7 +117,10 @@ def build_attempt_chain(
     An empty key chain yields one candidate with ``api_key=None`` so the client uses its
     configured key and a missing key becomes an honest upstream 401 — not our error.
     """
-    cfg = settings or get_settings()
+    from app.instance_config.effective import effective_settings
+
+    # ADR-116 §5: ключи ротации и провайдер — из действующих настроек (оверлей CRM → env).
+    cfg = effective_settings(settings if settings is not None else get_settings())
     primary = cfg.credits_provider_for_model(session_model)
     if primary == _ANTHROPIC:
         secondary = _OPENAI

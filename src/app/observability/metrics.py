@@ -240,6 +240,14 @@ admin_overrides_refresh_failures_total = Counter(
     "Failed instance-config snapshot refreshes by reason (ADR-099).",
     ["reason"],
 )
+# producer: сборка снимка, ветка отказа расшифровки строки `admin_credentials` (ADR-116 §5);
+# consumer: тревога «инстанс работает не на ключе из CRM» — после холодного старта такая строка
+# молча откатывает инстанс на ключ из `.env`. Лейбл — идентификатор из закрытого реестра (8).
+admin_credential_undecryptable_total = Counter(
+    "admin_credential_undecryptable_total",
+    "Operator credential overlay rows that failed to decrypt, by credential id (ADR-116).",
+    ["credential_id"],
+)
 # producer: валидация PATCH/POST admin-поверхности; consumer: разбор «CRM шлёт то, что мы
 # отвергаем» — то есть расхождение нашего объявления с нашей же валидацией.
 admin_override_rejected_total = Counter(
