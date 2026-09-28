@@ -40,9 +40,9 @@ class VoicesResponse(StrictModel):
     locale: str = Field(
         description=(
             "Язык, фактически применённый к именам голосов (из числа поддерживаемых, "
-            "например `en` или `ru`)."
+            "например `en`, `ru`, `zh-Hans`, `de`, `fr` или `it`)."
         ),
-        examples=["en"],
+        examples=["en", "de"],
     )
     defaultVoiceId: str | None = Field(
         description=(

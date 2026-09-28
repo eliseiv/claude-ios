@@ -65,11 +65,16 @@ def test_query_locale_beats_accept_language() -> None:
 
 
 def test_query_locale_unsupported_raises_422() -> None:
+    # ADR-119: de/fr/it in allowlist; outside set stays strict 422.
     with pytest.raises(ValidationFailedError) as exc:
-        resolve_presets_locale("de", "ru-RU", _DEFAULT)
+        resolve_presets_locale("xx", "ru-RU", _DEFAULT)
     assert exc.value.status_code == 422
     assert exc.value.code == "validation_error"
-    assert "de" in str(exc.value)
+    assert "xx" in str(exc.value)
+
+
+def test_query_locale_de_supported() -> None:
+    assert resolve_presets_locale("de", "ru-RU", _DEFAULT) == "de"
 
 
 def test_query_locale_empty_string_unsupported_raises_422() -> None:
@@ -94,13 +99,15 @@ def test_accept_language_zh_hans_maps_to_zh_hans() -> None:
 
 
 def test_accept_language_order_and_qweight_first_supported_wins() -> None:
-    # fr is unsupported → skipped; ru-RU (with q-weight) is the first supported primary-subtag.
-    assert resolve_presets_locale(None, "fr-FR,ru-RU;q=0.8", "en") == "ru"
+    # ADR-119: fr is supported → first primary wins over later ru.
+    assert resolve_presets_locale(None, "fr-FR,ru-RU;q=0.8", "en") == "fr"
+    # Unsupported primary skipped; first supported wins.
+    assert resolve_presets_locale(None, "xx-XX,ru-RU;q=0.8", "en") == "ru"
 
 
 def test_accept_language_no_supported_falls_through_to_default() -> None:
     # Only unsupported tags → silent fall-through to the per-instance default (ru here).
-    assert resolve_presets_locale(None, "fr-FR,de-DE", "ru") == "ru"
+    assert resolve_presets_locale(None, "xx-XX,yy-YY", "ru") == "ru"
 
 
 def test_accept_language_unparseable_falls_through_to_default() -> None:
@@ -131,7 +138,9 @@ def test_priority_query_over_header_over_default() -> None:
     # No query: header wins over default.
     assert resolve_presets_locale(None, "ru-RU", "en") == "ru"
     # No query, unsupported header: default wins.
-    assert resolve_presets_locale(None, "fr-FR", "ru") == "ru"
+    assert resolve_presets_locale(None, "xx-XX", "ru") == "ru"
+    # ADR-119: supported fr header wins over default.
+    assert resolve_presets_locale(None, "fr-FR", "ru") == "fr"
 
 
 # ============================ _first_supported_language ============================
@@ -140,11 +149,13 @@ def test_first_supported_language_none_for_missing_header() -> None:
 
 
 def test_first_supported_language_none_for_no_supported() -> None:
-    assert _first_supported_language("fr-FR,de-DE") is None
+    assert _first_supported_language("xx-XX,yy-YY") is None
 
 
 def test_first_supported_language_picks_first_supported() -> None:
-    assert _first_supported_language("de,ru-RU,en") == "ru"
+    # ADR-119: de is supported → first wins.
+    assert _first_supported_language("de,ru-RU,en") == "de"
+    assert _first_supported_language("xx,ru-RU,en") == "ru"
 
 
 def test_first_supported_language_strips_qweight() -> None:
@@ -153,7 +164,8 @@ def test_first_supported_language_strips_qweight() -> None:
 
 def test_first_supported_language_zh_hans() -> None:
     assert _first_supported_language("zh-Hans") == "zh-Hans"
-    assert _first_supported_language("fr,zh-Hans-CN;q=0.8") == "zh-Hans"
+    assert _first_supported_language("xx,zh-Hans-CN;q=0.8") == "zh-Hans"
+    assert _first_supported_language("fr,zh-Hans-CN;q=0.8") == "fr"
 
 
 def test_query_locale_zh_hant_unsupported_raises_422() -> None:

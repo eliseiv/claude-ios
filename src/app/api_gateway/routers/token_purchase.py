@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from app import instance_config
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.billing_cloudpayments.checkout import CloudPaymentsCheckoutClient
+from app.billing_cloudpayments.parser import _INTERVAL_UNITS
 from app.config import get_settings
 from app.deps import (
     CurrentUser,
@@ -141,7 +142,8 @@ def _refined(products: list[TokenProduct]) -> list[TokenProduct]:
         if overlay.archived:
             continue
         update: dict[str, Any] = {}
-        if overlay.tokens is not None:
+        # ADR-117 §2: subscription rows keep credits=null; overlay must not lift pack amounts.
+        if overlay.tokens is not None and product.kind != "subscription":
             update["credits"] = overlay.tokens
         if overlay.name is not None:
             update["title"] = overlay.name
@@ -213,6 +215,10 @@ def _from_broadapps(
 
     credits приходят из операторской карты TOKEN_PRODUCTS для пакетов; у подписок — null.
     ``isSpecialOffer`` — флаг `is_special_offer` поставщика; отсутствует или не булево => False.
+
+    ``kind`` (ADR-117 §1): ``subscription`` if ``payment_type == "subscription"`` **or**
+    ``subscription_interval_unit`` (strip, case-insensitive) ∈ ``_INTERVAL_UNITS``
+    ``{year,month,week,day}`` — same set as ``classify_product``. Else ``tokens``.
     """
     if not isinstance(item, dict):
         return None
@@ -221,7 +227,11 @@ def _from_broadapps(
         return None
     if item.get("status") not in (None, "active"):
         return None
-    is_sub = item.get("payment_type") == "subscription"
+    payment_is_sub = item.get("payment_type") == "subscription"
+    period_raw = item.get("subscription_interval_unit")
+    period = period_raw if isinstance(period_raw, str) else None
+    interval_implies_sub = period is not None and period.strip().lower() in _INTERVAL_UNITS
+    is_sub = payment_is_sub or interval_implies_sub
     price: int | None = None
     amount = item.get("price_amount")
     if isinstance(amount, str | int | float):
@@ -235,15 +245,22 @@ def _from_broadapps(
     # трактовать «непустую строку» как истину нельзя — тогда, например, "false" из ошибочно
     # сериализованного ответа включило бы предложение вместо того, чтобы его выключить.
     special = item.get("is_special_offer")
-    # Признак «продукт по умолчанию» — та же строгость и та же причина, что у флага выше:
-    period = item.get("subscription_interval_unit")
     currency = item.get("price_currency")
     name = item.get("name")
+    if interval_implies_sub and not payment_is_sub:
+        # ADR-117 §4 (optional): mirror payment_type mismatch on the catalog read-path.
+        logger.warning(
+            "tokens_products_interval_implies_subscription productId=%s paymentType=%s "
+            "intervalUnit=%s",
+            code,
+            item.get("payment_type"),
+            period.strip() if period is not None else None,
+        )
     return TokenProduct(
         productId=code,
         title=name if isinstance(name, str) else None,
         kind="subscription" if is_sub else "tokens",
-        period=period if isinstance(period, str) else None,
+        period=period,
         price=price,
         currency=currency if isinstance(currency, str) else None,
         credits=None if is_sub else token_products.get(code),

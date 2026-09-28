@@ -4,7 +4,8 @@ Extends the ADR-035 endpoint tests with locale resolution over the wire. Uses th
 ``client`` (real PG container, faked external clients, rate limits forced open). Covers:
 - backward compatibility: no ``?locale=`` and no env → ``locale:"en"`` + EN texts (ADR-035 parity);
 - per-instance default: ``PRESETS_DEFAULT_LOCALE=ru`` (settings overridden) → RU + ``locale:"ru"``;
-- explicit query: ``?locale=ru`` → RU; ``?locale=en`` on a ru-instance → EN; ``?locale=de`` → 422;
+- explicit query: ``?locale=ru`` → RU; ``?locale=en`` on a ru-instance → EN; ``?locale=xx`` → 422;
+  ``?locale=de`` → 200 (ADR-119);
 - ``Accept-Language: ru`` → RU;
 - ``id``/``icon`` stable and order preserved across locales;
 - 401 without a JWT.
@@ -188,8 +189,21 @@ async def test_query_locale_unsupported_returns_422(
 ) -> None:
     async with db_sessionmaker() as s:
         uid = await seed_user(s)
-    r = await client.get("/v1/presets?locale=de", headers=auth_headers(uid))
+    r = await client.get("/v1/presets?locale=xx", headers=auth_headers(uid))
     assert r.status_code == 422, r.text
+
+
+@pytest.mark.asyncio
+async def test_query_locale_de_supported_returns_200(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """ADR-119: de/fr/it are in the allowlist (EN-fallback for empty fields)."""
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s)
+    r = await client.get("/v1/presets?locale=de", headers=auth_headers(uid))
+    assert r.status_code == 200, r.text
+    assert r.json()["locale"] == "de"
 
 
 # ----------------------------- Accept-Language -----------------------------

@@ -923,6 +923,10 @@ Steps-view — агрегированные шаги одного message-шаг
    и `CLOUDPAYMENTS_API_TOKEN`. Отсюда приходят `title`, `price`, `currency`, `kind`, `period`,
    `isSpecialOffer` и `isDefault`; `credits` подставляются из нашей карты `TOKEN_PRODUCTS`
    (поставщик про кредиты не знает), у подписок — `null`.
+   **`kind` ([ADR-117](adr/ADR-117-tokens-products-period-implies-subscription-kind.md)):**
+   `subscription`, если у поставщика `payment_type=="subscription"` **или**
+   `subscription_interval_unit` ∈ `{year,month,week,day}`; иначе `tokens`.
+   У подписки `credits` всегда `null` (карта пакетов на подписочную строку не поднимается).
 2. **Статический `PRODUCTS_CATALOG`**, если задан.
 3. **Карта `TOKEN_PRODUCTS`** — только `productId` и `credits`, без цен.
 
@@ -970,7 +974,8 @@ Steps-view — агрегированные шаги одного message-шаг
   **Если ни у одного** — предвыбора нет, поведение прежнее.
 - **`credits`** — сколько кредитов даёт пакет. Источник — только server-side `TOKEN_PRODUCTS`
   ([07-deployment.md](07-deployment.md)); из тела запроса величина не берётся никогда.
-  `credits: null` у пакета означает, что продукт есть у поставщика, но **не заведён у нас**, и
+  У `kind: "subscription"` — всегда `null` ([ADR-117](adr/ADR-117-tokens-products-period-implies-subscription-kind.md)).
+  `credits: null` у пакета (`kind: "tokens"`) означает, что продукт есть у поставщика, но **не заведён у нас**, и
   покупка будет отвергнута как `unknown token product`.
 - **`price`** — единицы зависят от `TOKEN_PRODUCTS_PRICE_MINOR_UNITS`: при `true` минорные
   (`59900` = 599.00), при `false` (по умолчанию) целые единицы валюты с отброшенными копейками.
@@ -1233,7 +1238,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 ### GET /v1/presets
 Пресеты промтов для чипов на главном экране чата (экран 4). Тап подставляет `prompt` в композер. Набор/тексты меняются деплоем backend **без релиза iOS-приложения**. [ADR-035](adr/ADR-035-prompt-presets-endpoint.md), [ADR-049](adr/ADR-049-presets-localization.md) (локализация), [chat-orchestrator/02-api-contracts](modules/chat-orchestrator/02-api-contracts.md#get-v1presets--пресеты-промтов-adr-035).
 **Заголовки:** `Authorization: Bearer <JWT>` (обязателен — как все `/v1/*`; каталог не секретен, контур единый). Опц. `Accept-Language` (см. резолвинг локали).
-**Query:** `locale` (опц., набор `en`/`ru`/`zh-Hans`) — явный выбор локали; вне набора → `422`.
+**Query:** `locale` (опц., набор `SUPPORTED_PRESET_LOCALES`: `en`/`ru`/`zh-Hans`/`de`/`fr`/`it`, [ADR-119](adr/ADR-119-catalog-locales-de-fr-it.md)) — явный выбор локали; вне набора → `422`.
 **Резолвинг локали ([ADR-049](adr/ADR-049-presets-localization.md)):** `?locale=` → `Accept-Language` (первый поддерживаемый, `ru-RU`→`ru`, `zh-Hans-CN`→`zh-Hans`) → per-instance `PRESETS_DEFAULT_LOCALE` (avelyra=`ru`, остальные=`en`) → `en`.
 **Response 200:**
 ```json
@@ -1261,7 +1266,7 @@ JWKS с публичным ключом (для самопроверки/отл�
 
 **Auth:** `Authorization: Bearer <JWT>` (обязателен). Read-only.
 
-**Query:** `locale` (опц.) — `en` / `ru` / `zh-Hans`, канонизируется (`ru-RU`→`ru`); явное значение вне набора → `422`.
+**Query:** `locale` (опц.) — `en` / `ru` / `zh-Hans` / `de` / `fr` / `it` ([ADR-119](adr/ADR-119-catalog-locales-de-fr-it.md)), канонизируется (`ru-RU`→`ru`, `de-DE`→`de`); явное значение вне набора → `422`. Незаполненные имена — EN-fallback.
 
 **Резолвинг локали** — тот же, что у `GET /v1/presets`: `?locale=` → `Accept-Language` (первый поддерживаемый) → per-instance `PRESETS_DEFAULT_LOCALE` → `en`. Отдельной переменной под язык каталога персонажей нет ([TD-035](100-known-tech-debt.md)).
 

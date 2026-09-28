@@ -5,6 +5,7 @@
 - **Тип:** feature-ADR. **Закрывает [Q-100-3](../99-open-questions.md)** (потоковая озвучка) и **снимает границу [ADR-100 §Границы](ADR-100-assistant-speech-output.md)** («потоковая озвучка по предложениям — следующий этап, здесь не проектируется»). Тело [ADR-100](ADR-100-assistant-speech-output.md) не переписано (immutability) — в его заголовок добавлена строка пересмотра.
 - **Контекст запроса (решение владельца, дословно):** «Давай реализуем отдельный эндпоинт с вебсокетом для реализации voice mode где будет перерывание, ответ и тд».
 - **Границы:** здесь проектируется **живой голосовой диалог** — приём речи, ход, потоковый синтез ответа и прерывание. Не проектируются: серверный VAD (граница реплики — на устройстве, §3), видео, телефония, распознавание нескольких говорящих.
+- **Пересмотр 2026-09-28 → [ADR-118](ADR-118-voice-pending-client-tools-before-next-turn.md):** решения §1–§13 **не изменены**. Добавлена явная норма: ожидание `tool.result` после `done {status:"tool_call"}` **не** удерживает turn lock / «идущую ногу»; следующий ход закрывает вытесненные вызовы через [ADR-114](ADR-114-superseded-client-tool-calls-in-history-replay.md) (`tool_result_missing`); барьер [ADR-025](ADR-025-parallel-tool-calls-and-max-tokens-truncation.md) для штатного `tool.result` не ослабляется. Тело ADR-104 не переписано (immutability).
 - **Реализуется в:** [modules/chat-orchestrator](../modules/chat-orchestrator/README.md), [modules/api-gateway](../modules/api-gateway/02-api-contracts.md)
 
 ## Контекст

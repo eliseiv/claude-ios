@@ -501,9 +501,11 @@ Read-only. Сколько бизнес заплатил AI-провайдера�
 **`options` не хардкодятся ни здесь, ни в CRM — они выводятся из единственного объявления в
 коде** (`allowed_models_union()` для моделей, `GENERATION_MODE_ORDER`, `DISABLEABLE_TOOL_FAMILIES`,
 `SUPPORTED_PRESET_LOCALES`, наборы нормализаторов `reasoning_level`/`thinking_display`). Перечень,
-переписанный в документ, был бы вторым домом факта и протух бы молча: `SUPPORTED_PRESET_LOCALES`
-уже содержит **три** значения (`en`, `ru`, `zh-Hans`), и инстанс на `zh-Hans` при перечне из двух
-стал бы невозвратимым. По той же причине `moderation.block_categories` объявлена **`string`**:
+переписанный в документ, был бы вторым домом факта и протух бы молча: по [ADR-119](../../adr/ADR-119-catalog-locales-de-fr-it.md)
+нормативный состав `SUPPORTED_PRESET_LOCALES` — `en`/`ru`/`zh-Hans`/`de`/`fr`/`it` (источник `options` после
+реализации — константа в `src/app/chat/presets.py`; на 2026-09-28 ADR docs-only, код может ещё не
+содержать `de`/`fr`/`it`), и урезанный перечень в docs сделал бы инстанс на `zh-Hans`/`de`/…
+невозвратимым. По той же причине `moderation.block_categories` объявлена **`string`**:
 словарь категорий принадлежит провайдеру модерации и меняется без нашего релиза.
 
 **Две модельные строки ограничены ВКЛЮЧЁННЫМИ провайдерами** (`credits_providers()`): предложить

@@ -78,8 +78,7 @@ unit/integration-пирамиду из [06-testing-strategy.md](06-testing-strat
 
 ### 2.4 Безопасность test-mode (защита от случайного включения в prod)
 - Флаг **по умолчанию `false`** → prod fail-closed сохраняется без конфигурации.
-- При старте приложения, если `STOREKIT_TEST_MODE=true` → **WARNING в лог** на старте:
-  `"STOREKIT_TEST_MODE is ENABLED — accepting HS256 test transactions. MUST be false in production."`
+- Включённая тестовая ветка видна в логе событием **`storekit_verifier_built`** уровня **WARNING** (`testMode=true`). Событие пишется при каждом (пере)создании верификатора, в том числе при старте ([ADR-116 §4.2](adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md)): режим меняется из CRM без рестарта. Прежнее стартовое предупреждение, вычислявшееся по env (`STOREKIT_TEST_MODE is ENABLED …`), снято (код ADR-116 в рабочем дереве, не закоммичен на 2026-09-26).
 - Test-mode активен **только** при одновременном `STOREKIT_TEST_MODE=true` **и** непустом
   `STOREKIT_TEST_SECRET`. Один флаг без секрета test-mode не включает.
 - `STOREKIT_TEST_SECRET` — секрет (env / secret manager), под redaction-allowlist
@@ -207,6 +206,7 @@ Anthropic; `StoreKit-test` = нужен `STOREKIT_TEST_MODE`; `—` = незав
 | E2E-TOOL-6 | **Parallel tool use ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** промпт, провоцирующий несколько client-side tool_use в одном ходе (напр. два `files.write`) | ответ `tool_call` с `toolCalls[]` (≥2); continuation к Claude **только** после батч `tool-result` на все вызовы (барьер хода); ровно 1 debit на весь ход | **Claude** |
 | E2E-TOOL-7 | **max_tokens-обрезка ([ADR-025](adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md)):** запрос с искусственно малым `ANTHROPIC_MAX_TOKENS` (через env), провоцирующий `stop_reason="max_tokens"` | `200 status=blocked`, `blockReason=max_tokens`, `usage`/`messageStepId`/`stepId` присутствуют, `toolCalls` отсутствуют, **кредит не списан** | **Claude** |
 | E2E-TOOL-8 | Брошенный вызов инструмента ([ADR-114](adr/ADR-114-superseded-client-tool-calls-in-history-replay.md)): ход вернул `tool_call` клиентского инструмента, результат не прислан → новое сообщение в ту же сессию; затем `tool-result` на брошенный вызов | `200` на новое сообщение (не `502`); `409` `conflict` на запоздалый `tool-result` | — |
+| E2E-TOOL-8v | То же на голосовом WS ([ADR-118](adr/ADR-118-voice-pending-client-tools-before-next-turn.md)): `done{tool_call}` → без `tool.result` → новая реплика/`text` в сокете | ход не `502`/`upstream_error`; запоздалый `tool.result` → `409`/`conflict` | — |
 
 ### 4.6 BYOK set/toggle/delete + routing (AC-5, BR-4)
 | ID | Сценарий | Ожидание | Зависимость |

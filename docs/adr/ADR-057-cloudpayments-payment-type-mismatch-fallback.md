@@ -3,7 +3,8 @@
 - Статус: Accepted
 - Дата: 2026-07-20
 - Тип: bugfix-ADR, **пересматривает [ADR-054](ADR-054-cloudpayments-webhook-payment-verification.md) §3** (классификация платежа **только** по `product.payment_type`) и **§Наблюдаемость** (агрегатный исход). Восстанавливает симметрию checkout ↔ вебхук, заявленную в [ADR-051](ADR-051-cloudpayments-checkout-payment-link.md) §2.
-- Связано: [ADR-050](ADR-050-cloudpayments-webhook.md) (паттерн-классификация `classify_product`, которую ADR-054 вывел из пути начисления), [ADR-053](ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)/[ADR-055](ADR-055-adapty-webhook-user-resolution-via-auth-devices.md) (резолв — не затронут), [ADR-005](ADR-005-idempotency-ledger.md) (идемпотентность гранта), [ADR-048](ADR-048-admin-subscription-grant.md) (ретроактивная компенсация). Модуль [billing-cloudpayments](../modules/billing-cloudpayments/README.md).
+- Связано: [ADR-050](ADR-050-cloudpayments-webhook.md) (паттерн-классификация `classify_product`, которую ADR-054 вывел из пути начисления), [ADR-053](ADR-053-cloudpayments-webhook-user-resolution-via-auth-devices.md)/[ADR-055](ADR-055-adapty-webhook-user-resolution-via-auth-devices.md) (резолв — не затронут), [ADR-005](ADR-005-idempotency-ledger.md) (идемпотентность гранта), [ADR-048](ADR-048-admin-subscription-grant.md) (ретроактивная компенсация), [ADR-117](ADR-117-tokens-products-period-implies-subscription-kind.md) (**2026-09-28:** тот же класс рассинхрона `payment_type` vs interval — на **витрине** `GET /v1/tokens/products`; начисление этого ADR не меняется). Модуль [billing-cloudpayments](../modules/billing-cloudpayments/README.md).
+- Пересмотр 2026-09-28 → [ADR-117](ADR-117-tokens-products-period-implies-subscription-kind.md): решения §1–§ начисления **не изменены**. Симметрия «витрина / checkout / вебхук» дотягивается правкой маппера каталога (interval → `kind: subscription`), не пересмотром фолбэка вебхука.
 
 ## Context
 

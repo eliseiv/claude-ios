@@ -66,6 +66,7 @@ from app.errors import (
     VoiceModeDisabledError,
     VoiceModeNotConfiguredError,
 )
+from app.instance_config.effective import effective_settings
 from app.observability.context import set_session_id, set_user_id
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import voice_mode_connections, voice_mode_turns_total
@@ -192,7 +193,8 @@ class _VoiceSession:
         self._send_lock = asyncio.Lock()
         self._alive = True
 
-        self._settings = get_settings()
+        # ADR-116 §5: провайдер и ключ OpenAI — из действующих настроек.
+        self._settings = effective_settings(get_settings())
         self._start: VoiceStartFrame | None = None
         self._session_id: uuid.UUID | None = None
         self._voice: Voice | None = None
@@ -832,6 +834,9 @@ class _VoiceSession:
         started = time.monotonic()
 
         async def _call(orchestrator: ChatOrchestrator) -> ChatRunOut:
+            # ADR-118 §1: no second closer here. Superseded client tool-calls without
+            # `tool.result` are closed in `_neutral_history_from_steps` (ADR-114) when this
+            # `run` rebuilds history. ADR-025 barrier for on-time `tool.result` is unchanged.
             return await orchestrator.run(
                 user_id=self._user_id,
                 project_id=start.projectId,
@@ -1180,7 +1185,8 @@ class _VoiceSession:
         локального `_turn_task`: ИСПОЛНЕНИЕ НОГИ. Ожидание на барьере хода (между
         `done {status:"tool_call"}` и кадром `tool.result`) замком НЕ покрывается — там сервер
         не работает, и покрытие этого окна было бы новой семантикой, которой нет и в пределах
-        одного соединения.
+        одного соединения (ADR-104 §13.14 / ADR-118 §2: следующая реплика принимается; висящий
+        вызов закрывает ADR-114 при сборке истории, не turn lock).
 
         **TTL — страховка от гибели процесса, а не рабочий таймер:** он равен таймауту вызова
         провайдера этой сессии, новой переменной не вводится. Самолечение обязательно — без него
@@ -1513,7 +1519,7 @@ async def _handshake(websocket: WebSocket) -> tuple[uuid.UUID, str | None]:
         raise _Denied(exc) from exc
     set_user_id(str(user.user_id))
 
-    settings = get_settings()
+    settings = effective_settings(get_settings())
     missing = voice_mode_missing_flags(settings=settings)
     if missing:
         log_event(

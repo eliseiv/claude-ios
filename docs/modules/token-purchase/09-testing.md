@@ -14,6 +14,13 @@
 ## E2E
 - Включить в [09-e2e-testing.md](../../09-e2e-testing.md): подписчик покупает пакет → рост баланса → списание в credits-mode. Отдельный кейс: без активной подписки покупка → `403 subscription_required`, баланс не меняется ([Q-015-1](../../99-open-questions.md) = вариант B).
 
+## Каталог — `kind` по period/interval ([ADR-117](../../adr/ADR-117-tokens-products-period-implies-subscription-kind.md))
+
+- Broadapps-запись с `payment_type: "one_time"` и `subscription_interval_unit: "month"` (или `year`/`week`/`day`) → в `GET /v1/tokens/products` элемент с `kind: "subscription"`, `period` = unit, `credits: null` (даже если `productId` есть в `TOKEN_PRODUCTS`).
+- `payment_type: "subscription"` без interval → по-прежнему `kind: "subscription"`, `credits: null`.
+- `payment_type: "one_time"` **без** interval (и unit не из набора) → `kind: "tokens"`, `credits` из карты (или `null`, если кода нет).
+- Регресс: пакетный продукт с interval **не** должен получать ненулевые `credits` при `kind: "subscription"`.
+
 ## Каталог продуктов — признак «по умолчанию» ([ADR-098 §11](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md))
 - Источник — **наш** список `TOKEN_PRODUCTS_DEFAULT`, а не поле поставщика: продукт, чей
   `productId` в списке → `isDefault=true`; не в списке → `false`. Принимаются **обе** записи списка

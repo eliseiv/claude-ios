@@ -38,7 +38,7 @@ JWT, владелец = `sub`. Статус: **Реализован (MVP)**, pol
 Каталог продуктов: пакеты токенов **и** подписки. JWT (`bearerAuth`). Полное описание для интеграторов — [API-REFERENCE §GET /v1/tokens/products](../../API-REFERENCE.md#get-v1tokensproducts).
 
 ### Источник ответа (первый непустой выигрывает)
-1. **Живой рублёвый каталог broadapps** — `GET {CLOUDPAYMENTS_API_BASE}/apps/{CLOUDPAYMENTS_APP_ID}/products` (`Bearer CLOUDPAYMENTS_API_TOKEN`, тот же клиент, что у checkout, [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)). Оттуда — `title`, `kind`, `period`, `price`, `currency`, `isSpecialOffer`, `isDefault`; `credits` подставляются из нашей карты `TOKEN_PRODUCTS` (поставщик про кредиты не знает), у подписок — `null`. Любой сбой/неконфигурированный инстанс → следующий источник (ошибка наружу не поднимается).
+1. **Живой рублёвый каталог broadapps** — `GET {CLOUDPAYMENTS_API_BASE}/apps/{CLOUDPAYMENTS_APP_ID}/products` (`Bearer CLOUDPAYMENTS_API_TOKEN`, тот же клиент, что у checkout, [ADR-051](../../adr/ADR-051-cloudpayments-checkout-payment-link.md)). Оттуда — `title`, `kind`, `period`, `price`, `currency`, `isSpecialOffer`, `isDefault`; `credits` подставляются из нашей карты `TOKEN_PRODUCTS` (поставщик про кредиты не знает), у подписок — `null`. **`kind` ([ADR-117](../../adr/ADR-117-tokens-products-period-implies-subscription-kind.md)):** `subscription`, если `payment_type=="subscription"` **или** `subscription_interval_unit ∈ {year,month,week,day}`; иначе `tokens`. У `kind: "subscription"` поле `credits` всегда `null` (даже если код есть в `TOKEN_PRODUCTS`). Любой сбой/неконфигурированный инстанс → следующий источник (ошибка наружу не поднимается).
 2. **Статический `PRODUCTS_CATALOG`** (JSON-массив в env), если задан; элементы, не прошедшие схему, пропускаются.
 3. **Карта `TOKEN_PRODUCTS`** — только `productId` + `credits`, без цен ([07-deployment.md](../../07-deployment.md)).
 
@@ -54,7 +54,9 @@ JWT, владелец = `sub`. Статус: **Реализован (MVP)**, pol
   цены у нас нет, и придумывать её нельзя;
 - **в ветке 1 своих строк мы не добавляем** — каталог принадлежит поставщику, и позиция без
   платёжной ссылки была бы некликабельной на пейволле; там оверлей уточняет только `credits` и
-  `title` уже перечисленных продуктов.
+  `title` уже перечисленных продуктов. **Исключение ([ADR-117](../../adr/ADR-117-tokens-products-period-implies-subscription-kind.md) §2):**
+  у строки с `kind: "subscription"` (в т.ч. по interval) поле `credits` в ответе остаётся `null`
+  даже если оверлей задал пакетные `tokens` — класс витрины важнее уточнения числа пакета.
 
 ### Response (200)
 ```json
@@ -73,7 +75,7 @@ JWT, владелец = `sub`. Статус: **Реализован (MVP)**, pol
 |---|---|---|
 | `productId` | str | код продукта |
 | `title`/`kind`/`period`/`price`/`currency` | str\|int\|null | из рублёвого каталога; `null`, если источник их не даёт. Единицы `price` — `TOKEN_PRODUCTS_PRICE_MINOR_UNITS` |
-| `credits` | int\|null | **только** из server-side `TOKEN_PRODUCTS`; `null` у подписок и у пакета, не заведённого у нас (покупка такого будет отвергнута) |
+| `credits` | int\|null | **только** из server-side `TOKEN_PRODUCTS` для `kind: "tokens"`; у `kind: "subscription"` всегда `null` ([ADR-117](../../adr/ADR-117-tokens-products-period-implies-subscription-kind.md)); `null` также у пакета, не заведённого у нас (покупка такого будет отвергнута) |
 | `isSpecialOffer` | bool | флаг `is_special_offer` рублёвого каталога; присутствует всегда (`false` там, где каталога нет); отображательный |
 | `isDefault` | bool | **[ADR-098 §11](../../adr/ADR-098-broadapps-paywall-experiments-and-default-product.md)** — «продукт по умолчанию» (предвыбор на пейволле). Источник — **наша** сторона: `TOKEN_PRODUCTS_DEFAULT`, список идентификаторов на инстанс; поднимается в `_catalog_response` для **всех** веток источника; присутствует всегда (`false`, если продукта нет в списке); отображательный |
 

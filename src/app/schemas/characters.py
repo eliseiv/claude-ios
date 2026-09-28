@@ -43,9 +43,9 @@ class CharactersResponse(StrictModel):
     locale: str = Field(
         description=(
             "Язык, фактически применённый к текстам `name` и `tagline` (из числа "
-            "поддерживаемых, например `en` или `ru`)."
+            "поддерживаемых, например `en`, `ru`, `zh-Hans`, `de`, `fr` или `it`)."
         ),
-        examples=["en"],
+        examples=["en", "de"],
     )
     characters: list[CharacterInfo] = Field(
         description="Каталог персонажей; порядок элементов = порядок на экране выбора."

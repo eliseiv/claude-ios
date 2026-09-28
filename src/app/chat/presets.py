@@ -35,10 +35,10 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
-# Supported preset locales — single source of truth (ADR-049 §1; EN first = canon/fallback).
-# Extending = add the locale here AND fill title/prompt in the registry. Never hardcode "exactly 2".
+# Supported preset locales — single source of truth (ADR-049 §1 / ADR-119 §1; EN first = canon).
+# Extending = add the locale here; unfilled per-field translations fall back to EN (ADR-119 §2).
 # ``zh-Hans`` is the BCP-47 canonical form (iOS / Accept-Language); matching is case-insensitive.
-SUPPORTED_PRESET_LOCALES: tuple[str, ...] = ("en", "ru", "zh-Hans")
+SUPPORTED_PRESET_LOCALES: tuple[str, ...] = ("en", "ru", "zh-Hans", "de", "fr", "it")
 # Canon and per-field fallback locale (ADR-049 §1). Its key is required in every preset.
 DEFAULT_PRESET_LOCALE: str = "en"
 # Agents-screen genres (ADR-080). Stable slugs, not localized — iOS maps them to tab titles.

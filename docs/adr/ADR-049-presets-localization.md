@@ -2,7 +2,8 @@
 
 - **Статус:** Accepted
 - **Дата:** 2026-07-02
-- **Связано:** [ADR-035](ADR-035-prompt-presets-endpoint.md) (статический реестр пресетов + `GET /v1/presets` — расширяется этим ADR), [Q-035-2](../99-open-questions.md) (локализация `title`/`prompt` — **частично закрывается**), [ADR-034](ADR-034-user-model-selection.md) (паттерн per-provider allowlist в `config.py` — образец конфиг-валидации), [ADR-033](ADR-033-llm-provider-abstraction.md) (провайдер-агностичность), [ADR-017](ADR-017-shared-server-traefik-deploy.md) (мульти-инстанс, per-instance env), [ADR-037](ADR-037-chatrunrequest-context-allowlist-injection.md) (`context.locale` — независимый механизм, см. §7)
+- **Связано:** [ADR-035](ADR-035-prompt-presets-endpoint.md) (статический реестр пресетов + `GET /v1/presets` — расширяется этим ADR), [Q-035-2](../99-open-questions.md) (локализация `title`/`prompt` — **частично закрывается**), [ADR-034](ADR-034-user-model-selection.md) (паттерн per-provider allowlist в `config.py` — образец конфиг-валидации), [ADR-033](ADR-033-llm-provider-abstraction.md) (провайдер-агностичность), [ADR-017](ADR-017-shared-server-traefik-deploy.md) (мульти-инстанс, per-instance env), [ADR-037](ADR-037-chatrunrequest-context-allowlist-injection.md) (`context.locale` — независимый механизм, см. §7), [ADR-119](ADR-119-catalog-locales-de-fr-it.md) (**2026-09-28:** набор расширен `de`/`fr`/`it`)
+- **Пересмотр 2026-09-28 → [ADR-119](ADR-119-catalog-locales-de-fr-it.md):** нормативный набор `SUPPORTED_PRESET_LOCALES` включает `de`/`fr`/`it`; резолв §3 и per-field EN-fallback **не изменены**. Снимок `("en","ru")` в теле ниже — исторический; актуальная норма — ADR-119 (код константы на 2026-09-28 ещё не расширен — зона `backend`).
 
 ## Контекст
 

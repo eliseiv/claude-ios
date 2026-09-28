@@ -50,11 +50,12 @@ async def list_characters(
     locale: str | None = Query(
         default=None,
         description=(
-            "Желаемый язык каталога (например `en`, `ru` или `zh-Hans`). Если не указан — язык "
-            "определяется по заголовку `Accept-Language`, иначе используется язык по умолчанию "
-            "для инстанса. Недопустимое значение возвращает ошибку 422."
+            "Желаемый язык каталога (например `en`, `ru`, `zh-Hans`, `de`, `fr` или `it`). "
+            "Если не указан — язык определяется по заголовку `Accept-Language`, иначе "
+            "используется язык по умолчанию для инстанса. Недопустимое значение возвращает "
+            "ошибку 422."
         ),
-        examples=["ru", "zh-Hans"],
+        examples=["ru", "zh-Hans", "de", "fr", "it"],
     ),
     accept_language: str | None = Header(default=None),
 ) -> CharactersResponse:

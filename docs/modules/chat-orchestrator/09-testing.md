@@ -58,9 +58,10 @@
 
 Нормативное покрытие [ADR-025](../../adr/ADR-025-parallel-tool-calls-and-max-tokens-truncation.md). Fake Anthropic возвращает `tool_use.id = "toolu_..."` (инвариант fake).
 
-### Брошенный клиентский вызов и новое сообщение (ADR-114)
+### Брошенный клиентский вызов и новое сообщение (ADR-114 / ADR-118)
 
-Нормативное покрытие [ADR-114](../../adr/ADR-114-superseded-client-tool-calls-in-history-replay.md). Каждый кейс — отдельный тест; кейсы 1–3 прогоняются на обоих бэкендах (`/v1/chat/run` и `/v1/chat/v2/run`) и для обоих провайдеров (fake Anthropic и fake OpenAI Responses), то есть по четыре варианта.
+Нормативное покрытие [ADR-114](../../adr/ADR-114-superseded-client-tool-calls-in-history-replay.md) и голосового дополнения [ADR-118](../../adr/ADR-118-voice-pending-client-tools-before-next-turn.md). Каждый кейс — отдельный тест; кейсы 1–3 прогоняются на обоих бэкендах (`/v1/chat/run` и `/v1/chat/v2/run`) и для обоих провайдеров (fake Anthropic и fake OpenAI Responses), то есть по четыре варианта.
+**Плюс кейс V (voice, ADR-118 §3):** WS `/v1/chat/voice` (или тот же оркестраторный вход, что `_execute_turn`) — `done{status=tool_call}` по client-tool → `tool.result` не прислан → новый `text`/`utterance` в ту же сессию → не `502`; ввод провайдера несёт синтетический `tool_result_missing`; контраст — своевременный `tool.result` → continuation ADR-025 без синтетики на этих id. Инвариант: после `tool_call` следующая реплика не получает `turn_in_progress` **только** из-за ожидания результата.
 Предикат вытеснения — по свойству «`tool_use`, который реплей отправляет провайдеру, без парного результата до следующего `user`-шага», а не по классу инструмента.
 - **1. Регресс прод-инцидента:** ход вернул `status=tool_call` (клиентский `maps.geocode`), результат не прислан → новое сообщение в ту же сессию → `200` по обычному контракту, не `502`. Fake-провайдер ассертит валидность ввода: для каждого `function_call`/`tool_use` есть парный `function_call_output`/`tool_result`, у синтетического — `tool_result_missing`; для Anthropic блоки `tool_result` стоят в начале user-сообщения перед текстом нового вопроса.
 - **2. «Отравленный» чат оживает:** в БД заранее лежит форма прод-инцидента (`user`; `assistant` с `tool_use`; без шага `tool`; `user`; `assistant` с `turnFailed`) → следующее сообщение → `200`. Фикстура воспроизводит именно эту форму, а не «удобный» вариант.
@@ -230,7 +231,7 @@
 
 **Резолвинг локали (helper, чистый):**
 - query `?locale=ru` → `ru`; `?locale=en` → `en`; `?locale=RU`/` ru ` (нормализация) → `ru`.
-- явный `?locale=de` (вне набора) → **`422`** (`unsupported`), НЕ тихий fallback.
+- явный `?locale=de` / `fr` / `it` → **`200`**, `locale` из набора; незаполненные поля — EN-fallback ([ADR-119](../../adr/ADR-119-catalog-locales-de-fr-it.md)); явный `?locale=xx` (вне набора) → **`422`** (`unsupported`), НЕ тихий fallback.
 - нет query, `Accept-Language: ru-RU,en;q=0.8` → `ru`; `en-US` → `en`; `fr` (нет поддерживаемого) → следующий шаг (тихо).
 - нет query, `Accept-Language` пуст/нераспознан + `PRESETS_DEFAULT_LOCALE=ru` → `ru`; без env → `en`.
 - приоритет: query важнее `Accept-Language` важнее env важнее `en`.
