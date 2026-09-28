@@ -96,7 +96,7 @@ from app.chat.tools import (
 )
 from app.chat.transcription import TranscriptionClient
 from app.chats.provider_blocks import to_domain_blocks
-from app.config import Settings, get_settings
+from app.config import get_settings
 from app.documents import DocumentsService
 from app.errors import (
     CharactersDisabledError,
@@ -112,7 +112,6 @@ from app.errors import (
     WorkspaceNotFoundError,
 )
 from app.instance_config import chat_turn_credit_cost
-from app.instance_config.effective import effective_settings
 from app.memory.indexer import schedule_delete_from_message_step, schedule_index_turn
 from app.memory.service import MemoryService
 from app.models import ChatSession, ChatStep, ToolCall
@@ -155,12 +154,6 @@ _DOCUMENT_TOOL_NAMES = frozenset(
 _DOCUMENT_MUTATING_TOOL_NAMES = _DOCUMENT_TOOL_NAMES & MUTATING_TOOLS
 
 logger = logging.getLogger("app.chat.orchestrator")
-
-
-def _effective() -> Settings:
-    """Действующие настройки (ADR-116 §5): провайдер, ключи и флаг карт управляются из CRM."""
-    return effective_settings(get_settings())
-
 
 _MEDIA_TOOL_NAMES = frozenset({TOOL_MEDIA_GENERATE_IMAGE, TOOL_MEDIA_GENERATE_VIDEO})
 
@@ -510,7 +503,7 @@ def _system_prompt_for(
     # ADR-102 ось E: как и у оси D, указания добавляются РОВНО по тому условию, по которому
     # предлагаются сами инструменты, — но БЕЗ `assistant_mode`: карты доступны в обычном чате.
     # Флаг выключен → строки нет вовсе, и `system` побайтно совпадает с прежним.
-    if _effective().maps_tools_enabled:
+    if get_settings().maps_tools_enabled:
         base = f"{base} {_MAPS_TOOLS_INSTRUCTION}"
     if instance_config.characters_enabled():
         persona = character_prompt_layer(character_id)
@@ -3241,7 +3234,7 @@ class ChatOrchestrator:
         when a crossover candidate answers.
         """
         attempts = build_attempt_chain(session_model)
-        active = _effective().credits_provider_for_model(None)
+        active = get_settings().credits_provider_for_model(None)
         index = 0
         while True:
             attempt = attempts[index]
@@ -3365,11 +3358,11 @@ class ChatOrchestrator:
                 # подстановка была бы изменением исходящего вызова там, где ничего не менялось.
                 # Пустой оверлей обязан воспроизводить сегодняшний день бит-в-бит.
                 operator_default = instance_config.instance_default_model()
-                if operator_default != _effective().default_model():
+                if operator_default != get_settings().default_model():
                     model = operator_default
             # ADR-073: route credits by the session model (session-fixed; no mid-chat switch).
             # ADR-074 may still answer from the other provider on this call only.
-            provider = _effective().credits_provider_for_model(model)
+            provider = get_settings().credits_provider_for_model(model)
         # ADR-011: server-side site.* tools are executed by the backend synchronously inside this
         # loop, WITHOUT a round-trip to iOS. We keep calling the LLM as long as the turn contains
         # ONLY server-side tools (their tool_results are produced here and fed straight back).
@@ -3437,7 +3430,7 @@ class ChatOrchestrator:
                     ),
                     # ADR-102 ось E: карты гейтит ТОЛЬКО флаг инстанса. С `assistant_mode` ось
                     # намеренно не складывается — «как доехать» это обычный чат, а не режим.
-                    maps_tools_enabled=_effective().maps_tools_enabled,
+                    maps_tools_enabled=get_settings().maps_tools_enabled,
                 ),
                 "attachments": turn0_attachments,
                 "generation_mode": effective_generation_mode,
@@ -3975,7 +3968,7 @@ class ChatOrchestrator:
             # `files.*` по денилисту.
             if tool_name in MAPS_TOOLS and not offered_maps_tool(
                 tool_name,
-                maps_tools_enabled=_effective().maps_tools_enabled,
+                maps_tools_enabled=get_settings().maps_tools_enabled,
             ):
                 await self._record_refused_tool_call(
                     user_id=user_id,
