@@ -37,6 +37,20 @@ STEP="server.$SUB"
 
 # --- общие части -----------------------------------------------------------------------------
 postgres_gid() { tr -dc '0-9' < "$WALG_DIR/.gid" 2>/dev/null; }
+# ensure_postgres_gid — печатает GID postgres образа wal-g. На A/B без bootstrap (импорт) .gid нет:
+# признак A/B — /etc/fleet/server_id (на R его не пишет ни один инструмент); GID берётся из образа,
+# как в bootstrap шаг 6. На R печатает пусто. Код 1 — GID на A/B не вычислен.
+ensure_postgres_gid() {
+  local g img
+  g="$(postgres_gid)"; [ -n "$g" ] && { printf '%s' "$g"; return 0; }
+  [ -n "$(server_id)" ] || return 0
+  img="$(walg_image)"; [ -n "$img" ] || return 1
+  docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img" >/dev/null 2>&1 || return 1
+  g="$(docker run --rm --entrypoint id "$img" -g postgres 2>/dev/null | tr -dc '0-9')"; [ -n "$g" ] || return 1
+  install -d -m 0750 -o root -g "$g" "$WALG_DIR" || return 1
+  { printf '%s\n' "$g" > "$WALG_DIR/.gid" && chmod 0644 "$WALG_DIR/.gid"; } || return 1
+  printf '%s' "$g"
+}
 
 key_id_of_hex() {  # SHA-256 от сырых байт → первые 12 hex. Ключ не попадает в argv: printf — встроенная
   local esc; esc="$(sed 's/../\\x&/g' <<<"$1")"
@@ -356,7 +370,7 @@ objstore-set)
     [[ "$NEW_SID" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail bad_server_id
     if [ -f "$FLEET_ETC/server_id" ] && [ "$(server_id)" != "$NEW_SID" ]; then fail server_id_conflict; fi
     install -d -m 0755 "$FLEET_ETC"; printf '%s\n' "$NEW_SID" > "$FLEET_ETC/server_id"; chmod 0644 "$FLEET_ETC/server_id"
-    gid="$(postgres_gid)"
+    gid="$(ensure_postgres_gid)" || fail postgres_gid_unknown "GID postgres из образа wal-g не получен"
     [ -n "$gid" ] && install -m 0640 -o root -g "$gid" "$FLEET_ETC/server_id" "$WALG_DIR/server_id"
   fi
   write_objstore || { drop_objstore_tmp; fail objstore_write_failed; }
@@ -470,7 +484,8 @@ walg-key-add)
   check_keyid "$KID"
   [[ "$KHEX" =~ ^[0-9a-f]{64}$ ]] || fail bad_backup_key
   [ "$(key_id_of_hex "$KHEX")" = "$KID" ] || fail key_id_mismatch
-  gid="$(postgres_gid)"; owner="root:${gid:-root}"; mode=0640; [ -n "$gid" ] || mode=0600
+  gid="$(ensure_postgres_gid)" || fail postgres_gid_unknown "GID postgres из образа wal-g не получен"
+  owner="root:${gid:-root}"; mode=0640; [ -n "$gid" ] || mode=0600
   install -d -m 0750 -o root -g "${gid:-root}" "$WALG_DIR/keys"
   kt="$(mktemp "$WALG_DIR/keys/.k.XXXXXX")"; printf '%s' "$KHEX" > "$kt"; unset KHEX
   chown "$owner" "$kt"; chmod "$mode" "$kt"; mv -f "$kt" "$WALG_DIR/keys/$KID"
