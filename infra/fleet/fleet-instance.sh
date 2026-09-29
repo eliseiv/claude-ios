@@ -91,6 +91,9 @@ verify_archiving() {
   local s="$1" st0 f0 t0 st la fc okw=0
   st0="$(archiver_state "$s")"; f0="$(cut -d'|' -f2 <<<"$st0")"
   t0="$(psql_inst "$s" "SELECT extract(epoch FROM now())::bigint")"
+  # На базе без WAL-записей после последнего переключения pg_switch_wal() ничего не делает
+  # (свежий инстанс) — сегмент не выгружается. Точка восстановления даёт запись в WAL.
+  psql_inst "$s" "SELECT pg_create_restore_point('fleet-verify-archiving')" >/dev/null
   psql_inst "$s" "SELECT pg_switch_wal()" >/dev/null
   for _ in $(seq 1 45); do
     st="$(archiver_state "$s")"
