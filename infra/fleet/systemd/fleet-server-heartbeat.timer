@@ -1,0 +1,10 @@
+[Unit]
+Description=Флот: heartbeat сервера каждые 5 минут (ADR-115 §8.6)
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=5min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

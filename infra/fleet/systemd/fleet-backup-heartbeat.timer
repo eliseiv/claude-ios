@@ -1,0 +1,12 @@
+# OnBootSec=30s — это и ограждение при загрузке: вернувшийся после аварии сервер останавливает
+# устаревшие экземпляры не позже чем через 30 с (ADR-115 §8.4, Q-115-6).
+[Unit]
+Description=Флот: ограждение и heartbeat архива WAL каждые 5 минут
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

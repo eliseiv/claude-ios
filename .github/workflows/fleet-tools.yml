@@ -1,0 +1,91 @@
+# Проверка инструментов флота (ADR-115 §13) и бандла деплоя (§4.1, §10.4). Не касается деплоя:
+# безопасна до ввода inventory CRM. Гейты:
+#   * bash -n по ВСЕМ скриптам infra/fleet и infra/postgres-walg;
+#   * shellcheck (severity warning) по инструментам, введённым ADR-115 (прежние скрипты
+#     репликации под него не ставятся: их снимает §11 после фазы 8);
+#   * сборка бандла make-bundle.sh и `docker compose config -q` на его файлах с ФИКТИВНЫМ .env
+#     (тихий вариант: значения не печатаются) — отдельно без и с оверлеем архива WAL;
+#   * разбор inventory-validate.sh на эталонном и испорченных ответах (мутационная пара).
+name: fleet-tools
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/fleet/**"
+      - "infra/postgres-walg/**"
+      - "docker-compose.prod.yml"
+      - "docker-compose.fleet.yml"
+      - "docker-compose.walg.yml"
+      - ".github/workflows/fleet-tools.yml"
+  pull_request:
+    paths:
+      - "infra/fleet/**"
+      - "infra/postgres-walg/**"
+      - "docker-compose.prod.yml"
+      - "docker-compose.fleet.yml"
+      - "docker-compose.walg.yml"
+      - ".github/workflows/fleet-tools.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: bash -n • shellcheck • bundle • compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: bash -n (все скрипты)
+        run: |
+          rc=0
+          for f in $(find infra/fleet infra/postgres-walg -name '*.sh' | sort); do bash -n "$f" || rc=1; done
+          exit $rc
+
+      - name: shellcheck (инструменты ADR-115)
+        run: |
+          shellcheck --version | head -2
+          shellcheck -x -S warning \
+            infra/fleet/fleet.sh infra/fleet/fleet-server.sh infra/fleet/fleet-instance.sh \
+            infra/fleet/fleet-backup.sh infra/fleet/fleet-route.sh infra/fleet/fleet-deploy.sh \
+            infra/fleet/make-bundle.sh infra/fleet/bootstrap-server.sh infra/fleet/lib/common.sh \
+            infra/fleet/ci/*.sh infra/postgres-walg/*.sh
+
+      - name: Бандл + docker compose config -q (фиктивный .env)
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/bundle"
+          bash infra/fleet/make-bundle.sh "${{ github.sha }}" "$B"
+          test "$(cat "$B/VERSION")" = "${{ github.sha }}"
+          T="$RUNNER_TEMP/ct"; mkdir -p "$T"; cp "$B"/compose/docker-compose.*.yml "$T/"
+          printf '%s\n' COMPOSE_PROJECT_NAME=ci-check SERVICE_DOMAIN=example.invalid TRAEFIK_CERTRESOLVER=le \
+            POSTGRES_USER=u POSTGRES_PASSWORD=fictitious POSTGRES_DB=d WG_BIND_IP=127.0.0.1 \
+            API_HOST_PORT=18999 PG_HOST_PORT=15999 > "$T/.env"
+          cd "$T"
+          docker compose -p ci-check -f docker-compose.prod.yml -f docker-compose.fleet.yml --env-file .env config -q
+          # Оверлей без INSTANCE_UID обязан ПАДАТЬ (первый слой защиты префикса, ADR-115 §8.2)…
+          if docker compose -p ci-check -f docker-compose.prod.yml -f docker-compose.fleet.yml -f docker-compose.walg.yml --env-file .env config -q 2>/dev/null; then
+            echo "::error::оверлей архива принят без INSTANCE_UID"; exit 1
+          fi
+          # …и проходить с ним.
+          printf '%s\n' INSTANCE_UID=0f8fad5b-d9cb-469f-a165-70867728950e INSTANCE_GENERATION=1 WALG_KEY_ID=0123456789ab >> .env
+          docker compose -p ci-check -f docker-compose.prod.yml -f docker-compose.fleet.yml -f docker-compose.walg.yml --env-file .env config -q
+
+      - name: inventory-validate — эталон проходит, испорченные ответы краснеют
+        run: |
+          set -uo pipefail
+          good='{"schema":1,"generated_at":"2026-09-26T00:00:00Z","router":{"ssh_host":"r","ssh_port":22,"ssh_host_key":"ssh-ed25519 AAAA"},
+            "servers":[{"server_id":"s1","name":"A","ssh_host":"a","ssh_port":22,"ssh_host_key":"ssh-ed25519 AAAA","wg_ip":"10.10.0.1","state":"active"}],
+            "instances":[{"instance_uid":"0f8fad5b-d9cb-469f-a165-70867728950e","slug":"alpha","server_id":"s1","domain":"a.example","api_port":18001,"state":"active"}],
+            "last_deployed_sha":null}'
+          printf '%s' "$good" > g.json; bash infra/fleet/ci/inventory-validate.sh g.json
+          bad() { printf '%s' "$good" | jq -c "$1" > b.json; if bash infra/fleet/ci/inventory-validate.sh b.json >/dev/null; then echo "::error::не отвергнуто: $1"; exit 1; fi; }
+          bad '.schema = 2'
+          bad '.instances[0].state = "stopped"'
+          bad '.instances[0].server_id = "nope"'
+          bad '.instances += [.instances[0] | .instance_uid = "1f8fad5b-d9cb-469f-a165-70867728950e" | .domain = "b.example" | .api_port = 18002]'
+          bad '.instances += [.instances[0] | .slug = "beta" | .instance_uid = "1f8fad5b-d9cb-469f-a165-70867728950e" | .api_port = 18002]'
+          bad '.instances += [.instances[0] | .slug = "beta" | .instance_uid = "1f8fad5b-d9cb-469f-a165-70867728950e" | .domain = "b.example"]'
+          bad '.instances = []'
+          printf 'not json' > b.json; if bash infra/fleet/ci/inventory-validate.sh b.json >/dev/null; then echo "::error::не-JSON принят"; exit 1; fi
+          echo "inventory-validate: эталон принят, 8 испорченных ответов отвергнуты"

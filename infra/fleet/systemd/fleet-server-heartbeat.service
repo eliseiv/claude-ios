@@ -1,0 +1,12 @@
+# Установлен инструментами флота (ADR-115 §8). Не править руками: bootstrap перезапишет.
+[Unit]
+Description=Флот: heartbeat сервера — диск и нагрузка (ADR-115 §8.6)
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fleet-server heartbeat
+TimeoutStartSec=2min
+Nice=0
+IOSchedulingClass=best-effort

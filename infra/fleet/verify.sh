@@ -11,8 +11,22 @@
 set -uo pipefail
 cd /opt/router/fleet || exit 1
 WG_A=10.10.0.1; WG_B=10.10.0.2
-ip_of() { [ "$1" = "A" ] && echo $WG_A || echo $WG_B; }
-other() { [ "$1" = "A" ] && echo B || echo A; }
+# Источник состава (ADR-115 §15: «verify.sh — источник состава из inventory вместо instances.tsv»).
+# FLEET_INVENTORY_FILE=<ответ inventory CRM, §10.1> — строки строятся из active инстансов inventory:
+# сервер A/B узнаётся по адресу туннеля, прочие серверы идут адресом (ssh root@<wg_ip>, резерва нет).
+# Без переменной — прежний источник instances.tsv (до ADR-115 §11 фазы 8 он остаётся рабочим).
+SRC=instances.tsv
+if [ -n "${FLEET_INVENTORY_FILE:-}" ]; then
+  SRC="$(mktemp)"; trap 'rm -f "$SRC"' EXIT
+  jq -r '(.servers | map({key: .server_id, value: .wg_ip}) | from_entries) as $ip
+    | .instances[] | select(.state == "active")
+    | [.slug, .domain, (.api_port | tostring),
+       ($ip[.server_id] | if . == "10.10.0.1" then "A" elif . == "10.10.0.2" then "B" else . end)] | @tsv'     "$FLEET_INVENTORY_FILE" > "$SRC" || { echo "inventory не разобран: $FLEET_INVENTORY_FILE"; exit 1; }
+fi
+ip_of() { case "$1" in A) echo $WG_A;; B) echo $WG_B;; *) echo "$1";; esac; }
+# Резерв есть только у пары A/B (до ADR-115 §11 фазы 8); у сервера, заданного адресом, его нет.
+other() { case "$1" in A) echo B;; B) echo A;; *) echo -;; esac; }
+host_of() { case "$1" in A|B) echo "app$1";; -) echo "none.invalid";; *) echo "root@$1";; esac; }
 
 ONE="${1:-}"
 printf "%-14s %-22s %-9s %-9s %-9s %s\n" ИНСТАНС ДОМЕН ОСНОВНОЙ РЕЗЕРВ ЧЕРЕЗ_ВХОД ОТСТАВАНИЕ
@@ -24,12 +38,13 @@ while IFS=$'\t' read -r inst domain port primary; do
   case "$inst" in ""|\#*) continue;; esac
   [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
 
-  p_ip="$(ip_of "$primary")"; s_ip="$(ip_of "$(other "$primary")")"
+  p_ip="$(ip_of "$primary")"
   c_pri="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://$p_ip:$port/ready" 2>/dev/null)"
   # У резерва api намеренно выключен, поэтому проверяем не его, а живость базы через ssh.
   # -n обязателен: без него ssh читает stdin цикла (instances.tsv) и съедает остаток файла —
   # цикл отработает ОДНУ строку и завершится, а сводка отрапортует успех по одному инстансу.
-  st="$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "app$(other "$primary")" "
+  if [ "$(other "$primary")" = "-" ]; then st="БЕЗ_РЕЗЕРВА"; else
+  st="$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$(host_of "$(other "$primary")")" "
         cd /opt/$inst 2>/dev/null || exit 1
         proj=\$(grep -m1 '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2-); proj=\${proj:-$inst}
         u=\$(grep -m1 '^POSTGRES_USER=' .env | cut -d= -f2-)
@@ -37,11 +52,13 @@ while IFS=$'\t' read -r inst domain port primary; do
         docker exec -i \${proj}-postgres-1 psql -U \$u -d \$d -tAc \
           \"SELECT CASE WHEN NOT pg_is_in_recovery() THEN 'НЕ_РЕЗЕРВ' ELSE COALESCE((SELECT status FROM pg_stat_wal_receiver LIMIT 1),'НЕТ_ПОТОКА') || ':' || COALESCE(pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint::text,'0') END\"
       " 2>/dev/null | tr -d ' \r')"
+  fi
   # Отставание меряется в БАЙТАХ журнала, а не в секундах с последней транзакции. Секундная
   # мера врала на тихих инстансах: на базе без записей `now() - pg_last_xact_replay_timestamp()`
   # растёт бесконечно при совершенно здоровой репликации (наблюдалось 72890с на claude-ios), и
   # настоящий затор в этом шуме было бы не различить.
   case "$st" in
+    БЕЗ_РЕЗЕРВА) s_state="—"; lag="—";;
     ""|*ERROR*)  s_state="нет"; lag="—"; repl_bad=$((repl_bad+1)); repl_down="$repl_down $inst";;
     НЕ_РЕЗЕРВ)   s_state="ОСНОВНОЙ!"; lag="—"; repl_bad=$((repl_bad+1)); repl_split="$repl_split $inst";;
     streaming:*) s_state="ок"; lag="${st#streaming:}б";;
@@ -57,7 +74,7 @@ while IFS=$'\t' read -r inst domain port primary; do
 
   [ "$c_pri" = "200" ] && ok=$((ok+1)) || bad=$((bad+1))
   printf "%-14s %-22s %-9s %-9s %-9s %s\n" "$inst" "$domain" "${c_pri:-нет}($primary)" "$s_state" "${c_edge:-нет}" "$lag"
-done < instances.tsv
+done < "$SRC"
 printf '%.0s-' {1..82}; echo
 echo "основных отвечает: $ok, не отвечает: $bad"
 # Состояние резерва печаталось только в своей строке таблицы. На четырёх десятках строк отметка
@@ -90,7 +107,7 @@ collapsed=0
 while IFS=$'	' read -r inst domain port primary; do
   case "$inst" in ""|\#*) continue;; esac
   [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
-  host="app${primary}"
+  host="$(host_of "$primary")"
   # Имя проекта в этом флоте совпадает с именем каталога (provision.sh задаёт
   # COMPOSE_PROJECT_NAME=<инстанс>), поэтому имя контейнера выводится прямо из него —
   # без чтения .env через вложенное экранирование, которое здесь и ломалось.
@@ -106,7 +123,7 @@ while IFS=$'	' read -r inst domain port primary; do
     printf "  %-14s доверие: %-12s живой ключ маршрутизатора: %s
 "       "$inst" "$cfg" "${live:-—}"
   fi
-done < instances.tsv
+done < "$SRC"
 [ "$collapsed" = "0" ] && echo "  все инстансы видят реальные адреса клиентов"
 
 # --- Расхождение с базой флота (инцидент 2026-09-01) ---------------------------------------
@@ -129,7 +146,7 @@ while IFS=$'	' read -r inst domain port primary; do
     printf "  %-14s /docs -> %s
 " "$inst" "${c:-нет ответа}"
   fi
-done < instances.tsv
+done < "$SRC"
 [ "$docs_bad" = "0" ] && echo "  документация открыта на всех инстансах"
 
 # --- Заглушки шаблона в боевом инстансе (инцидент 2026-09-02) ------------------------------
@@ -144,7 +161,7 @@ stub_bad=0
 while IFS=$'	' read -r inst domain port primary; do
   case "$inst" in ""|\#*) continue;; esac
   [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
-  out="$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "app${primary}"       "grep -hE '^(APPSTORE_BUNDLE_ID|TOKEN_PRODUCTS|ADAPTY_PRODUCT_TOKENS)=' /opt/$inst/.env"       2>/dev/null | tr -d '')"
+  out="$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$(host_of "$primary")"       "grep -hE '^(APPSTORE_BUNDLE_ID|TOKEN_PRODUCTS|ADAPTY_PRODUCT_TOKENS)=' /opt/$inst/.env"       2>/dev/null | tr -d '')"
   probs=""
   case "$out" in *"<"*) probs="$probs bundle-заглушка";; esac
   case "$out" in *tokens_1500*) probs="$probs продукты-заглушки";; esac
@@ -154,7 +171,7 @@ while IFS=$'	' read -r inst domain port primary; do
     printf "  %-14s%s
 " "$inst" "$probs"
   fi
-done < instances.tsv
+done < "$SRC"
 [ "$stub_bad" = "0" ] && echo "  заглушек шаблона нет"
 
 # --- Самоподписанный сертификат вместо выпущенного (инцидент 2026-09-04) --------------------
@@ -186,7 +203,7 @@ while IFS=$'	' read -r inst domain port primary; do
     *)  tls_bad=$((tls_bad+1)); printf "  %-14s НЕ выпущен: %s
 " "$inst" "${issuer#issuer=}";;
   esac
-done < instances.tsv
+done < "$SRC"
 [ "$tls_bad" = "0" ] && echo "  у всех инстансов сертификат Let's Encrypt"
 
 # --- Генерация через прокси (ADR-108 §1, §10) -----------------------------------------------
@@ -232,7 +249,7 @@ fval() { printf '%s\n' "$1" | tr ' ' '\n' | awk -F= -v k="$2" '$1==k{print subst
 while IFS=$'\t' read -r inst domain port primary; do
   case "$inst" in ""|\#*) continue;; esac
   [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
-  fl="$(flags_of "app${primary}" "$inst")"
+  fl="$(flags_of "$(host_of "$primary")" "$inst")"
   if [ -z "$fl" ]; then
     printf "  %-14s нет данных о .env основного (ssh/каталог)\n" "$inst"
     continue
@@ -242,7 +259,7 @@ while IFS=$'\t' read -r inst domain port primary; do
   probs=""
   # Резерв: признаки читаются для ВСЕХ классов — ключ прокси, заданный только на резерве, после
   # повышения включил бы прокси на инстансе, который до этого на прокси не был.
-  sfl="$(flags_of "app$(other "$primary")" "$inst")"
+  sfl="$(flags_of "$(host_of "$(other "$primary")")" "$inst")"
   h_sb="$(fval "$sfl" H)"; p_sb="$(fval "$sfl" P)"
   # Состояние ключа прокси (0/1/2 — не значение и не хэш) обязано совпадать: обрыв записи между
   # серверами (proxy-rollout.sh пишет ключ по очереди) иначе всплыл бы только при повышении резерва.
@@ -289,7 +306,7 @@ while IFS=$'\t' read -r inst domain port primary; do
     if [ "$f_proxy" != "0" ]; then hook_bad=$((hook_bad+1)); else hook_cand_bad=$((hook_cand_bad+1)); fi
     printf "  %-14s %-10s%s\n" "$inst" "$cls" "$probs"
   fi
-done < instances.tsv
+done < "$SRC"
 echo "  на прокси: $hook_proxy; кандидатов: $hook_cand; нарушений: $hook_bad; кандидатов не готово к переключению: $hook_cand_bad"
 
 # --- Своё хранение результатов генерации (ADR-109 §1.1, §4, §6, §9, §10) --------------------
@@ -333,7 +350,7 @@ while IFS=$'\t' read -r inst domain port primary; do
   case "$inst" in ""|\#*) continue;; esac
   [ -n "$ONE" ] && [ "$inst" != "$ONE" ] && continue
   sb="$(other "$primary")"
-  sp="$(store_of "app${primary}" "$inst")"; ss="$(store_of "app${sb}" "$inst")"
+  sp="$(store_of "$(host_of "$primary")" "$inst")"; ss="$(store_of "$(host_of "$sb")" "$inst")"
   if [ -z "$sp" ] || [ -z "$ss" ]; then
     st_nodata=$((st_nodata+1))
     printf "  %-14s нет данных (ssh/каталог) на %s\n" "$inst" "$( [ -z "$sp" ] && echo "основном " )$( [ -z "$ss" ] && echo резерве )"
@@ -366,7 +383,7 @@ while IFS=$'\t' read -r inst domain port primary; do
     [ "$(fval "$ss" N)" = "0" ] || [ "$(fval "$ss" D)" != dir ] || probs="$probs файлы-на-резерве:$(fval "$ss" N)"
     mf="$(fval "$sp" MF)"; [ "$mf" = "-" ] && mf=21474836480   # дефолт кода, ADR-109 §1.1
     [ "$(fval "$sp" FREE)" -lt $((2*mf)) ] && probs="$probs мало-места:$(fval "$sp" FREE)б"
-    m="$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "app${primary}" "cd /opt/$inst 2>/dev/null || exit 1; $metrics_snippet" 2>/dev/null | tr -d '\r')"
+    m="$(ssh -n -o BatchMode=yes -o ConnectTimeout=6 "$(host_of "$primary")" "cd /opt/$inst 2>/dev/null || exit 1; $metrics_snippet" 2>/dev/null | tr -d '\r')"
     if [ -z "$m" ]; then
       probs="$probs нет-метрик-хранения"
     else
@@ -390,6 +407,6 @@ while IFS=$'\t' read -r inst domain port primary; do
   elif [ -n "$ONE" ] || [ "$e_p" != "-" ]; then
     printf "  %-14s %s\n" "$inst" "${info:-выключено, каталог готов}"
   fi
-done < instances.tsv
+done < "$SRC"
 echo "  сервер A: свободно ${st_free_A:-?}б, занято каталогами ${st_bytes_A}б; сервер B: свободно ${st_free_B:-?}б, занято каталогами ${st_bytes_B}б"
 echo "  хранение включено: $st_on; нарушений: $st_bad; не подготовлено (выключено): $st_unprep; нет данных: $st_nodata"

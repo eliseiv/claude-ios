@@ -1,0 +1,12 @@
+# Установлен инструментами флота (ADR-115 §8). Не править руками: bootstrap перезапишет.
+[Unit]
+Description=Флот: еженедельная проверка восстановления (ADR-115 §8.8)
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fleet-backup restore-check
+TimeoutStartSec=12h
+Nice=15
+IOSchedulingClass=idle
