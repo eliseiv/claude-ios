@@ -26,7 +26,7 @@
 #                 / 0640, ADR-115 §8.2); gid снимает `fleet-server bootstrap` из этого образа.
 services:
   postgres:
-    image: ghcr.io/eliseiv/claude-ios-postgres:16.15-walg3.0.9-r1
+    image: ghcr.io/eliseiv/claude-ios-postgres:16.15-walg3.0.9-r2
     command:
       - postgres
       - -c
