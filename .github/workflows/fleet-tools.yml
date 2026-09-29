@@ -87,5 +87,7 @@ jobs:
           bad '.instances += [.instances[0] | .slug = "beta" | .instance_uid = "1f8fad5b-d9cb-469f-a165-70867728950e" | .api_port = 18002]'
           bad '.instances += [.instances[0] | .slug = "beta" | .instance_uid = "1f8fad5b-d9cb-469f-a165-70867728950e" | .domain = "b.example"]'
           bad '.instances = []'
+          printf '%s' "$good" | jq -c '.instances = [(.instances[0] | .state = "stopped"), (.instances[0] | .slug = "beta" | .instance_uid = "1f8fad5b-d9cb-469f-a165-70867728950e" | .api_port = 18002)]' > b.json
+          bash infra/fleet/ci/inventory-validate.sh b.json || { echo "::error::stopped + active с одним доменом отвергнуто"; exit 1; }
           printf 'not json' > b.json; if bash infra/fleet/ci/inventory-validate.sh b.json >/dev/null; then echo "::error::не-JSON принят"; exit 1; fi
-          echo "inventory-validate: эталон принят, 8 испорченных ответов отвергнуты"
+          echo "inventory-validate: эталон и stopped+active с одним доменом приняты, 8 испорченных ответов отвергнуты"

@@ -4,9 +4,10 @@
 #   inventory-validate.sh <inventory.json>
 #
 # Красный (код 1, НИ ОДИН сервер не тронут), если: тело не JSON; schema ≠ 1; ноль инстансов в
-# active; инстанс ссылается на несуществующий сервер; дубли slug, instance_uid, домена или пары
-# (server_id, api_port). Пустой список — ОШИБКА, а не «нечего делать» (Р5: деплой не пропускает
-# инстансы молча). Дополнительно (форма контракта §10.1): допустимые состояния, формат slug и
+# active; инстанс ссылается на несуществующий сервер; дубли slug, instance_uid или пары
+# (server_id, api_port); дубль домена среди инстансов, держащих домен (state не stopped/erasing/
+# purged: CRM освобождает домен после снятия маршрута при стирании, ADR-151). Пустой список —
+# ОШИБКА, а не «нечего делать» (Р5: деплой не пропускает инстансы молча). Дополнительно (форма контракта §10.1): допустимые состояния, формат slug и
 # instance_uid, host-ключи серверов и R (без них CI не закрепит known_hosts).
 set -uo pipefail
 F="${1:?файл inventory}"
@@ -23,7 +24,7 @@ errs="$(jq -r '
        | "инстанс \(.slug) ссылается на несуществующий сервер \(.server_id)"),
     (.instances | dups(.slug)[]? | "дубль slug: \(.)"),
     (.instances | dups(.instance_uid)[]? | "дубль instance_uid: \(.)"),
-    (.instances | dups(.domain)[]? | "дубль домена: \(.)"),
+    ([.instances[]? | select(.state | IN("stopped","erasing","purged") | not)] | dups(.domain)[]? | "дубль домена: \(.)"),
     (.instances | dups("\(.server_id)|\(.api_port)")[]? | "дубль (server_id, api_port): \(.)"),
     (.servers | dups(.server_id)[]? | "дубль server_id: \(.)"),
     (.instances[]? | select((.state | IN("creating","active","erasing","stopped","failed")) | not)
