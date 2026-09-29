@@ -18,6 +18,7 @@ from app.chat.instance_catalog import build_instance_catalog
 from app.config import get_settings
 from app.deps import CurrentUser, get_preferences_service
 from app.errors import RateLimitedError
+from app.instance_config.effective import effective_settings
 from app.preferences.service import PreferencesService
 from app.schemas.models import ModelsResponse
 
@@ -45,5 +46,7 @@ async def list_models(
         raise RateLimitedError("rate limit exceeded")
     user_default_model = await prefs.get_default_model(current.user_id)
     return ModelsResponse(
-        models=build_instance_catalog(get_settings(), user_default_model=user_default_model)
+        models=build_instance_catalog(
+            effective_settings(get_settings()), user_default_model=user_default_model
+        )
     )

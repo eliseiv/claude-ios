@@ -49,7 +49,7 @@ from app.chat.tools import (
     to_domain_tool_name,
 )
 from app.chats.provider_blocks import is_chat_completions_message, to_domain_blocks
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.errors import UpstreamError, ValidationFailedError
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import llm_upstream_errors_total
@@ -105,6 +105,17 @@ class OpenAIAuthError(Exception):
     """Raised when OpenAI rejects the (BYOK) key as unauthorized → key_status=invalid (ADR-016)."""
 
 
+def openai_client_inputs(settings: Settings) -> tuple[object, ...]:
+    """Входы, захватываемые клиентом при создании (ADR-116 §5: пересоздание по отпечатку)."""
+    return (
+        settings.openai_api_key,
+        settings.openai_model,
+        settings.openai_max_tokens,
+        settings.openai_timeout_seconds,
+        settings.openai_max_retries,
+    )
+
+
 class OpenAIClient:
     """Async wrapper around ``openai.AsyncOpenAI``, implementing LLMClient (ADR-033).
 
@@ -113,7 +124,11 @@ class OpenAIClient:
     """
 
     def __init__(self) -> None:
-        settings = get_settings()
+        from app.instance_config.effective import effective_settings
+
+        # ADR-116 §5: ключ — из действующих настроек (оверлей CRM → env).
+        settings = effective_settings(get_settings())
+        self._inputs = openai_client_inputs(settings)
         self._default_model = settings.openai_model
         self._max_tokens = settings.openai_max_tokens
         self._service_key = settings.openai_api_key

@@ -1147,6 +1147,25 @@ class AdminSetting(Base):
     )
 
 
+class AdminCredential(Base):
+    """Зашифрованный операторский оверлей креденшла инстанса (ADR-116 §2.2, миграция 0040).
+
+    Схема — envelope encryption BYOK (ADR-003): ``encrypted_value`` = nonce + шифротекст
+    AES-256-GCM под одноразовым DEK, ``encrypted_dek`` — DEK, обёрнутый KMS-клиентом. Открытое
+    значение в БД не попадает никогда; ``fingerprint`` — первые 12 hex SHA-256 значения.
+    """
+
+    __tablename__ = "admin_credentials"
+
+    credential_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    encrypted_value: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    encrypted_dek: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+
 class ScheduledChatTask(Base):
     """One-shot delayed chat run (ADR-107, migration 0034).
 

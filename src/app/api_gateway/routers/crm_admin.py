@@ -21,6 +21,9 @@ from app.deps import client_ip, get_admin_economics_service, get_crm_admin_servi
 from app.errors import RateLimitedError, UserNotFoundError
 from app.schemas.admin_economics import (
     AdminCapabilitiesResponse,
+    AdminCredentialListResponse,
+    AdminCredentialPatchRequest,
+    AdminCredentialWriteResponse,
     AdminProductCreateRequest,
     AdminProductCreateResponse,
     AdminProductListResponse,
@@ -472,3 +475,44 @@ async def admin_patch_setting(
     _enforce_admin_economics_write_guards(request)
     await _enforce_admin_economics_rate_limit(request)
     return await service.patch_setting(setting_id, body, actor_claim=x_admin_actor)
+
+
+@router.get(
+    "/credentials",
+    response_model=AdminCredentialListResponse,
+    summary="CRM: креденшлы инстанса",
+    description=(
+        "Ключи и секреты интеграций инстанса. Значения не отдаются никогда: только признак "
+        "заданности, источник действующего значения и короткий отпечаток, по которому панель "
+        "узнаёт, какой из её ключей стоит на инстансе."
+    ),
+)
+async def admin_list_credentials(
+    request: Request,
+    service: Annotated[AdminEconomicsService, Depends(get_admin_economics_service)],
+) -> AdminCredentialListResponse:
+    await _enforce_admin_economics_rate_limit(request)
+    return service.list_credentials()
+
+
+@router.patch(
+    "/credentials/{credential_id}",
+    response_model=AdminCredentialWriteResponse,
+    summary="CRM: записать креденшл инстанса",
+    description=(
+        "Записывает значение (пустая строка явно выключает величину) или удаляет запись панели "
+        "(null) — тогда действует конфигурация сервера. Значение хранится зашифрованным и в "
+        "ответ не возвращается. Правка, после которой выбранный провайдер остался бы без "
+        "ключа, отвергается. Неизвестный креденшл отвергается."
+    ),
+)
+async def admin_patch_credential(
+    request: Request,
+    service: Annotated[AdminEconomicsService, Depends(get_admin_economics_service)],
+    credential_id: Annotated[str, Path(max_length=128)],
+    body: Annotated[AdminCredentialPatchRequest, Body()],
+    x_admin_actor: AdminActor = None,
+) -> AdminCredentialWriteResponse:
+    _enforce_admin_economics_write_guards(request)
+    await _enforce_admin_economics_rate_limit(request)
+    return await service.patch_credential(credential_id, body, actor_claim=x_admin_actor)

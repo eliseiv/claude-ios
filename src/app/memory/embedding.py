@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-from functools import lru_cache
 
 from openai import AsyncOpenAI
 
@@ -45,6 +44,46 @@ class EmbeddingClient:
         return [row.embedding for row in ordered]
 
 
-@lru_cache
-def get_embedding_client() -> EmbeddingClient:
-    return EmbeddingClient(get_settings())
+def _embedding_inputs(settings: Settings) -> tuple[object, ...]:
+    return (
+        settings.openai_api_key,
+        settings.memory_embedding_fake,
+        settings.memory_embedding_dimensions,
+        settings.memory_embedding_model,
+    )
+
+
+class _EmbeddingClientFactory:
+    """Процессный клиент эмбеддингов, пересоздаваемый при смене ключа OpenAI из CRM (ADR-116 §5).
+
+    Замена ``lru_cache``: ``cache_clear()`` сохранён — им пользуется изоляция тестов.
+    """
+
+    def __init__(self) -> None:
+        self._cached: tuple[tuple[object, ...], EmbeddingClient] | None = None
+
+    def __call__(self) -> EmbeddingClient:
+        from app.instance_config.effective import effective_settings
+
+        settings = effective_settings(get_settings())
+        key = _embedding_inputs(settings)
+        if self._cached is not None and self._cached[0] == key:
+            return self._cached[1]
+        client = EmbeddingClient(settings)
+        previous = self._cached
+        self._cached = (key, client)
+        if previous is not None:
+            # Пул прежнего клиента закрывается, когда на нём не останется идущих вызовов.
+            from app.instance_config.client_retirement import (
+                retire_when_unreferenced,
+                sdk_clients_of,
+            )
+
+            retire_when_unreferenced(previous[1], sdk_clients_of(previous[1], "_client"))
+        return client
+
+    def cache_clear(self) -> None:
+        self._cached = None
+
+
+get_embedding_client = _EmbeddingClientFactory()

@@ -154,16 +154,24 @@ class _StubScalars:
 
 
 class _StubSession:
-    """Минимальная замена AsyncSession: отдаёт заранее заданные строки трёх таблиц по порядку."""
+    """Минимальная замена AsyncSession: строки трёх таблиц ADR-099 — по СУЩНОСТИ запроса.
+
+    Адресация по сущности, а не по порядку вызовов: снимок читает ещё и `admin_credentials`
+    (ADR-116), и порядок чтений — деталь реализации, а не предмет этих кейсов.
+    """
 
     def __init__(self, batches: list[list[Any]]) -> None:
-        self._batches = batches
+        from app.models import AdminProduct, AdminSetting, AdminTariff
+
+        self._by_entity = dict(
+            zip((AdminProduct, AdminTariff, AdminSetting), batches, strict=False)
+        )
         self.calls = 0
 
-    async def scalars(self, _statement: Any) -> _StubScalars:
-        rows = self._batches[self.calls] if self.calls < len(self._batches) else []
+    async def scalars(self, statement: Any) -> _StubScalars:
         self.calls += 1
-        return _StubScalars(rows)
+        entity = statement.column_descriptions[0]["entity"]
+        return _StubScalars(self._by_entity.get(entity, []))
 
 
 @pytest.mark.asyncio
@@ -243,21 +251,31 @@ async def test_an_ignored_row_is_labelled_by_the_fact_of_its_own_branch(
 
 
 # ============================== состав поверхности ==========================================
-def test_the_registry_declares_fourteen_rows_one_of_them_instance_conditional() -> None:
-    """ADR-099 §8.1: строк ЧЕТЫРНАДЦАТЬ, и одна из них объявляется не на каждом инстансе.
+def test_the_registry_declares_twenty_one_rows_one_of_them_instance_conditional() -> None:
+    """ADR-099 §8.1 + ADR-116 §4: строк ДВАДЦАТЬ ОДНА (14 + 7), одна — не на каждом инстансе.
 
     Состав зависит от инстанса по сноске ¹: `chat.anthropic_thinking_display` на OpenAI-инстансе
     потребителя не имеет, и объявить её значило бы дать оператору ручку, которая ничего не делает.
-    Отсюда 14 в реестре и 13 в ответе OpenAI-инстанса — это ОДНО правило, а не расхождение.
+    Отсюда 21 в реестре и 20 в ответе OpenAI-инстанса — это ОДНО правило, а не расхождение.
+    Семь строк ADR-116 перечислены поимённо по `docs/modules/admin/02-api-contracts.md`.
     """
     anthropic_specs = declared_settings(_anthropic_settings())
     openai_specs = declared_settings(_openai_settings())
 
-    assert len(anthropic_specs) == 14
+    assert len(anthropic_specs) == 21
+    assert {
+        "llm.provider",
+        "llm.dual_enabled",
+        "storekit.mode",
+        "storekit.bundle_id",
+        "cloudpayments.app_id",
+        "cloudpayments.pay_page_proxy_enabled",
+        "chat.maps_tools_enabled",
+    } <= {spec.setting_id for spec in anthropic_specs}
     assert {spec.setting_id for spec in anthropic_specs} - {
         spec.setting_id for spec in openai_specs
     } == {SETTING_CHAT_THINKING_DISPLAY}
-    assert len(openai_specs) == 13
+    assert len(openai_specs) == 20
     assert find_setting(SETTING_CHAT_THINKING_DISPLAY, _openai_settings()) is None
 
 
@@ -270,7 +288,12 @@ def test_every_declared_row_carries_non_empty_metadata_and_a_typed_value() -> No
         if spec.type == "bool":
             assert isinstance(value, bool)
         elif spec.type == "enum":
-            assert isinstance(value, str)
+            # ADR-116 §4.2: `storekit.mode` без строки оверлея — `null`, если флаги сервера не
+            # совпадают ни с одним режимом (здесь: sandbox с заданным bundle). Только у неё.
+            if spec.setting_id == "storekit.mode":
+                assert value is None or isinstance(value, str)
+            else:
+                assert isinstance(value, str)
         elif spec.type == "multi_enum":
             assert isinstance(value, list)
             assert all(isinstance(item, str) for item in value)
@@ -301,6 +324,12 @@ _FORBIDDEN_ALIASES: dict[str, str] = {
     "METRICS_SCRAPE_TOKEN": "SENTINEL-metrics-token",
     "APPLE_TEST_SECRET": "SENTINEL-apple-secret",
     "STOREKIT_TEST_SECRET": "SENTINEL-storekit-secret",
+    # ADR-116 §2.1: креденшлы живут в ОТДЕЛЬНОЙ поверхности `/credentials` (только запись), в
+    # `/settings` их значений нет; материал подписи (§1 п. 1) — нигде.
+    "OPENAI_API_KEY_BACKUP": "SENTINEL-openai-backup",
+    "ANTHROPIC_API_KEY_BACKUP": "SENTINEL-anthropic-backup",
+    "PROXY_API_KEY": "SENTINEL-proxy-key",
+    "PROXY_WEBHOOK_SECRET": "SENTINEL-proxy-webhook-secret",
     # (б) адрес / параметр инфраструктуры
     "DATABASE_URL": "SENTINEL-database-url",
     "REDIS_URL": "SENTINEL-redis-url",
@@ -314,8 +343,9 @@ _FORBIDDEN_ALIASES: dict[str, str] = {
     "ADAPTY_PRODUCT_TOKENS": '{"SENTINEL-adapty-products": 1}',
     "CLOUDPAYMENTS_PRODUCT_TOKENS": '{"SENTINEL-cp-products": 1}',
     "MEDIA_MODEL_CREDITS": '{"SENTINEL-media-credits": 1}',
-    # (д) параметры проверки личности и платежей
-    "APPSTORE_BUNDLE_ID": "SENTINEL-bundle-id",
+    # (д) параметры проверки личности и платежей. `APPSTORE_BUNDLE_ID` и `CLOUDPAYMENTS_APP_ID`
+    # переведены в поверхность ADR-116 §7 (строки `storekit.bundle_id`, `cloudpayments.app_id`)
+    # и здесь больше не запрещены.
     "APPLE_AUDIENCE": "SENTINEL-apple-audience",
     "JWT_ISSUER": "SENTINEL-jwt-issuer",
     "JWT_AUDIENCE": "SENTINEL-jwt-audience",
@@ -392,7 +422,7 @@ def test_no_setting_id_names_a_forbidden_class_of_variable() -> None:
         "rate_limit",
         "webhook",
         "jwt",
-        "bundle",
+        # `bundle` снят: ADR-116 §4.1 объявляет строку `storekit.bundle_id` (класс (д) §7).
     )
 
     for spec in declared_settings(_anthropic_settings()):

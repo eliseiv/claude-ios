@@ -26,6 +26,7 @@ from app.deps import (
     require_owner,
 )
 from app.errors import AppError, RateLimitedError, ValidationFailedError
+from app.instance_config.effective import effective_settings
 from app.observability.context import set_session_id
 from app.request_logs.service import RequestLogWriter
 from app.schemas.chat import (
@@ -560,7 +561,8 @@ async def chat_v2_capabilities(
     model: Annotated[str | None, Query(max_length=200)] = None,
 ) -> ChatCapabilitiesResponse:
     _ = current  # endpoint is authenticated but does not need per-user state.
-    settings = get_settings()
+    # ADR-116 §4.1: провайдер и его каталог — из действующих настроек (`llm.provider` из CRM).
+    settings = effective_settings(get_settings())
     provider = settings.llm_provider.strip().lower()
     # ADR-099 §5.2: у режима больше нет собственной цены — цена стала функцией МОДЕЛИ, а модели
     # в этом запросе нет. Поле обязано быть определено (его уже читают выпущенные сборки),

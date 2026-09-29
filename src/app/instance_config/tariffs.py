@@ -16,7 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.config import Settings, get_settings
+from app.config import Settings
+from app.instance_config.effective import effective_settings
 from app.instance_config.snapshot import InstanceConfigSnapshot, get_snapshot
 from app.media_generation.catalog import (
     KIND_IMAGE,
@@ -73,7 +74,7 @@ def base_credits_for(model: FalModel, settings: Settings | None = None) -> int:
     отдавать это число пользователю нельзя: после правки ячейки показанное разошлось бы со
     списанным. Для пользовательского ответа — ``media_pricing.media_base_credits``.
     """
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     return cfg.media_model_credits().get(model.id, model.default_credits)
 
 
@@ -185,7 +186,7 @@ def chat_turn_credit_cost(
     ``model=None`` — сессия на дефолте инстанса: цена берётся у той модели, которой ход
     фактически обслуживается.
     """
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     snap = snapshot if snapshot is not None else get_snapshot()
     from app.instance_config.models import instance_default_model
 
@@ -203,7 +204,7 @@ def photo_unit_credits(
     snapshot: InstanceConfigSnapshot | None = None,
 ) -> int:
     """Кредиты за ОДНО изображение в этом разрешении: оверлей ячейки, иначе реестр."""
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     snap = snapshot if snapshot is not None else get_snapshot()
     effective = _effective_resolution(model, resolution)
     if effective is not None:
@@ -247,7 +248,7 @@ def media_run_price(
     цене запуска: `ceil(23×2×1.5)=69`, а `2×ceil(23×1.5)=70` — пачечная ячейка сдвинула бы
     действующее списание на единицу.
     """
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     snap = snapshot if snapshot is not None else get_snapshot()
     if model.kind == KIND_IMAGE:
         unit = photo_unit_credits(model, resolution, settings=cfg, snapshot=snap)
@@ -335,7 +336,7 @@ def pricing_rows(
     моделей, а не из витрины: модель, снятая с витрины, продолжает обслуживать уже созданные
     сессии, и строка без тарифа означала бы списание по неотображаемой цене.
     """
-    cfg = settings or get_settings()
+    cfg = effective_settings(settings)
     snap = snapshot if snapshot is not None else get_snapshot()
     rows: list[TariffRow] = []
     seen_models: set[str] = set()

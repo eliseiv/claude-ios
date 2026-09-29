@@ -18,6 +18,7 @@ from app.errors import (
     UnsupportedModelError,
     VoiceOutputDisabledError,
 )
+from app.instance_config.effective import effective_settings
 from app.preferences.service import UNSET, PreferencesService, PreferencesView
 from app.schemas.preferences import PreferencesPatchRequest, PreferencesResponse
 
@@ -72,7 +73,7 @@ def _validate_default_model(value: str | None) -> None:
     """
     if value is None:
         return
-    if not instance_config.model_is_selectable(value, settings=get_settings()):
+    if not instance_config.model_is_selectable(value, settings=effective_settings(get_settings())):
         raise UnsupportedModelError(f"model '{value}' is not available on this instance")
 
 

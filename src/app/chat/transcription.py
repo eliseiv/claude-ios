@@ -38,7 +38,10 @@ class TranscriptionClient:
     """Тонкая обёртка над OpenAI audio.transcriptions."""
 
     def __init__(self) -> None:
-        settings = get_settings()
+        from app.instance_config.effective import effective_settings
+
+        # ADR-116 §5: клиент создаётся на вызов и берёт ключ OpenAI из действующих настроек.
+        settings = effective_settings(get_settings())
         self._model = settings.transcription_model
         self._client = openai.AsyncOpenAI(
             api_key=settings.openai_api_key or "placeholder",

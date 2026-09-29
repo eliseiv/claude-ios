@@ -49,7 +49,10 @@ def require_adapty_webhook(
     raising on a missing/malformed header, so the 500-on-unset / 401-on-mismatch behaviour below
     is the single source of truth. Comparison is constant-time (``hmac.compare_digest``).
     """
-    secret = get_settings().adapty_webhook_secret
+    from app.instance_config.effective import effective_settings
+
+    # ADR-116 §3: секрет вебхука управляется из CRM — действующие настройки.
+    secret = effective_settings(get_settings()).adapty_webhook_secret
     if not secret:
         raise AdaptyWebhookMisconfiguredError("adapty webhook secret not configured")
     presented = credentials.credentials if credentials is not None else None

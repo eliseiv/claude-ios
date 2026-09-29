@@ -41,6 +41,10 @@ EVENT_ADMIN_PRODUCT_UPDATED = "admin_product_updated"
 EVENT_ADMIN_PRODUCT_ARCHIVED = "admin_product_archived"
 EVENT_ADMIN_TARIFF_UPDATED = "admin_tariff_updated"
 EVENT_ADMIN_SETTING_UPDATED = "admin_setting_updated"
+# ADR-116 §2.5: запись и удаление строки оверлея креденшла. Значение в аудит не попадает
+# никогда — только идентификатор, источник и отпечаток до→после.
+EVENT_ADMIN_CREDENTIAL_SET = "admin_credential_set"
+EVENT_ADMIN_CREDENTIAL_CLEARED = "admin_credential_cleared"
 
 
 @dataclass(frozen=True)

@@ -169,6 +169,20 @@ groups:
           summary: "Media asset orphan cleanup blocked on {{ $labels.instance }}"
           description: "media_asset_cleanup_blocked = 1 for 15m — marker identity absent or != DB system_identifier; orphan files are not deleted (ADR-109 §6.3). Fix with media-assets-rollout.sh."
 
+      # Operator credential overlay row failed to decrypt (ADR-116 §5). producer:
+      # admin_credential_undecryptable_total{credential_id} (src/app/observability/metrics.py),
+      # incremented by the snapshot build in src/app/instance_config/snapshot.py. The row is
+      # ignored and the instance keeps the PREVIOUS snapshot value or falls back to the `.env` key
+      # after a cold start — i.e. it runs NOT on the key chosen in CRM: money for a turn may go to
+      # someone else's account, or the turn fails. Any increase is critical.
+      - alert: AdminCredentialUndecryptable
+        expr: increase(admin_credential_undecryptable_total[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Credential overlay row undecryptable on {{ $labels.instance }} ({{ $labels.credential_id }})"
+          description: "admin_credential_undecryptable_total grew within 15m — the instance ignores the CRM-chosen credential and uses the previous snapshot value or the .env key (ADR-116 §5). Check KMS_LOCAL_MASTER_KEY of the instance and rewrite the credential from CRM."
+
       # Readiness flapping inferred from scrape health is covered by BackendTargetDown.
       # Anthropic/Apple/KMS dependency outages surface as wallet/debit failures and
       # elevated chat_run_latency; add provider-specific probes when those exporters exist.

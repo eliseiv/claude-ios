@@ -30,6 +30,7 @@ import logging
 from app import deps
 from app.config import Settings, get_settings
 from app.db import get_sessionmaker
+from app.instance_config.effective import effective_settings
 from app.media_generation.repository import MediaJobsRepository
 from app.observability.logging import log_event
 from app.observability.metrics import media_proxy_jobs_awaiting_callback
@@ -50,7 +51,8 @@ async def reconcile_once(settings: Settings | None = None) -> int:
     without an outgoing call (the fal client refuses before any request when the key is empty) —
     plus every proxy job regardless of age (ADR-108 §6).
     """
-    settings = settings or get_settings()
+    # ADR-116 §5: ключи fal/прокси — из действующих настроек (оверлей CRM → env).
+    settings = effective_settings(settings or get_settings())
     configured = settings.fal_configured()
     now = datetime.datetime.now(tz=datetime.UTC)
     created_before: datetime.datetime | None = None
@@ -107,6 +109,8 @@ async def reconcile_once(settings: Settings | None = None) -> int:
 
 
 async def reconciler_loop(stop: asyncio.Event, settings: Settings | None = None) -> None:
+    # Базовые настройки, а НЕ действующие: действующие пересчитывает каждый проход
+    # `reconcile_once`, иначе ключ из CRM застыл бы на момент старта цикла (ADR-116 §5).
     settings = settings or get_settings()
     interval = settings.media_reconcile_interval_seconds
     if interval <= 0:

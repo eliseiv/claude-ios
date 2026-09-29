@@ -27,7 +27,7 @@ import httpx
 import jwt
 from jwt import PyJWKClient
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.errors import ServiceUnavailableError, UnauthorizedError
 
 
@@ -44,7 +44,11 @@ class AppleIdentityVerifier:
     """Verifies Apple-signed OIDC identity tokens (Sign in with Apple, native flow)."""
 
     def __init__(self) -> None:
-        settings = get_settings()
+        from app.instance_config.effective import effective_settings
+
+        # ADR-116 §4.2: аудитория — фолбэк на bundle, управляемый из CRM (действующие настройки).
+        settings = effective_settings(get_settings())
+        self._audience_inputs = _audience_inputs(settings)
         self._issuer = settings.apple_oidc_issuer
         self._audience = settings.apple_audience_resolved()
         # test-mode (ADR-043 §2): HS256 path is honored ONLY when both flag and secret are set;
@@ -166,11 +170,31 @@ class AppleIdentityVerifier:
                 raise UnauthorizedError("invalid apple identity token")
 
 
+def _audience_inputs(settings: Settings) -> tuple[str, ...]:
+    """Входы, захватываемые верификатором при создании (ADR-116 §5: отпечаток входов)."""
+    return (
+        settings.apple_audience_resolved(),
+        settings.apple_oidc_issuer,
+        settings.apple_jwks_url,
+        str(settings.apple_test_mode),
+        settings.apple_test_secret,
+    )
+
+
 _verifier_singleton: AppleIdentityVerifier | None = None
+# Экземпляр, собранный ЭТОЙ фабрикой: подменённый тестом `_verifier_singleton` не пересоздаётся.
+_verifier_built: AppleIdentityVerifier | None = None
 
 
 def get_apple_verifier() -> AppleIdentityVerifier:
-    global _verifier_singleton
-    if _verifier_singleton is None:
+    """Процессный верификатор, пересоздаваемый при смене аудитории (bundle из CRM, ADR-116)."""
+    global _verifier_singleton, _verifier_built
+    if _verifier_singleton is not None and _verifier_singleton is not _verifier_built:
+        return _verifier_singleton
+    from app.instance_config.effective import effective_settings
+
+    inputs = _audience_inputs(effective_settings(get_settings()))
+    if _verifier_singleton is None or _verifier_singleton._audience_inputs != inputs:
         _verifier_singleton = AppleIdentityVerifier()
+        _verifier_built = _verifier_singleton
     return _verifier_singleton

@@ -206,6 +206,33 @@ class LLMClient(Protocol):
 
 _openai_singleton: OpenAIClient | None = None
 _openai_responses_singleton: OpenAIResponsesClient | None = None
+# Экземпляры, собранные ЭТИМИ фабриками. Подменённый тестом синглтон (фейк) по отпечатку
+# входов НЕ пересоздаётся (ADR-116 §5).
+_openai_built: OpenAIClient | None = None
+_openai_responses_built: OpenAIResponsesClient | None = None
+
+
+def _openai_inputs() -> tuple[object, ...]:
+    from app.chat.openai_client import openai_client_inputs
+    from app.instance_config.effective import effective_settings
+
+    return openai_client_inputs(effective_settings(get_settings()))
+
+
+def _retire(previous: object | None) -> None:
+    """Закрыть пул выведенного клиента, когда на нём не останется идущих вызовов (ADR-116 §5)."""
+    if previous is None:
+        return
+    from app.instance_config.client_retirement import retire_when_unreferenced, sdk_clients_of
+
+    retire_when_unreferenced(previous, sdk_clients_of(previous, "_client"))
+
+
+def _active_provider() -> str:
+    """Провайдер по умолчанию из ДЕЙСТВУЮЩИХ настроек (ADR-116 §4.1, `llm.provider`)."""
+    from app.instance_config.effective import effective_settings
+
+    return effective_settings(get_settings()).llm_provider.strip().lower()
 
 
 def _get_openai_singleton() -> LLMClient:
@@ -215,11 +242,18 @@ def _get_openai_singleton() -> LLMClient:
     (``OPENAI_API_KEY``/``OPENAI_MODEL``) and does NOT depend on ``LLM_PROVIDER`` — so it can be
     created on any instance (e.g. an OpenAI-BYOK call on an Anthropic instance, ADR-044 §2).
     """
-    global _openai_singleton
-    if _openai_singleton is None:
+    global _openai_singleton, _openai_built
+    if _openai_singleton is not None and _openai_singleton is not _openai_built:
+        return _openai_singleton
+    inputs = _openai_inputs()
+    # Идущий вызов завершается на прежнем клиенте; новый вызов получает клиента с новым ключом.
+    if _openai_singleton is None or _openai_singleton._inputs != inputs:
         from app.chat.openai_client import OpenAIClient
 
+        previous = _openai_singleton
         _openai_singleton = OpenAIClient()
+        _openai_built = _openai_singleton
+        _retire(previous)
     return _openai_singleton
 
 
@@ -229,11 +263,20 @@ def _get_openai_responses_singleton() -> LLMClient:
     This is deliberately separate from `_get_openai_singleton()` so the legacy OpenAI client can
     never switch to Responses API just because the installed SDK exposes `client.responses`.
     """
-    global _openai_responses_singleton
-    if _openai_responses_singleton is None:
+    global _openai_responses_singleton, _openai_responses_built
+    if (
+        _openai_responses_singleton is not None
+        and _openai_responses_singleton is not _openai_responses_built
+    ):
+        return _openai_responses_singleton
+    inputs = _openai_inputs()
+    if _openai_responses_singleton is None or _openai_responses_singleton._inputs != inputs:
         from app.chat.openai_responses_client import OpenAIResponsesClient
 
+        previous = _openai_responses_singleton
         _openai_responses_singleton = OpenAIResponsesClient()
+        _openai_responses_built = _openai_responses_singleton
+        _retire(previous)
     return _openai_responses_singleton
 
 
@@ -294,7 +337,7 @@ def get_llm_client() -> LLMClient:
     the anthropic path the shared ``anthropic_client`` module singleton is used, so a test that
     patches ``anthropic_client._anthropic_singleton`` overrides the factory too (conftest).
     """
-    provider = get_settings().llm_provider.strip().lower()
+    provider = _active_provider()
     if provider == "openai":
         return llm_client_for("openai")
     # Default (and explicit "anthropic"): reuse the anthropic_client module singleton.
@@ -308,7 +351,7 @@ def get_generation_llm_client() -> LLMClient:
     `/v1/chat/run` traffic. For Anthropic it returns the same Messages client as `get_llm_client()`,
     because v2 modes are ordinary Messages API parameters.
     """
-    provider = get_settings().llm_provider.strip().lower()
+    provider = _active_provider()
     if provider == "openai":
         return generation_llm_client_for("openai")
     return generation_llm_client_for("anthropic")

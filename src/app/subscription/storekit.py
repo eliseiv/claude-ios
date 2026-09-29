@@ -26,8 +26,9 @@ import jwt
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.errors import ValidationFailedError
+from app.observability.logging import log_event
 
 logger = logging.getLogger("app.subscription.storekit")
 
@@ -105,21 +106,88 @@ def _verify_chain(chain: list[x509.Certificate], roots: list[x509.Certificate]) 
         raise ValidationFailedError("StoreKit certificate chain not anchored to a trusted root")
 
 
-class StoreKitVerifier:
-    """Verifies Apple-signed StoreKit JWS transactions."""
+def _is_production(settings: Settings) -> bool:
+    return settings.appstore_environment.strip().lower() == "production"
 
-    def __init__(self) -> None:
-        settings = get_settings()
+
+def _mode_from_overlay(settings: Settings) -> bool:
+    """Задан ли режим StoreKit строкой оверлея ``storekit.mode`` (ADR-116 §4.2)."""
+    from app.instance_config.effective import overlaid_setting_ids
+    from app.instance_config.settings_registry import SETTING_STOREKIT_MODE
+
+    return SETTING_STOREKIT_MODE in overlaid_setting_ids(settings)
+
+
+def verifier_inputs(settings: Settings) -> tuple[object, ...]:
+    """Входы, которые верификатор захватывает при создании (ADR-116 §5: отпечаток входов).
+
+    Режим StoreKit и bundle управляются из CRM; при смене любого входа верификатор
+    пересоздаётся при следующем обращении.
+    """
+    return (
+        _mode_from_overlay(settings),
+        settings.appstore_bundle_id,
+        settings.appstore_environment,
+        settings.appstore_root_cert_dir,
+        settings.storekit_dev_skip_cert_chain_verification,
+        settings.storekit_test_mode,
+        settings.storekit_test_secret,
+    )
+
+
+def apple_root_certificates_loaded(cert_dir: str) -> bool:
+    """Загружен ли хотя бы один корневой сертификат Apple (ADR-116 §4.3, `environment_missing`)."""
+    try:
+        return bool(StoreKitVerifier._load_roots(cert_dir))
+    except (OSError, ValueError):
+        return False
+
+
+class StoreKitVerifier:
+    """Verifies Apple-signed StoreKit JWS transactions.
+
+    Режим задаётся строкой оверлея ``storekit.mode`` (ADR-116 §4.2): ``sandbox`` — без привязки
+    цепочки x5c к корню Apple, с тестовой веткой HS256 и БЕЗ сверки ``bundleId``;
+    ``production`` — привязка цепочки, тестовая ветка выключена, ``bundleId`` сверяется.
+
+    ⚠️ Без строки оверлея поведение — прежнее, бит-в-бит: флаги env действуют как есть,
+    ``bundleId`` сверяется всегда, когда bundle задан. Выводить правила §4.2 из
+    ``APPSTORE_ENVIRONMENT`` запрещено — это изменило бы env-инстансы, которых никто не правил.
+    """
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        from app.instance_config.effective import effective_settings
+
+        settings = effective_settings(settings if settings is not None else get_settings())
+        self._inputs = verifier_inputs(settings)
+        production = _is_production(settings)
         self._bundle_id = settings.appstore_bundle_id
+        # ADR-116 §4.2: `bundleId` не сверяется в песочнице, ЗАДАННОЙ СТРОКОЙ ОВЕРЛЕЯ, — bundle
+        # там сохраняется ради аудитории входа через Apple. Без строки оверлея — прежнее
+        # правило: сверка всегда, когда bundle задан (на sandbox-инстансе с привязкой цепочки
+        # к корню Apple это единственная привязка транзакции к приложению).
+        self._check_bundle_id = production or not _mode_from_overlay(settings)
         self._environment = settings.appstore_environment
         self._roots = self._load_roots(settings.appstore_root_cert_dir)
         # test-mode: TD-007 (09-e2e-testing.md §2). Active ONLY when both flag and secret set;
-        # never weakens the real ES256/x5c path. Default false => prod unchanged.
+        # never weakens the real ES256/x5c path. Под строкой `storekit.mode=production` оверлей
+        # сам выставляет флаг в false (ADR-116 §4.2); env-флаг действует как прежде.
         self._test_secret = settings.storekit_test_secret
         self._test_mode = settings.storekit_test_mode and bool(self._test_secret)
+        # Второй барьер: флаг пропуска цепочки игнорируется при production (было до ADR-116).
         self._skip_chain_verification = (
-            settings.storekit_dev_skip_cert_chain_verification
-            and settings.appstore_environment.strip().lower() != "production"
+            settings.storekit_dev_skip_cert_chain_verification and not production
+        )
+        # Фактический режим тестовой ветки — при КАЖДОМ (пере)создании: режим управляется из
+        # CRM, и стартового предупреждения по env недостаточно. Секрет не логируется.
+        log_event(
+            logger,
+            logging.WARNING if self._test_mode else logging.INFO,
+            "storekit_verifier_built",
+            testMode=self._test_mode,
+            environment=settings.appstore_environment,
+            chainAnchored=not self._skip_chain_verification,
+            bundleCheck=self._check_bundle_id and bool(self._bundle_id),
         )
         if self._skip_chain_verification:
             logger.warning(
@@ -219,7 +287,7 @@ class StoreKitVerifier:
     def _normalize_payload(self, payload: dict[str, Any]) -> VerifiedTransaction:
         """Normalize a verified transaction payload (shared by real and test paths)."""
         bundle_id = payload.get("bundleId")
-        if self._bundle_id and bundle_id != self._bundle_id:
+        if self._check_bundle_id and self._bundle_id and bundle_id != self._bundle_id:
             raise ValidationFailedError("StoreKit transaction bundleId mismatch")
 
         environment = str(payload.get("environment", self._environment)).lower()
@@ -252,10 +320,20 @@ class StoreKitVerifier:
 
 
 _verifier_singleton: StoreKitVerifier | None = None
+# Экземпляр, собранный ЭТОЙ фабрикой: подменённый тестом ``_verifier_singleton`` не
+# пересоздаётся по отпечатку входов.
+_verifier_built: StoreKitVerifier | None = None
 
 
 def get_storekit_verifier() -> StoreKitVerifier:
-    global _verifier_singleton
-    if _verifier_singleton is None:
-        _verifier_singleton = StoreKitVerifier()
+    """Процессный верификатор, пересоздаваемый при смене своих входов (ADR-116 §5)."""
+    global _verifier_singleton, _verifier_built
+    if _verifier_singleton is not None and _verifier_singleton is not _verifier_built:
+        return _verifier_singleton
+    from app.instance_config.effective import effective_settings
+
+    settings = effective_settings(get_settings())
+    if _verifier_singleton is None or _verifier_singleton._inputs != verifier_inputs(settings):
+        _verifier_singleton = StoreKitVerifier(settings)
+        _verifier_built = _verifier_singleton
     return _verifier_singleton

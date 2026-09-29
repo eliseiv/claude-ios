@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, Request
 from app.config import get_settings
 from app.deps import get_media_generation_service
 from app.errors import UnauthorizedError, ValidationFailedError
+from app.instance_config.effective import effective_settings
 from app.media_generation.service import MediaGenerationService
 from app.media_generation.webhook import (
     WEBHOOK_BAD_TOKEN,
@@ -58,7 +59,7 @@ async def proxy_media_webhook(
     token = request.query_params.get("token")
     parsed_id = _parse_job_id(job_id)
     if parsed_id is None or not verify_webhook_token(
-        settings=get_settings(), job_id=parsed_id, token=token
+        settings=effective_settings(get_settings()), job_id=parsed_id, token=token
     ):
         log_webhook_outcome(
             job_id=None if parsed_id is None else str(parsed_id),

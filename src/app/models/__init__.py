@@ -3,6 +3,7 @@
 from app.models.base import Base
 from app.models.tables import (
     AdaptyWebhookEvent,
+    AdminCredential,
     AdminProduct,
     AdminSetting,
     AdminTariff,
@@ -36,6 +37,7 @@ from app.models.tables import (
 __all__ = [
     "Base",
     "AdaptyWebhookEvent",
+    "AdminCredential",
     "AdminProduct",
     "AdminSetting",
     "AdminTariff",

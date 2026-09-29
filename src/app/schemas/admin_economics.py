@@ -191,3 +191,54 @@ class AdminCapabilitiesResponse(StrictModel):
     cache_effective_after_seconds: int = Field(
         description="Через сколько секунд правка применяется во всех процессах инстанса."
     )
+
+
+class AdminCredentialConstraints(StrictModel):
+    max_length: int = Field(description="Наибольшая длина значения.")
+
+
+class AdminCredentialItem(StrictModel):
+    """Креденшл инстанса. Значение не отдаётся никогда: только признаки и отпечаток."""
+
+    credential_id: str = Field(description="Ключ строки для правки.")
+    label: str = Field(description="Подпись для формы оператора.")
+    group: str | None = Field(default=None, description="Раздел формы.")
+    description: str | None = Field(default=None, description="Пояснение для оператора.")
+    constraints: AdminCredentialConstraints = Field(description="Объявленные границы значения.")
+    configured: bool = Field(description="Непусто ли действующее значение.")
+    source: Literal["overlay", "env", "unset"] = Field(
+        description=(
+            "Откуда взято действующее значение: запись из панели, конфигурация сервера или "
+            "нигде не задано."
+        )
+    )
+    fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "Первые 12 шестнадцатеричных символов SHA-256 действующего значения; пусто, если "
+            "значение не задано."
+        ),
+    )
+    updated_at: str | None = Field(
+        default=None, description="Пусто — строку ни разу не меняли из панели."
+    )
+
+
+class AdminCredentialListResponse(StrictModel):
+    items: list[AdminCredentialItem]
+
+
+class AdminCredentialPatchRequest(StrictModel):
+    value: Any = Field(
+        description=(
+            "Строка — записать (пустая строка явно выключает величину); null — удалить запись "
+            "панели и вернуться к конфигурации сервера."
+        )
+    )
+
+
+class AdminCredentialWriteResponse(AdminCredentialItem):
+    changed: bool = Field(default=True, description="Изменилось ли что-нибудь фактически.")
+    effective_after_seconds: int = Field(
+        description="Через сколько секунд правка применится во всех процессах инстанса."
+    )

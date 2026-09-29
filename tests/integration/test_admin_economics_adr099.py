@@ -256,6 +256,9 @@ async def test_capabilities_declares_only_implemented_features(econ: Any) -> Non
         "pricing.write_tokens",
         "settings.write",
         "requests.costs",
+        # ADR-116 §2.6: поинстансный признак поддержки `/v1/admin/credentials`.
+        "credentials.read",
+        "credentials.write",
     }
     # Парной `settings.read` в контракте не существует — и мы её не выдумываем.
     assert "settings.read" not in body["features"]
@@ -293,6 +296,8 @@ async def test_every_declared_feature_has_a_reachable_path(
         # пользователю, потому что на нём `404` означает «нет такого пользователя», а не
         # «путь не реализован» — два разных смысла одного кода на соседних поверхностях.
         "requests.costs": ("GET", f"/v1/admin/users/{user_id}/requests", None),
+        "credentials.read": ("GET", "/v1/admin/credentials", None),
+        "credentials.write": ("PATCH", "/v1/admin/credentials/fal.api_key", {"value": "fal-x"}),
     }
     declared = set((await client.get("/v1/admin/capabilities", headers=_H)).json()["features"])
     assert declared == set(probes)
@@ -934,6 +939,10 @@ async def test_settings_are_self_describing_and_carry_a_typed_value(econ: Any) -
             assert isinstance(item["value"], bool)
         elif item["type"] == "multi_enum":
             assert isinstance(item["value"], list)
+        elif item["setting_id"] == "storekit.mode":
+            # ADR-116 §4.2: без строки оверлея — `null`, если флаги сервера не совпадают ни с
+            # одним режимом (здесь: sandbox с заданным bundle).
+            assert item["value"] is None or isinstance(item["value"], str)
         else:
             assert isinstance(item["value"], str)
 
@@ -958,7 +967,7 @@ async def test_the_settings_surface_carries_no_forbidden_class_of_variable(econ:
         "rate_limit",
         "webhook",
         "jwt",
-        "bundle",
+        # `bundle` снят: ADR-116 §4.1 объявляет строку `storekit.bundle_id`.
     )
 
     items = (await client.get("/v1/admin/settings", headers=_H)).json()["items"]
@@ -1745,6 +1754,12 @@ _REJECT_CASES: tuple[tuple[str, str, dict[str, Any], int, str, str], ...] = (
 )
 
 _REJECT_REASONS: tuple[str, ...] = tuple(row[4] for row in _REJECT_CASES)
+# ADR-116 §4.3 добавил восьмое место несоответствия — ОКРУЖЕНИЕ инстанса. На области `products`
+# оно недостижимо по построению (окружение продукта не проверяется); его кейсы — на областях
+# `settings` и `credentials` в `tests/integration/test_admin_credentials_adr116.py`. Здесь оно
+# входит в проверку «ни одна соседняя серия не выросла».
+_ENV_REASON = "environment_missing"
+_ALL_REASONS: tuple[str, ...] = (*_REJECT_REASONS, _ENV_REASON)
 
 
 def _rejected(reason: str, scope: str = "products") -> float:
@@ -1801,7 +1816,7 @@ async def test_each_rejection_increments_exactly_its_own_reason_and_no_other(
     четыре `400` соседствуют здесь с шестью разными лейблами именно поэтому.
     """
     client, _ = econ
-    before = {reason: _rejected(reason) for reason in _REJECT_REASONS}
+    before = {reason: _rejected(reason) for reason in _ALL_REASONS}
 
     if expected_reason == "conflict":
         # Версионный конфликт требует СУЩЕСТВУЮЩЕЙ строки оверлея: без неё резолвер видит
@@ -1810,7 +1825,7 @@ async def test_each_rejection_increments_exactly_its_own_reason_and_no_other(
             f"/v1/admin/products/{product_id}", json={"tokens": 6}, headers=_H
         )
         assert seeded.status_code == 200, seeded.text
-        before = {reason: _rejected(reason) for reason in _REJECT_REASONS}
+        before = {reason: _rejected(reason) for reason in _ALL_REASONS}
 
     response = await client.patch(f"/v1/admin/products/{product_id}", json=payload, headers=_H)
 
@@ -1821,9 +1836,9 @@ async def test_each_rejection_increments_exactly_its_own_reason_and_no_other(
     # …и НИ ОДНА соседняя серия того же словаря этим отказом не тронута.
     assert {
         reason: _rejected(reason) - before[reason]
-        for reason in _REJECT_REASONS
+        for reason in _ALL_REASONS
         if reason != expected_reason
-    } == {reason: 0.0 for reason in _REJECT_REASONS if reason != expected_reason}
+    } == {reason: 0.0 for reason in _ALL_REASONS if reason != expected_reason}
 
 
 @pytest.mark.asyncio
@@ -1850,7 +1865,7 @@ async def test_a_setting_rejection_is_labelled_by_its_own_branch_too(
     нуле, а не «просто не проверяться».
     """
     client, _ = econ
-    before = {reason: _rejected(reason, "settings") for reason in _REJECT_REASONS}
+    before = {reason: _rejected(reason, "settings") for reason in _ALL_REASONS}
 
     response = await client.patch(
         f"/v1/admin/settings/{setting_id}", json={"value": value}, headers=_H
@@ -1860,13 +1875,14 @@ async def test_a_setting_rejection_is_labelled_by_its_own_branch_too(
     assert _rejected(expected_reason, "settings") == before[expected_reason] + 1
     assert {
         reason: _rejected(reason, "settings") - before[reason]
-        for reason in _REJECT_REASONS
+        for reason in _ALL_REASONS
         if reason != expected_reason
-    } == {reason: 0.0 for reason in _REJECT_REASONS if reason != expected_reason}
+    } == {reason: 0.0 for reason in _ALL_REASONS if reason != expected_reason}
 
 
-def test_the_seven_rejection_reasons_are_covered_one_case_each(econ: Any) -> None:
-    """Перечень кейсов выше — РАЗБИЕНИЕ, а не выборка: семь значений, семь кейсов, без повторов.
+def test_the_eight_rejection_reasons_are_covered_one_case_each(econ: Any) -> None:
+    """Перечень кейсов выше — РАЗБИЕНИЕ, а не выборка: семь значений, семь кейсов, без повторов,
+    плюс восьмое (`environment_missing`, ADR-116), недостижимое на области `products`.
 
     Без этого утверждения перечень мог бы молча потерять значение (кейс удалён вместе со
     строкой) или задвоить одно за счёт другого, и параметризация продолжила бы зеленеть.
@@ -1881,7 +1897,7 @@ def test_the_seven_rejection_reasons_are_covered_one_case_each(econ: Any) -> Non
     }
 
     assert len(_REJECT_REASONS) == len(set(_REJECT_REASONS)) == 7
-    assert set(_REJECT_REASONS) == declared
+    assert set(_ALL_REASONS) == declared
 
 
 def test_the_declared_reason_vocabulary_and_the_emitted_one_are_the_same_set() -> None:
@@ -1908,7 +1924,7 @@ def test_the_declared_reason_vocabulary_and_the_emitted_one_are_the_same_set() -
         for name, value in vars(econ_mod).items()
         if name.startswith("REASON_") and isinstance(value, str)
     }
-    assert len(declared) == 7, sorted(declared)  # семь мест несоответствия правки (§10.0)
+    assert len(declared) == 8, sorted(declared)  # восемь мест (§10.0 + ADR-116 §4.3)
     # Перечень отказов обновления снимка живёт литералами у самих веток (константы ему не
     # заведены), поэтому объявление берётся из нормы §10.0 — единственного его дома.
     refresh_declared = {"schema_mismatch", "db_error", "unexpected"}
