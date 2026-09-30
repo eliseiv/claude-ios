@@ -420,11 +420,11 @@ _SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         setting_id=SETTING_CLOUDPAYMENTS_APP_ID,
         type=TYPE_STRING,
-        label="Идентификатор приложения CloudPayments",
+        label="UUID CloudPayments",
         group="CloudPayments",
         description=(
             "Идентификатор приложения у платёжного партнёра. Оплата картой доступна, когда "
-            "задан и он, и токен CloudPayments." + _AFTER_WRITE_NOTE
+            "задан и он, и API KEY CloudPayments." + _AFTER_WRITE_NOTE
         ),
         env_value=lambda s: s.cloudpayments_app_id,
         constraints={"max_length": CLOUDPAYMENTS_APP_ID_MAX_LENGTH},
