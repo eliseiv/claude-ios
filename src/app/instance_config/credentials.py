@@ -120,7 +120,7 @@ _SPECS: tuple[CredentialSpec, ...] = (
     CredentialSpec(
         credential_id=CREDENTIAL_CLOUDPAYMENTS_API_TOKEN,
         settings_field="cloudpayments_api_token",
-        label="Токен CloudPayments",
+        label="API KEY CloudPayments",
         group="CloudPayments",
         description=(
             "Токен исходящих запросов к платёжному партнёру: оформление оплаты и сверка платежей."
