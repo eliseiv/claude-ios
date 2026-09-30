@@ -18,7 +18,9 @@
 #    "wg_bind_ip":"10.10.0.N","walg_key_id":"<12 hex>","last_deployed_sha":"<40 hex>",
 #    "env":{"POSTGRES_PASSWORD":"…","KMS_LOCAL_MASTER_KEY":"…","ADMIN_API_SECRET":"…",
 #           "PREVIEW_URL_SECRET":"…","METRICS_SCRAPE_TOKEN":"…","PROXY_WEBHOOK_SECRET":"…",
-#           …прочие (E1)/(E2) из ADR-115 §5, напр. DOCS_ENABLED, LOG_LEVEL, MEDIA_ASSET_STORAGE_DIR}}
+#           …прочие (E1)/(E2) из ADR-115 §5, напр. LOG_LEVEL, MEDIA_ASSET_STORAGE_DIR}}
+# Поверх .env.prod.example create пишет базу флота (DOCS_ENABLED=true, песочница StoreKit, продукты —
+# как provision.sh); ключи из env её переопределяют.
 # Вычисляемые инструментом (E1) в env передавать нельзя: COMPOSE_PROJECT_NAME, SERVICE_DOMAIN,
 # JWT_ISSUER, POSTGRES_USER, POSTGRES_DB, DATABASE_URL, REDIS_URL, WG_BIND_IP, API_HOST_PORT,
 # PG_HOST_PORT, GUNICORN_WORKERS, TRAEFIK_CERTRESOLVER, INSTANCE_UID, INSTANCE_GENERATION, WALG_KEY_ID.
@@ -187,6 +189,19 @@ create)
     env_set "$T" INSTANCE_UID "$UIDV"
     env_set "$T" INSTANCE_GENERATION "$GEN"
     env_set "$T" WALG_KEY_ID "$KID"
+    # База флота (как в provision.sh): .env.prod.example — производственный шаблон, а флот живёт
+    # в песочнице с открытой документацией и фактическим набором продуктов. Не вычисляемые —
+    # env из stdin ниже их переопределяет.
+    env_set "$T" DOCS_ENABLED true
+    env_set "$T" APPSTORE_ENVIRONMENT sandbox
+    env_set "$T" APPSTORE_ROOT_CERT_DIR /run/secrets/appstore_root_certs
+    env_set "$T" STOREKIT_TEST_MODE true
+    env_set "$T" STOREKIT_DEV_SKIP_CERT_CHAIN_VERIFICATION true
+    env_set "$T" PRESETS_DEFAULT_LOCALE en
+    env_set "$T" TOKEN_PRODUCTS '{"100_tokens_9.99":100,"250_tokens_19.99":250,"500_tokens_34.99":500,"1000_tokens_59.99":1000,"2000_tokens_99.99":2000}'
+    env_set "$T" ADAPTY_PRODUCT_TOKENS '{"weekly_9.99_nottrial":100,"year_49.99_nottrial":1000}'
+    env_set "$T" ADAPTY_SUBSCRIPTION_TOKENS_GRANT 100
+    env_set "$T" TOKEN_PRODUCTS_DEFAULT 'weekly_9.99_nottrial,year_49.99_nottrial,100_tokens_9.99,250_tokens_19.99,500_tokens_34.99,1000_tokens_59.99,2000_tokens_99.99'
     while read -r k; do
       env_set "$T" "$k" "$(jin ".env.$k")"
     done < <(jq -r '.env | keys[]' <<<"$STDIN_JSON")
