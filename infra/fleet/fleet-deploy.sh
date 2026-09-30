@@ -52,7 +52,7 @@ DEPLOYED=(); FAILED=(); SKIPPED=(); MISSING=(); ORPHANS=(); N=0
 mapfile -t ROWS < <(jq -r '.instances[] | [.slug, (.instance_uid // ""), .state] | @tsv' <<<"$STDIN_JSON")
 
 deploy_one() {  # в подоболочке: лок держится до её выхода
-  local s="$1" uid="$2" d f t proj up_rc
+  local s="$1" uid="$2" d f t proj up_rc want cur recreate
   d="$(inst_dir "$s")"
   lock_instance "$s" >/dev/null
   have="$(env_get "$d/.env" INSTANCE_UID)"
@@ -67,9 +67,15 @@ deploy_one() {  # в подоболочке: лок держится до её �
   docker tag "$IMG" "${proj}-backend:prod" || { echo "::error title=tag failed ($s)::"; return 1; }
   echo "[deploy:$s] migrate"
   dc "$s" run --rm --no-deps migrate >/dev/null 2>&1 || { echo "::error title=migrate failed ($s)::alembic upgrade head returned non-zero"; return 1; }
+  # Файлы compose и имя тега между версиями не меняются, поэтому `up` без --force-recreate
+  # оставляет контейнер на прежнем образе: пересоздаём по несовпадению image id.
+  want="$(image_id "$IMG")"
+  cur="$(docker inspect -f '{{.Image}}' "$(ctr "$s" api)" 2>/dev/null || true)"
+  recreate=()
+  [ -n "$want" ] && [ "$cur" = "$want" ] || recreate=(--force-recreate)
   up_rc=0
-  dc "$s" up -d --no-build --no-deps api >/dev/null 2>&1 || up_rc=$?
-  echo "[deploy:$s] up api rc=$up_rc (решает гейт готовности)"
+  dc "$s" up -d --no-build --no-deps "${recreate[@]}" api >/dev/null 2>&1 || up_rc=$?
+  echo "[deploy:$s] up api ${recreate[*]:-(образ уже актуален)} rc=$up_rc (решает гейт готовности)"
   if ! wait_healthy "$(ctr "$s" api)" 30; then
     echo "::error title=api not healthy ($s)::api не стал healthy за ~60s. Последние строки лога:"
     docker logs "$(ctr "$s" api)" --tail 40 2>&1 || true

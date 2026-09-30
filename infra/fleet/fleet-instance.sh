@@ -64,13 +64,18 @@ api_image_check() {  # IMG_RESULT=match|mismatch|absent; ev_* пишет evidenc
 }
 
 bring_up_app() {  # migrate + api, гейт готовности (как шаг деплоя CI, ADR-115 §10.2 п. 3)
-  local s="$1"
+  local s="$1" want cur recreate=()
   if ! ctr_running "$(ctr "$s" postgres)"; then
     dc "$s" up -d --no-build --no-recreate postgres redis >/dev/null 2>&1 || return 1
   fi
   wait_healthy "$(ctr "$s" postgres)" 45 || return 2
   dc "$s" run --rm --no-deps migrate >/dev/null 2>&1 || return 3
-  dc "$s" up -d --no-build --no-deps api >/dev/null 2>&1
+  # Тег <проект>-backend:prod переназначается без смены compose: `up` без --force-recreate
+  # оставил бы контейнер на прежнем образе.
+  want="$(image_id "$(img_proj_of "$s")-backend:prod")"
+  cur="$(docker inspect -f '{{.Image}}' "$(ctr "$s" api)" 2>/dev/null || true)"
+  [ -n "$want" ] && [ "$cur" = "$want" ] || recreate=(--force-recreate)
+  dc "$s" up -d --no-build --no-deps "${recreate[@]}" api >/dev/null 2>&1
   wait_healthy "$(ctr "$s" api)" 45 || return 4
 }
 
