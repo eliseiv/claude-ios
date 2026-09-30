@@ -73,12 +73,13 @@ do_retention() {
   cutoff="$(date -u -d "-$RETENTION_DAYS days" +%FT%TZ)"
   walg_in_pg "$s" delete before FIND_FULL "$cutoff" --confirm >/dev/null 2>&1 || { ERR="retention_delete_failed"; return 1; }
   cutday="$(date -u -d "-$RETENTION_DAYS days" +%F)"
-  while read -r obj; do
+  # Список — через fd 3: stdin цикла не должен достаться командам тела.
+  while read -r obj <&3; do
     case "$obj" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].tar) ;; *) continue;; esac
     [[ "${obj%.tar}" < "$cutday" ]] || continue
     # `st rm` удаляет ПО ПРЕФИКСУ — ключ передаётся полным именем объекта, не каталогом.
     walg_host -- --root st rm "$(prefix "$GEN")/config/$obj" >/dev/null 2>&1 || { ERR="config_retention_failed"; return 1; }
-  done < <(walg_host -- --root st ls "$(prefix "$GEN")/config/" 2>/dev/null | awk 'NR>1 && $1=="obj" {print $NF}')
+  done 3< <(walg_host -- --root st ls "$(prefix "$GEN")/config/" 2>/dev/null | awk 'NR>1 && $1=="obj" {print $NF}')
   return 0
 }
 
@@ -124,7 +125,8 @@ final)
 heartbeat)
   require_root
   n=0; written=0; fenced=0; skipped=0; errs=()
-  while read -r s; do
+  # Список — через fd 3: stdin цикла не должен достаться docker/psql в теле.
+  while read -r s <&3; do
     n=$((n+1)); inst_vars "$s"
     fence_state "$s"; st="$FENCE"
     case "$st" in
@@ -153,7 +155,7 @@ heartbeat)
       errs+=("$s:upload_failed")
     fi
     rm -rf "$io"
-  done < <(list_archive_enabled)
+  done 3< <(list_archive_enabled)
   ev_num instances "$n"; ev_num heartbeats_written "$written"; ev_num fenced "$fenced"; ev_num skipped "$skipped"
   if [ "${#errs[@]}" -gt 0 ]; then
     ev_json errors "$(printf '%s\n' "${errs[@]}" | jq -R . | jq -sc .)"
@@ -225,13 +227,14 @@ restore-check)
 nightly)
   require_root
   results=(); bad=0; EVMODE=0
-  while read -r s; do
+  # Список — через fd 3: stdin цикла не должен достаться docker/psql в теле.
+  while read -r s <&3; do
     # Последовательно, по одному, под nice (ADR-115 §8.3): одновременный старт тяжёлых операций
     # всех инстансов сервера — CPU-голодание, которым машина уже падала.
     ( lock_instance "$s"; do_full "$s" && do_retention "$s"; rc=$?; [ "$rc" = 0 ] || echo "$ERR" >&2; exit "$rc" ) >/dev/null 2>"/var/tmp/fleet-nightly-$s.err"
     if [ "$?" = 0 ]; then results+=("$s:ok"); else results+=("$s:$(tail -1 "/var/tmp/fleet-nightly-$s.err")"); bad=$((bad+1)); fi
     rm -f "/var/tmp/fleet-nightly-$s.err"
-  done < <(list_archive_enabled)
+  done 3< <(list_archive_enabled)
   ev_json results "$(printf '%s\n' "${results[@]:-}" | jq -R 'select(length>0)' | jq -sc .)"
   ev_num failed "$bad"
   [ "$bad" -eq 0 ] || fail nightly_partial

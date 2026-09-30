@@ -64,11 +64,12 @@ case "${1:-}" in
   --all-from)
     failed="${2:?укажите отказавший сервер: A или B}"; to="$(other "$failed")"
     n=0
-    while IFS=$'\t' read -r inst primary; do
+    # Таблица — через fd 3: ssh в promote_one иначе читает stdin цикла и съедает остаток таблицы.
+    while IFS=$'\t' read -r inst primary <&3; do
       case "$inst" in ""|\#*) continue;; esac
       [ "$primary" = "$failed" ] || continue
       promote_one "$inst" "$to" && n=$((n+1))
-    done < /opt/router/roles/roles.tsv
+    done 3< /opt/router/roles/roles.tsv
     echo "повышено инстансов: $n"
     ;;
   "") echo "использование: promote.sh <инстанс> <A|B> | promote.sh --all-from <A|B>"; exit 2;;

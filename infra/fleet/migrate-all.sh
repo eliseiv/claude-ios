@@ -34,7 +34,8 @@ declare -a DONE=() FAILED=()
 
 echo
 echo "== 2. Перенос инстансов =="
-while IFS=$'\t' read -r inst domain port primary; do
+# Таблица — через fd 3: ssh в теле иначе читает stdin цикла и съедает остаток таблицы.
+while IFS=$'\t' read -r inst domain port primary <&3; do
   case "$inst" in ""|\#*) continue;; esac
   if [ -n "$WANT" ]; then case " $WANT " in *" $inst "*) ;; *) continue;; esac; fi
 
@@ -47,7 +48,7 @@ while IFS=$'\t' read -r inst domain port primary; do
   fi
   # Пауза между инстансами: прежний сервер уже показал, что не выдерживает плотной череды.
   sleep 3
-done < instances.tsv
+done 3< instances.tsv
 
 echo
 echo "== 3. Репликация на резервный сервер =="

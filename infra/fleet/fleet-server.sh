@@ -123,13 +123,14 @@ CHECKED=0; CHECK_FAILED=()
 check_in_containers() {
   local s c
   CHECKED=0; CHECK_FAILED=()
-  while read -r s; do
+  # Список — через fd 3: stdin цикла не должен достаться docker exec в теле.
+  while read -r s <&3; do
     [ -n "$s" ] || continue
     c="$(ctr "$s" postgres)"
     ctr_running "$c" || continue
     CHECKED=$((CHECKED+1))
     docker exec -u postgres "$c" bash -c "$1" >/dev/null 2>&1 || CHECK_FAILED+=("$s")
-  done < <(list_archive_enabled)
+  done 3< <(list_archive_enabled)
 }
 
 install_wrapper() {  # /usr/local/bin/fleet + ссылки групп — копия из действующей версии

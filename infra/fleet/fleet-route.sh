@@ -228,11 +228,12 @@ backup-config)
     || { rm -rf "$io"; fail upload_failed; }
   size="$(stat -c %s "$io/router.tar")"; rm -rf "$io"
   cut="$(date -u -d '-30 days' +%F)"; removed=0
-  while read -r obj; do
+  # Список — через fd 3: stdin цикла не должен достаться командам тела.
+  while read -r obj <&3; do
     case "$obj" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].tar) ;; *) continue;; esac
     [[ "${obj%.tar}" < "$cut" ]] || continue
     walg_host -- --root st rm "router/$HID/$obj" >/dev/null 2>&1 && removed=$((removed+1))
-  done < <(walg_host -- --root st ls "router/$HID/" 2>/dev/null | awk 'NR>1 && $1=="obj" {print $NF}')
+  done 3< <(walg_host -- --root st ls "router/$HID/" 2>/dev/null | awk 'NR>1 && $1=="obj" {print $NF}')
   ev_str object "$key"; ev_num size "$size"; ev_num expired_removed "$removed"
   ok
   ;;

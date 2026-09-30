@@ -23,7 +23,8 @@ fi
 [ -s "$TMP" ] || { echo "страж ролей: таблица пуста — состояние не трогаю"; exit 0; }
 
 changed=0
-while IFS=$'\t' read -r inst primary; do
+# Таблица — через fd 3: docker compose в теле не должен читать stdin цикла.
+while IFS=$'\t' read -r inst primary <&3; do
   case "$inst" in ""|\#*) continue;; esac
   dir="/opt/$inst"
   [ -f "$dir/.env" ] || continue
@@ -55,6 +56,6 @@ while IFS=$'\t' read -r inst primary; do
     ( cd "$dir" && docker compose -p "$proj" $cf --env-file .env up -d --no-build api >/dev/null 2>&1 )
     echo "страж ролей: $inst — api поднят (основной)"
   fi
-done < "$TMP"
+done 3< "$TMP"
 
 echo "страж ролей: проверено, изменений ролей: $changed"

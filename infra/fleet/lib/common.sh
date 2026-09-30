@@ -187,7 +187,7 @@ ctr_health() { docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{
 psql_inst() {  # psql_inst <slug> <SQL> — вывод -tA; секреты не участвуют (локальный сокет, trust)
   local s="$1" d u db; d="$(inst_dir "$s")"
   u="$(env_get "$d/.env" POSTGRES_USER)"; db="$(env_get "$d/.env" POSTGRES_DB)"
-  docker exec -i "$(ctr "$s" postgres)" psql -X -v ON_ERROR_STOP=1 -U "${u:-postgres}" -d "${db:-postgres}" -tAc "$2"
+  docker exec "$(ctr "$s" postgres)" psql -X -v ON_ERROR_STOP=1 -U "${u:-postgres}" -d "${db:-postgres}" -tAc "$2"
 }
 
 wait_healthy() {  # wait_healthy <контейнер> <попыток по 2 с>
@@ -237,7 +237,8 @@ walg_host() {
   [ -n "$uid" ] && envs+=(-e "FLEET_INSTANCE_UID=$uid" -e "FLEET_INSTANCE_GENERATION=$gen")
   [ -n "$kid" ] && envs+=(-e "FLEET_WALG_KEY_ID=$kid")
   [ -d "$WALG_DIR" ] && mounts+=(-v "$WALG_DIR:/etc/fleet/walg:ro")
-  docker run --rm -i --network host --env-file "$OBJSTORE_DIR/objstore.env" "${envs[@]}" "${mounts[@]}" \
+  # Без -i: stdin вызывающего не читается (иначе съедает список цикла `while read`).
+  docker run --rm --network host --env-file "$OBJSTORE_DIR/objstore.env" "${envs[@]}" "${mounts[@]}" \
     --entrypoint fleet-walg "$img" "$@"
 }
 
