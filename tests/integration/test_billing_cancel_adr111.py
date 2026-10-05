@@ -21,6 +21,7 @@ from tests.integration.test_billing_web_aliases_adr110 import (  # noqa: F401
     _Upstream,
     buckets,
     client,
+    link_redis,
     upstream,
     verify,
 )
