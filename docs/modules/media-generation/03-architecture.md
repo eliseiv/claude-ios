@@ -201,7 +201,7 @@ POST /v1/media/images|videos | submit_custom | chat-tool media.generate_*
   │     на ЛЮБОМ вызывающем, в том числе в tool-loop чата (ADR-108 §3.1)
   ├─ routes = маршруты ADR-108 §2 по возрастанию цены (fal есть всегда; последний на дефолтах,
   │          первый — если MEDIA_VENDOR_PRICES сделал его дешевле; sosana/kie — только по §2.1)
-  ├─ callbackUrl = https://{SERVICE_DOMAIN}/v1/media/webhooks/proxy/{jobId}?token=HMAC(jobId)
+  ├─ callbackUrl = https://{SERVICE_DOMAIN}/v1/media/webhooks/proxy/{jobId}?token=HMAC(jobId)&route={service}
   ├─ для route in routes: ProxyClient.submit(service, endpoint, payload, callbackUrl)
   │     ├─ таймаут / connect к прокси → 502, без отката на следующий маршрут
   │     ├─ 429 / 5xx / 402 / 400 без валидации → следующий маршрут
@@ -210,6 +210,7 @@ POST /v1/media/images|videos | submit_custom | chat-tool media.generate_*
   │     └─ 401/403 → 503 media_generation_not_configured ┘ стоп, списание откатывается
   │     (маршруты исчерпаны → последний 429 | 502, списание откатывается)
   └─ INSERT media_jobs(provider, fal_endpoint=<endpoint варианта>, fal_request_id=<id прокси>,
+                      remaining_routes=<маршруты после принятого | NULL>,
                       status_url='', response_url='', status='queued', …)
         ↓ session_scope commit — ОДНА транзакция, как сегодня
 ```
@@ -221,12 +222,19 @@ POST /v1/media/images|videos | submit_custom | chat-tool media.generate_*
   ├─ тело не JSON-объект              → 422
   ├─ SELECT … FOR UPDATE по id; нет строки или provider = '' → 404
   ├─ status ∈ {completed, failed}     → 200 no-op (media_webhook_outcome=duplicate_terminal)
+  ├─ query route есть и ≠ provider    → 200 no-op (stale_attempt; колбэк прежней попытки, ADR-108 §4.4)
   ├─ pending_result непуст (шаг 0 ADR-108 §4.3 — результат уже получен)
   │     ├─ outcome = completed → результат НЕ перезаписывается → SAVEPOINT: ОБЩИЙ ПУТЬ ЗАВЕРШЕНИЯ
   │     │                        с сохранённого pending_result (исходы — как в ветке ниже)
   │     └─ outcome = failed | pending → игнор → 200 (media_webhook_outcome=result_already_received)
   ├─ outcome = pending                → mark_running → 200
-  ├─ outcome = failed                 → _fail(текст вендора) → 200
+  ├─ outcome = failed
+  │     ├─ provider ∈ {sosana, kie} ∧ remaining_routes непуст ∧ возраст ≤ дедлайна
+  │     │     → перебор remaining_routes по правилам сабмита (callbackUrl …&route={service})
+  │     │        ├─ принят → provider, fal_request_id, remaining_routes := остаток; mark_running
+  │     │        │           → 200 (resubmitted; лог media_generation_route_resubmit)
+  │     │        └─ стоп / исчерпано → _fail(текст вендора), возврат → 200
+  │     └─ иначе (в т.ч. provider = fal)  → _fail(текст вендора), возврат → 200
   └─ outcome = completed              (pending_result пуст)
         ├─ нормализация (форма fal → действующий _normalize_result; иначе сбор URL)
         ├─ URL не https / хост вне FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES → отброшен
