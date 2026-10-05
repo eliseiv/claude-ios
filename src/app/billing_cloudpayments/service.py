@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import EVENT_CLOUDPAYMENTS_PAYMENT, AuditEvent, AuditService
 from app.billing_cloudpayments import parser, verify
+from app.billing_cloudpayments.checkout import forget_reusable_links
 from app.billing_cloudpayments.verify import CloudPaymentsVerifyClient, CreditablePayment
 from app.billing_common.resolve import resolve_user
 from app.billing_common.single_grant import signal_unmapped_product
@@ -237,6 +238,7 @@ class CloudPaymentsWebhookService:
         # "duplicate", so a lost payment was indistinguishable from a benign re-delivery.
         if credited >= 1:
             outcome = WebhookOutcome(result="applied")
+            await forget_reusable_links(resolved_user_id)
         elif skipped >= 1:
             outcome = _ignored("payment_skipped")
         else:

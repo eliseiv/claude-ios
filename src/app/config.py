@@ -334,6 +334,9 @@ class Settings(BaseSettings):
     cloudpayments_pay_page_proxy_enabled: bool = Field(
         default=False, alias="CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED"
     )
+    # Window (seconds) during which a repeated checkout for the same user + product + email returns
+    # the already issued unpaid link instead of creating a new broadapps payment. 0 disables reuse.
+    checkout_link_reuse_seconds: int = Field(default=900, ge=0, alias="CHECKOUT_LINK_REUSE_SECONDS")
 
     # --- Token purchase (ADR-015, token-purchase/03) ---
     # Server-side mapping consumable productId -> credits (JSON object). Source of truth for

@@ -12,13 +12,21 @@ log ``"cloudpayments_checkout_outcome"`` is emitted per call with an allowlist o
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import datetime
+import hashlib
+import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
+import redis.asyncio as redis
 
+from app.api_gateway.rate_limit import get_redis
 from app.billing_cloudpayments.parser import KIND_TOKENS, KIND_UNKNOWN, classify_product
 from app.billing_cloudpayments.pay_page import SKIP_DISABLED, rewrite_payment_url
 from app.config import Settings
@@ -31,6 +39,42 @@ logger = logging.getLogger(__name__)  # == "app.billing_cloudpayments.checkout"
 # Connect+read timeout for the outgoing broadapps call (ADR-051 §3). No dedicated env — the three
 # CLOUDPAYMENTS_API_* configs are sufficient.
 _CHECKOUT_TIMEOUT_SECONDS = 15.0
+
+# Unpaid-link reuse (CHECKOUT_LINK_REUSE_SECONDS). One Redis hash per user (field = product + email
+# digest) so a credited payment drops every reusable link of that user with a single DEL. The lock
+# outlives the upstream call, so its holder always finishes (stores or fails) before it expires.
+_LINK_LOCK_TTL_SECONDS = int(_CHECKOUT_TIMEOUT_SECONDS) + 5
+_LINK_LOCK_POLL_SECONDS = 0.25
+# A link the provider says expires sooner than this is not handed out again.
+_LINK_EXPIRY_MARGIN_SECONDS = 60
+
+
+def _links_key(user_id: uuid.UUID) -> str:
+    return f"cp:link:{user_id}"
+
+
+def _link_field(product_id: str, customer_email: str) -> str:
+    # The email is part of the identity (a link carries the receipt address) but is never stored.
+    digest = hashlib.sha256(customer_email.strip().lower().encode("utf-8")).hexdigest()
+    return f"{product_id}:{digest}"
+
+
+async def forget_reusable_links(user_id: uuid.UUID) -> None:
+    """Drop the user's reusable checkout links after a credited payment (next purchase = new link).
+
+    Redis unavailability is logged and swallowed: the webhook outcome must not depend on the cache.
+    """
+    try:
+        await get_redis().delete(_links_key(user_id))
+    except redis.RedisError as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "cloudpayments_checkout_link_reuse_unavailable",
+            op="invalidate",
+            userId=str(user_id),
+            error=type(exc).__name__,
+        )
 
 
 @dataclass(frozen=True)
@@ -58,7 +102,7 @@ class CancelResult:
 
 
 class CloudPaymentsCheckoutClient:
-    """Creates a RU payment link via broadapps. Passthrough — no DB, no persisted state."""
+    """Creates a RU payment link via broadapps. No DB; recent unpaid links are reused via Redis."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -197,6 +241,163 @@ class CloudPaymentsCheckoutClient:
     async def create_payment_link(
         self, *, user_id: uuid.UUID, product_id: str, customer_email: str
     ) -> CheckoutResult:
+        """Return a payment link for (user, product, email), reusing a recent unpaid one.
+
+        Within ``CHECKOUT_LINK_REUSE_SECONDS`` a repeated call returns the stored result without a
+        broadapps call. Concurrent calls are serialised by a short Redis lock: the loser waits for
+        the winner's stored result, or takes the lock itself if the winner failed. Upstream errors
+        are never stored. Redis unavailability fails open to a plain upstream call.
+        """
+        reuse_seconds = self._settings.checkout_link_reuse_seconds
+        if reuse_seconds <= 0:
+            return await self._issue_link(
+                user_id=user_id, product_id=product_id, customer_email=customer_email
+            )
+        key = _links_key(user_id)
+        field = _link_field(product_id, customer_email)
+        lock_key = f"cp:link:lock:{user_id}:{field}"
+        client = get_redis()
+        locked = False
+        try:
+            deadline = time.monotonic() + _LINK_LOCK_TTL_SECONDS
+            while True:
+                cached = await self._cached_link(client, key, field)
+                if cached is not None:
+                    self._log_created(
+                        cached, user_id=user_id, product_id=product_id, rewritten=None, reused=True
+                    )
+                    return cached
+                if await client.set(lock_key, "1", nx=True, ex=_LINK_LOCK_TTL_SECONDS):
+                    locked = True
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(_LINK_LOCK_POLL_SECONDS)
+        except redis.RedisError as exc:
+            self._log_reuse_unavailable("lookup", exc, user_id=user_id, product_id=product_id)
+            return await self._issue_link(
+                user_id=user_id, product_id=product_id, customer_email=customer_email
+            )
+        try:
+            result = await self._issue_link(
+                user_id=user_id, product_id=product_id, customer_email=customer_email
+            )
+            ttl = self._reuse_ttl(result, reuse_seconds)
+            if ttl > 0:
+                try:
+                    await self._store_link(client, key, field, result, ttl, reuse_seconds)
+                except redis.RedisError as exc:
+                    self._log_reuse_unavailable(
+                        "store", exc, user_id=user_id, product_id=product_id
+                    )
+            return result
+        finally:
+            if locked:
+                # On a Redis error the lock TTL releases it; the store step logs the failure.
+                with contextlib.suppress(redis.RedisError):
+                    await client.delete(lock_key)
+
+    @staticmethod
+    async def _cached_link(client: redis.Redis, key: str, field: str) -> CheckoutResult | None:
+        raw = await client.hget(key, field)  # type: ignore[misc]
+        if not isinstance(raw, str):
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        expires = data.get("exp")
+        payment_url = data.get("paymentUrl")
+        if not isinstance(expires, int | float) or expires <= time.time():
+            return None
+        if not isinstance(payment_url, str) or not payment_url:
+            return None
+        expires_at = data.get("expiresAt")
+        return CheckoutResult(
+            payment_id=str(data.get("paymentId") or ""),
+            payment_url=payment_url,
+            status=str(data.get("status") or ""),
+            expires_at=expires_at if isinstance(expires_at, str) else None,
+        )
+
+    @staticmethod
+    async def _store_link(
+        client: redis.Redis,
+        key: str,
+        field: str,
+        result: CheckoutResult,
+        ttl: int,
+        reuse_seconds: int,
+    ) -> None:
+        value = json.dumps(
+            {
+                "paymentId": result.payment_id,
+                "paymentUrl": result.payment_url,
+                "status": result.status,
+                "expiresAt": result.expires_at,
+                "exp": time.time() + ttl,
+            }
+        )
+        async with client.pipeline(transaction=True) as pipe:
+            pipe.hset(key, field, value)
+            pipe.expire(key, reuse_seconds)
+            await pipe.execute()
+
+    @staticmethod
+    def _reuse_ttl(result: CheckoutResult, reuse_seconds: int) -> int:
+        """Reuse window, capped by the provider's own link expiry when it is a parseable instant."""
+        if result.expires_at is None:
+            return reuse_seconds
+        try:
+            expires_at = datetime.datetime.fromisoformat(result.expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return reuse_seconds
+        if expires_at.tzinfo is None:
+            return reuse_seconds
+        left = (expires_at - datetime.datetime.now(datetime.UTC)).total_seconds()
+        return min(reuse_seconds, int(left) - _LINK_EXPIRY_MARGIN_SECONDS)
+
+    @staticmethod
+    def _log_reuse_unavailable(
+        op: str, exc: redis.RedisError, *, user_id: uuid.UUID, product_id: str
+    ) -> None:
+        log_event(
+            logger,
+            logging.WARNING,
+            "cloudpayments_checkout_link_reuse_unavailable",
+            op=op,
+            userId=str(user_id),
+            productId=product_id,
+            error=type(exc).__name__,
+        )
+
+    @staticmethod
+    def _log_created(
+        result: CheckoutResult,
+        *,
+        user_id: uuid.UUID,
+        product_id: str,
+        rewritten: bool | None,
+        reused: bool,
+    ) -> None:
+        log_event(
+            logger,
+            logging.INFO,
+            "cloudpayments_checkout_outcome",
+            result="created",
+            userId=str(user_id),
+            productId=product_id,
+            status=result.status,
+            paymentId=result.payment_id,
+            paymentUrlRewritten=rewritten,
+            reused=reused,
+        )
+
+    async def _issue_link(
+        self, *, user_id: uuid.UUID, product_id: str, customer_email: str
+    ) -> CheckoutResult:
         """POST broadapps ``/payments/link`` and return the created link (ADR-051 §3).
 
         ``user_id`` is the authenticated subject (from JWT ``sub``), never a client-supplied value.
@@ -262,16 +463,12 @@ class CloudPaymentsCheckoutClient:
         if rewrite.rewritten:
             result = replace(result, payment_url=rewrite.url)
 
-        log_event(
-            logger,
-            logging.INFO,
-            "cloudpayments_checkout_outcome",
-            result="created",
-            userId=str(user_id),
-            productId=product_id,
-            status=result.status,
-            paymentId=result.payment_id,
-            paymentUrlRewritten=rewrite.rewritten,
+        self._log_created(
+            result,
+            user_id=user_id,
+            product_id=product_id,
+            rewritten=rewrite.rewritten,
+            reused=False,
         )
         return result
 
