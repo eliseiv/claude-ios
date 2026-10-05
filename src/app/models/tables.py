@@ -871,6 +871,12 @@ class MediaJob(Base):
     pending_result: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
+    # ADR-108 §4.4: proxy routes not yet tried for this job, in submit order —
+    # `[{service, endpoint, payload, catalogEndpoint}]`; NULL = none left (also after a terminal).
+    # `none_as_null=True` for the same reason as `pending_result`.
+    remaining_routes: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     # ADR-109 §7: state and metadata of OUR copy of the result on the instance disk (the bytes
     # themselves live on disk, never in the DB). '' — storage never applied to the row (rows
     # before migration 0039, jobs that are not `completed`, storage switched off). Our own state

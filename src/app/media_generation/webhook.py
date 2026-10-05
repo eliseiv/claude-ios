@@ -19,6 +19,7 @@ import json
 import logging
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 from app.config import Settings
 from app.errors import MediaGenerationNotConfiguredError
@@ -46,6 +47,8 @@ WEBHOOK_COMPLETION_FAILED = "completion_failed"  # §5 ran and the job IS `faile
 WEBHOOK_COMPLETION_DEFERRED = "completion_deferred"  # pending_result kept, §5 hit a transient fault
 WEBHOOK_NO_USABLE_ASSET = "no_usable_asset"  # §4.3 п.2 dropped every asset → failed
 WEBHOOK_RESULT_ALREADY_RECEIVED = "result_already_received"  # §4.3 step 0 ignored failed/pending
+WEBHOOK_STALE_ATTEMPT = "stale_attempt"  # §4.2 п.4а — callback of a previous route attempt
+WEBHOOK_RESUBMITTED = "resubmitted"  # §4.4 — failed callback, the job moved to the next route
 
 _WARNING_OUTCOMES = frozenset({WEBHOOK_BAD_TOKEN, WEBHOOK_UNKNOWN_JOB, WEBHOOK_NO_USABLE_ASSET})
 
@@ -81,17 +84,19 @@ def verify_webhook_token(*, settings: Settings, job_id: uuid.UUID, token: str | 
     return hmac.compare_digest(expected.encode("utf-8"), token.encode("utf-8"))
 
 
-def callback_url(*, settings: Settings, job_id: uuid.UUID) -> str:
+def callback_url(*, settings: Settings, job_id: uuid.UUID, route: str) -> str:
     """Absolute URL the proxy POSTs to when the vendor finishes (ADR-108 §4.1).
 
     Unlike the sample repository there is no ``localhost`` fallback: ``proxy_configured`` already
     requires ``SERVICE_DOMAIN``, and a job without a reachable callback must not be debited.
+    ``route`` names the service of this attempt (§4.4); the token does not sign it.
     """
     host = settings.normalized_service_domain()
     if not host:
         raise MediaGenerationNotConfiguredError("media generation is not configured")
     token = sign_webhook_token(settings=settings, job_id=job_id)
-    return f"https://{host}{WEBHOOK_PATH_PREFIX}/{job_id}?token={token}"
+    route_param = quote(route, safe="")
+    return f"https://{host}{WEBHOOK_PATH_PREFIX}/{job_id}?token={token}&route={route_param}"
 
 
 def log_webhook_outcome(*, job_id: str | None, proxy_service: str | None, outcome: str) -> None:

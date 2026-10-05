@@ -43,6 +43,7 @@ from app.chat.attachments import (
 )
 from app.config import Settings
 from app.errors import (
+    AppError,
     ContentPolicyViolationError,
     JobNotTerminalError,
     NotFoundError,
@@ -83,6 +84,8 @@ from app.media_generation.repository import (
 )
 from app.media_generation.routing import (
     SERVICE_FAL,
+    SERVICE_KIE,
+    SERVICE_SOSANA,
     VendorRoute,
     candidate_routes,
     fal_route,
@@ -99,7 +102,9 @@ from app.media_generation.webhook import (
     WEBHOOK_FAILED,
     WEBHOOK_NO_USABLE_ASSET,
     WEBHOOK_PENDING,
+    WEBHOOK_RESUBMITTED,
     WEBHOOK_RESULT_ALREADY_RECEIVED,
+    WEBHOOK_STALE_ATTEMPT,
     WEBHOOK_UNKNOWN_JOB,
     callback_url,
     collect_urls,
@@ -217,6 +222,8 @@ class _SubmitHandle:
     request_id: str
     status_url: str
     response_url: str
+    # ADR-108 §4.4: routes after the accepted one, serialized for `media_jobs.remaining_routes`.
+    remaining_routes: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -441,6 +448,7 @@ class MediaGenerationService:
                 input_image_urls=list(image_urls) or None,
                 moderation=input_verdict.to_payload(),
                 provider=handle.provider,
+                remaining_routes=handle.remaining_routes,
             )
         log_event(
             logger,
@@ -570,12 +578,34 @@ class MediaGenerationService:
         * ``422`` on the fal route → stop (``422``); on sosana/kie → next route: only fal gives
           the final verdict about the validity of a request fal itself would accept;
         * ``429`` / other upstream failures → next route; exhausted → the last of them.
+
+        The routes after the accepted one are kept on the job for a resubmission (§4.4).
         """
-        if self._proxy is None:  # pragma: no cover - guarded by _proxy_enabled
+        route, submission, remaining = await self._submit_first_accepting(
+            job_id=job_id, model_id=model_id, routes=routes
+        )
+        return _SubmitHandle(
+            provider=route.service,
+            request_id=submission.request_id,
+            # ADR-108 §3.1: a proxy job is never polled — no status/response URL.
+            status_url="",
+            response_url="",
+            remaining_routes=_routes_to_json(remaining),
+        )
+
+    async def _submit_first_accepting(
+        self, *, job_id: uuid.UUID, model_id: str, routes: list[VendorRoute]
+    ) -> tuple[VendorRoute, ProxySubmission, list[VendorRoute]]:
+        """The §3.3 loop shared by the submit and the resubmission (§4.4).
+
+        Returns the accepted route, its proxy task and the routes after it; a stop or exhaustion
+        raises.
+        """
+        if self._proxy is None:
             raise UpstreamError("generation provider unavailable")
-        callback = callback_url(settings=self._settings, job_id=job_id)
         last_retryable: RateLimitedError | UpstreamError | None = None
-        for route in routes:
+        for index, route in enumerate(routes):
+            callback = callback_url(settings=self._settings, job_id=job_id, route=route.service)
             try:
                 submission: ProxySubmission = await self._proxy.submit(
                     service=route.service,
@@ -595,13 +625,7 @@ class MediaGenerationService:
                 last_retryable = exc
                 self._log_route_fallback(job_id=job_id, model_id=model_id, route=route)
                 continue
-            return _SubmitHandle(
-                provider=route.service,
-                request_id=submission.request_id,
-                # ADR-108 §3.1: a proxy job is never polled — no status/response URL.
-                status_url="",
-                response_url="",
-            )
+            return route, submission, routes[index + 1 :]
         if last_retryable is not None:
             raise last_retryable
         raise UpstreamError("generation provider unavailable")
@@ -993,26 +1017,34 @@ class MediaGenerationService:
         await self._repo.mark_running(job)
         return MediaJobView(job=job, assets=[])
 
-    async def handle_proxy_webhook(self, *, job_id: uuid.UUID, body: dict[str, Any]) -> str:
+    async def handle_proxy_webhook(
+        self, *, job_id: uuid.UUID, body: dict[str, Any], route: str | None = None
+    ) -> str:
         """Apply a proxy callback to job ``job_id``; returns the ``media_webhook_outcome`` value.
 
         The caller (the router) has ALREADY verified the HMAC token and that ``body`` is a JSON
         object — both before any DB access (ADR-108 §4.2 п.1–2). Here, in order: the row is
         locked (``FOR UPDATE``); none or a legacy row → ``NotFoundError`` (``404``); terminal →
-        no-op (a repeated delivery); otherwise the outcome of §4.3 is applied. The first terminal
+        no-op (a repeated delivery); ``route`` of a previous attempt → no-op (§4.2 п.4а);
+        otherwise the outcome of §4.3 is applied. The first terminal
         outcome wins; a result already recorded in ``pending_result`` is never overwritten.
         """
         job = await self._repo.get_for_update(job_id)
         if job is None or not _is_proxy_job(job):
             log_webhook_outcome(job_id=str(job_id), proxy_service=None, outcome=WEBHOOK_UNKNOWN_JOB)
             raise NotFoundError("media job not found")
-        outcome = await self._apply_callback(job, body)
+        outcome = await self._apply_callback(job, body, route=route)
         log_webhook_outcome(job_id=str(job.id), proxy_service=job.provider, outcome=outcome)
         return outcome
 
-    async def _apply_callback(self, job: MediaJob, body: dict[str, Any]) -> str:
+    async def _apply_callback(
+        self, job: MediaJob, body: dict[str, Any], *, route: str | None = None
+    ) -> str:
         if job.status in TERMINAL_STATUSES:
             return WEBHOOK_DUPLICATE_TERMINAL
+        # §4.2 п.4а: no `route` — a job submitted before §4.4, the callback is the current attempt.
+        if route is not None and route != job.provider:
+            return WEBHOOK_STALE_ATTEMPT
         # ADR-108 §8: the vendor's price is recorded for EVERY outcome that carries it —
         # `completed`, `failed`, `no_usable_asset`, a repeated delivery — BEFORE branching: the
         # purchase at the vendor happened even when the user's credits are refunded. Same
@@ -1029,6 +1061,8 @@ class MediaGenerationService:
                 return await self._complete_in_savepoint(job, pending)
             return WEBHOOK_RESULT_ALREADY_RECEIVED
         if classified == OUTCOME_FAILED:
+            if await self._resubmit_to_next_route(job):
+                return WEBHOOK_RESUBMITTED
             await self._fail(job, error=webhook_error_message(body))
             return WEBHOOK_FAILED
         if classified != OUTCOME_COMPLETED:
@@ -1040,6 +1074,47 @@ class MediaGenerationService:
             return WEBHOOK_NO_USABLE_ASSET
         await self._repo.store_pending_result(job, pending_result=result)
         return await self._complete_in_savepoint(job, result)
+
+    async def _resubmit_to_next_route(self, job: MediaJob) -> bool:
+        """ADR-108 §4.4: hand a failed sosana/kie attempt to the next untried route.
+
+        Allowed only while ``remaining_routes`` is non-empty and the job is within
+        ``MEDIA_JOB_DEADLINE_SECONDS`` of ``created_at``. Credits are not charged again. A stop or
+        exhaustion of §3.3 returns ``False`` — the caller fails the job with a refund, so the
+        exception never leaves the webhook.
+        """
+        if job.provider not in (SERVICE_SOSANA, SERVICE_KIE):
+            return False
+        routes = _routes_from_json(job.remaining_routes)
+        age = self._age(job)
+        if not routes or age is None:
+            return False
+        if age.total_seconds() > self._settings.media_job_deadline_seconds:
+            return False
+        try:
+            route, submission, remaining = await self._submit_first_accepting(
+                job_id=job.id, model_id=job.model_id, routes=routes
+            )
+        except AppError:
+            return False
+        from_service = job.provider
+        await self._repo.switch_route(
+            job,
+            provider=route.service,
+            request_id=submission.request_id,
+            remaining_routes=_routes_to_json(remaining),
+        )
+        await self._repo.mark_running(job)
+        log_event(
+            logger,
+            logging.INFO,
+            "media_generation_route_resubmit",
+            jobId=str(job.id),
+            fromService=from_service,
+            toService=route.service,
+            falEndpoint=route.catalog_endpoint,
+        )
+        return True
 
     async def _complete_in_savepoint(self, job: MediaJob, result: dict[str, Any]) -> str:
         """§5 inside a SAVEPOINT — the webhook side (ADR-108 §5).
@@ -1274,6 +1349,52 @@ class MediaGenerationService:
             raise ValidationFailedError(f"{field} is not supported by this model in this mode")
         if value not in allowed:
             raise ValidationFailedError(f"{field} must be one of: {', '.join(allowed)}")
+
+
+def _routes_to_json(routes: list[VendorRoute]) -> list[dict[str, Any]] | None:
+    """``media_jobs.remaining_routes`` form (ADR-108 §4.4); no routes → ``None`` (SQL NULL)."""
+    return [
+        {
+            "service": route.service,
+            "endpoint": route.endpoint,
+            "payload": route.payload,
+            "catalogEndpoint": route.catalog_endpoint,
+        }
+        for route in routes
+    ] or None
+
+
+def _routes_from_json(raw: Any) -> list[VendorRoute]:
+    """Inverse of ``_routes_to_json``; malformed entries are skipped."""
+    if not isinstance(raw, list):
+        return []
+    routes: list[VendorRoute] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        service = item.get("service")
+        endpoint = item.get("endpoint")
+        payload = item.get("payload")
+        catalog_endpoint = item.get("catalogEndpoint")
+        if not (
+            isinstance(service, str)
+            and service
+            and isinstance(endpoint, str)
+            and isinstance(payload, dict)
+            and isinstance(catalog_endpoint, str)
+        ):
+            continue
+        # unit_price only orders routes at submit; the stored list is already in that order.
+        routes.append(
+            VendorRoute(
+                service=service,
+                endpoint=endpoint,
+                payload=payload,
+                unit_price=0.0,
+                catalog_endpoint=catalog_endpoint,
+            )
+        )
+    return routes
 
 
 def _as_int(value: Any) -> int | None:

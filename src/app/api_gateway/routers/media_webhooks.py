@@ -12,7 +12,8 @@ the iOS client never does. Hence:
 
 Order of checks (normative): (1) ``token`` missing / longer than 128 / HMAC mismatch (empty secret
 ⇒ always a mismatch) → ``401`` WITHOUT touching the DB; (2) body not a JSON object → ``422``;
-(3) no job or a legacy job → ``404``; (4) terminal → ``200`` unchanged; (5) apply → ``200``.
+(3) no job or a legacy job → ``404``; (4) terminal → ``200`` unchanged; (4а) ``route`` of a previous
+attempt → ``200`` unchanged; (5) apply → ``200``.
 
 Never logged: the token, the secret, the callback body, an asset URL.
 """
@@ -78,6 +79,8 @@ async def proxy_media_webhook(
         log_webhook_outcome(job_id=str(parsed_id), proxy_service=None, outcome=WEBHOOK_NOT_JSON)
         raise ValidationFailedError("webhook body must be a JSON object")
 
-    # (3)–(5) in the service, under the row lock, in the request transaction.
-    await media.handle_proxy_webhook(job_id=parsed_id, body=body)
+    # (3)–(5) and (4а) in the service, under the row lock, in the request transaction.
+    await media.handle_proxy_webhook(
+        job_id=parsed_id, body=body, route=request.query_params.get("route") or None
+    )
     return {"ok": True}

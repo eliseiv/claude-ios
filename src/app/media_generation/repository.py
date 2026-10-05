@@ -92,6 +92,7 @@ class MediaJobsRepository:
         operation_input: dict[str, Any] | None = None,
         visible_in_history: bool = True,
         provider: str = "",
+        remaining_routes: list[dict[str, Any]] | None = None,
     ) -> MediaJob:
         # `provider` is passed explicitly (never left to the server default): an attribute the
         # INSERT did not set is expired after flush, and an async lazy load of it would fail.
@@ -120,6 +121,7 @@ class MediaJobsRepository:
             provider=provider,
             vendor_price=None,
             pending_result=None,
+            remaining_routes=remaining_routes or None,
             # ADR-109 §7 — set explicitly for the same reason as `provider` above.
             asset_store_status=ASSET_STORE_NONE,
             asset_store_attempts=0,
@@ -267,6 +269,21 @@ class MediaJobsRepository:
         await self._session.delete(job)
         await self._session.flush()
 
+    async def switch_route(
+        self,
+        job: MediaJob,
+        *,
+        provider: str,
+        request_id: str,
+        remaining_routes: list[dict[str, Any]] | None,
+    ) -> None:
+        """Hand the job to the route that accepted a resubmission (ADR-108 §4.4)."""
+        job.provider = provider
+        job.fal_request_id = request_id
+        job.remaining_routes = remaining_routes or None
+        job.updated_at = _now()
+        await self._session.flush()
+
     async def mark_running(self, job: MediaJob) -> None:
         if job.status == STATUS_RUNNING:
             return
@@ -282,6 +299,7 @@ class MediaJobsRepository:
         job.error = None
         # ADR-108 §5: the pending result is applied — it does not outlive the terminal.
         job.pending_result = None
+        job.remaining_routes = None
         if moderation is not None:
             job.moderation = moderation
         now = _now()
@@ -310,6 +328,7 @@ class MediaJobsRepository:
         job.error = error
         job.credits_refunded = refunded
         job.pending_result = None
+        job.remaining_routes = None
         if moderation is not None:
             job.moderation = moderation
         if result is not None:
