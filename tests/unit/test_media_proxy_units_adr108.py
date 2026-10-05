@@ -304,8 +304,8 @@ def test_token_is_hmac_sha256_hex_of_the_job_id_under_the_dedicated_secret() -> 
     )
     expected = hmac.new(b"wh-secret", str(job_id).encode(), hashlib.sha256).hexdigest()
     assert sign_webhook_token(settings=cfg, job_id=job_id) == expected
-    assert callback_url(settings=cfg, job_id=job_id) == (
-        f"https://{_DOMAIN}/v1/media/webhooks/proxy/{job_id}?token={expected}"
+    assert callback_url(settings=cfg, job_id=job_id, route="kie") == (
+        f"https://{_DOMAIN}/v1/media/webhooks/proxy/{job_id}?token={expected}&route=kie"
     )
 
 

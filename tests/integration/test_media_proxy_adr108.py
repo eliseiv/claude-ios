@@ -446,7 +446,7 @@ async def test_proxy_submit_sends_the_proxy_contract_and_never_calls_fal(
     assert call["json"]["method"] == "POST"
     assert call["json"]["endpoint"] == "https://queue.fal.run/fal-ai/nano-banana-2"
     assert call["json"]["callbackUrl"] == (
-        f"https://{_DOMAIN}/v1/media/webhooks/proxy/{job_id}?token={_token(job_id)}"
+        f"https://{_DOMAIN}/v1/media/webhooks/proxy/{job_id}?token={_token(job_id)}&route=fal"
     )
     # No vendor key and no instance key in the body.
     assert _PROXY_KEY not in json.dumps(call["json"])
@@ -1868,3 +1868,161 @@ async def test_rest_submit_failure_is_502_and_charges_nothing(
     assert resp.status_code == 502
     assert await _balance(db_sessionmaker, uid) == _START_BALANCE
     assert await _jobs(db_sessionmaker, uid) == 0
+
+
+# ============================ §4.4 — resubmission to the next route ============================
+
+
+async def _remaining(maker: async_sessionmaker[AsyncSession], job_id: uuid.UUID | str) -> Any:
+    async with maker() as s:
+        return await s.scalar(
+            text("SELECT remaining_routes FROM media_jobs WHERE id = :id"), {"id": str(job_id)}
+        )
+
+
+async def _route_callback(
+    client: AsyncClient, job_id: uuid.UUID | str, body: dict[str, Any], route: str
+) -> _httpx.Response:
+    url = f"/v1/media/webhooks/proxy/{job_id}?token={_token(job_id)}&route={route}"
+    return await client.post(url, json=body)
+
+
+async def _submit_png_via_kie(
+    client: AsyncClient, maker: async_sessionmaker[AsyncSession], proxy: _Proxy
+) -> tuple[uuid.UUID, str, int]:
+    """png ⇒ routes [kie, fal]; kie accepts. Returns (user, jobId, balance after the debit)."""
+    uid = await _user(maker)
+    proxy.answer(_ok(taskId="kie-1"))
+    resp = await _post_image(client, uid, resolution="2K", aspectRatio="16:9", outputFormat="png")
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["jobId"]
+    assert (await _row(maker, job_id))["provider"] == "kie"
+    return uid, job_id, await _balance(maker, uid)
+
+
+async def test_submit_keeps_the_untried_routes_in_order(
+    vendor_media: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], proxy: _Proxy
+) -> None:
+    uid = await _user(db_sessionmaker)
+    resp = await _post_image(vendor_media, uid, resolution="2K", aspectRatio="16:9")
+    assert resp.status_code == 202, resp.text
+    assert proxy.services == ["sosana"]
+    remaining = await _remaining(db_sessionmaker, resp.json()["jobId"])
+    assert [r["service"] for r in remaining] == ["kie", "fal"]
+    assert all({"endpoint", "payload", "catalogEndpoint"} <= r.keys() for r in remaining)
+    assert proxy.calls[0]["json"]["callbackUrl"].endswith("&route=sosana")
+
+
+async def test_submit_with_a_single_route_stores_no_remaining_routes(
+    media: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], proxy: _Proxy
+) -> None:
+    uid = await _user(db_sessionmaker)
+    resp = await _post_image(media, uid)
+    assert resp.status_code == 202, resp.text
+    assert proxy.services == ["fal"]
+    assert await _remaining(db_sessionmaker, resp.json()["jobId"]) is None
+
+
+async def test_failed_kie_callback_resubmits_to_fal_without_refund_or_second_debit(
+    vendor_media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    uid, job_id, balance = await _submit_png_via_kie(vendor_media, db_sessionmaker, proxy)
+    proxy.answer(_ok(request_id="fal-2"))
+
+    resp = await _route_callback(vendor_media, job_id, {"status": "failed", "error": "x"}, "kie")
+
+    assert resp.status_code == 200
+    assert proxy.services == ["kie", "fal"]
+    assert proxy.calls[1]["json"]["callbackUrl"].endswith("&route=fal")
+    row = await _row(db_sessionmaker, job_id)
+    assert (row["status"], row["provider"], row["fal_request_id"]) == ("running", "fal", "fal-2")
+    assert row["refunded"] is False
+    assert await _remaining(db_sessionmaker, job_id) is None
+    assert await _refunds(db_sessionmaker, job_id) == 0
+    assert await _gen_rows(db_sessionmaker, uid) == 1
+    assert await _balance(db_sessionmaker, uid) == balance
+    assert _outcomes(caplog) == ["resubmitted"]
+
+
+async def test_callback_of_a_previous_route_is_a_stale_attempt_no_op(
+    media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    uid = await _user(db_sessionmaker)
+    job_id = await _seed_job(db_sessionmaker, uid, provider="fal")
+    before = await _row(db_sessionmaker, job_id)
+
+    resp = await _route_callback(media, job_id, {"status": "failed", "error": "old"}, "kie")
+
+    assert resp.status_code == 200
+    assert await _row(db_sessionmaker, job_id) == before
+    assert await _refunds(db_sessionmaker, job_id) == 0
+    assert proxy.calls == []
+    assert _outcomes(caplog) == ["stale_attempt"]
+
+
+_FAL_LEFT = [{"service": "fal", "endpoint": "e", "payload": {}, "catalogEndpoint": "c"}]
+
+
+@pytest.mark.parametrize(
+    ("provider", "remaining"),
+    [("fal", _FAL_LEFT), ("kie", None)],
+    ids=["last-route-fal", "kie-without-remaining"],
+)
+async def test_failed_callback_without_a_next_route_fails_with_one_refund(
+    media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    caplog: pytest.LogCaptureFixture,
+    provider: str,
+    remaining: list[dict[str, Any]] | None,
+) -> None:
+    caplog.set_level(logging.INFO)
+    uid = await _user(db_sessionmaker)
+    job_id = await _seed_job(db_sessionmaker, uid, provider=provider)
+    async with db_sessionmaker() as s:
+        await s.execute(
+            text("UPDATE media_jobs SET remaining_routes = CAST(:r AS JSONB) WHERE id = :id"),
+            {"r": None if remaining is None else json.dumps(remaining), "id": str(job_id)},
+        )
+        await s.commit()
+
+    resp = await _route_callback(media, job_id, {"status": "failed", "error": "no"}, provider)
+
+    assert resp.status_code == 200
+    assert proxy.calls == []
+    row = await _row(db_sessionmaker, job_id)
+    assert (row["status"], row["refunded"]) == ("failed", True)
+    assert await _remaining(db_sessionmaker, job_id) is None
+    assert await _refunds(db_sessionmaker, job_id) == 1
+    assert await _balance(db_sessionmaker, uid) == _START_BALANCE + _CREDITS
+    assert _outcomes(caplog) == ["failed"]
+
+
+async def test_resubmission_hitting_a_proxy_timeout_fails_the_job_with_a_refund(
+    vendor_media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    uid, job_id, balance = await _submit_png_via_kie(vendor_media, db_sessionmaker, proxy)
+    charged = (await _row(db_sessionmaker, job_id))["credits_charged"]
+    proxy.answer(_httpx.ReadTimeout("slow"))
+
+    resp = await _route_callback(vendor_media, job_id, {"status": "failed", "error": "x"}, "kie")
+
+    assert resp.status_code == 200
+    assert proxy.services == ["kie", "fal"]
+    row = await _row(db_sessionmaker, job_id)
+    assert (row["status"], row["refunded"], row["provider"]) == ("failed", True, "kie")
+    assert await _refunds(db_sessionmaker, job_id) == 1
+    assert await _balance(db_sessionmaker, uid) == balance + charged
+    assert _outcomes(caplog) == ["failed"]
