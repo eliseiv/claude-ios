@@ -193,6 +193,9 @@ create)
     # в песочнице с открытой документацией и фактическим набором продуктов. Не вычисляемые —
     # env из stdin ниже их переопределяет.
     env_set "$T" DOCS_ENABLED true
+    env_set "$T" VOICE_MODE_ENABLED true
+    env_set "$T" VOICE_INPUT_ENABLED true
+    env_set "$T" VOICE_OUTPUT_ENABLED true
     env_set "$T" APPSTORE_ENVIRONMENT sandbox
     env_set "$T" APPSTORE_ROOT_CERT_DIR /run/secrets/appstore_root_certs
     env_set "$T" STOREKIT_TEST_MODE true

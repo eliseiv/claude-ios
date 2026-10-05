@@ -157,6 +157,9 @@ new)
   # Значения ниже — то, что ФАКТИЧЕСКИ работает на флоте. Возвращать к производственным нужно
   # осознанно и вместе с корневым сертификатом Apple (07-deployment.md §Prod-readiness).
   setvar DOCS_ENABLED true
+  setvar VOICE_MODE_ENABLED true
+  setvar VOICE_INPUT_ENABLED true
+  setvar VOICE_OUTPUT_ENABLED true
   setvar APPSTORE_ENVIRONMENT sandbox
   setvar APPSTORE_ROOT_CERT_DIR /run/secrets/appstore_root_certs
   setvar STOREKIT_TEST_MODE true
