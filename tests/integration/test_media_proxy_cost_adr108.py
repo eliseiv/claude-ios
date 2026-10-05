@@ -123,6 +123,15 @@ def _body(outcome: str, price: Any) -> dict[str, Any]:
 _OUTCOMES = {"completed": "completed", "failed": "failed", "no_usable_asset": "failed"}
 
 
+async def _make_last_route(maker: async_sessionmaker[AsyncSession], job_id: str) -> None:
+    """No untried route left: a `failed` callback is terminal, not a resubmission (§4.4)."""
+    async with maker() as s:
+        await s.execute(
+            text("UPDATE media_jobs SET remaining_routes = NULL WHERE id = :id"), {"id": job_id}
+        )
+        await s.commit()
+
+
 # ======================= §8 (а): USD-confirmed services — the price REPLACES the cost =======
 
 
@@ -140,6 +149,7 @@ async def test_usd_confirmed_service_price_replaces_the_estimate(
     before = await _cost_row(db_sessionmaker, job_id)
     assert before["provider"] == service
     assert before["cost"] is not None and before["cost"] != decimal.Decimal(str(_PRICE))
+    await _make_last_route(db_sessionmaker, job_id)
 
     resp = await _callback(app_client, job_id, _body(outcome, _PRICE))
 
@@ -164,6 +174,7 @@ async def test_kie_price_is_recorded_but_the_estimate_stays(
     job_id = await _submit(app_client, uid, "kie")
     before = await _cost_row(db_sessionmaker, job_id)
     assert before["provider"] == "kie"
+    await _make_last_route(db_sessionmaker, job_id)
 
     await _callback(app_client, job_id, _body(outcome, 7))
 
