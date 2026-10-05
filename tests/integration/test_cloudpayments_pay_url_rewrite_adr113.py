@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
 from tests.conftest import auth_headers
+from tests.integration._link_redis_fake import FakeLinkRedis
 
 _OLD = "/v1/billing/cloudpayments/checkout"
 _NEW = "/v1/web/session"
@@ -114,8 +115,11 @@ async def client(
     monkeypatch.setenv("CLOUDPAYMENTS_API_BASE", _API_BASE)
     monkeypatch.setenv("SERVICE_DOMAIN", _DOMAIN)
     monkeypatch.setenv("CLOUDPAYMENTS_PAY_PAGE_PROXY_ENABLED", "true")
+    # Every checkout here must reach the rewrite step: link reuse is off.
+    monkeypatch.setenv("CHECKOUT_LINK_REUSE_SECONDS", "0")
     get_settings.cache_clear()
     monkeypatch.setattr(checkout_mod, "httpx", _fake_httpx(upstream))
+    monkeypatch.setattr(checkout_mod, "get_redis", FakeLinkRedis)
 
     async def _allow(*, user_id: uuid.UUID) -> bool:
         return True

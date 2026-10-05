@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
 from tests.conftest import auth_headers, seed_user
+from tests.integration._link_redis_fake import FakeLinkRedis
 
 _OLD = "/v1/billing/cloudpayments"
 _NEW = "/v1/web"
@@ -187,12 +188,18 @@ def verify() -> _Verify:
 
 
 @pytest.fixture
+def link_redis() -> FakeLinkRedis:
+    return FakeLinkRedis()
+
+
+@pytest.fixture
 async def client(
     monkeypatch: pytest.MonkeyPatch,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     upstream: _Upstream,
     buckets: _Buckets,
     verify: _Verify,
+    link_redis: FakeLinkRedis,
 ) -> AsyncIterator[AsyncClient]:
     from app import deps
     from app.api_gateway import rate_limit
@@ -208,6 +215,7 @@ async def client(
 
     fake = _fake_httpx(upstream)
     monkeypatch.setattr(checkout_mod, "httpx", fake)
+    monkeypatch.setattr(checkout_mod, "get_redis", lambda: link_redis)
     monkeypatch.setattr(experiments_mod, "httpx", fake)
     monkeypatch.setattr(rate_limit, "_allow", buckets.allow)
     monkeypatch.setattr(deps, "get_cloudpayments_verify_client", lambda: verify)
@@ -580,3 +588,57 @@ async def test_cancel_success_sets_will_renew_false_and_keeps_status_expiry(
             ).one()
         assert (after.status, after.expires_at) == (before.status, before.expires_at)
         assert after.will_renew is False
+
+
+# ========================= credited payment drops reusable checkout links =========================
+
+
+async def test_webhook_applied_forgets_reusable_checkout_links(
+    client: AsyncClient,
+    verify: _Verify,
+    link_redis: FakeLinkRedis,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = uuid.UUID(_UID_UPPER.lower())
+    async with db_sessionmaker() as s:
+        await seed_user(s, user_id=uid)
+    link_redis.hashes[f"cp:link:{uid}"] = {"week:digest": "{}"}
+    link_redis.hashes["cp:link:someone-else"] = {"week:digest": "{}"}
+    verify.payments = [_payment("pay-forget")]
+    r = await client.post(PAIRS["webhook"][1], content=_webhook_body())
+    assert r.status_code == 200 and r.json() == {"code": 0}
+    assert await _balance(db_sessionmaker, uid) == _TOKEN_CREDITS
+    assert f"cp:link:{uid}" not in link_redis.hashes
+    assert "cp:link:someone-else" in link_redis.hashes
+
+
+async def test_webhook_not_applied_keeps_reusable_checkout_links(
+    client: AsyncClient,
+    verify: _Verify,
+    link_redis: FakeLinkRedis,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = uuid.UUID(_UID_UPPER.lower())
+    async with db_sessionmaker() as s:
+        await seed_user(s, user_id=uid)
+    link_redis.hashes[f"cp:link:{uid}"] = {"week:digest": "{}"}
+    verify.payments = []  # forged callback: nothing credited
+    r = await client.post(PAIRS["webhook"][1], content=_webhook_body())
+    assert r.status_code == 200 and r.json() == {"code": 0}
+    assert f"cp:link:{uid}" in link_redis.hashes
+
+
+async def test_webhook_applied_credits_when_redis_unavailable(
+    client: AsyncClient,
+    verify: _Verify,
+    link_redis: FakeLinkRedis,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = uuid.UUID(_UID_UPPER.lower())
+    async with db_sessionmaker() as s:
+        await seed_user(s, user_id=uid)
+    link_redis.broken = True
+    verify.payments = [_payment("pay-redis-down")]
+    r = await client.post(PAIRS["webhook"][1], content=_webhook_body())
+    assert r.status_code == 200 and r.json() == {"code": 0}
+    assert await _balance(db_sessionmaker, uid) == _TOKEN_CREDITS

@@ -15,9 +15,11 @@ rate-limit 429, §6 PII/secret log allowlist.
 
 from __future__ import annotations
 
+import asyncio
+import datetime
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -27,7 +29,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
-from tests.conftest import auth_headers
+from tests.conftest import auth_headers, seed_user
+from tests.integration._link_redis_fake import FakeLinkRedis
 
 _URL = "/v1/billing/cloudpayments/checkout"
 _APP_ID = "481d10b0-c7ee-4eeb-8618-d3a6cd7f7b9d"
@@ -72,6 +75,7 @@ class _Broadapps:
         self.init_kwargs: dict[str, Any] = {}
         self._response: _FakeResponse | None = None
         self._exc: BaseException | None = None
+        self.before_post: Callable[[], Awaitable[None]] | None = None
 
     def respond(
         self, status_code: int, json_data: Any = None, *, json_raises: bool = False
@@ -91,6 +95,8 @@ class _Broadapps:
         headers: dict[str, str] | None = None,
     ) -> _FakeResponse:
         self.calls += 1
+        if self.before_post is not None:
+            await self.before_post()
         self.url = url
         self.files = files
         self.headers = headers
@@ -139,10 +145,16 @@ def broadapps() -> _Broadapps:
 
 
 @pytest.fixture
+def link_redis() -> FakeLinkRedis:
+    return FakeLinkRedis()
+
+
+@pytest.fixture
 async def checkout_client(
     monkeypatch: pytest.MonkeyPatch,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     broadapps: _Broadapps,
+    link_redis: FakeLinkRedis,
 ) -> AsyncIterator[AsyncClient]:
     """ASGI client with checkout configured, rate-limit allowed, and the outgoing httpx faked."""
     from app import deps
@@ -159,6 +171,9 @@ async def checkout_client(
     # Fake ONLY the httpx reference inside checkout.py so no real socket opens to broadapps and the
     # test's own httpx.AsyncClient (ASGI transport) is untouched.
     monkeypatch.setattr(checkout_mod, "httpx", _make_fake_httpx(broadapps))
+    # Link reuse goes to an in-memory Redis double (no real Redis in the test run).
+    monkeypatch.setattr(checkout_mod, "get_redis", lambda: link_redis)
+    monkeypatch.setattr(checkout_mod, "_LINK_LOCK_POLL_SECONDS", 0)
 
     # The router imported enforce_other_limits by name at load; patch it there. Default is allow.
     async def _allow(*, user_id: uuid.UUID) -> bool:
@@ -541,6 +556,7 @@ async def test_checkout_success_log_has_only_allowlisted_fields(
     assert fields["paymentId"] == _OK_BODY["payment_id"]
     # ADR-113 §7: a YooMoney link is never rewritten.
     assert fields["paymentUrlRewritten"] is False
+    assert fields["reused"] is False
     # Allowlist: no PII / secrets / app_id in the structured record.
     assert set(fields) <= {
         "result",
@@ -550,6 +566,7 @@ async def test_checkout_success_log_has_only_allowlisted_fields(
         "status",
         "paymentId",
         "paymentUrlRewritten",
+        "reused",
         "requestId",
     }
     assert "secret-pii@example.com" not in str(fields)
@@ -594,3 +611,186 @@ async def test_checkout_error_log_has_reason_and_no_pii(
     }
     assert "secret-pii@example.com" not in str(fields)
     assert _API_TOKEN not in str(fields)
+
+
+# --------------------- unpaid link reuse (CHECKOUT_LINK_REUSE_SECONDS) ---------------------
+
+
+def _outcomes(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    return [
+        r.extra_fields  # type: ignore[attr-defined]
+        for r in caplog.records
+        if r.msg == "cloudpayments_checkout_outcome"
+    ]
+
+
+def _capture(caplog: pytest.LogCaptureFixture) -> None:
+    logging.getLogger("app.billing_cloudpayments.checkout").disabled = False
+    caplog.set_level(logging.DEBUG)
+
+
+async def _buy(
+    client: AsyncClient,
+    uid: uuid.UUID,
+    *,
+    product: str = "week_6.99_nottrial",
+    email: str = "buyer@example.com",
+) -> _httpx.Response:
+    return await client.post(
+        _URL, json={"productId": product, "customerEmail": email}, headers=auth_headers(uid)
+    )
+
+
+async def test_link_reuse_repeat_returns_same_link_without_upstream_call(
+    checkout_client: AsyncClient,
+    broadapps: _Broadapps,
+    link_redis: FakeLinkRedis,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    broadapps.respond(201, _OK_BODY)
+    uid = uuid.uuid4()
+    _capture(caplog)
+
+    first = await _buy(checkout_client, uid, email="Buyer@Example.com ")
+    second = await _buy(checkout_client, uid, email="buyer@example.com")
+
+    assert first.status_code == second.status_code == 200, second.text
+    assert first.json() == second.json()
+    assert broadapps.calls == 1
+    outcomes = _outcomes(caplog)
+    assert [f["reused"] for f in outcomes] == [False, True]
+    assert outcomes[1]["paymentId"] == _OK_BODY["payment_id"]
+    assert outcomes[1]["paymentUrlRewritten"] is None
+    # The email is part of the cache identity only as a digest; it is never stored.
+    stored = link_redis.hashes[f"cp:link:{uid}"]
+    assert len(stored) == 1
+    assert "buyer@example.com" not in str(stored).lower()
+    assert link_redis.expires[f"cp:link:{uid}"] == 900
+
+
+@pytest.mark.parametrize(
+    "second",
+    [{"email": "other@example.com"}, {"product": _TOKEN_PRODUCT}],
+    ids=["other_email", "other_product"],
+)
+async def test_link_reuse_other_email_or_product_creates_new_link(
+    checkout_client: AsyncClient, broadapps: _Broadapps, second: dict[str, str]
+) -> None:
+    broadapps.respond(201, _OK_BODY)
+    uid = uuid.uuid4()
+    assert (await _buy(checkout_client, uid)).status_code == 200
+    assert (await _buy(checkout_client, uid, **second)).status_code == 200
+    assert broadapps.calls == 2
+
+
+async def test_link_reuse_other_user_creates_new_link(
+    checkout_client: AsyncClient, broadapps: _Broadapps
+) -> None:
+    broadapps.respond(201, _OK_BODY)
+    assert (await _buy(checkout_client, uuid.uuid4())).status_code == 200
+    assert (await _buy(checkout_client, uuid.uuid4())).status_code == 200
+    assert broadapps.calls == 2
+
+
+async def test_link_reuse_disabled_with_zero_calls_upstream_every_time(
+    checkout_client: AsyncClient,
+    broadapps: _Broadapps,
+    link_redis: FakeLinkRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHECKOUT_LINK_REUSE_SECONDS", "0")
+    get_settings.cache_clear()
+    broadapps.respond(201, _OK_BODY)
+    uid = uuid.uuid4()
+    assert (await _buy(checkout_client, uid)).status_code == 200
+    assert (await _buy(checkout_client, uid)).status_code == 200
+    assert broadapps.calls == 2
+    assert link_redis.hashes == {}
+    assert link_redis.lock_attempts == []
+
+
+async def test_link_reuse_upstream_error_is_not_cached(
+    checkout_client: AsyncClient, broadapps: _Broadapps, link_redis: FakeLinkRedis
+) -> None:
+    uid = uuid.uuid4()
+    broadapps.respond(500, {"detail": "boom"})
+    assert (await _buy(checkout_client, uid)).status_code == 502
+    assert link_redis.hashes == {}
+    assert link_redis.locks == set(), "the lock must be released after a failed call"
+
+    broadapps.respond(201, _OK_BODY)
+    resp = await _buy(checkout_client, uid)
+    assert resp.status_code == 200, resp.text
+    assert broadapps.calls == 2
+
+
+async def test_link_reuse_short_provider_expiry_is_not_cached(
+    checkout_client: AsyncClient, broadapps: _Broadapps, link_redis: FakeLinkRedis
+) -> None:
+    soon = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=30)
+    broadapps.respond(201, {**_OK_BODY, "expires_at": soon.isoformat()})
+    uid = uuid.uuid4()
+    assert (await _buy(checkout_client, uid)).status_code == 200
+    assert (await _buy(checkout_client, uid)).status_code == 200
+    assert broadapps.calls == 2
+    assert link_redis.hashes == {}
+
+
+async def test_link_reuse_concurrent_calls_make_one_upstream_call(
+    checkout_client: AsyncClient,
+    broadapps: _Broadapps,
+    link_redis: FakeLinkRedis,
+    caplog: pytest.LogCaptureFixture,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    broadapps.respond(201, _OK_BODY)
+    uid = uuid.uuid4()
+    # Provision the user up front: concurrent first-time provisioning of one user serialises on
+    # the DB (uncommitted insert), which would hide the Redis lock under test.
+    async with db_sessionmaker() as s:
+        await seed_user(s, user_id=uid)
+
+    async def _hold_until_loser_waits() -> None:
+        # Keep the winner inside the upstream call until another request was denied the lock.
+        for _ in range(10_000):
+            if any(not taken for _key, taken in link_redis.lock_attempts):
+                return
+            await asyncio.sleep(0)
+        raise AssertionError("no concurrent request contended for the lock")
+
+    broadapps.before_post = _hold_until_loser_waits
+    _capture(caplog)
+
+    responses = await asyncio.gather(*(_buy(checkout_client, uid) for _ in range(3)))
+
+    assert [r.status_code for r in responses] == [200, 200, 200]
+    assert {r.json()["paymentId"] for r in responses} == {_OK_BODY["payment_id"]}
+    assert broadapps.calls == 1
+    assert sorted(f["reused"] for f in _outcomes(caplog)) == [False, True, True]
+    assert link_redis.locks == set()
+
+
+async def test_link_reuse_redis_unavailable_fails_open_to_upstream(
+    checkout_client: AsyncClient,
+    broadapps: _Broadapps,
+    link_redis: FakeLinkRedis,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    link_redis.broken = True
+    broadapps.respond(201, _OK_BODY)
+    uid = uuid.uuid4()
+    _capture(caplog)
+
+    for _ in range(2):
+        resp = await _buy(checkout_client, uid)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["paymentUrl"] == _OK_BODY["payment_url"]
+
+    assert broadapps.calls == 2
+    warnings = [
+        r.extra_fields  # type: ignore[attr-defined]
+        for r in caplog.records
+        if r.msg == "cloudpayments_checkout_link_reuse_unavailable"
+    ]
+    assert [w["op"] for w in warnings] == ["lookup", "lookup"]
+    assert "buyer@example.com" not in str(warnings)
