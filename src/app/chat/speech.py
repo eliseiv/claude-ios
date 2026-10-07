@@ -308,18 +308,28 @@ def _inside_unclosed_construct(prefix: str) -> bool:
     return _open_fence(prefix) or _tail_is_table_line(prefix) or _unclosed_link(prefix)
 
 
-def next_speech_segment(buffer: str, min_chars: int) -> tuple[str, str] | None:
+def next_speech_segment(
+    buffer: str, min_chars: int, *, first: bool = False
+) -> tuple[str, str] | None:
     """Отрезать от растущего буфера очередной сегмент озвучки. `None` — ещё рано (ADR-104 §6).
 
     Кандидат — НАИБОЛЬШИЙ префикс буфера, который: (а) заканчивается на границе предложения (та
     же `_SENTENCE_END_RE`, что уже используется потолком, — второй границы предложения в системе
     не заводится); (б) не короче ``min_chars``; (в) не находится внутри незакрытой конструкции.
+    При ``first`` — НАИМЕНЬШИЙ такой префикс: первый сегмент определяет время до первого звука.
 
     Возвращает пару «сегмент, остаток» СЫРОГО текста: чистка применяется вызывающим, потому что
     ему нужен ещё и признак «после чистки пусто» (такой сегмент не отправляется и не
     оплачивается). Функция чистая — её исход зависит только от буфера и порога.
     """
     if len(buffer) < min_chars:
+        return None
+    if first:
+        for match in _SENTENCE_END_RE.finditer(buffer):
+            cut = match.end()
+            if cut < min_chars or _inside_unclosed_construct(buffer[:cut]):
+                continue
+            return buffer[:cut], buffer[cut:]
         return None
     for match in reversed(list(_SENTENCE_END_RE.finditer(buffer))):
         cut = match.end()
@@ -455,6 +465,8 @@ class VoiceTurnBudget:
       `spokenSegments` кадра `interrupted` и пометки `payload.interrupted`.
     * ``capped`` — «потолок хода исчерпан, дальше по этому ходу не синтезируем»: признак
       потурновый по той же причине, что и бюджет, который его порождает.
+    * ``hedged_segments`` — число сегментов хода, где запускался hedge синтеза; это `ttsHedged`
+      лога `voice_mode_turn` (ADR-104 §12), а лог пишется на ход.
 
     **Признака исчерпанного бакета здесь НЕТ, и это не пропуск.** Единица бакета `rl:speech` —
     ОЗВУЧЕННЫЙ ШАГ (ADR-104 §13.2), и отказ гасит синтез именно шага: «следующий озвученный шаг
@@ -472,6 +484,7 @@ class VoiceTurnBudget:
     next_segment: int = 0
     heard_segments: int = 0
     capped: bool = False
+    hedged_segments: int = 0
 
 
 class VoiceSpeechSink(Protocol):
@@ -534,6 +547,8 @@ class VoiceTurnSpeech:
         # а не импортирован: синтезу нечего знать ни о Redis, ни о том, чей это пользователь.
         self._limiter = limiter
         self._buffer = ""
+        # Первый сегмент ЭТОЙ ноги режется по своему порогу и наименьшим префиксом (ADR-104 §6).
+        self._first_segment = True
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._delivered = 0
@@ -625,10 +640,16 @@ class VoiceTurnSpeech:
             return
         self._buffer += text
         while True:
-            split = next_speech_segment(self._buffer, self._settings.voice_mode_segment_min_chars)
+            min_chars = (
+                self._settings.voice_mode_first_segment_min_chars
+                if self._first_segment
+                else self._settings.voice_mode_segment_min_chars
+            )
+            split = next_speech_segment(self._buffer, min_chars, first=self._first_segment)
             if split is None:
                 return
             segment, self._buffer = split
+            self._first_segment = False
             self._queue.put_nowait(segment)
 
     def interrupt(self) -> None:
@@ -722,7 +743,7 @@ class VoiceTurnSpeech:
                 return
             self._token_taken = True
         try:
-            audio = await self._client.synthesize(text=spoken, voice=self._voice)
+            audio = await self._synthesize_hedged(spoken)
         except AppError:
             # Отказ синтезатора ход НЕ затрагивает: звук прекращается, `delta`/`done` идут.
             # Наружу — кадр `error {scope:"speech"}`, а не закрытие сокета.
@@ -751,6 +772,46 @@ class VoiceTurnSpeech:
             # полным и продолжает идти в `delta` и в `done` — обрезается речь, не ответ.
             self._budget.capped = True
         voice_mode_speech_segments_total.labels(outcome="capped" if truncated else "ok").inc()
+
+    async def _synthesize_hedged(self, text: str) -> bytes:
+        """Синтез сегмента с hedge (ADR-104 §6): нет ответа за `VOICE_TTS_HEDGE_SECONDS` —
+        второй такой же вызов параллельно, берётся первый успешный, другой отменяется.
+
+        Отказ одного при живом другом — не отказ сегмента: `AppError` наружу только когда
+        отказали все запущенные вызовы. Токен бакета и списание — у вызывающего, один раз.
+        """
+        hedge_after = self._settings.voice_tts_hedge_seconds
+        if hedge_after <= 0:
+            return await self._client.synthesize(text=text, voice=self._voice)
+        started = [asyncio.create_task(self._client.synthesize(text=text, voice=self._voice))]
+        try:
+            pending: set[asyncio.Task[bytes]] = set(started)
+            done, _ = await asyncio.wait(pending, timeout=hedge_after)
+            if not done:
+                self._budget.hedged_segments += 1
+                hedge = asyncio.create_task(self._client.synthesize(text=text, voice=self._voice))
+                started.append(hedge)
+                pending.add(hedge)
+            failure: AppError | None = None
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    error = task.exception()
+                    if error is None:
+                        return task.result()
+                    if not isinstance(error, AppError):
+                        raise error
+                    failure = error
+            assert failure is not None
+            raise failure
+        finally:
+            for task in started:
+                if not task.done():
+                    task.cancel()
+                elif not task.cancelled():
+                    # Исход проигравшего забирается, чтобы его отказ не всплыл предупреждением
+                    # «Task exception was never retrieved».
+                    task.exception()
 
 
 # ---------------------------------------------------------------------------------------------

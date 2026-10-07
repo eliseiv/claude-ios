@@ -7,10 +7,11 @@ No magic numbers in business code: limits and grant size are config-driven (ADR-
 from __future__ import annotations
 
 import ipaddress
+import math
 from functools import lru_cache
 from typing import Any, Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _IpNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -886,6 +887,12 @@ class Settings(BaseSettings):
     # нижней границы короткие реплики дали бы вызов на каждое слово. ВЕРХНЮЮ границу задаёт не
     # эта переменная, а совокупный на ход TTS_MAX_CHARS. Калибровка — Q-104-1.
     voice_mode_segment_min_chars: int = Field(default=80, alias="VOICE_MODE_SEGMENT_MIN_CHARS")
+    # Порог ПЕРВОГО сегмента ноги: время до первого звука = генерация первого сегмента + его
+    # синтез, поэтому первый режется раньше и короче (ADR-104 §6). Объявлен ПОСЛЕ
+    # `voice_mode_segment_min_chars` намеренно — валидатор сверяет его с ним.
+    voice_mode_first_segment_min_chars: int = Field(
+        default=30, alias="VOICE_MODE_FIRST_SEGMENT_MIN_CHARS"
+    )
     # Потолок ОДНОЙ входящей реплики в секундах. Отдельный от ATTACHMENT_MAX_BYTES_AUDIO —
     # действуют оба, что сработает раньше: байты ограничивают трафик, секунды — время
     # распознавания, и на сильно сжатом кодеке одно не выводится из другого.
@@ -898,6 +905,9 @@ class Settings(BaseSettings):
     voice_mode_idle_timeout_seconds: float = Field(
         default=120.0, alias="VOICE_MODE_IDLE_TIMEOUT_SECONDS"
     )
+    # Порог параллельного повтора синтеза сегмента в голосовом режиме (ADR-104 §6): ответа нет
+    # дольше — второй такой же вызов, берётся первый успешный. `<= 0` — hedge выключен.
+    voice_tts_hedge_seconds: float = Field(default=4.0, alias="VOICE_TTS_HEDGE_SECONDS")
 
     # --- Observability ---
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -1273,6 +1283,25 @@ class Settings(BaseSettings):
         короткой фразы отдельным платным вызовом — ровно то, против чего переменная заведена.
         """
         return value if value > 0 else 80
+
+    @field_validator("voice_mode_first_segment_min_chars")
+    @classmethod
+    def _bounded_voice_mode_first_segment_min_chars(cls, value: int, info: ValidationInfo) -> int:
+        """Порог первого сегмента: положителен и не больше общего (ADR-104 §6).
+
+        Иначе — `min(30, VOICE_MODE_SEGMENT_MIN_CHARS)`: первый сегмент длиннее остальных
+        отменял бы саму цель порога — ранний первый звук.
+        """
+        segment_min = int(info.data.get("voice_mode_segment_min_chars", 80))
+        if 0 < value <= segment_min:
+            return value
+        return min(30, segment_min)
+
+    @field_validator("voice_tts_hedge_seconds")
+    @classmethod
+    def _non_negative_voice_tts_hedge_seconds(cls, value: float) -> float:
+        """`<= 0` или не конечное число — hedge выключен, а не ошибка старта (ADR-104 §6)."""
+        return value if math.isfinite(value) and value > 0 else 0.0
 
     @field_validator("voice_mode_utterance_max_seconds")
     @classmethod
