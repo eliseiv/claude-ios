@@ -223,6 +223,11 @@ class _VoiceSession:
         # `tool_call` пользователь уже УСЛЫШАЛ, — ассистент договорил бы целый новый ответ
         # после просьбы замолчать.
         self._turn_spoke = False
+        # Задержки ХОДА для лога `voice_mode_turn` (ADR-104 §12): начало хода, распознавание
+        # реплики (`None` — ход начат не голосом) и момент первого `audio.begin` хода.
+        self._turn_started_at = time.monotonic()
+        self._stt_ms: int | None = None
+        self._first_audio_at: float | None = None
         self._interrupt_reason: str | None = None
         # СНИМОК предиката §5, снятый В МОМЕНТ кадра `interrupt`. Живёт по правилам
         # `_interrupt_reason`: прерывание — событие ХОДА, поэтому на ноге `tool.result` не
@@ -723,6 +728,9 @@ class _VoiceSession:
         """
         self._turn_text = ""
         self._turn_spoke = False
+        self._turn_started_at = time.monotonic()
+        self._stt_ms = None
+        self._first_audio_at = None
         self._interrupt_reason = None
         self._interrupt_had_text = False
         self._speech_skipped = None
@@ -771,6 +779,7 @@ class _VoiceSession:
         """
         self._new_turn()
         locale = (context or {}).get("locale")
+        stt_started = time.monotonic()
         try:
             transcript = await TranscriptionClient().transcribe(
                 # Подсказка языка — ТА ЖЕ функция, что у голосового вложения (ADR-095 §6), и
@@ -784,6 +793,7 @@ class _VoiceSession:
         except AppError as exc:
             await self._error(code=exc.code, message=exc.message, scope=SCOPE_TURN)
             return
+        self._stt_ms = int((time.monotonic() - stt_started) * 1000)
         if not transcript:
             # Пустая реплика — ПРЕДМЕТНЫЙ отказ, а не пустой ход: отправить в модель тишину
             # нельзя, промолчать в ответ — тоже. Код `empty_audio` вводится ADR-104 §9 и на
@@ -1094,6 +1104,13 @@ class _VoiceSession:
                     answerChars=len(self._turn_text),
                     segments=speech.delivered_segments if speech is not None else 0,
                     latencyMs=int((time.monotonic() - started) * 1000),
+                    sttMs=self._stt_ms,
+                    firstAudioMs=(
+                        int((self._first_audio_at - self._turn_started_at) * 1000)
+                        if self._first_audio_at is not None
+                        else None
+                    ),
+                    ttsHedged=self._turn_budget.hedged_segments,
                     interruptReason=self._interrupt_reason,
                 )
             # §13.13: реплика, принятая в очередь, пока этот ход закрывался, уходит в работу
@@ -1362,6 +1379,8 @@ class _SocketSpeechSink:
         self._session = session
 
     async def audio_begin(self, *, segment: int, media_type: str, voice_id: str) -> None:
+        if self._session._first_audio_at is None:  # noqa: SLF001
+            self._session._first_audio_at = time.monotonic()  # noqa: SLF001
         await self._session._send(  # noqa: SLF001 — sink принадлежит сеансу и живёт его жизнью
             {
                 "type": "audio.begin",
