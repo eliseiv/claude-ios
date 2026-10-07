@@ -36,9 +36,14 @@ from app.chat.attachment_refs import (
     RECENT_USER_STEPS_SCAN,
     latest_alive_image_urls,
     recent_image_available,
-    upload_turn_attachment_refs,
+    upload_image_ref,
 )
-from app.chat.attachments import ImageAttachmentRef, PreparedAttachments, prepare_attachments
+from app.chat.attachments import (
+    ImageAttachmentRef,
+    PreparedAttachments,
+    is_attachment_placeholder,
+    prepare_attachments,
+)
 from app.chat.characters import character_prompt_layer, is_known_character
 from app.chat.global_tools import (
     DOCUMENT_INVALID_ERROR_CODE,
@@ -96,6 +101,7 @@ from app.chat.tools import (
 )
 from app.chat.transcription import TranscriptionClient
 from app.chats.provider_blocks import to_domain_blocks
+from app.chats.repository import strip_context_block
 from app.config import Settings, get_settings
 from app.documents import DocumentsService
 from app.errors import (
@@ -1738,9 +1744,20 @@ class ChatOrchestrator:
         # the freshly generated message_step_id (above) yields a new debit (CO-7); on resume
         # Состояние провайдера здесь сбрасывается, поэтому ниже файлы проекта подмешиваются
         # заново: без этого правка навсегда лишала бы беседу файлов.
+        inherited_attachments = False
         if edit_message_step_id is not None:
             if ctx.is_new:
                 raise MessageNotFoundError("message_not_found")
+            # ADR-120 §4: правка/перегенерация без вложений наследует вложения исходного хода —
+            # читаются ДО усечения, которое удаляет их строки.
+            if not attachments:
+                attachments = await self._inherited_attachments(sess.id, edit_message_step_id)
+                inherited_attachments = attachments is not None
+            # Пустой текст правки/перегенерации — текст исходного хода.
+            if not message.strip():
+                message = await self._inherited_message(sess.id, edit_message_step_id)
+            if not message.strip() and not attachments:
+                raise ValidationFailedError("message or at least one attachment is required")
             deleted = await self._deps.repo.truncate_from_message_step(
                 sess.id, edit_message_step_id
             )
@@ -1875,14 +1892,22 @@ class ChatOrchestrator:
         # показывает как медиа. Точка вызова — после валидации вложений (кривой файл дешевле отбить
         # раньше) и ДО add_step: нарушение ⇒ 422, ни одного шага в БД, ни одного вызова LLM, кредит
         # не списан, только что созданная пустая сессия откатывается с транзакцией запроса.
-        if attachments:
+        # ADR-120 §4: наследованные вложения прошли модерацию в исходном ходе.
+        if attachments and not inherited_attachments:
             await self._moderate_turn(message, attachments)
 
-        # Persist fal https refs (TTL 1 day) for later useRecentImage — soft-fail if media off.
+        # ADR-120 §1/§2: rows for chat_attachments + their attachmentRefs; photos additionally get
+        # fal https refs (TTL 1 day) for later useRecentImage — soft-fail if media off.
         attachment_refs: list[dict[str, Any]] = []
-        if prepared is not None and prepared.images:
-            media_svc = self._deps.global_tools._media  # noqa: SLF001
-            attachment_refs = await upload_turn_attachment_refs(media_svc, prepared.images)
+        attachment_rows: list[dict[str, Any]] = []
+        if prepared is not None and attachments:
+            attachment_refs, attachment_rows = await self._turn_attachment_records(
+                user_id=user_id,
+                session_id=sess.id,
+                message_step_id=message_step_id,
+                attachments=attachments,
+                prepared=prepared,
+            )
 
         # Ask-first: recent earlier photo, but NOT when this message already has a new image.
         has_turn_images = bool(prepared is not None and prepared.images)
@@ -1916,6 +1941,10 @@ class ChatOrchestrator:
             role="user",
             payload=user_payload,
         )
+        if attachment_rows:
+            await self._deps.repo.add_attachments(attachment_rows)
+        # The decoded bytes must not live for the rest of the turn (generation can take minutes).
+        del attachment_rows
 
         generation_credit_cost = _turn_credit_cost(sess.model or None)
         decision, state = await self._evaluate(
@@ -2096,6 +2125,99 @@ class ChatOrchestrator:
                 messageStepId=str(message_step_id),
                 reason=reason,
             )
+
+    async def _inherited_message(self, session_id: uuid.UUID, message_step_id: uuid.UUID) -> str:
+        """User text of the edited turn without the settings block and placeholders."""
+        payload = await self._deps.repo.user_step_payload(session_id, message_step_id)
+        content = payload.get("content") if isinstance(payload, dict) else None
+        if not isinstance(content, list) or not content:
+            return ""
+        first = content[0]
+        if not isinstance(first, dict) or first.get("type") != "text":
+            return ""
+        text = str(first.get("text") or "")
+        if is_attachment_placeholder(text):
+            return ""
+        return strip_context_block(text)
+
+    async def _inherited_attachments(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID
+    ) -> list[AttachmentIn] | None:
+        """Stored attachments of the edited turn as request attachments (ADR-120 §4)."""
+        rows = await self._deps.repo.turn_attachments(session_id, message_step_id)
+        if not rows:
+            return None
+        return [
+            AttachmentIn.model_validate(
+                {
+                    "type": row.type,
+                    "mediaType": row.media_type,
+                    "filename": row.filename,
+                    "data": base64.b64encode(row.content).decode("ascii"),
+                }
+            )
+            for row in rows
+        ]
+
+    async def _turn_attachment_records(
+        self,
+        *,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        message_step_id: uuid.UUID,
+        attachments: list[AttachmentIn],
+        prepared: PreparedAttachments,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """``(attachmentRefs, chat_attachments rows)`` of one turn, in request order (ADR-120).
+
+        Called after ``prepare_attachments`` validated every item, so decoding cannot fail here.
+        """
+        media_svc = self._deps.global_tools._media  # noqa: SLF001
+        images = iter(prepared.images)
+        refs: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
+        for position, att in enumerate(attachments):
+            content = base64.b64decode(att.data, validate=True)
+            attachment_id = uuid.uuid4()
+            filename = att.filename or "file"
+            ref: dict[str, Any] = {
+                "attachmentId": str(attachment_id),
+                "mediaType": att.mediaType,
+                "filename": filename,
+                "size": len(content),
+            }
+            if att.type == "image":
+                fal_ref = await upload_image_ref(media_svc, next(images))
+                if fal_ref is not None:
+                    ref["url"] = fal_ref["url"]
+                    ref["expiresAt"] = fal_ref["expiresAt"]
+            refs.append(ref)
+            rows.append(
+                {
+                    "id": attachment_id,
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "message_step_id": message_step_id,
+                    "position": position,
+                    "type": att.type,
+                    "media_type": att.mediaType,
+                    "filename": filename,
+                    "size_bytes": len(content),
+                    "content": content,
+                }
+            )
+        return refs, rows
+
+    async def _stored_recent_image(self, session_id: uuid.UUID) -> ImageAttachmentRef | None:
+        """Newest stored photo of the session for a lazy ``useRecentImage`` (ADR-120 §2)."""
+        row = await self._deps.repo.latest_image_attachment(session_id)
+        if row is None:
+            return None
+        return ImageAttachmentRef(
+            media_type=row.media_type,
+            filename=row.filename,
+            data=base64.b64encode(row.content).decode("ascii"),
+        )
 
     async def _moderate_turn(self, message: str, attachments: list[AttachmentIn]) -> None:
         """Пре-модерация хода с вложениями (ADR-086 §3). Нарушение → 422 до записи шага.
@@ -4273,6 +4395,7 @@ class ChatOrchestrator:
             session_id=session_id,
             turn_images=turn_images,
             recent_image_urls=recent_image_urls,
+            recent_image_loader=lambda: self._stored_recent_image(session_id),
             last_image_job_id=last_image_job_id,
         )
         await self._persist_tool_execution(

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -95,6 +96,9 @@ MEDIA_CONTENT_POLICY_ERROR_CODE = "content_policy_violation"
 MEDIA_MODERATION_UNAVAILABLE_ERROR_CODE = "moderation_unavailable"
 MEDIA_MODERATION_NOT_CONFIGURED_ERROR_CODE = "moderation_not_configured"
 
+# ADR-120 §2: lazy source of the newest stored chat photo of the session.
+RecentImageLoader = Callable[[], Awaitable[ImageAttachmentRef | None]]
+
 # Cap auto-uploads from chat attachments (matches media.generate_image imageUrls max).
 _TURN_IMAGE_UPLOAD_MAX = 14
 
@@ -145,9 +149,14 @@ class GlobalToolHandlers:
         session_id: uuid.UUID | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
+        recent_image_loader: RecentImageLoader | None = None,
         last_image_job_id: str | None = None,
     ) -> ToolExecution:
-        """Execute a global server-side tool. Returns a ToolExecution (result or error envelope)."""
+        """Execute a global server-side tool. Returns a ToolExecution (result or error envelope).
+
+        ``recent_image_loader`` (ADR-120 §2) returns the newest stored photo of the session; it is
+        awaited only when ``useRecentImage`` finds no live fal url in ``recent_image_urls``.
+        """
         if tool_name in _DOCUMENT_TOOLS:
             return await self._document(
                 tool_name=tool_name, args=args, user_id=user_id, session_id=session_id
@@ -162,6 +171,7 @@ class GlobalToolHandlers:
                 user_id=user_id,
                 turn_images=turn_images,
                 recent_image_urls=recent_image_urls,
+                recent_image_loader=recent_image_loader,
                 last_image_job_id=last_image_job_id,
             )
         if tool_name == TOOL_MEDIA_GENERATE_IMAGE:
@@ -171,6 +181,7 @@ class GlobalToolHandlers:
                 user_id=user_id,
                 turn_images=turn_images,
                 recent_image_urls=recent_image_urls,
+                recent_image_loader=recent_image_loader,
             )
         if tool_name == TOOL_MEDIA_GENERATE_VIDEO:
             return await self._media_generate(
@@ -179,6 +190,7 @@ class GlobalToolHandlers:
                 user_id=user_id,
                 turn_images=turn_images,
                 recent_image_urls=recent_image_urls,
+                recent_image_loader=recent_image_loader,
             )
         # Unknown global tool name — should never happen (validated upstream against the registry).
         return ToolExecution.error("unknown_tool", f"unknown global server-side tool: {tool_name}")
@@ -233,6 +245,23 @@ class GlobalToolHandlers:
             )
         return urls
 
+    async def _recent_image_urls(
+        self,
+        recent_image_urls: list[str] | None,
+        recent_image_loader: RecentImageLoader | None,
+    ) -> list[str] | ToolExecution:
+        """Live fal urls of the recent photo; else re-upload the stored one (ADR-120 §2)."""
+        urls = [u for u in (recent_image_urls or []) if isinstance(u, str) and u]
+        if urls:
+            return urls
+        stored = await recent_image_loader() if recent_image_loader is not None else None
+        if stored is None:
+            return ToolExecution.error(
+                MEDIA_NO_RECENT_IMAGE_ERROR_CODE,
+                "no recent chat photo available (expired or missing); ask the user to re-attach",
+            )
+        return await self._upload_turn_images([stored])
+
     async def _media_ask_params(
         self,
         args: dict[str, Any],
@@ -240,6 +269,7 @@ class GlobalToolHandlers:
         user_id: uuid.UUID | None = None,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
+        recent_image_loader: RecentImageLoader | None = None,
         last_image_job_id: str | None = None,
     ) -> ToolExecution:
         """Start a mediaChoices wizard; options come only from the server catalog (ADR-070)."""
@@ -283,14 +313,10 @@ class GlobalToolHandlers:
                 return uploaded
             image_urls = uploaded
         elif source_job_id is None and use_recent:
-            urls = [u for u in (recent_image_urls or []) if isinstance(u, str) and u]
-            if not urls:
-                return ToolExecution.error(
-                    MEDIA_NO_RECENT_IMAGE_ERROR_CODE,
-                    "no recent chat photo available (expired or missing); "
-                    "ask the user to re-attach",
-                )
-            image_urls = urls
+            recent = await self._recent_image_urls(recent_image_urls, recent_image_loader)
+            if isinstance(recent, ToolExecution):
+                return recent
+            image_urls = recent
 
         # Offer «Использовать последнее фото?» only when starting video without a chosen reference.
         offer_last = (
@@ -418,6 +444,7 @@ class GlobalToolHandlers:
         user_id: uuid.UUID | None,
         turn_images: list[ImageAttachmentRef] | None = None,
         recent_image_urls: list[str] | None = None,
+        recent_image_loader: RecentImageLoader | None = None,
     ) -> ToolExecution:
         """Submit a media job (ADR-068). Never waits for fal completion.
 
@@ -475,14 +502,10 @@ class GlobalToolHandlers:
                 return uploaded
             image_urls = uploaded
         elif source_job_id is None and not image_urls and use_recent:
-            urls = [u for u in (recent_image_urls or []) if isinstance(u, str) and u]
-            if not urls:
-                return ToolExecution.error(
-                    MEDIA_NO_RECENT_IMAGE_ERROR_CODE,
-                    "no recent chat photo available (expired or missing); "
-                    "ask the user to re-attach",
-                )
-            image_urls = urls
+            recent = await self._recent_image_urls(recent_image_urls, recent_image_loader)
+            if isinstance(recent, ToolExecution):
+                return recent
+            image_urls = recent
 
         try:
             view = await self._media.submit(

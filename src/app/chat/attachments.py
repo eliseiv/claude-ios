@@ -253,15 +253,23 @@ def _check_pdf_pages(decoded: bytes, settings: Settings) -> None:
         raise PdfTooManyPagesError("PDF exceeds the maximum allowed number of pages")
 
 
+_PLACEHOLDER_PREFIX = "[attachment: "
+_PLACEHOLDER_SUFFIX = "— отправлено в первом обращении к модели]"
+
+
 def _placeholder(att: AttachmentIn, decoded_size: int) -> dict[str, str]:
     name = att.filename or "file"
     return {
         "type": "text",
         "text": (
-            f'[attachment: {att.mediaType} "{name}", {decoded_size}B '
-            f"— отправлено в первом обращении к модели]"
+            f'{_PLACEHOLDER_PREFIX}{att.mediaType} "{name}", {decoded_size}B {_PLACEHOLDER_SUFFIX}'
         ),
     }
+
+
+def is_attachment_placeholder(text: str) -> bool:
+    """True for a persisted attachment placeholder text block (not the user's own text)."""
+    return text.startswith(_PLACEHOLDER_PREFIX) and text.endswith(_PLACEHOLDER_SUFFIX)
 
 
 def _text_part_text(att: AttachmentIn, text: str | None) -> str:

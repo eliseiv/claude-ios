@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chats.cursor import ChatCursor, ChatHistoryCursor
 from app.chats.provider_blocks import to_domain_blocks
-from app.models import ChatSession, ChatStep, ToolCall
+from app.models import ChatAttachment, ChatSession, ChatStep, ToolCall
 
 _PREVIEW_MAX_CHARS = 160
 
@@ -314,6 +314,21 @@ class ChatsRepository:
         return dict(rows.tuples().all())
 
     # ---- mutations (metadata only) ----
+
+    async def attachment_owner(
+        self, attachment_id: uuid.UUID, session_id: uuid.UUID
+    ) -> uuid.UUID | None:
+        """Owner of a stored attachment of the chat, without reading its bytes (ADR-120 §3)."""
+        owner: uuid.UUID | None = await self._session.scalar(
+            select(ChatAttachment.user_id).where(
+                ChatAttachment.id == attachment_id, ChatAttachment.session_id == session_id
+            )
+        )
+        return owner
+
+    async def get_attachment(self, attachment_id: uuid.UUID) -> ChatAttachment | None:
+        row: ChatAttachment | None = await self._session.get(ChatAttachment, attachment_id)
+        return row
 
     async def update_metadata(
         self,
