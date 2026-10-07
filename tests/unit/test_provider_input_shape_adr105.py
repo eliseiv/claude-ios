@@ -28,8 +28,7 @@ from app.chat.openai_client import OpenAIClient
 from app.chat.openai_responses_client import OpenAIResponsesClient
 from app.config import get_settings
 from app.schemas.chat import AttachmentIn
-
-_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+from tests.images import PNG_B64
 
 
 def _b64(data: bytes) -> str:
@@ -47,7 +46,7 @@ def _pdf_b64() -> str:
 
 
 _ATTACHMENTS: dict[str, AttachmentIn] = {
-    "image": AttachmentIn(type="image", mediaType="image/png", filename="p.png", data=_b64(_PNG)),
+    "image": AttachmentIn(type="image", mediaType="image/png", filename="p.png", data=PNG_B64),
     "document": AttachmentIn(
         type="document", mediaType="application/pdf", filename="d.pdf", data=_pdf_b64()
     ),

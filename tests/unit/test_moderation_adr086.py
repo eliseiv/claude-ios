@@ -12,11 +12,14 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
+import openai
 import pytest
 
 from app.config import Settings
 from app.errors import (
     ContentPolicyViolationError,
+    ModerationInputRejectedError,
     ModerationNotConfiguredError,
     ModerationUnavailableError,
 )
@@ -511,3 +514,32 @@ async def test_worst_verdict_wins_across_separate_image_calls() -> None:
     )
     assert len(fake.calls) == 2
     assert verdict.status in (STATUS_FLAGGED, STATUS_BLOCKED)
+
+
+# --- 400 провайдера — отказ входа, не недоступность (§7) --------------------------------------
+
+
+def _bad_request(code: str | None) -> openai.BadRequestError:
+    request = httpx.Request("POST", "https://api.openai.com/v1/moderations")
+    body = {"error": {"message": "bad", "code": code}}
+    response = httpx.Response(400, request=request, json=body)
+    return openai.BadRequestError("bad", response=response, body=body["error"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_open", ["false", "true"])
+async def test_provider_bad_request_is_input_rejected_not_unavailable(fail_open: str) -> None:
+    """400 не превращается ни в 503 (fail-closed), ни в `unchecked` (fail-open)."""
+    svc, _ = _service(error=_bad_request("invalid_image"), MODERATION_FAIL_OPEN=fail_open)
+    with pytest.raises(ModerationInputRejectedError) as info:
+        await svc.check(surface=SURFACE_MEDIA_SUBMIT, stage=STAGE_INPUT, text="x")
+    assert info.value.code == "invalid_image"
+    assert not isinstance(info.value, ModerationUnavailableError)
+
+
+@pytest.mark.asyncio
+async def test_provider_bad_request_without_code_keeps_empty_code() -> None:
+    svc, _ = _service(error=_bad_request(None))
+    with pytest.raises(ModerationInputRejectedError) as info:
+        await svc.check(surface=SURFACE_MEDIA_SUBMIT, stage=STAGE_INPUT, text="x")
+    assert info.value.code == ""

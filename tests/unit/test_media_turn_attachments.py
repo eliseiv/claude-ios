@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import uuid
 from dataclasses import dataclass
 from unittest.mock import AsyncMock
@@ -16,16 +15,11 @@ from app.chat.tools import TOOL_MEDIA_ASK_PARAMS, TOOL_MEDIA_GENERATE_IMAGE
 from app.config import get_settings
 from app.media_generation.service import MediaJobView, UploadedFile
 from app.schemas.chat import AttachmentIn
+from tests.images import PNG_B64
 
 
 def _tiny_png_b64() -> str:
-    # 1x1 PNG
-    raw = (
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
-        b"\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00"
-        b"\x00\x00IEND\xaeB`\x82"
-    )
-    return base64.b64encode(raw).decode("ascii")
+    return PNG_B64
 
 
 @dataclass

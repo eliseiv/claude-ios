@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.chat.attachment_refs import upload_turn_attachment_refs
+from app.chat.attachment_refs import upload_image_ref
 from app.chat.attachments import ImageAttachmentRef
 from app.errors import (
     MediaGenerationNotConfiguredError,
@@ -74,9 +74,9 @@ async def test_upload_failure_is_skipped_softly(
     media.upload_reference_image = AsyncMock(side_effect=exc)
 
     with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
-        refs = await upload_turn_attachment_refs(media, [_image()])
+        ref = await upload_image_ref(media, _image())
 
-    assert refs == []
+    assert ref is None
     # Сообщение уходит СТРУКТУРНЫМ событием: имя файла живёт в `extra_fields`, а не в
     # зарезервированном атрибуте `LogRecord.filename`, из-за которого ветка падала.
     events = [r.getMessage() for r in caplog.records if r.name == _LOGGER_NAME]
@@ -87,30 +87,26 @@ async def test_upload_failure_is_skipped_softly(
     assert fields["fileName"] == "selfie.png"
 
 
-async def test_upload_failure_of_one_image_does_not_drop_the_others(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Сбой одной картинки не отменяет успешно загруженные: пропуск точечный, а не тотальный."""
+async def test_upload_success_returns_fal_ref() -> None:
+    """Успешная загрузка → ref с fal-url и TTL-сроком."""
     media = AsyncMock()
     media.upload_reference_image = AsyncMock(
-        side_effect=[
-            UpstreamError("fal 502"),
-            UploadedFile(
-                url="https://fal.media/files/ok.png",
-                media_type="image/png",
-                size=10,
-                expires_at=None,
-            ),
-        ]
+        return_value=UploadedFile(
+            url="https://fal.media/files/ok.png",
+            media_type="image/png",
+            size=10,
+            expires_at=None,
+        )
     )
 
-    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
-        refs = await upload_turn_attachment_refs(media, [_image("bad.png"), _image("good.png")])
+    ref = await upload_image_ref(media, _image("good.png"))
 
-    assert [r["filename"] for r in refs] == ["good.png"]
-    assert [r["url"] for r in refs] == ["https://fal.media/files/ok.png"]
+    assert ref is not None
+    assert ref["filename"] == "good.png"
+    assert ref["url"] == "https://fal.media/files/ok.png"
+    assert ref["expiresAt"].endswith("Z")
 
 
-async def test_upload_without_media_service_returns_no_refs() -> None:
-    """Media на инстансе не сконфигурирована → пустой список и ни одного обращения к fal."""
-    assert await upload_turn_attachment_refs(None, [_image()]) == []
+async def test_upload_without_media_service_returns_no_ref() -> None:
+    """Media на инстансе не сконфигурирована → None и ни одного обращения к fal."""
+    assert await upload_image_ref(None, _image()) is None

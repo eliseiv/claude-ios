@@ -25,13 +25,11 @@ from app.chat.attachments import (
 from app.config import Settings
 from app.errors import ValidationFailedError
 from app.schemas.chat import AttachmentIn
+from tests.images import GIF, JPEG, PNG, WEBP
 
 # ----------------------------- byte fixtures -----------------------------
 # Minimal valid magic-byte payloads for each image class.
-_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x00" * 16
-_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
-_GIF = b"GIF89a" + b"\x00" * 16
-_WEBP = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 16
+_JPEG, _PNG, _GIF, _WEBP = JPEG, PNG, GIF, WEBP
 
 
 def _b64(data: bytes) -> str:

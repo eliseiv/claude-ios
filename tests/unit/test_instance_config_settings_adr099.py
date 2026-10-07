@@ -251,18 +251,18 @@ async def test_an_ignored_row_is_labelled_by_the_fact_of_its_own_branch(
 
 
 # ============================== состав поверхности ==========================================
-def test_the_registry_declares_twenty_one_rows_one_of_them_instance_conditional() -> None:
-    """ADR-099 §8.1 + ADR-116 §4: строк ДВАДЦАТЬ ОДНА (14 + 7), одна — не на каждом инстансе.
+def test_the_registry_declares_twenty_two_rows_one_of_them_instance_conditional() -> None:
+    """ADR-099 §8.1 + ADR-116 §4: строк ДВАДЦАТЬ ДВЕ (15 + 7), одна — не на каждом инстансе.
 
     Состав зависит от инстанса по сноске ¹: `chat.anthropic_thinking_display` на OpenAI-инстансе
     потребителя не имеет, и объявить её значило бы дать оператору ручку, которая ничего не делает.
-    Отсюда 21 в реестре и 20 в ответе OpenAI-инстанса — это ОДНО правило, а не расхождение.
+    Отсюда 22 в реестре и 21 в ответе OpenAI-инстанса — это ОДНО правило, а не расхождение.
     Семь строк ADR-116 перечислены поимённо по `docs/modules/admin/02-api-contracts.md`.
     """
     anthropic_specs = declared_settings(_anthropic_settings())
     openai_specs = declared_settings(_openai_settings())
 
-    assert len(anthropic_specs) == 21
+    assert len(anthropic_specs) == 22
     assert {
         "llm.provider",
         "llm.dual_enabled",
@@ -275,7 +275,7 @@ def test_the_registry_declares_twenty_one_rows_one_of_them_instance_conditional(
     assert {spec.setting_id for spec in anthropic_specs} - {
         spec.setting_id for spec in openai_specs
     } == {SETTING_CHAT_THINKING_DISPLAY}
-    assert len(openai_specs) == 20
+    assert len(openai_specs) == 21
     assert find_setting(SETTING_CHAT_THINKING_DISPLAY, _openai_settings()) is None
 
 

@@ -38,8 +38,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.chat.orchestrator import _compose_turn0_text
 from app.config import get_settings
 from tests.conftest import FakeAnthropicClient, auth_headers, seed_user
+from tests.images import PNG
 
-_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+_PNG = PNG
 _BLOCK_PREFIX = "[Conversation settings for this message:"
 
 

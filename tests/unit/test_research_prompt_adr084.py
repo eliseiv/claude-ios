@@ -47,6 +47,14 @@ def test_suffix_states_live_search_and_forbids_dummy_queries() -> None:
     assert "no internet" in text
 
 
+def test_suffix_exempts_media_creation_from_search() -> None:
+    """Запрос на создание картинки/видео в Research — не поиск: идти в media-инструменты."""
+    text = _RESEARCH_INSTRUCTION
+    assert "Exception: a request to CREATE an image or a video is not a search" in text
+    assert "media.ask_params" in text
+    assert "do not run a web search for it" in text
+
+
 def test_layer_order_base_then_suffix_then_workspace_instructions() -> None:
     instructions = "Always answer in pirate speak."
     composed = _system_prompt_with_workspace("chat", instructions, "research")

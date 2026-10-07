@@ -19,8 +19,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.conftest import FakeAnthropicClient, auth_headers, seed_user
+from tests.images import PNG
 
-_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+_PNG = PNG
 
 
 def _b64(data: bytes) -> str:

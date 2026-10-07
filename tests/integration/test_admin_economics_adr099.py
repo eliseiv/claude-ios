@@ -1172,6 +1172,62 @@ async def test_dropping_general_from_the_advertised_set_is_normalized_visibly(
 
 
 @pytest.mark.asyncio
+async def test_setting_a_default_generation_mode_outside_the_advertised_set_is_400(
+    econ: Any,
+) -> None:
+    """Обратная сторона нормализации: режим по умолчанию вне витрины — `400`, не тихая правка."""
+    client, _ = econ
+    narrowed = await client.patch(
+        "/v1/admin/settings/chat.advertised_generation_modes",
+        json={"value": ["general"]},
+        headers=_H,
+    )
+    assert narrowed.status_code == 200, narrowed.text
+
+    response = await client.patch(
+        "/v1/admin/settings/chat.default_generation_mode", json={"value": "reasoning"}, headers=_H
+    )
+
+    assert response.status_code == 400, response.text
+
+
+@pytest.mark.asyncio
+async def test_default_generation_mode_reaches_capabilities_and_pins_the_advertised_set(
+    econ: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Режим по умолчанию отдаётся в capabilities и не снимается с витрины следующей правкой."""
+    from tests.conftest import auth_headers
+
+    client, _ = econ
+    widened = await client.patch(
+        "/v1/admin/settings/chat.advertised_generation_modes",
+        json={"value": ["general", "reasoning"]},
+        headers=_H,
+    )
+    assert widened.status_code == 200, widened.text
+    default = await client.patch(
+        "/v1/admin/settings/chat.default_generation_mode", json={"value": "reasoning"}, headers=_H
+    )
+    assert default.status_code == 200, default.text
+    # Витрина без нового режима по умолчанию нормализуется: он возвращается в список.
+    narrowed = await client.patch(
+        "/v1/admin/settings/chat.advertised_generation_modes",
+        json={"value": ["general"]},
+        headers=_H,
+    )
+    assert narrowed.status_code == 200, narrowed.text
+    assert "reasoning" in narrowed.json()["value"]
+
+    async with db_sessionmaker() as s:
+        uid = await seed_user(s, subscription="active", balance=5)
+    caps = await client.get("/v1/chat/v2/capabilities", headers=auth_headers(uid))
+    assert caps.status_code == 200, caps.text
+    body = caps.json()
+    assert body["defaultGenerationMode"] == "reasoning"
+    assert "reasoning" in [m["mode"] for m in body["generationModes"]]
+
+
+@pytest.mark.asyncio
 async def test_patch_of_an_unknown_setting_is_400_and_creates_nothing(
     econ: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:

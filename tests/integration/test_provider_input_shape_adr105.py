@@ -37,13 +37,14 @@ from app.chat.openai_client import OpenAIClient
 from app.chat.openai_responses_client import OpenAIResponsesClient
 from app.config import Settings, get_settings
 from tests.conftest import auth_headers, seed_user
+from tests.images import PNG
 
 ANTHROPIC_KEY = "sk-ant-service-test"
 OPENAI_KEY = "sk-openai-service-test"
 CLAUDE = "claude-sonnet-4-5"
 GPT = "gpt-4o"
 
-_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+_PNG = PNG
 _TEXT_FILE = "line one\nline two"
 
 

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from app.chat.speech import VoiceTurnBudget, VoiceTurnSpeech, to_spoken_text
@@ -76,6 +77,7 @@ def _settings(**overrides: Any) -> Settings:
     """Настройки хода. `model_copy` вместо env: тест не трогает процессный кэш настроек."""
     base: dict[str, Any] = {
         "voice_mode_segment_min_chars": 5,
+        "voice_mode_first_segment_min_chars": 5,
         "tts_max_chars": 700,
         "tts_rate_limit_per_min": 1000,
     }
@@ -235,7 +237,7 @@ async def test_segment_min_chars_holds_a_short_sentence() -> None:
     Падает, если минимальная длина не применяется: каждое короткое предложение стало бы отдельным
     ПЛАТНЫМ вызовом к поставщику.
     """
-    strict = _settings(voice_mode_segment_min_chars=80)
+    strict = _settings(voice_mode_segment_min_chars=80, voice_mode_first_segment_min_chars=80)
 
     held, _ = await _released(["Да. "], settings=strict)
     assert held.texts == []
@@ -259,10 +261,11 @@ async def test_cleaning_is_the_same_function_as_the_speech_endpoint() -> None:
         "Итог такой, смотри 🎉 подробности в [документации](https://example.dev) и в таблице.\n"
         "| ключ | значение |\n| --- | --- |\n| a | b |\nНа этом всё готово. "
     )
-    client, _ = await _released([raw])
+    # Первый сегмент ноги режется наименьшим префиксом — проверяемый идёт вторым, целиком.
+    client, _ = await _released(["Начало ответа. ", raw])
 
-    assert client.texts, "сегмент обязан выпуститься"
-    assert client.texts[0] == to_spoken_text(raw.rstrip())
+    assert len(client.texts) == 2, "сегмент обязан выпуститься"
+    assert client.texts[1] == to_spoken_text(raw.rstrip())
 
 
 # ---------------------------------------------------------------------------------------------
@@ -343,3 +346,76 @@ async def test_empty_after_cleaning_segment_is_not_synthesized_and_not_paid() ->
     assert client.texts == []
     assert sink.ends == []
     assert _segment_metric("skipped_empty") == before + 1
+
+
+# ---------------------------------------------------------------------------------------------
+# Unit — первый сегмент ноги и hedge синтеза (ADR-104 §6)
+# ---------------------------------------------------------------------------------------------
+
+
+async def test_first_segment_is_the_smallest_prefix_over_its_own_threshold() -> None:
+    """Первый сегмент — НАИМЕНЬШИЙ префикс по своему порогу; следующие — наибольший по общему."""
+    settings = _settings(voice_mode_segment_min_chars=40, voice_mode_first_segment_min_chars=10)
+    client, _ = await _released(
+        ["Да. Первое предложение. Второе предложение тут. Третье, длинное предложение. Хвост"],
+        settings=settings,
+    )
+
+    # «Да.» короче порога первого (10) — пропущено; дальше наименьший префикс, затем наибольший.
+    assert client.texts == [
+        "Да. Первое предложение.",
+        "Второе предложение тут. Третье, длинное предложение.",
+    ]
+
+
+class _HedgeClient:
+    """Первый вызов синтеза висит до отмены, второй (hedge) отвечает сразу."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_cancelled = False
+
+    async def synthesize(self, *, text: str, voice: Voice) -> bytes:
+        self.calls += 1
+        if self.calls == 1:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.first_cancelled = True
+                raise
+        return b"hedged-audio"
+
+
+async def test_slow_synthesis_is_hedged_and_the_fast_answer_wins() -> None:
+    client, sink, budget = _HedgeClient(), _RecordingSink(), VoiceTurnBudget()
+    speech = VoiceTurnSpeech(
+        client=client,  # type: ignore[arg-type]
+        settings=_settings(voice_tts_hedge_seconds=0.01),
+        voice=_voice(),
+        sink=sink,
+        budget=budget,
+        limiter=_allow,
+    )
+    speech.start()
+    speech.feed_delta("Привет, это ответ. ")
+    await speech.finish()
+
+    assert client.calls == 2
+    assert client.first_cancelled
+    assert budget.hedged_segments == 1
+    assert sink.failed == 0
+    assert b"".join(sink.chunks) == b"hedged-audio"
+    assert [end["segment"] for end in sink.ends] == [0]
+
+
+async def test_fast_synthesis_is_not_hedged() -> None:
+    client, sink, budget = _FakeSpeechClient(), _RecordingSink(), VoiceTurnBudget()
+    speech = _build(
+        settings=_settings(voice_tts_hedge_seconds=5.0), client=client, sink=sink, budget=budget
+    )
+    speech.start()
+    speech.feed_delta("Привет, это ответ. ")
+    await speech.finish()
+
+    assert client.texts == ["Привет, это ответ."]
+    assert budget.hedged_segments == 0

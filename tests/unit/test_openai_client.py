@@ -755,9 +755,9 @@ def _anthropic_blocks(prepared: PreparedAttachments) -> list[dict[str, Any]]:
 
 
 def _png_b64() -> str:
-    import base64
+    from tests.images import PNG_B64
 
-    return base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32).decode("ascii")
+    return PNG_B64
 
 
 def test_openai_attachment_image_maps_to_image_url_data_uri() -> None:
