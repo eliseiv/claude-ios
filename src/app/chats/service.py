@@ -22,12 +22,15 @@ from app.chat.tools import (
     UnknownToolNameError,
     to_domain_tool_name,
 )
+from app.chats.attachment_url import build_signed_url, iso_expires_at, verify_token
 from app.chats.cursor import ChatCursor, ChatHistoryCursor, InvalidCursorError
 from app.chats.provider_blocks import to_domain_blocks
 from app.chats.repository import ChatsRepository, strip_context_block
 from app.errors import NotFoundError, ValidationFailedError, WorkspaceNotFoundError
 from app.memory.indexer import schedule_delete_session_chunks
-from app.models import ChatSession, ChatStep, ToolCall
+from app.models import ChatAttachment, ChatSession, ChatStep, ToolCall
+from app.observability.logging import log_event
+from app.website.signed_url import PreviewSecretMissingError
 from app.workspaces.service import WorkspacesService
 
 _MEDIA_PROMPT_TOOLS = frozenset(
@@ -216,7 +219,9 @@ class ChatsService:
         last_assistant_by_turn = self._last_assistant_step_ids(enrich_steps)
         history_steps: list[ChatStepView] = []
         for step in steps:
-            payload = self._normalize_payload(step, provider_to_domain, quiz_turns)
+            payload = self._normalize_payload(
+                step, provider_to_domain, quiz_turns, owner_user_id=session.user_id
+            )
             if (
                 step.role == "assistant"
                 and last_assistant_by_turn.get(step.message_step_id) == step.id
@@ -336,6 +341,8 @@ class ChatsService:
         step: ChatStep,
         provider_to_domain: dict[str, uuid.UUID],
         quiz_turns: set[uuid.UUID] | None = None,
+        *,
+        owner_user_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Normalize a step's stored wire payload to the domain view for the history response.
 
@@ -355,6 +362,9 @@ class ChatsService:
         MESSAGE instead of domain blocks; ``to_domain_blocks`` converts it FIRST (on the deep copy)
         so the per-block normalization below — and therefore ADR-008/ADR-024 — applies identically
         on both providers.
+
+        ADR-120 §2: on a user step (with ``owner_user_id``) every ``attachmentRefs`` entry carrying
+        ``attachmentId`` gets our signed ``url``/``expiresAt`` instead of the stored ones.
         """
         payload = copy.deepcopy(step.payload)
         # ADR-008: never expose the raw provider id stored on tool steps.
@@ -363,6 +373,10 @@ class ChatsService:
         # have no ``content[]`` (toolName/result) — strip BEFORE the content early-return.
         if step.role == "user":
             ChatsService._strip_media_wizard_prompt(payload)
+            if owner_user_id is not None:
+                ChatsService._sign_attachment_refs(
+                    payload, session_id=step.session_id, owner_user_id=owner_user_id
+                )
         if step.role == "tool":
             ChatsService._strip_media_tool_result_prompt(payload)
         content = payload.get("content")
@@ -405,6 +419,48 @@ class ChatsService:
                 ChatsService._normalize_tool_result_block(block, provider_to_domain, step)
             # text blocks are intentionally left unchanged (except quiz / context strips above).
         return payload
+
+    @staticmethod
+    def _sign_attachment_refs(
+        payload: dict[str, Any], *, session_id: uuid.UUID, owner_user_id: uuid.UUID
+    ) -> None:
+        """Replace ``url``/``expiresAt`` of stored attachments with a signed URL (ADR-120 §2).
+
+        Refs without ``attachmentId`` (written before ADR-120) are served as stored. Without
+        ``PREVIEW_URL_SECRET`` the stored attachment ref carries no ``url``/``expiresAt``.
+        """
+        refs = payload.get("attachmentRefs")
+        if not isinstance(refs, list):
+            return
+        secret_missing = False
+        for ref in refs:
+            if not isinstance(ref, dict) or not ref.get("attachmentId"):
+                continue
+            try:
+                attachment_id = uuid.UUID(str(ref["attachmentId"]))
+            except ValueError:
+                continue
+            ref.pop("url", None)
+            ref.pop("expiresAt", None)
+            if secret_missing:
+                continue
+            try:
+                signed = build_signed_url(
+                    attachment_id=attachment_id,
+                    session_id=session_id,
+                    owner_user_id=owner_user_id,
+                )
+            except PreviewSecretMissingError:
+                secret_missing = True
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "chat_attachment_url_secret_missing",
+                    chatId=str(session_id),
+                )
+                continue
+            ref["url"] = signed.url
+            ref["expiresAt"] = iso_expires_at(signed.expires_at)
 
     @staticmethod
     def _strip_media_wizard_prompt(payload: dict[str, Any]) -> None:
@@ -619,6 +675,31 @@ class ChatsService:
             set_workspace_project_id=set_workspace_project_id,
             workspace_project_id=workspace_project_id,
         )
+
+    async def signed_attachment(
+        self, session_id: uuid.UUID, attachment_id: uuid.UUID, token: str
+    ) -> tuple[ChatAttachment, int]:
+        """Attachment opened by a signed URL and the token's ``exp`` (ADR-120 §3).
+
+        Any refusal — unknown/foreign row, other chat, bad or expired token — is the same 404.
+        """
+        # The signature is checked BEFORE the bytes are read: an unauthenticated route must not
+        # turn a guessed id into a 20 MiB read.
+        owner = await self._repo.attachment_owner(attachment_id, session_id)
+        exp = (
+            verify_token(
+                attachment_id=attachment_id,
+                session_id=session_id,
+                owner_user_id=owner,
+                token=token,
+            )
+            if owner is not None
+            else None
+        )
+        row = await self._repo.get_attachment(attachment_id) if exp is not None else None
+        if row is None or exp is None:
+            raise NotFoundError("attachment not found")
+        return row, exp
 
     async def delete_chat(self, session_id: uuid.UUID, user_id: uuid.UUID) -> None:
         deleted = await self._repo.delete_session(session_id, user_id)

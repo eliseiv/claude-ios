@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
+import urllib.parse
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Request
+from starlette.responses import Response
 
 from app.api_gateway.rate_limit import enforce_other_limits
 from app.chats.service import ChatsService
@@ -170,6 +173,43 @@ async def get_chat_steps(
             )
             for step in view.steps
         ],
+    )
+
+
+@router.get(
+    "/{chat_id}/attachments/{attachment_id}/{token}",
+    summary="Скачать вложение сообщения",
+    description=(
+        "Байты вложения, присланного в сообщении чата. Без JWT — авторизация в подписи пути. "
+        "Передайте `attachmentRefs[].url` из истории чата как есть. Неверная или просроченная "
+        "ссылка, чужой или удалённый файл — `404`; свежую ссылку даёт повторный запрос истории."
+    ),
+    response_class=Response,
+    responses={
+        200: {"description": "Файл вложения."},
+        404: {"description": "Ссылка недействительна или вложение не найдено."},
+    },
+)
+async def download_chat_attachment(
+    chats: Annotated[ChatsService, Depends(get_chats_service)],
+    chat_id: Annotated[uuid.UUID, Path(description="Идентификатор чата.")],
+    attachment_id: Annotated[uuid.UUID, Path(description="`attachmentId` вложения.")],
+    token: Annotated[str, Path(description="Подпись из `attachmentRefs[].url`.")],
+) -> Response:
+    row, exp = await chats.signed_attachment(chat_id, attachment_id, token)
+    media_type = row.media_type
+    if media_type.startswith("text/") or media_type == "application/json":
+        media_type = f"{media_type}; charset=utf-8"
+    filename = urllib.parse.quote(row.filename, safe="")
+    return Response(
+        content=row.content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{filename}",
+            "Cache-Control": f"private, max-age={max(exp - int(time.time()), 0)}",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
+        },
     )
 
 

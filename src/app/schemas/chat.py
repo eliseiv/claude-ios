@@ -173,7 +173,10 @@ class ChatRunRequest(StrictModel):
     )
     message: str = Field(
         default="",
-        description="Текст сообщения пользователя. Опционален при наличии хотя бы одного вложения.",
+        description=(
+            "Текст сообщения пользователя. Опционален при наличии хотя бы одного вложения. "
+            "При `editMessageStepId` пустой текст означает текст исходного сообщения."
+        ),
     )
     mode: Literal["credits", "byok"] = Field(
         description=(
@@ -195,8 +198,10 @@ class ChatRunRequest(StrictModel):
             "Вложения в base64 (фото/PDF/текст) для ЭТОГО хода. Принимаются на ЛЮБОМ ходу "
             "сессии — не только в первом сообщении чата. Модель видит их в том ходе, в котором "
             "они присланы; на следующих ходах они не пересылаются (в истории остаётся текстовый "
-            "плейсхолдер) и при `editMessageStepId` не наследуются — чтобы регенерация снова "
-            "учитывала файл, приложите его заново. В `/v1/chat/tool-result` не принимаются. "
+            "плейсхолдер и ссылка в `attachmentRefs`). При `editMessageStepId` без вложений "
+            "(поле отсутствует, `null` или `[]`) ход наследует вложения исходного сообщения; "
+            "присланный список заменяет их целиком; пустой `message` при этом берётся из "
+            "исходного сообщения. В `/v1/chat/tool-result` не принимаются. "
             "Опционально. Только base64, URL запрещены. " + _attachment_limits_text()
         ),
     )
@@ -280,11 +285,13 @@ class ChatRunRequest(StrictModel):
         # 5115 iOS: a non-empty actionPrompt is also enough to make the turn valid.
         has_media_selection = getattr(self, "mediaSelection", None) is not None
         has_action_prompt = bool(self.actionPrompt is not None and self.actionPrompt.strip())
+        # Edit/regenerate may omit both: the server takes them from the edited turn.
         if (
             not self.message.strip()
             and not self.attachments
             and not has_media_selection
             and not has_action_prompt
+            and self.editMessageStepId is None
         ):
             raise ValueError("message or at least one attachment is required")
         settings = get_settings()

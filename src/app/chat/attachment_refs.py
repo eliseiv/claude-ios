@@ -4,6 +4,9 @@ Chat vision still uses same-turn base64 (ADR-020). Separately, when media genera
 configured, each uploaded image is also stored with fal (ADR-062) and a light
 ``payload.attachmentRefs`` entry is written on the user step so a later turn can ask
 ``useRecentImage`` without re-attach. App-level TTL is 24h (independent of fal lifecycle).
+
+ADR-120 §2: every stored attachment (``chat_attachments``) also gets a ref with ``attachmentId``,
+``mediaType``, ``filename`` and ``size``; ``url``/``expiresAt`` stay the fal ones in storage.
 """
 
 from __future__ import annotations
@@ -74,49 +77,43 @@ def is_ref_alive(ref: Mapping[str, Any], *, now: datetime.datetime | None = None
     return exp > (now or _now())
 
 
-async def upload_turn_attachment_refs(
-    media: MediaGenerationService | None,
-    images: Sequence[ImageAttachmentRef],
-) -> list[dict[str, Any]]:
-    """Upload same-turn images to fal; return attachmentRefs (empty if media unavailable)."""
-    if media is None or not images:
-        return []
-    refs: list[dict[str, Any]] = []
-    for img in images:
-        try:
-            uploaded = await media.upload_reference_image(
-                media_type=img.media_type,
-                file_name=img.filename,
-                data=img.data,
-            )
-        except (
-            MediaGenerationNotConfiguredError,
-            PayloadTooLargeError,
-            ValidationFailedError,
-            UpstreamError,
-        ) as exc:
-            # Через `log_event`, а не `logger.warning(extra=...)`: сырой `extra` кладёт ключи
-            # ПРЯМО в `LogRecord`, и ключ, совпавший с его собственным атрибутом (`filename` —
-            # именно такой), заставляет `makeRecord` поднять `KeyError`. То есть ветка,
-            # написанная ради МЯГКОГО пропуска неудачной загрузки, роняла весь ход в `500` при
-            # каждом сбое fal. `log_event` кладёт поля в `extra_fields`, где зарезервированных
-            # имён нет по построению, и заодно даёт формату JSON-редакцию и `requestId`.
-            log_event(
-                logger,
-                logging.WARNING,
-                "chat_attachment_fal_upload_skipped",
-                error=type(exc).__name__,
-                fileName=img.filename,
-            )
-            continue
-        refs.append(
-            build_attachment_ref(
-                media_type=img.media_type,
-                filename=img.filename,
-                url=uploaded.url,
-            )
+async def upload_image_ref(
+    media: MediaGenerationService | None, img: ImageAttachmentRef
+) -> dict[str, Any] | None:
+    """Upload one image to fal; its ``url``/``expiresAt`` ref, or ``None`` (soft skip)."""
+    if media is None:
+        return None
+    try:
+        uploaded = await media.upload_reference_image(
+            media_type=img.media_type,
+            file_name=img.filename,
+            data=img.data,
         )
-    return refs
+    except (
+        MediaGenerationNotConfiguredError,
+        PayloadTooLargeError,
+        ValidationFailedError,
+        UpstreamError,
+    ) as exc:
+        # Через `log_event`, а не `logger.warning(extra=...)`: сырой `extra` кладёт ключи
+        # ПРЯМО в `LogRecord`, и ключ, совпавший с его собственным атрибутом (`filename` —
+        # именно такой), заставляет `makeRecord` поднять `KeyError`. То есть ветка,
+        # написанная ради МЯГКОГО пропуска неудачной загрузки, роняла весь ход в `500` при
+        # каждом сбое fal. `log_event` кладёт поля в `extra_fields`, где зарезервированных
+        # имён нет по построению, и заодно даёт формату JSON-редакцию и `requestId`.
+        log_event(
+            logger,
+            logging.WARNING,
+            "chat_attachment_fal_upload_skipped",
+            error=type(exc).__name__,
+            fileName=img.filename,
+        )
+        return None
+    return build_attachment_ref(
+        media_type=img.media_type,
+        filename=img.filename,
+        url=uploaded.url,
+    )
 
 
 def refs_from_user_payload(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:

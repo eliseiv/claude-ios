@@ -33,6 +33,7 @@ _TTS_DEFAULT_AUDIO_FORMAT = "mp3"
 # fallback of a non-positive env both read it, so the two cannot drift apart.
 _DEFAULT_MEDIA_JOB_DEADLINE_SECONDS = 21600
 # ADR-109 §1.1: default lifetime of our own copy of a generation result, days.
+_DEFAULT_CHAT_ATTACHMENT_URL_TTL_SECONDS = 86400
 _DEFAULT_MEDIA_ASSET_RETENTION_DAYS = 30
 
 
@@ -558,6 +559,11 @@ class Settings(BaseSettings):
     # TTL of the HMAC token in GET /v1/media/jobs/{id}/assets/{index}/{token} (ADR-085).
     # After expiry the client re-polls the job and gets a fresh URL. Secret is PREVIEW_URL_SECRET.
     media_download_ttl_seconds: int = Field(default=86400, alias="MEDIA_DOWNLOAD_TTL_SECONDS")
+    # TTL of the HMAC token in GET /v1/chats/{id}/attachments/{attachmentId}/{token} (ADR-120 §3);
+    # `<= 0` → the default (`chat_attachment_url_ttl()`). Secret is PREVIEW_URL_SECRET.
+    chat_attachment_url_ttl_seconds: int = Field(
+        default=_DEFAULT_CHAT_ATTACHMENT_URL_TTL_SECONDS, alias="CHAT_ATTACHMENT_URL_TTL_SECONDS"
+    )
 
     # --- Own 30-day copy of generation results on the instance disk (ADR-109 §1.1 — the one
     # normative place of these defaults; other documents refer there). ---
@@ -992,6 +998,11 @@ class Settings(BaseSettings):
     def media_asset_storage_enabled(self) -> bool:
         """Whether our own copy of results is stored (ADR-109 §1.1: non-empty storage dir)."""
         return bool(self.media_asset_storage_dir.strip())
+
+    def chat_attachment_url_ttl(self) -> int:
+        """``CHAT_ATTACHMENT_URL_TTL_SECONDS``; ``<= 0`` → the default (ADR-120 §3)."""
+        ttl = self.chat_attachment_url_ttl_seconds
+        return ttl if ttl > 0 else _DEFAULT_CHAT_ATTACHMENT_URL_TTL_SECONDS
 
     def media_asset_retention_days(self) -> int:
         """``MEDIA_ASSET_RETENTION_DAYS``; ``<= 0``, blank or not a number → the default 30.

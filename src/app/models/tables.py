@@ -20,6 +20,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -780,6 +781,46 @@ class ChatDocument(Base):
     )
 
     __table_args__ = (Index("ix_chat_documents_session_created", "session_id", "created_at"),)
+
+
+class ChatAttachment(Base):
+    """Байты вложения чата, присланного в ходе (ADR-120 §1).
+
+    ``message_step_id`` без FK: значение не уникально в ``chat_steps``, поэтому строки усечённых
+    ходов удаляет ``ChatRepository.truncate_from_message_step`` явно.
+    """
+
+    __tablename__ = "chat_attachments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_uuid_default
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    message_step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    media_type: Mapped[str] = mapped_column(Text, nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_now
+    )
+
+    __table_args__ = (
+        Index(
+            "ux_chat_attachments_turn",
+            "session_id",
+            "message_step_id",
+            "position",
+            unique=True,
+        ),
+    )
 
 
 class MediaJob(Base):

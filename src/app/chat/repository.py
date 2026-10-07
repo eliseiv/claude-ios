@@ -12,13 +12,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import get_settings
 from app.errors import SessionNotFoundError
-from app.models import ChatSession, ChatStep, ToolCall
+from app.models import ChatAttachment, ChatSession, ChatStep, ToolCall
 
 # Default max length of an auto-generated chat title (chats/03-architecture.md).
 _TITLE_MAX_CHARS = 60
@@ -737,15 +737,25 @@ class ChatRepository:
         )
         if anchor is None:
             return None
-        # Delete tool_calls of the truncated turns FIRST (FK is on chat_sessions, not chat_steps →
-        # no cascade). The subquery reads the still-existing chat_steps (seq >= anchor).
+        # Delete tool_calls and chat_attachments (ADR-120 §1) of the truncated turns FIRST (their
+        # FK is on chat_sessions, not chat_steps → no cascade). The subquery reads the
+        # still-existing chat_steps (seq >= anchor).
+        params = {"sid": str(session_id), "anchor": anchor}
         await self._session.execute(
             text(
                 "DELETE FROM tool_calls WHERE session_id = :sid AND message_step_id IN ("
                 "SELECT DISTINCT message_step_id FROM chat_steps "
                 "WHERE session_id = :sid AND seq >= :anchor)"
             ),
-            {"sid": str(session_id), "anchor": anchor},
+            params,
+        )
+        await self._session.execute(
+            text(
+                "DELETE FROM chat_attachments WHERE session_id = :sid AND message_step_id IN ("
+                "SELECT DISTINCT message_step_id FROM chat_steps "
+                "WHERE session_id = :sid AND seq >= :anchor)"
+            ),
+            params,
         )
         result = await self._session.execute(
             text("DELETE FROM chat_steps WHERE session_id = :sid AND seq >= :anchor RETURNING id"),
@@ -754,6 +764,55 @@ class ChatRepository:
         deleted = len(result.fetchall())
         await self._session.flush()
         return deleted
+
+    async def add_attachments(self, rows: list[dict[str, Any]]) -> None:
+        """Insert ``chat_attachments`` rows of one turn (ADR-120 §1); keys = column names.
+
+        Core INSERT (no ORM objects): the bytes are not kept in the identity map for the rest of
+        the turn. ``flush`` semantics — the request transaction commits them with the user step.
+        """
+        await self._session.execute(insert(ChatAttachment), rows)
+
+    async def user_step_payload(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID
+    ) -> dict[str, Any] | None:
+        """Payload of the turn's user step (edit/regenerate text inheritance, ADR-120 §4)."""
+        payload: dict[str, Any] | None = await self._session.scalar(
+            select(ChatStep.payload)
+            .where(
+                ChatStep.session_id == session_id,
+                ChatStep.message_step_id == message_step_id,
+                ChatStep.role == "user",
+            )
+            .order_by(ChatStep.seq.asc())
+            .limit(1)
+        )
+        return payload
+
+    async def turn_attachments(
+        self, session_id: uuid.UUID, message_step_id: uuid.UUID
+    ) -> list[ChatAttachment]:
+        """Stored attachments of one turn in ``position`` order (ADR-120 §4)."""
+        return list(
+            await self._session.scalars(
+                select(ChatAttachment)
+                .where(
+                    ChatAttachment.session_id == session_id,
+                    ChatAttachment.message_step_id == message_step_id,
+                )
+                .order_by(ChatAttachment.position.asc())
+            )
+        )
+
+    async def latest_image_attachment(self, session_id: uuid.UUID) -> ChatAttachment | None:
+        """Newest stored ``image`` of the session — lazy ``useRecentImage`` source (ADR-120 §2)."""
+        row: ChatAttachment | None = await self._session.scalar(
+            select(ChatAttachment)
+            .where(ChatAttachment.session_id == session_id, ChatAttachment.type == "image")
+            .order_by(ChatAttachment.created_at.desc(), ChatAttachment.position.desc())
+            .limit(1)
+        )
+        return row
 
     async def assistant_tool_step_id(
         self, session_id: uuid.UUID, message_step_id: uuid.UUID
