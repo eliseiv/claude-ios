@@ -6,7 +6,9 @@
 
 Fail-closed (§7): любой сбой провайдера — таймаут, сеть, 5xx, нечитаемый ответ — поднимает
 ``ModerationUnavailableError`` (503), кроме случая, когда оператор аварийно включил
-``MODERATION_FAIL_OPEN``; тогда вердикт ``unchecked`` и WARNING в лог.
+``MODERATION_FAIL_OPEN``; тогда вердикт ``unchecked`` и WARNING в лог. ``400`` провайдера —
+отказ конкретного входа, а не недоступность: ``ModerationInputRejectedError``, исход решает
+вызывающий.
 
 Модуль НИКОГДА не логирует проверяемый контент: ни промпт, ни текст сообщения, ни base64, ни URL
 ассета целиком (allowlist полей лога — §10).
@@ -24,7 +26,11 @@ import openai
 
 from app import instance_config
 from app.config import Settings
-from app.errors import ModerationNotConfiguredError, ModerationUnavailableError
+from app.errors import (
+    ModerationInputRejectedError,
+    ModerationNotConfiguredError,
+    ModerationUnavailableError,
+)
 from app.observability.logging import log_event
 from app.observability.metrics import moderation_decisions_total, moderation_errors_total
 
@@ -176,6 +182,21 @@ class ModerationService:
                 )
             )
             verdict = _merge(list(verdicts), stage=stage)
+        except openai.BadRequestError as exc:
+            # §7: 400 — провайдер не принимает именно этот вход; повтор его не изменит, поэтому
+            # это не недоступность, и ни fail-closed 503, ни fail-open к нему не применяются.
+            code = str(exc.code or "")
+            moderation_errors_total.labels(reason="bad_request").inc()
+            log_event(
+                logger,
+                logging.WARNING,
+                "moderation_provider_rejected",
+                surface=surface,
+                stage=stage,
+                code=code,
+                httpStatus=exc.status_code,
+            )
+            raise ModerationInputRejectedError(code) from exc
         except Exception as exc:  # noqa: BLE001 — любой сбой провайдера = единая политика §7
             return self._on_failure(exc, surface=surface, stage=stage)
 

@@ -1,4 +1,4 @@
-"""Точки применения 14 продуктовых настроек (ADR-099 §8).
+"""Точки применения 15 продуктовых настроек (ADR-099 §8).
 
 Каждая функция здесь — ЕДИНСТВЕННЫЙ способ прочитать свою величину на рабочем пути. Прямое
 чтение соответствующего поля ``Settings`` в потребителе означало бы, что настройка объявлена
@@ -17,6 +17,7 @@ from app.instance_config.settings_registry import (
     SETTING_CHAT_ADVERTISED_MODES,
     SETTING_CHAT_CHARACTERS_ENABLED,
     SETTING_CHAT_CODE_TOOLS_ENABLED,
+    SETTING_CHAT_DEFAULT_GENERATION_MODE,
     SETTING_CHAT_DISABLED_TOOL_FAMILIES,
     SETTING_CHAT_MEDIA_TOOLS_ENABLED,
     SETTING_CHAT_MEMORY_ENABLED,
@@ -87,17 +88,30 @@ def advertised_generation_modes(
     *, settings: Settings | None = None, snapshot: InstanceConfigSnapshot | None = None
 ) -> tuple[str, ...]:
     """Объявляемые режимы В КАНОНИЧЕСКОМ порядке, а не в том, в каком их выбрал оператор."""
-    from app.schemas.chat import DEFAULT_GENERATION_MODE, GENERATION_MODE_ORDER
+    from app.schemas.chat import GENERATION_MODE_ORDER
 
     selected = set(
         resolve_setting(SETTING_CHAT_ADVERTISED_MODES, settings=settings, snapshot=snapshot)
     )
     # ADR-065 §1: `defaultGenerationMode` обязан присутствовать в списке — иначе у выпущенной
-    # сборки переключатель остаётся без значения по умолчанию. Это барьер КОДА, защищающий
-    # пользовательский контракт, а не молчаливое расширение выбора оператора: снять с витрины
-    # можно любой режим, кроме объявленного контрактом дефолтным.
-    selected.add(DEFAULT_GENERATION_MODE)
+    # сборки переключатель остаётся без значения по умолчанию. Это барьер КОДА для значений,
+    # пришедших не через PATCH (env, прямая запись в БД); добавляется РАЗРЕШЁННЫЙ режим по
+    # умолчанию, а не константа (ADR-099 §8.1 п.2).
+    selected.add(default_generation_mode(settings=settings, snapshot=snapshot))
     return tuple(mode for mode in GENERATION_MODE_ORDER if mode in selected)
+
+
+def default_generation_mode(
+    *, settings: Settings | None = None, snapshot: InstanceConfigSnapshot | None = None
+) -> str:
+    """`defaultGenerationMode` capabilities — режим, который КЛИЕНТ выбирает и шлёт сам.
+
+    Режим run без `generationMode` в запросе — не эта величина, а `DEFAULT_GENERATION_MODE`.
+    """
+    value = resolve_setting(
+        SETTING_CHAT_DEFAULT_GENERATION_MODE, settings=settings, snapshot=snapshot
+    )
+    return str(value)
 
 
 def reasoning_level(

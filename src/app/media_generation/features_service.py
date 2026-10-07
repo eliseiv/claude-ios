@@ -26,10 +26,15 @@ from app.media_generation.avatar_images import compose_avatar, validate_avatar_i
 from app.media_generation.catalog import KIND_IMAGE, KIND_VIDEO
 from app.media_generation.fal_client import FalClient
 from app.media_generation.features_repository import MediaFeaturesRepository
-from app.media_generation.service import MediaAsset, MediaGenerationService, MediaJobView
+from app.media_generation.service import (
+    MediaAsset,
+    MediaGenerationService,
+    MediaJobView,
+    moderate_media_input,
+)
 from app.models import MediaFeaturePreset, MediaJob, UserAvatar
 from app.moderation import ModerationService
-from app.moderation.service import STAGE_INPUT, SURFACE_MEDIA_UPLOAD
+from app.moderation.service import SURFACE_MEDIA_UPLOAD
 
 FEATURE_AVATAR = "avatar"
 FEATURE_BACKGROUND = "background"
@@ -472,9 +477,9 @@ class MediaFeaturesService:
     async def _moderate_inline(self, media_type: str, data: str) -> None:
         if self._moderation is None:
             return
-        verdict = await self._moderation.check(
+        verdict = await moderate_media_input(
+            self._moderation,
             surface=SURFACE_MEDIA_UPLOAD,
-            stage=STAGE_INPUT,
             image_urls=[f"data:{media_type};base64,{data}"],
         )
         if verdict.blocked:

@@ -129,6 +129,7 @@ def _anthropic_instance(settings: Settings) -> bool:
 SETTING_CHAT_DEFAULT_MODEL = "chat.default_model"
 SETTING_CHAT_MODELS_OFFERED = "chat.models_offered"
 SETTING_CHAT_ADVERTISED_MODES = "chat.advertised_generation_modes"
+SETTING_CHAT_DEFAULT_GENERATION_MODE = "chat.default_generation_mode"
 SETTING_CHAT_REASONING_LEVEL = "chat.reasoning_level"
 SETTING_CHAT_THINKING_DISPLAY = "chat.anthropic_thinking_display"
 SETTING_CHAT_CHARACTERS_ENABLED = "chat.characters_enabled"
@@ -252,13 +253,26 @@ _SPECS: tuple[SettingSpec, ...] = (
         label="Объявляемые режимы генерации",
         group="Чат",
         description=(
-            "Режимы, которые приложение показывает в переключателе. `general` присутствует "
-            "всегда — он режим по умолчанию, и снять его с витрины нельзя. Это объявление, а не "
-            "поведение: не объявленный режим сервер по-прежнему принимает."
+            "Режимы, которые приложение показывает в переключателе. Режим по умолчанию "
+            "присутствует всегда, и снять его с витрины нельзя — сначала смените режим по "
+            "умолчанию. Это объявление, а не поведение: не объявленный режим сервер "
+            "по-прежнему принимает."
         ),
         env_value=lambda s: list(s.advertised_generation_modes()),
         options=_generation_mode_options,
         constraints={"min_items": 1},
+    ),
+    SettingSpec(
+        setting_id=SETTING_CHAT_DEFAULT_GENERATION_MODE,
+        type=TYPE_ENUM,
+        label="Режим по умолчанию",
+        group="Чат",
+        description=(
+            "Режим, который приложение выбирает при открытии чата. Должен быть среди "
+            "показываемых режимов. Запрос без режима сервер выполняет как «Обычный»."
+        ),
+        env_value=lambda s: s.resolved_default_generation_mode(),
+        options=_generation_mode_options,
     ),
     SettingSpec(
         setting_id=SETTING_CHAT_REASONING_LEVEL,

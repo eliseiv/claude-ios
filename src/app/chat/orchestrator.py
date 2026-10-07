@@ -99,12 +99,14 @@ from app.chats.provider_blocks import to_domain_blocks
 from app.config import Settings, get_settings
 from app.documents import DocumentsService
 from app.errors import (
+    AttachmentMediaTypeMismatchError,
     CharactersDisabledError,
     ConflictError,
     ContentPolicyViolationError,
     InsufficientCreditsError,
     MediaGenerationNotConfiguredError,
     MessageNotFoundError,
+    ModerationInputRejectedError,
     NotFoundError,
     UnknownCharacterError,
     UpstreamError,
@@ -396,7 +398,9 @@ _RESEARCH_INSTRUCTION = (
     "citations — you MUST use that web-search tool with a real query about the user's question. "
     "Never send a dummy, calculator, or no-op query. After search results arrive, answer from them "
     "and include working source links. Never claim you cannot look something up, have no internet "
-    "access, or can only give generic advice on a Research turn."
+    "access, or can only give generic advice on a Research turn. Exception: a request to CREATE "
+    "an image or a video is not a search — follow the media instructions "
+    "(media.ask_params / media.generate_*) and do not run a web search for it."
 )
 
 
@@ -2120,12 +2124,19 @@ class ChatOrchestrator:
                     # prepare_attachments уже отбил бы такой файл; молча пропускаем, чтобы
                     # модерация не превратилась во второй валидатор с иным вердиктом.
                     continue
-        verdict = await self._deps.moderation.check(
-            surface=SURFACE_CHAT,
-            stage=STAGE_INPUT,
-            text="\n".join(texts),
-            image_urls=image_urls,
-        )
+        try:
+            verdict = await self._deps.moderation.check(
+                surface=SURFACE_CHAT,
+                stage=STAGE_INPUT,
+                text="\n".join(texts),
+                image_urls=image_urls,
+            )
+        except ModerationInputRejectedError as exc:
+            # ADR-086 §7: провайдер не принял само вложение (напр. invalid_image) — это вход
+            # пользователя, а не недоступность модерации.
+            raise AttachmentMediaTypeMismatchError(
+                "attachment could not be processed by the content check"
+            ) from exc
         if verdict.blocked:
             raise ContentPolicyViolationError(
                 "сообщение отклонено правилами контента: измените текст или вложение"

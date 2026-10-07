@@ -30,7 +30,6 @@ from app.instance_config.effective import effective_settings
 from app.observability.context import set_session_id
 from app.request_logs.service import RequestLogWriter
 from app.schemas.chat import (
-    DEFAULT_GENERATION_MODE,
     ChatCapabilitiesResponse,
     ChatDocumentRefSchema,
     ChatResponse,
@@ -591,14 +590,14 @@ async def chat_v2_capabilities(
     # ADR-065 §1: the ADVERTISED set, not «every mode the backend understands». A mode outside the
     # instance allowlist is ABSENT from the array — deliberately not `available: false`, because the
     # clients this protects are already-released binaries that may ignore that field. The list is
-    # already in canonical order and always contains `general` (= defaultGenerationMode).
+    # already in canonical order and always contains defaultGenerationMode (ADR-065 §1 п.3).
     # This does NOT gate behaviour: /v1/chat/v2/run accepts every mode on every instance.
     # `available` is `true` for every element by construction — there is no producer of `false`
     # (ADR-065 §1.8); the field is kept for compatibility and reserved for a future, separate
     # «advertised but temporarily unavailable» decision.
     return ChatCapabilitiesResponse(
         provider=provider,
-        defaultGenerationMode=DEFAULT_GENERATION_MODE,
+        defaultGenerationMode=cast(GenerationMode, instance_config.default_generation_mode()),
         generationModes=[
             GenerationModeCapability(
                 mode=cast(GenerationMode, mode),

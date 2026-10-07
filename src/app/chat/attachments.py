@@ -52,6 +52,8 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from PIL import Image
+
 from app.config import Settings
 from app.errors import (
     AttachmentMediaTypeMismatchError,
@@ -215,6 +217,27 @@ def _check_magic_bytes(media_type: str, decoded: bytes) -> None:
         raise AttachmentMediaTypeMismatchError(
             "attachment content does not match declared mediaType"
         )
+
+
+def _check_image_decodes(decoded: bytes, settings: Settings) -> None:
+    """Open the photo with Pillow BEFORE moderation (ADR-086 §7).
+
+    The pixel ceiling is read from the header, before any pixel is decoded (anti decompression
+    bomb); the global ``PIL.Image.MAX_IMAGE_PIXELS`` is deliberately left as is. A file that does
+    not verify is rejected by our own validator instead of reaching the moderation provider.
+    """
+    try:
+        with Image.open(io.BytesIO(decoded)) as image:
+            width, height = image.size
+            if width * height > settings.attachment_max_image_pixels:
+                raise AttachmentTooLargeError("image exceeds the maximum number of pixels")
+            image.verify()
+    except ValidationFailedError:
+        raise
+    except Image.DecompressionBombError as exc:
+        raise AttachmentTooLargeError("image exceeds the maximum number of pixels") from exc
+    except Exception as exc:  # noqa: BLE001 — Pillow raises many types on a broken file
+        raise AttachmentMediaTypeMismatchError("image could not be decoded") from exc
 
 
 def _decode_text(media_type: str, decoded: bytes) -> str:
@@ -414,6 +437,7 @@ def prepare_attachments(
             raise UnsupportedMediaTypeError("audio must be transcribed before block assembly")
         if att.type == "image":
             _check_magic_bytes(att.mediaType, decoded)
+            _check_image_decodes(decoded, settings)
         elif att.type == "document":
             _check_magic_bytes(att.mediaType, decoded)
             _check_pdf_pages(decoded, settings)

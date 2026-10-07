@@ -277,6 +277,20 @@ class ModerationUnavailableError(AppError):
     code = "moderation_unavailable"
 
 
+class ModerationInputRejectedError(Exception):
+    """Провайдер модерации ответил ``400`` на конкретный вход (ADR-086 §7) — не HTTP-ошибка.
+
+    Повтор вход не изменит, поэтому это не недоступность: ни ``503``, ни fail-open. Исход решает
+    вызывающий (вход чата → ``422 attachment_media_type_mismatch``, вход медиа →
+    ``422 validation_error``, выход медиа → уменьшение при ``file_too_large`` либо ``failed``).
+    ``code`` — ``exc.code`` провайдера (``invalid_image``, ``file_too_large``, …), может быть пуст.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code or "bad_request")
+        self.code = code
+
+
 class ModerationNotConfiguredError(AppError):
     """503 moderation_not_configured: MODERATION_ENABLED=true, но ключ не резолвится."""
 

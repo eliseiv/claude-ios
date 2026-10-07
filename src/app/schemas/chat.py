@@ -98,7 +98,8 @@ GenerationMode = Literal["general", "research", "reasoning", "study_learn"]
 # the END of the Literal, existing positions never shift, and the advertisement allowlist
 # (ADR-065 §1.5) re-orders whatever the operator typed back into this order.
 GENERATION_MODE_ORDER: tuple[str, ...] = get_args(GenerationMode)
-# Mode used when the request omits the field; must always be advertised (ADR-065 §1.3).
+# Mode of a run whose request omits the field (ADR-065 §1 п.3). NOT `defaultGenerationMode` of the
+# capabilities — that one is the instance setting `chat.default_generation_mode`.
 DEFAULT_GENERATION_MODE: GenerationMode = "general"
 # Fail-closed default of the advertisement allowlist (ADR-065 §1.2): the modes that need no
 # dedicated client UI. `study_learn` requires a quiz renderer, so it is advertised only where an
@@ -524,7 +525,13 @@ class ChatCapabilitiesResponse(StrictModel):
     """
 
     provider: str = Field(description="Активный LLM provider текущего instance.")
-    defaultGenerationMode: GenerationMode = Field(description="Дефолт при отсутствии поля.")
+    defaultGenerationMode: GenerationMode = Field(
+        description=(
+            "Режим, который приложение выбирает по умолчанию и само шлёт в `generationMode`; "
+            "всегда входит в `generationModes`. Запрос без `generationMode` сервер выполняет "
+            "в `general`."
+        )
+    )
     generationModes: list[GenerationModeCapability] = Field(
         description="Список режимов и их стоимость в кредитах."
     )

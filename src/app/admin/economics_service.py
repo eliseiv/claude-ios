@@ -38,6 +38,7 @@ from app.config import Settings
 from app.instance_config import models as chat_models
 from app.instance_config import products as product_catalog
 from app.instance_config import tariffs as tariff_registry
+from app.instance_config import values as instance_values
 from app.instance_config.credentials import (
     CREDENTIAL_ANTHROPIC_API_KEY,
     CREDENTIAL_MAX_LENGTH,
@@ -66,6 +67,7 @@ from app.instance_config.settings_registry import (
     INFRA_SETTING_IDS,
     PRODUCT_TOKENS_MAX,
     SETTING_CHAT_ADVERTISED_MODES,
+    SETTING_CHAT_DEFAULT_GENERATION_MODE,
     SETTING_CHAT_DEFAULT_MODEL,
     SETTING_CHAT_MODELS_OFFERED,
     SETTING_LLM_DUAL_ENABLED,
@@ -214,37 +216,32 @@ def _short(value: Any) -> str:
     return text[:_AUDIT_DELTA_MAX_CHARS]
 
 
-def _normalized_setting_value(spec: SettingSpec, value: Any) -> Any:
+def _normalized_setting_value(spec: SettingSpec, value: Any, *, default_mode: str) -> Any:
     """Нормализация присланного значения, выполняемая на ЗАПИСИ (ADR-099 §8.1).
 
-    Сейчас правило одно: ``chat.advertised_generation_modes`` всегда несёт
-    ``DEFAULT_GENERATION_MODE``. Оператор вправе прислать список без него, и отказ здесь был бы
-    ТУПИКОМ, а не защитой: `defaultGenerationMode` — константа кода, настройкой не является и
-    оператору недоступна, поэтому «сначала смени дефолт» не ведёт ни к какому выполнимому шагу
-    (в отличие от межэлементного инварианта моделей, где действие у оператора есть, и там стоит
-    `400`).
+    Сейчас правило одно: ``chat.advertised_generation_modes`` всегда несёт ТЕКУЩИЙ режим по
+    умолчанию (``chat.default_generation_mode``). Оператор вправе прислать список без него:
+    нормализация, а не ``400``, сохраняет сценарий выкаченной CRM, которая присылает список без
+    ``general`` и показывает вернувшееся ``value``. Обратное направление (дефолт вне витрины) —
+    ``400`` в ``_check_generation_mode_invariant``.
 
     ⚠️ **Нормализация выполняется ДО сохранения, а не при сборке ответа.** ``previous_value``,
     ``changed`` и дельта аудита считаются по ХРАНИМОМУ значению; нормализация только в ответе
-    развела бы показанное с хранимым — оператор увидел бы `general` в `value` и его отсутствие
-    в `previous_value` соседней правки. Хранение нормализованного даёт ОДИН источник.
+    развела бы показанное с хранимым. Хранение нормализованного даёт ОДИН источник.
 
     ⚠️ Пустой список сюда НЕ доходит: `[]` нарушает объявленный `min_items: 1` и отвергается
-    `422` раньше. Пустой env означает «оператор ничего не сказал», пустой оверлей — «оператор
-    явно выбрал ничего», и подменять второе первым запрещено.
+    `422` раньше.
 
     Read-time барьер в ``values.advertised_generation_modes()`` НЕ отменяется: у него другая
     зона действия — значения, пришедшие не через эту ручку (env, прямая запись в БД).
     """
-    from app.schemas.chat import DEFAULT_GENERATION_MODE
-
     if spec.setting_id != SETTING_CHAT_ADVERTISED_MODES:
         return value
-    if not isinstance(value, list) or DEFAULT_GENERATION_MODE in value:
+    if not isinstance(value, list) or default_mode in value:
         return value
     from app.schemas.chat import GENERATION_MODE_ORDER
 
-    selected = {*value, DEFAULT_GENERATION_MODE}
+    selected = {*value, default_mode}
     # Канонический порядок, а не порядок ввода: клиент рендерит список как есть.
     return [mode for mode in GENERATION_MODE_ORDER if mode in selected]
 
@@ -974,6 +971,37 @@ class AdminEconomicsService:
                     " сначала добавьте её туда",
                 )
 
+    async def _apply_generation_mode_rules(self, spec: SettingSpec, value: Any) -> Any:
+        """Межэлементное правило пары витрина режимов ↔ режим по умолчанию (ADR-099 §8.1, §11).
+
+        Витрина без режима по умолчанию — нормализуется (режим добавляется); режим по умолчанию
+        вне витрины — `400`. Обе стороны сверяются по СТРОКАМ В БД (см. `_check_model_invariant`).
+        """
+        if spec.setting_id not in (
+            SETTING_CHAT_ADVERTISED_MODES,
+            SETTING_CHAT_DEFAULT_GENERATION_MODE,
+        ):
+            return value
+        snapshot = await self._db_settings_snapshot(
+            (SETTING_CHAT_ADVERTISED_MODES, SETTING_CHAT_DEFAULT_GENERATION_MODE)
+        )
+        if spec.setting_id == SETTING_CHAT_ADVERTISED_MODES:
+            current_default = instance_values.default_generation_mode(
+                settings=self._settings, snapshot=snapshot
+            )
+            return _normalized_setting_value(spec, value, default_mode=current_default)
+        advertised = instance_values.advertised_generation_modes(
+            settings=self._settings, snapshot=snapshot
+        )
+        if value not in advertised:
+            raise self._reject(
+                SCOPE_SETTINGS,
+                REASON_CONFLICT,
+                400,
+                f"режим «{value}» не входит в показываемые режимы:" " сначала добавьте его туда",
+            )
+        return value
+
     async def _db_settings_snapshot(self, setting_ids: tuple[str, ...]) -> InstanceConfigSnapshot:
         """Снимок перечисленных настроек, собранный НАПРЯМУЮ из БД, минуя кэш процесса.
 
@@ -1030,7 +1058,7 @@ class AdminEconomicsService:
             # код «для симметрии с лейблом» запрещено.
             reason = REASON_OUT_OF_RANGE if exc.constraint is not None else REASON_TYPE_MISMATCH
             raise self._reject(SCOPE_SETTINGS, reason, 422, str(exc)) from exc
-        value = _normalized_setting_value(spec, value)
+        value = await self._apply_generation_mode_rules(spec, value)
         await self._check_model_invariant(spec, value)
         await self._check_infra_invariant(spec, value)
 

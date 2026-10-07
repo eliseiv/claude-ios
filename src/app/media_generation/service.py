@@ -46,6 +46,7 @@ from app.errors import (
     AppError,
     ContentPolicyViolationError,
     JobNotTerminalError,
+    ModerationInputRejectedError,
     NotFoundError,
     PayloadTooLargeError,
     RateLimitedError,
@@ -71,6 +72,7 @@ from app.media_generation.fal_client import (
     FalClient,
     upstream_status_of,
 )
+from app.media_generation.moderation_downscale import UncheckableResultError, downscaled_data_uri
 from app.media_generation.proxy_client import (
     ProxyClient,
     ProxySubmission,
@@ -155,6 +157,26 @@ def _looks_like_provider_content_refusal(error: str) -> bool:
     return any(marker in lowered for marker in _FAL_CONTENT_POLICY_MARKERS)
 
 
+async def moderate_media_input(
+    moderation: ModerationService,
+    *,
+    surface: str,
+    image_urls: list[str],
+    text: str | None = None,
+) -> ModerationVerdict:
+    """Пре-модерация медиа-входа; ``400`` провайдера на сам вход → ``422`` (ADR-086 §7).
+
+    Отказ провайдера принять вход — не недоступность: повтор его не изменит, поэтому ни ``503``,
+    ни fail-open здесь не применяются, а кредиты ещё не списаны.
+    """
+    try:
+        return await moderation.check(
+            surface=surface, stage=STAGE_INPUT, text=text, image_urls=image_urls
+        )
+    except ModerationInputRejectedError as exc:
+        raise ValidationFailedError("the content check could not process this input") from exc
+
+
 # == "app.media_generation.service"
 
 _REFUND_REASON = "media_generation_failed"
@@ -176,6 +198,11 @@ OBSERVATION_INTERNAL_ERROR = "internal_error"  # raised outside FalClient and _m
 # exclusive with the five values above by the transport classifier: those describe a poll of fal
 # (legacy jobs), plus `moderation_unavailable`/`internal_error` of the shared completion path.
 OBSERVATION_WEBHOOK_PENDING = "webhook_pending"
+
+# ADR-086 §7: the `error` of a job whose result the moderation provider refused to check (`400`
+# not lifted by the downscale). Matches none of `_FAL_CONTENT_POLICY_MARKERS`.
+UNCHECKABLE_RESULT_ERROR = "result image could not be checked"
+_MODERATION_FILE_TOO_LARGE = "file_too_large"
 
 # ADR-108 §4.3 п.2: the outcome of a `completed` callback without a single usable asset — the same
 # terminal as "fal COMPLETED without a usable URL" on the poll path.
@@ -651,11 +678,8 @@ class MediaGenerationService:
         """
         if self._moderation is None:
             return unchecked_verdict()
-        verdict = await self._moderation.check(
-            surface=SURFACE_MEDIA_SUBMIT,
-            stage=STAGE_INPUT,
-            text=prompt,
-            image_urls=image_urls,
+        verdict = await moderate_media_input(
+            self._moderation, surface=SURFACE_MEDIA_SUBMIT, text=prompt, image_urls=image_urls
         )
         if verdict.blocked:
             raise ContentPolicyViolationError(
@@ -724,9 +748,9 @@ class MediaGenerationService:
         # генерации, поэтому проверяются здесь, ДО отправки провайдеру. Проверяем после валидации
         # (кривой файл дешевле отбить раньше) и по data-URI, а не по URL: URL ещё не существует.
         if self._moderation is not None:
-            verdict = await self._moderation.check(
+            verdict = await moderate_media_input(
+                self._moderation,
                 surface=SURFACE_MEDIA_UPLOAD,
-                stage=STAGE_INPUT,
                 image_urls=[f"data:{media_type};base64,{data}"],
             )
             if verdict.blocked:
@@ -941,6 +965,10 @@ class MediaGenerationService:
         # чтобы заблокированный ассет никогда не оказался в терминальном completed.
         try:
             output_verdict = await self._moderate_output(job, assets)
+        except (ModerationInputRejectedError, UncheckableResultError):
+            # ADR-086 §7 / ADR-105 §B2: a permanent refusal to check — terminal now, not at the
+            # deadline; an unchecked result never reaches `completed`.
+            return await self._fail(job, error=UNCHECKABLE_RESULT_ERROR)
         except Exception as exc:
             raise _TransientCompletionError(OBSERVATION_MODERATION_UNAVAILABLE, exc) from exc
         if output_verdict is not None and output_verdict.blocked:
@@ -1201,10 +1229,38 @@ class MediaGenerationService:
         """
         if self._moderation is None or job.kind != KIND_IMAGE:
             return None
+        urls = [a.url for a in assets]
+        try:
+            return await self._moderation.check(
+                surface=SURFACE_MEDIA_RESULT, stage=STAGE_OUTPUT, image_urls=urls
+            )
+        except ModerationInputRejectedError as exc:
+            if exc.code != _MODERATION_FILE_TOO_LARGE:
+                raise
+        # ADR-086 §7: the result is too large for the provider — check a downscaled copy instead
+        # of skipping the check. A second `400` propagates as a permanent refusal.
+        try:
+            data_uris = [
+                await downscaled_data_uri(
+                    url,
+                    max_bytes=self._settings.moderation_downscale_max_bytes,
+                    max_pixels=self._settings.moderation_downscale_max_pixels,
+                    timeout_seconds=self._settings.fal_timeout_seconds,
+                )
+                for url in urls
+            ]
+        except UncheckableResultError as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "moderation_downscale_rejected",
+                jobId=str(job.id),
+                model=job.model_id,
+                reason=exc.reason,
+            )
+            raise
         return await self._moderation.check(
-            surface=SURFACE_MEDIA_RESULT,
-            stage=STAGE_OUTPUT,
-            image_urls=[a.url for a in assets],
+            surface=SURFACE_MEDIA_RESULT, stage=STAGE_OUTPUT, image_urls=data_uris
         )
 
     async def _blocked_by_moderation(

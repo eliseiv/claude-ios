@@ -59,6 +59,10 @@ DEFAULT_REASONING_LEVEL = "medium"
 SUPPORTED_ANTHROPIC_THINKING_DISPLAYS: tuple[str, ...] = ("omitted", "summarized")
 DEFAULT_ANTHROPIC_THINKING_DISPLAY = "omitted"
 
+# ADR-086 §7: pre-decode ceilings of image handling (photo attachments, moderation downscale).
+_DEFAULT_MAX_IMAGE_PIXELS = 64_000_000
+_DEFAULT_MODERATION_DOWNSCALE_MAX_BYTES = 50 * 1024 * 1024
+
 # Минимальный блок-набор модерации. Держится КОДОМ, а не значением настройки: как бы оператор
 # ни изменил перечень, эта категория остаётся — поэтому пустая строка НЕ эквивалентна
 # выключенной модерации, и величина безопасна при любом своём значении.
@@ -242,6 +246,11 @@ class Settings(BaseSettings):
     # «not configured» → the fail-closed default set, see advertised_generation_modes().
     chat_advertised_generation_modes_raw: str = Field(
         default="", alias="CHAT_ADVERTISED_GENERATION_MODES"
+    )
+    # ADR-065 §1 п.3: `defaultGenerationMode` of GET /v1/chat/v2/capabilities — the mode the CLIENT
+    # preselects and sends itself. A run without `generationMode` still runs as `general`.
+    chat_default_generation_mode_raw: str = Field(
+        default="general", alias="CHAT_DEFAULT_GENERATION_MODE"
     )
     # Server-side defaults for the single public "reasoning" mode. The app exposes only the mode;
     # these knobs let operators tune provider cost/quality without changing the mobile contract.
@@ -684,6 +693,11 @@ class Settings(BaseSettings):
     attachment_total_bytes: int = Field(default=60 * 1024 * 1024, alias="ATTACHMENT_TOTAL_BYTES")
     # PDF page-count guard (anti decompression/structure bomb) via pypdf.
     attachment_pdf_max_pages: int = Field(default=100, alias="ATTACHMENT_PDF_MAX_PAGES")
+    # ADR-086 §7: width×height ceiling of a photo attachment, read from the header BEFORE decode
+    # (anti decompression bomb). The global PIL.Image.MAX_IMAGE_PIXELS is deliberately untouched.
+    attachment_max_image_pixels: int = Field(
+        default=_DEFAULT_MAX_IMAGE_PIXELS, alias="ATTACHMENT_MAX_IMAGE_PIXELS"
+    )
     # Raised transport body limit applied ONLY to the /v1/chat/run route (other routes keep
     # size_limit_body). Inline base64 of large files exceeds the general ≤512KB cap.
     #
@@ -753,6 +767,14 @@ class Settings(BaseSettings):
         alias="MODERATION_BLOCK_CATEGORIES",
     )
     moderation_text_max_chars: int = Field(default=4000, alias="MODERATION_TEXT_MAX_CHARS")
+    # ADR-086 §7: limits of the download + downscale of a media result the provider refused with
+    # `400 file_too_large`; both bound memory before decode.
+    moderation_downscale_max_bytes: int = Field(
+        default=_DEFAULT_MODERATION_DOWNSCALE_MAX_BYTES, alias="MODERATION_DOWNSCALE_MAX_BYTES"
+    )
+    moderation_downscale_max_pixels: int = Field(
+        default=_DEFAULT_MAX_IMAGE_PIXELS, alias="MODERATION_DOWNSCALE_MAX_PIXELS"
+    )
     # Аварийный переключатель оператора (§7). true = осознанное снижение соответствия сторам.
     moderation_fail_open: bool = Field(default=False, alias="MODERATION_FAIL_OPEN")
 
@@ -1218,6 +1240,17 @@ class Settings(BaseSettings):
         """
         return value if value > 0 else _DEFAULT_MEDIA_JOB_DEADLINE_SECONDS
 
+    @field_validator("attachment_max_image_pixels", "moderation_downscale_max_pixels")
+    @classmethod
+    def _positive_max_image_pixels(cls, value: int) -> int:
+        """``<= 0`` would reject every photo (ADR-086 §7) — fall back to the documented default."""
+        return value if value > 0 else _DEFAULT_MAX_IMAGE_PIXELS
+
+    @field_validator("moderation_downscale_max_bytes")
+    @classmethod
+    def _positive_moderation_downscale_max_bytes(cls, value: int) -> int:
+        return value if value > 0 else _DEFAULT_MODERATION_DOWNSCALE_MAX_BYTES
+
     @field_validator("tts_max_chars")
     @classmethod
     def _positive_tts_max_chars(cls, value: int) -> int:
@@ -1288,8 +1321,8 @@ class Settings(BaseSettings):
           NOT advertised by default — an instance whose app can draw the quiz lists it explicitly.
           The asymmetry is deliberate: mis-advertising costs the user 2 debited credits and an
           empty screen, while under-advertising costs only a hidden feature;
-        - ``general`` is ALWAYS present, even when a non-empty env omits it, because
-          ``defaultGenerationMode`` must exist in the list;
+        - ``CHAT_DEFAULT_GENERATION_MODE`` is ALWAYS present, even when a non-empty env omits it,
+          because ``defaultGenerationMode`` must exist in the list;
         - the result is in CANONICAL order (the declaration order of ``GenerationMode``), never the
           order the operator typed, so a client may render the list as-is.
 
@@ -1299,7 +1332,6 @@ class Settings(BaseSettings):
         from app.observability.logging import get_logger
         from app.schemas.chat import (
             DEFAULT_ADVERTISED_GENERATION_MODES,
-            DEFAULT_GENERATION_MODE,
             GENERATION_MODE_ORDER,
         )
 
@@ -1322,8 +1354,24 @@ class Settings(BaseSettings):
             # Unset, blank, or entirely invalid → fail-closed default (never «everything»).
             selected = set(DEFAULT_ADVERTISED_GENERATION_MODES)
         # defaultGenerationMode must always be offered, otherwise the UI switcher has no default.
-        selected.add(DEFAULT_GENERATION_MODE)
+        selected.add(self.resolved_default_generation_mode())
         return tuple(mode for mode in GENERATION_MODE_ORDER if mode in selected)
+
+    def resolved_default_generation_mode(self) -> str:
+        """``CHAT_DEFAULT_GENERATION_MODE``; a value outside ``GENERATION_MODE_ORDER`` → ``general``
+        + WARNING (ADR-065 §1 п.3) — a typo must not leave the UI switcher without a default."""
+        from app.observability.logging import get_logger
+        from app.schemas.chat import DEFAULT_GENERATION_MODE, GENERATION_MODE_ORDER
+
+        mode = self.chat_default_generation_mode_raw.strip().lower()
+        if mode in GENERATION_MODE_ORDER:
+            return mode
+        get_logger("app.config").warning(
+            "CHAT_DEFAULT_GENERATION_MODE %r is not a known mode; using %r",
+            mode,
+            DEFAULT_GENERATION_MODE,
+        )
+        return DEFAULT_GENERATION_MODE
 
     def resolved_reasoning_level(self) -> str:
         """Provider-safe reasoning effort for the public ``generationMode=reasoning`` mode."""
