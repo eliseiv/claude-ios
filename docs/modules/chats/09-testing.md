@@ -13,7 +13,8 @@
 - **Доменная нормализация `payload` ([ADR-024](../../adr/ADR-024-history-payload-domain-normalization.md)):** в `steps[].payload.content[]` `tool_use.name` — dot (== `/v1/tools` `name`); `tool_use.id` и `tool_result.tool_use_id` — domain `tool_calls.id` (== `/chat/run` `toolCall.id`), **не** provider `toolu_...`; текстовые блоки целы; шаг с `[text, tool_use]` отдаётся полностью (оба блока); provider `toolu_...` отсутствует в ответе; `chat_steps.payload` в БД после отдачи не изменён; карта provider→domain строится одним запросом на сессию (без N+1). Полное нормативное покрытие — [chat-orchestrator/09-testing.md §История: доменная нормализация payload](../chat-orchestrator/09-testing.md#integration--история-доменная-нормализация-payload-adr-024).
 - `GET /v1/chats/{id}/steps` — корректный `stepCount`, отсутствие raw provider tool_use.id в ответе.
 - `PATCH` rename/pin; `extra='forbid'`; `title` > 200 → `422`.
-- `DELETE` — cascade `chat_steps`/`tool_calls`; `attachments.session_id` → NULL; повторный DELETE → `404`.
+- `DELETE` — cascade `chat_steps`/`tool_calls`/`chat_attachments`; повторный DELETE → `404`.
+- `GET /v1/chats/{id}/attachments/{attachmentId}/{token}` ([ADR-120 §3](../../adr/ADR-120-chat-attachment-bytes-stored-server-side.md)): верная подпись → байты и заголовки; истёкшая/чужая/подменённый `id` → `404`. `GET /v1/chats/{id}` → `attachmentRefs[]` с `attachmentId`/`size` у PDF/TXT и подписанным `url`.
 
 ## Изоляция
 - Запрос чужого чата (другой `sub`) на всех эндпоинтах → `404`.

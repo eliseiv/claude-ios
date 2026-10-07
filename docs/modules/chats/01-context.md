@@ -6,7 +6,7 @@
 - **workspaces** ([ADR-013](../../adr/ADR-013-workspace-projects-vs-website-builder.md)) — **СПРИНТ 2 (отложено)**: фильтр списка чатов по `workspace_project_id` (чаты проекта). В Спринте 1 модуля `workspaces`, колонки `chat_sessions.workspace_project_id` и фильтра ещё нет.
 
 ## Соседи
-- **attachments** — `attachments.session_id` ссылается на чат; при удалении чата → SET NULL.
+- **chat_attachments** — байты вложений хода ([ADR-120](../../adr/ADR-120-chat-attachment-bytes-stored-server-side.md)); `session_id` FK `ON DELETE CASCADE`.
 
 ## Границы
 - Chats **не** вызывает Anthropic и **не** мутирует billing/policy. Только чтение истории + метаданные чата (`title`/`is_pinned`).

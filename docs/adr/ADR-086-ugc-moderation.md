@@ -125,6 +125,19 @@ Sweep по **всем** поверхностям, принимающим пол�
 
 **Выбор: fail-closed.** Сбой модерации (таймаут, сеть, 5xx, некорректный ответ) → операция **отклоняется**: `503 moderation_unavailable`, кредиты не списаны, задача не создана, шаг чата не записан.
 
+**Отказ провайдера `400` — не недоступность.** `openai.BadRequestError` означает, что провайдер не принимает именно этот вход (`exc.code`: `invalid_image`, `file_too_large`, `image_url_unavailable`, …); повтор его не изменит, поэтому ни fail-closed `503`, ни `MODERATION_FAIL_OPEN` к нему не применяются. `ModerationService.check` ловит его **до** общей ветки `_on_failure`, пишет WARNING `moderation_provider_rejected` (`surface`, `stage`, `code` = `exc.code`, `httpStatus`), инкрементирует `moderation_errors_total{reason="bad_request"}` и поднимает внутреннее `ModerationInputRejectedError(code)`. Решение — у вызывающего:
+
+| Поверхность | `code` | Исход |
+|---|---|---|
+| вход чата (`ChatOrchestrator._moderate_turn`) | любой | `422 attachment_media_type_mismatch`, шаг не записан, кредит не списан |
+| вход медиа (все прочие вызовы `check` со `stage=STAGE_INPUT`: `MediaGenerationService`, `MediaFeaturesService`) | любой | `422 validation_error` (`ValidationFailedError`), кредиты не списаны |
+| выход медиа (`MediaGenerationService._moderate_output`) | `file_too_large` | ассеты скачиваются (allowlist хостов, `https`, без редиректов, ≤ `MODERATION_DOWNSCALE_MAX_BYTES`), открываются Pillow с проверкой `width×height ≤ MODERATION_DOWNSCALE_MAX_PIXELS` до декодирования, уменьшаются до ≤ 2048 px по длинной стороне, кодируются JPEG и модерируются повторно как data-URI. Модерация не пропускается |
+| выход медиа | любой иной, повторный `400` после уменьшения, превышение байтов/пикселей при уменьшении | задача сразу `failed` с возвратом кредитов, `error = "result image could not be checked"` (не совпадает с `_FAL_CONTENT_POLICY_MARKERS`), без ожидания дедлайна ([ADR-105 §B2](ADR-105-provider-failure-input-shape-and-media-deadline.md)) |
+
+Таймаут, сеть, 5xx, некорректный ответ, а также сетевой сбой скачивания при уменьшении — по-прежнему недоступность: fail-closed `503` на входе, транзиентный исход до дедлайна на выходе.
+
+**Вход чата декодируется до модерации.** `prepare_attachments` для `type="image"` открывает байты Pillow: `width×height > ATTACHMENT_MAX_IMAGE_PIXELS` (проверка по заголовку, до декодирования) → `422 attachment_too_large`; `Image.verify()` падает → `422 attachment_media_type_mismatch`. Битое изображение отбивается собственным валидатором и до провайдера модерации не доходит.
+
 Обоснование: цена ошибки несимметрична. Fail-open означает, что во время любой недоступности провайдера через сервис проходит непроверенный UGC — то есть ровно то состояние, из-за которого приложение снимают с ревью; и узнать об этом можно только по факту жалобы. Fail-closed означает временную недоступность **двух** поверхностей (генерация медиа и чат с вложением) при живом текстовом чате, с явным retryable-кодом. Прецедент того же выбора в проекте — fail-closed дефолт `CHAT_ADVERTISED_GENERATION_MODES` ([ADR-065](ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md)).
 
 **Аварийный переключатель оператора:** `MODERATION_FAIL_OPEN` (дефолт `false`). При `true` сбой модерации не блокирует операцию, вердикт записывается как `unchecked`, пишется WARNING и инкрементируется `moderation_errors_total{reason="fail_open"}`. Это **осознанное снижение соответствия требованиям сторов** на время длительной аварии провайдера, а не штатный режим; включение и выключение — операторское решение, зафиксированное в `.env` инстанса.
@@ -189,6 +202,9 @@ Sweep по **всем** поверхностям, принимающим пол�
 | `MODERATION_BLOCK_CATEGORIES` | `sexual,sexual/minors,violence/graphic,self-harm,self-harm/intent,self-harm/instructions` | BLOCK-набор; `sexual/minors` неудаляем |
 | `MODERATION_TEXT_MAX_CHARS` | `4000` | срез текста, уходящего в модерацию |
 | `MODERATION_FAIL_OPEN` | `false` | аварийный переключатель (§7) |
+| `MODERATION_DOWNSCALE_MAX_BYTES` | `52428800` (50 MiB) | предел скачивания ассета для уменьшения при `file_too_large` (§7); `<= 0` → дефолт |
+| `MODERATION_DOWNSCALE_MAX_PIXELS` | `64000000` | предел `width×height` ассета до декодирования при уменьшении (§7); `<= 0` → дефолт |
+| `ATTACHMENT_MAX_IMAGE_PIXELS` | `64000000` | предел `width×height` фото-вложения чата до декодирования (§7); `<= 0` → дефолт |
 
 ### 12. Влияние на действующие инстансы
 

@@ -19,4 +19,4 @@ CRUD и просмотр истории чатов для экранов Home/и
 - BR-CH-1: доступ только владельца (`chat_sessions.user_id == sub`), иначе `404` (не раскрываем существование чужого).
 - BR-CH-2: `title` автогенерируется из первого user-сообщения, если не задан; `rename` через PATCH перезаписывает.
 - BR-CH-3: сортировка списка — `is_pinned DESC, updated_at DESC`.
-- BR-CH-4: удаление чата каскадно удаляет `chat_steps`/`tool_calls` (FK `ON DELETE CASCADE`); `attachments.session_id` → NULL (SET NULL), вложения не удаляются вместе с чатом (принадлежат пользователю).
+- BR-CH-4: удаление чата каскадно удаляет `chat_steps`/`tool_calls` (FK `ON DELETE CASCADE`), а также `chat_documents` и `chat_attachments` — байты вложений удаляются вместе с чатом ([ADR-120](../../adr/ADR-120-chat-attachment-bytes-stored-server-side.md)).

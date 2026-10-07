@@ -163,6 +163,11 @@
   оверлея** (нормализация на записи). Diff-проверка: снятие добавления `DEFAULT_GENERATION_MODE`
   на записи обязано ронять кейс; кейс, читающий только `values.advertised_generation_modes()`,
   его **не** заменяет — он проверяет read-time барьер, а не то, что видит оператор.
+- **`chat.default_generation_mode`** ([ADR-065 §1 п.3](../../adr/ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md)):
+  `PATCH` на режим из витрины → `200`, `GET /v1/chat/v2/capabilities` → `defaultGenerationMode`
+  = новое значение; на режим вне витрины → `400`; после смены дефолта на `research` `PATCH`
+  витрины без `research` → `research` в значении (нормализация следует дефолту, не `general`);
+  `POST /v1/chat/v2/run` без `generationMode` → ход в `general` при любом значении настройки.
 - ⚠️ **Компонентный тест резолвера этих кейсов не заменяет** — он сам конструирует снимок и
   доказывает только устройство потребителя, а не поставку данных ему.
 

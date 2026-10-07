@@ -713,7 +713,7 @@ subscription_credits(pid, канал)
 переоценки (продуктовый выбор объявлен секретом). Обе ошибки одинаково дороги: первая раздаёт
 ключи, вторая возвращает оператора к правке `.env`, ради ухода от которой поверхность и заводится.
 
-#### §8.1. Объявляемые настройки (14)
+#### §8.1. Объявляемые настройки (15)
 
 Список **самоописываем**: CRM не знает ни имён, ни типов, ни допустимых значений — всё приходит в
 ответе. Состав **зависит от инстанса** (см. сноски ¹ и ²).
@@ -743,6 +743,7 @@ subscription_credits(pid, канал)
 | `chat.default_model` ² | `enum` | `allowed_models_union()` по `credits_providers()` | — | `OPENAI_MODEL`/`ANTHROPIC_MODEL` (`default_model()`) | `instance_default_model()`; `default:true` в `GET /v1/models` (`build_instance_catalog`); модель хода при пустой `model` сессии; межэлементный барьер `_check_model_invariant` |
 | `chat.models_offered` ² | `multi_enum` | **та же** `allowed_models_union()` по `credits_providers()` | `min_items: 1` | все модели включённых провайдеров | `GET /v1/models` (`build_instance_catalog`); валидация `model` при создании сессии (`model_is_selectable`); межэлементный барьер `_check_model_invariant` |
 | `chat.advertised_generation_modes` | `multi_enum` | `GENERATION_MODE_ORDER` (`src/app/schemas/chat.py`, = `get_args(GenerationMode)`) | `min_items: 1` | `CHAT_ADVERTISED_GENERATION_MODES` | `generationModes[]` в `GET /v1/chat/v2/capabilities` |
+| `chat.default_generation_mode` | `enum` | `GENERATION_MODE_ORDER` | — | `CHAT_DEFAULT_GENERATION_MODE` (дефолт `general`) | `defaultGenerationMode` в `GET /v1/chat/v2/capabilities`; барьер включения в `advertised_generation_modes()`. Режим run при отсутствии `generationMode` в запросе — **не** эта величина, а константа `DEFAULT_GENERATION_MODE` (`general`) |
 | `chat.reasoning_level` | `enum` | `SUPPORTED_REASONING_LEVELS` (`src/app/config.py`) | — | `CHAT_REASONING_LEVEL` | `reasoningLevel` в `GET /v1/chat/v2/capabilities`; `reasoning.effort` исходящего запроса OpenAI Responses (`openai_responses_client`) |
 | `chat.anthropic_thinking_display` ¹ | `enum` | `SUPPORTED_ANTHROPIC_THINKING_DISPLAYS` (`src/app/config.py`) | — | `ANTHROPIC_THINKING_DISPLAY` | `thinking.display` исходящего запроса Anthropic (`anthropic_client`) — выдача summary размышлений |
 | `chat.characters_enabled` | `bool` | — | — | `CHARACTERS_ENABLED` | `GET /v1/characters`, гейт `characterId` при создании сессии, слой промта ([ADR-097](ADR-097-character-personas.md)); **ступень 1 резолва голоса озвучки** `resolve_default_voice_id` (`src/app/chat/voices.py`, [ADR-100](ADR-100-assistant-speech-output.md)) ⁴ |
@@ -831,19 +832,21 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
 замороженного набора контракта и может появиться у будущей строки; отсутствующий ключ ⇒ CRM по
 нему проверку не выполняет.
 
-⚠️ **Снятие `general` с витрины режимов: нормализация КОДОМ, а не отказ — и это НЕ копия решения
-по моделям.** Оператор вправе прислать `chat.advertised_generation_modes` без `general`; сервис
-**принимает правку и возвращает `general` в значение** (действующее правило
-[ADR-065](ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md) §1:
-`defaultGenerationMode` обязан присутствовать в списке, иначе у выпущенной сборки переключатель
-остаётся без значения по умолчанию).
+⚠️ **Снятие режима по умолчанию с витрины режимов: нормализация КОДОМ, а не отказ — и это НЕ копия
+решения по моделям.** Режим по умолчанию — текущее значение `chat.default_generation_mode`
+(оверлей → `CHAT_DEFAULT_GENERATION_MODE` → `general`). Оператор вправе прислать
+`chat.advertised_generation_modes` без него; сервис **принимает правку и возвращает режим по
+умолчанию в значение** (правило [ADR-065](ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md)
+§1: `defaultGenerationMode` обязан присутствовать в списке, иначе у выпущенной сборки переключатель
+остаётся без значения по умолчанию). Обратная правка — `chat.default_generation_mode` на режим вне
+текущей витрины — **`400`** (межэлементный инвариант, §11).
 
-**Почему здесь не симметричный `400`, хотя у моделей он введён (§8.1 выше).** Различие в том, есть
-ли у оператора **действие**: дефолтную модель он назначает сам, поэтому отказ «сначала смени
-дефолт» ведёт к выполнимому шагу. `defaultGenerationMode` — **константа кода**
-(`DEFAULT_GENERATION_MODE`), настройкой не является и оператору недоступна; отказ «нельзя снять
-`general`» не оставлял бы ему **ни одного** пути вперёд — это тупик, а не защита. Отказ, у
-которого нет выполнимого следующего шага, хуже нормализации.
+**Почему на витрине нормализация, а не симметричный `400`, как у моделей (§8.1 выше).** Правило
+введено, когда режим по умолчанию был константой кода и отказ был бы тупиком; выкаченная CRM на
+него опирается (присылает список без `general` и показывает вернувшееся `value`). С появлением
+`chat.default_generation_mode` у оператора есть путь вперёд, но смена кода ответа сломала бы
+работающий сценарий CRM без выигрыша: нормализация видима (п. 1–3 ниже) и не расходится с
+инвариантом. Направление «дефолт → витрина» новое, сценариев у него нет, и там действует `400`.
 
 ⛔ **Но нормализация обязана быть ВИДИМОЙ — иначе это молчаливое игнорирование ввода, запрещённое
 наравне с молчаливым приёмом `avatar_tokens` (§6).** Норма — **код вправе нормализовать значение,
@@ -859,14 +862,14 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
 `src/app/instance_config/settings_registry.py` совпадает с врезкой ниже дословно.
 
 1. **Нормализация выполняется на ЗАПИСИ: в оверлей ложится уже нормализованное значение.**
-   `patch_setting` добавляет `DEFAULT_GENERATION_MODE` к значению **до** сохранения, и ответ
-   `PATCH` (как и последующий `GET /v1/admin/settings`) несёт `general` **как следствие**, а не
+   `patch_setting` добавляет текущий режим по умолчанию к значению **до** сохранения, и ответ
+   `PATCH` (как и последующий `GET /v1/admin/settings`) несёт его **как следствие**, а не
    как отдельную меру. Почему именно на записи, а не «дорисовать в ответе»: `previous_value`,
    `changed` и дельта аудита считаются по **хранимому** значению, и нормализация только в ответе
    развела бы их с показанным — оператор увидел бы `general` в `value` и его отсутствие в
    `previous_value` соседней правки. Хранение нормализованного даёт **один** источник.
-2. **Read-time барьер `selected.add(DEFAULT_GENERATION_MODE)` в
-   `values.advertised_generation_modes()` ОСТАЁТСЯ — и это не дубль, а второй барьер с другой
+2. **Read-time барьер в `values.advertised_generation_modes()` ОСТАЁТСЯ** и добавляет
+   **разрешённый** режим по умолчанию (`chat.default_generation_mode`), а не константу — и это не дубль, а второй барьер с другой
    зоной действия.** Он покрывает значения, пришедшие **не** через эту ручку: `env`
    (`CHAT_ADVERTISED_GENERATION_MODES` без `general`) и прямую запись в БД. **Контраст помечен с
    обеих сторон:** п. 1 — про то, что видит оператор; п. 2 — про то, что получает выпущенная
@@ -909,7 +912,11 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
 
 **`chat.advertised_generation_modes`:**
 
-> Режимы, которые приложение показывает в переключателе. `general` присутствует всегда — он режим по умолчанию, и снять его с витрины нельзя. Это объявление, а не поведение: не объявленный режим сервер по-прежнему принимает.
+> Режимы, которые приложение показывает в переключателе. Режим по умолчанию присутствует всегда, и снять его с витрины нельзя — сначала смените режим по умолчанию. Это объявление, а не поведение: не объявленный режим сервер по-прежнему принимает.
+
+**`chat.default_generation_mode`:**
+
+> Режим, который приложение выбирает при открытии чата. Должен быть среди показываемых режимов. Запрос без режима сервер выполняет как «Обычный».
 
 **`chat.characters_enabled`:**
 
@@ -1023,6 +1030,7 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
   правилу `*_TIMEOUT_SECONDS`, `SEGMENT_MIN_CHARS` и `UTTERANCE_MAX_SECONDS` — **(в)**, `VOICE_MODE_ENABLED` —
   кандидат в §8.1 с отложенным включением; в перечень ниже по именам не переносились;
 - `MEDIA_JOB_DEADLINE_SECONDS` (`cbed6ca`) — **(б)**, внесено в перечень ниже.
+- `VOICE_MODE_FIRST_SEGMENT_MIN_CHARS` — **(в)**, `VOICE_TTS_HEDGE_SECONDS` — **(б)** ([ADR-104 §6](ADR-104-voice-mode-websocket.md)); `ATTACHMENT_MAX_IMAGE_PIXELS`, `MODERATION_DOWNSCALE_MAX_BYTES`, `MODERATION_DOWNSCALE_MAX_PIXELS` — **(в)** ([ADR-086 §7](ADR-086-ugc-moderation.md)); `CHAT_ATTACHMENT_URL_TTL_SECONDS` — **(б)** ([ADR-120 §3](ADR-120-chat-attachment-bytes-stored-server-side.md)); `CHAT_DEFAULT_GENERATION_MODE` — **§8.1** (строка `chat.default_generation_mode`). Код на 2026-10-07 не написан.
 
 Команда та же, что названа ниже; сверка — поимённо, а не по числу.
 
@@ -1694,7 +1702,7 @@ grep -ohE '"(unknown_id|type_mismatch|out_of_range|undeclared_bound|source_kind_
 | Конфликт `if_updated_at` на любом `PATCH` | **`409`** | штатный оптимистичный конфликт |
 | Нарушено **наше собственное объявление**: `tokens` **выше** `limits` (`product_tokens_max` / `tariff_tokens_max`), `tokens` тарифа дробное (`tariff_decimal_places: 0`), значение настройки не по объявленному `type`/`options`/`constraints` (в т.ч. **пустой `chat.models_offered`** и **пустой `chat.advertised_generation_modes`** — обе строки объявляют `min_items: 1`) | **`422`** | CRM **могла** отклонить это в форме по тому, что мы ей сами отдали (`limits`, `type`, `options`, `constraints`) — значит отказ относится к **валидации по объявлению**, а не к скрытому от неё правилу |
 | Нарушена граница, которой в нашем объявлении **НЕТ и быть не может**: `tokens` тарифа `< 1`; `tokens` продукта ниже нижней границы **своего класса** (`one_time` `< 1`) | **`400`** | ⚠️ **Исправление прежней редакции, где обе строки стояли под `422`.** Замороженный контракт объявляет тело обоих путей как `tokens: int≥0` / `number≥0` (`CRM ADR-072 §1` — перечень эндпоинтов: `PATCH {P}/products/{product_id}` и `PATCH {P}/pricing/{tariff_id}`; `CRM ADR-109 §2` — тело `POST {P}/products`), а наш `limits` несёт только **верхние** границы и число знаков: ключа под нижнюю границу в замороженном наборе нет, а у продукта она вдобавок **зависит от второго поля того же тела** (`purchase_kind`) и в `limits` невыразима в принципе. Значит CRM отклонить это в форме **не могла** — по собственному предикату ниже это `400`. Лейбл — `undeclared_bound` (§10.0) |
-| Правило, которого в объявлении **нет и быть не может**: непустой `avatar_tokens` (поле контракта, которое сервис не поддерживает) и `chat.default_model` вне `chat.models_offered` (**межэлементный** инвариант — у него нет места ни в `constraints`, ни в `options` одной строки) | **`400`** | знать об этом CRM было **неоткуда**: она прислала значение, законное по всему, что мы объявили. Текст ответа обязан объяснить причину — он единственный носитель правила |
+| Правило, которого в объявлении **нет и быть не может**: непустой `avatar_tokens` (поле контракта, которое сервис не поддерживает), `chat.default_model` вне `chat.models_offered` и `chat.default_generation_mode` вне `chat.advertised_generation_modes` (**межэлементные** инварианты — у него нет места ни в `constraints`, ни в `options` одной строки) | **`400`** | знать об этом CRM было **неоткуда**: она прислала значение, законное по всему, что мы объявили. Текст ответа обязан объяснить причину — он единственный носитель правила |
 | Отсутствует обязательный query/поле тела | **`422`** | штатный конвейер FastAPI |
 | Нет заголовка / неверный ключ / секрет не сконфигурирован | **`403` / `401` / `401`** | [ADR-009](ADR-009-admin-token-auth.md), без изменений |
 | Превышен лимит корзины `rl:admin_econ` | **`429`** | лимит обязателен на **каждой** из восьми ручек — он не middleware, а явный вызов в хендлере (§10.1); забытый вызов оставляет путь без лимита молча |

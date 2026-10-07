@@ -18,9 +18,9 @@
 
 ### 2. `attachmentRefs` + `useRecentImage`
 
-- При image-attachment + настроенном media: upload на fal, `user.payload.attachmentRefs[]` с `expiresAt = now+24h`.
+- `user.payload.attachmentRefs[]` пишется для каждого хранимого вложения любого типа (`attachmentId`, `mediaType`, `filename`, `size`); фото при настроенном media дополнительно заливается на fal (`url`, `expiresAt = now+24h`). Наружу `url`/`expiresAt` записи с `attachmentId` — наш подписанный адрес ([ADR-120 §2–§3](ADR-120-chat-attachment-bytes-stored-server-side.md)).
 - Если в последних ~30 user-steps есть живой ref (или image-placeholder) и на текущем ходе нет нового фото — system hint: **спросить** перед генерацией.
-- После согласия: `media.ask_params` / `generate_*` с `useRecentImage: true` → сервер подставляет свежий непросроченный URL. Нет URL → soft error `no_recent_image`.
+- После согласия: `media.ask_params` / `generate_*` с `useRecentImage: true` → сервер подставляет свежий непросроченный URL. Живого fal-URL нет → заливка байтов последнего фото сессии из `chat_attachments` ([ADR-120 §2](ADR-120-chat-attachment-bytes-stored-server-side.md)); нет и его → soft error `no_recent_image`.
 
 ### 3. Пагинация `GET /v1/chats/{id}`
 

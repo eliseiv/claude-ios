@@ -143,7 +143,7 @@
 
 Порядок одного продвижения:
 
-1. **Опрос выполняется всегда, в том числе после дедлайна** (последний шанс): терминальные исходы применяются как сегодня — `COMPLETED` с ассетами → пост-модерация → `completed`; `FAILED`/`CANCELED`, `422`, `404`, `COMPLETED` без ассетов, `blocked` → `failed` с возвратом.
+1. **Опрос выполняется всегда, в том числе после дедлайна** (последний шанс): терминальные исходы применяются как сегодня — `COMPLETED` с ассетами → пост-модерация → `completed`; `FAILED`/`CANCELED`, `422`, `404`, `COMPLETED` без ассетов, `blocked`, **постоянный отказ пост-модерации** (`400` провайдера модерации, не снятый уменьшением, [ADR-086 §7](ADR-086-ugc-moderation.md)) → `failed` с возвратом.
 2. **Опрос НЕ дал конечного состояния** — по **любой** причине: исключение клиента fal (строка 1), нетерминальный статус (строка 2), недоступная пост-модерация (строка 3), незаданный ключ (строка 4), исключение нашего собственного кода между опросом и записью исхода (например, в нормализации результата):
    - `now − created_at > MEDIA_JOB_DEADLINE_SECONDS` ⇒ `_fail(job, error="generation did not complete in time")`: возврат кредитов (ключ `media-refund:{jobId}`), `mark_failed`, `request_logs.finish_media(failed=True, refunded=…)`, событие §B5. Исключение наружу не всплывает: клиентский `GET` получает `200` со `status: "failed"`;
    - иначе — как сегодня: исключение всплывает (клиент получает свой `502`/`503`/`429`, согласователь пишет `media_reconcile_job_error`), нетерминальный статус → `mark_running`.
@@ -176,7 +176,7 @@
   |---|---|
   | `upstream_error` | `FAL_API_KEY` непуст, и вызов `FalClient.status` или `FalClient.result` завершился исключением |
   | `upstream_pending` | `FalClient.status` ответил нетерминальным статусом |
-  | `moderation_unavailable` | fal отдал ассеты, `_moderate_output` завершился исключением |
+  | `moderation_unavailable` | fal отдал ассеты, `_moderate_output` завершился исключением недоступности (не `ModerationInputRejectedError` — тот терминален по шагу 1 §B2) |
   | `not_configured` | `FAL_API_KEY` пуст — запроса наверх не было: `FalClient` отказывает до запроса (`FalClient._headers`, зовётся первым в `FalClient._request`). **Уточнение факта, решение не меняется:** через HTTP-ручку `GET /v1/media/jobs/{jobId}` это значение **не наблюдаемо** — весь роутер `/v1/media` закрыт зависимостью `require_media_generation_configured` (`src/app/api_gateway/routers/media.py`, `src/app/deps.py`), и без ключа ручка отвечает `503 media_generation_not_configured` до сервиса для **любой** задачи, просроченной тоже. Значение пишет согласователь (§B7 — берёт только просроченные и доводит их через тот же `_advance`) и сервисный `MediaGenerationService.get_job`, вызванный мимо роутера; контракт роутера не менялся (§B4) |
   | `internal_error` | исключение возникло вне вызовов `FalClient` и `_moderate_output` (наш код между опросом и записью исхода) |
 

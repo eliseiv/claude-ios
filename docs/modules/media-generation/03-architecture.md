@@ -105,6 +105,8 @@ GET /v1/media/jobs/{jobId}   (тот же путь _advance — у фоново�
 
 **Недоступность провайдера модерации на опросе** ведёт себя как транзиентная ошибка апстрима: задача остаётся non-terminal, `mark_completed` не выполняется, следующий опрос (или reconciler, [ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md)) доберёт исход — **но не позже дедлайна задачи**: по его истечении `failed` с возвратом, ассеты не выдаются ([ADR-105 §B2](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md), `lastObservation = moderation_unavailable`). Отдавать ассеты «пока модерация недоступна» запрещено — это и есть fail-open, отвергнутый в [ADR-086 §7](../../adr/ADR-086-ugc-moderation.md); при `MODERATION_FAIL_OPEN=true` (аварийный режим оператора) задача завершается с `moderation.status = "unchecked"`.
 
+**Отказ `400` провайдера модерации на результате — не недоступность** ([ADR-086 §7](../../adr/ADR-086-ugc-moderation.md)): `file_too_large` → скачать, уменьшить до ≤ 2048 px, JPEG, проверить data-URI; любой иной `400` или неуспех уменьшения по пределам → сразу `failed` с возвратом (`error = "result image could not be checked"`), без ожидания дедлайна.
+
 `COMPLETED` без пригодного URL трактуется как провал: с точки зрения пользователя разницы между «упало» и «завершилось без результата» нет, а кредиты в обоих случаях должны вернуться.
 
 Возврат идемпотентен дважды: ключом ledger `media-refund:{jobId}` ([ADR-005](../../adr/ADR-005-idempotency-ledger.md)) и флагом `credits_refunded` в строке — флаг лишь избавляет от повторного вызова, гарантию даёт ключ.

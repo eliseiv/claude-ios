@@ -489,9 +489,9 @@ Read-only. Сколько бизнес заплатил AI-провайдера�
 `constraints` (`{max_length, min_items, max_items}` \| null), `readonly` (bool \| null),
 `updated_at` (ISO \| null).
 
-**Реестр — 21 величина** (14 [ADR-099](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md) + 7 [ADR-116 §4](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md): `llm.provider`, `llm.dual_enabled`, `storekit.mode`, `storekit.bundle_id`, `cloudpayments.app_id`, `cloudpayments.pay_page_proxy_enabled`, `chat.maps_tools_enabled`) (`setting_id` / `type`); ⚠️ **ответ конкретного инстанса может быть уже**: строка, неприменимая к его конфигурации, отсутствует (см. пометку «только на Anthropic-инстансах» ниже), поэтому число элементов — не константа контракта:
+**Реестр — 22 величины** (15 [ADR-099](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md), включая `chat.default_generation_mode` ([ADR-065 §1 п.3](../../adr/ADR-065-study-learn-advertisement-gate-and-history-spoiler-strip.md), код на 2026-10-07 не написан) + 7 [ADR-116 §4](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md): `llm.provider`, `llm.dual_enabled`, `storekit.mode`, `storekit.bundle_id`, `cloudpayments.app_id`, `cloudpayments.pay_page_proxy_enabled`, `chat.maps_tools_enabled`) (`setting_id` / `type`); ⚠️ **ответ конкретного инстанса может быть уже**: строка, неприменимая к его конфигурации, отсутствует (см. пометку «только на Anthropic-инстансах» ниже), поэтому число элементов — не константа контракта:
 `chat.default_model` (`enum`), `chat.models_offered` (`multi_enum`, `min_items: 1`),
-`chat.advertised_generation_modes` (`multi_enum`, **`min_items: 1`**), `chat.reasoning_level` (`enum`),
+`chat.advertised_generation_modes` (`multi_enum`, **`min_items: 1`**), `chat.default_generation_mode` (`enum`), `chat.reasoning_level` (`enum`),
 `chat.anthropic_thinking_display` (`enum`, **только на Anthropic-инстансах**),
 `chat.characters_enabled`, `chat.memory_enabled`, `chat.voice_input_enabled`,
 `chat.code_tools_enabled`, `chat.media_tools_enabled` (все `bool`),
@@ -546,18 +546,17 @@ Read-only. Сколько бизнес заплатил AI-провайдера�
     не означает «вернуть дефолт»** ни у одной `multi_enum`-строки: пустой env — это «оператор
     ничего не сказал», пустой оверлей — «оператор явно выбрал ничего»;
   - **`400`** — правило, которого в объявлении **нет и быть не может**: `chat.default_model` вне
-    `chat.models_offered` (межэлементный инвариант — его нечем выразить в `constraints` одной
+    `chat.models_offered`, `chat.default_generation_mode` вне `chat.advertised_generation_modes` (межэлементные инварианты — его нечем выразить в `constraints` одной
     строки, и CRM не могла отклонить такую правку в форме);
   - обе стороны CRM сводит в `backend_admin_bad_request` и показывает текст транзитом; различение
     нужно **нам**: `422` означает, что клиентская проверка не сработала по нашему же объявлению;
 - неизвестный `setting_id` → **`400`**; `PATCH` настроек **не создаёт**;
 - `PATCH` идемпотентен: повтор того же значения → `changed: false`.
 - ⚠️ **`chat.advertised_generation_modes`: значение может вернуться НЕ ТЕМ, что отправлено, — и это
-  единственная такая строка.** `general` — режим по умолчанию выпущенных сборок, поэтому он
-  добавляется к присланному списку **на записи**: в оверлей ложится нормализованное значение,
-  и `value` ответа `PATCH` (как и последующий `GET`) несёт `general`, даже если оператор его снял.
-  Отказа здесь нет намеренно — `defaultGenerationMode` не является настройкой, и `400` не оставил
-  бы оператору ни одного пути вперёд ([ADR-099 §8.1](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md)).
+  единственная такая строка.** Текущий режим по умолчанию (`chat.default_generation_mode`, дефолт
+  `general`) добавляется к присланному списку **на записи**: в оверлей ложится нормализованное
+  значение, и `value` ответа `PATCH` (как и последующий `GET`) несёт его, даже если оператор его снял.
+  Нормализация, а не `400`, — сохранение сценария выкаченной CRM ([ADR-099 §8.1](../../adr/ADR-099-crm-admin-economics-and-instance-settings.md)).
   Об этом же предупреждает `description` строки; CRM ничего специального не делает — она просто
   показывает вернувшееся `value`. Ни одна другая строка присланное значение не меняет.
 

@@ -616,6 +616,10 @@ CREATE INDEX ix_media_jobs_assets_expire ON media_jobs (assets_expire_at)
 
 **`version` — признак изменения для UI, а НЕ механизм конкурентности:** условной проверки при обновлении нет, `If-Match` не читается, `409` не возвращается — два одновременных обновления оба применятся, победит последнее ([modules/documents/02-api-contracts §version](modules/documents/02-api-contracts.md#version--признак-изменения-а-не-механизм-конкурентности)). Полный контракт модуля — [modules/documents](modules/documents/README.md); справочник для интегратора — [API-REFERENCE §30](API-REFERENCE.md#30-documents-документы-чата).
 
+## Таблица `chat_attachments` (миграция `0042_chat_attachments`, [ADR-120](adr/ADR-120-chat-attachment-bytes-stored-server-side.md), модуль `chat-orchestrator`, **docs-only на 2026-10-07**)
+
+Байты вложений хода чата (`image`/`document`/`text`; `audio` не хранится). Колонки, индекс, момент записи и удаления — [ADR-120 §1](adr/ADR-120-chat-attachment-bytes-stored-server-side.md) (единственный источник DDL). Каскад: `session_id` → `chat_sessions`, `user_id` → `users` (`ON DELETE CASCADE`); строки усечённых ходов удаляет `truncate_from_message_step` явно. Рост объёма — [TD-009](100-known-tech-debt.md).
+
 ## Таблицы удалённого управления инстансом (миграция `0033_admin_economics`, [ADR-099](adr/ADR-099-crm-admin-economics-and-instance-settings.md), модуль `admin`)
 
 Три **таблицы-оверлея**: они хранят **только то, что оператор изменил** из CRM. Дом дефолтов
