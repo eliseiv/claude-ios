@@ -102,25 +102,27 @@ jobs:
       - name: Install deps (uv sync)
         run: uv sync --frozen
 
-      # Global coverage gate: 80% (02-tech-stack.md, 06-testing-strategy.md).
+      # ОДИН прогон pytest на оба гейта: раньше critical-гейт перегонял unit+integration заново (+27 мин).
+      # xdist: -n auto по vCPU раннера; loadfile держит тесты файла в одном воркере (фикстуры модуля);
+      # session-фикстура Postgres (testcontainers) поднимается в каждом воркере на своём порту.
+      # pytest-cov сам объединяет данные воркеров в .coverage. Global gate 80% (02-tech-stack.md, 06-testing-strategy.md).
       - name: Pytest + coverage (global gate 80%)
         run: >
           uv run pytest
+          -n auto
+          --dist loadfile
           --cov=src
           --cov-report=term-missing
           --cov-report=xml
           --cov-fail-under=80
 
-      # Critical packages must hit >=95% (06-testing-strategy.md §Coverage gate).
+      # Critical packages >=95% (06-testing-strategy.md §Coverage gate) — по данным того же прогона.
       - name: Critical-package coverage gate (policy/wallet/byok >=95%)
         run: >
-          uv run pytest
-          --cov=src/app/policy
-          --cov=src/app/wallet
-          --cov=src/app/byok
-          --cov-report=term-missing
-          --cov-fail-under=95
-          tests/unit tests/integration
+          uv run coverage report
+          --include='src/app/policy/*,src/app/wallet/*,src/app/byok/*'
+          --show-missing
+          --fail-under=95
 
       - name: Upload coverage report
         if: always()

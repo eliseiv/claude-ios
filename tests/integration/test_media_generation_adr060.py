@@ -871,7 +871,9 @@ async def test_unconfigured_instance_returns_503_on_submit(
     assert await _balance(db_sessionmaker, uid) == 100
 
 
-@pytest.mark.parametrize("path", [_MODELS_URL, _JOBS_URL, f"{_JOBS_URL}/{uuid.uuid4()}"])
+@pytest.mark.parametrize(
+    "path", [_MODELS_URL, _JOBS_URL, f"{_JOBS_URL}/6b19532d-5ea2-4a51-9d85-813e041fe1bb"]
+)
 async def test_unconfigured_instance_returns_503_on_every_read_route(
     unconfigured_client: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], path: str
 ) -> None:

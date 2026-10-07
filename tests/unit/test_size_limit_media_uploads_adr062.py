@@ -60,7 +60,7 @@ def test_the_upload_path_gets_the_raised_limit(
         "/v1/media/images",
         "/v1/media/videos",
         "/v1/media/jobs",
-        f"/v1/media/jobs/{uuid.uuid4()}",
+        "/v1/media/jobs/6b19532d-5ea2-4a51-9d85-813e041fe1bb",
         # Near-misses: the rule is an exact path, not a prefix.
         "/v1/media/uploads/",
         "/v1/media/uploads/abc",

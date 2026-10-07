@@ -285,6 +285,53 @@ def _reset_instance_config_snapshot() -> Iterator[None]:
     reset_snapshot()
 
 
+class _UnreachableRedis:
+    """Redis, которого нет: каждая команда — `ConnectionError`, без сетевого вызова.
+
+    Подменяет общий клиент `rate_limit.get_redis` (им же пользуются checkout и voice), чтобы ни
+    один тест не ходил на `REDIS_URL` по умолчанию (localhost:6379): поднятый локально Redis
+    давал бы общее между xdist-воркерами состояние (счётчики лимитов, `cp:link:*`), а его
+    отсутствие стоило бы таймаута подключения. Поведение совпадает с CI без Redis (fail-open).
+    Тесты, которым нужен рабочий Redis, патчат `get_redis` своим фейком поверх.
+    """
+
+    class _Pipeline:
+        def __getattr__(self, _name: str) -> Any:
+            return lambda *_a, **_k: self
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def execute(self) -> Any:
+            import redis.asyncio as aioredis
+
+            raise aioredis.ConnectionError("redis unavailable in tests")
+
+    def pipeline(self, *_a: Any, **_k: Any) -> Any:
+        return self._Pipeline()
+
+    async def aclose(self) -> None:
+        return None
+
+    def __getattr__(self, _name: str) -> Any:
+        async def _down(*_a: Any, **_k: Any) -> Any:
+            import redis.asyncio as aioredis
+
+            raise aioredis.ConnectionError("redis unavailable in tests")
+
+        return _down
+
+
+@pytest.fixture(autouse=True)
+def _no_real_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api_gateway import rate_limit
+
+    monkeypatch.setattr(rate_limit, "_redis_client", _UnreachableRedis())
+
+
 @pytest.fixture
 async def db_sessionmaker(_engine) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     """Per-test clean DB: truncate all tables, yield a sessionmaker bound to the container."""
