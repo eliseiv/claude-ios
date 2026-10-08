@@ -4,9 +4,9 @@ Norm — ``docs/adr/ADR-108-media-generation-via-proxy.md`` (§1 predicate, §2/
 the proxy task, §4.1 token, §4.3 classification, §7 allowlist, §10 access-log redaction) and
 ``docs/modules/media-generation/09-testing.md`` §«Integration — транспорт через прокси (ADR-108)».
 
-Every classification is checked on BOTH sides of its predicate: the routing condition §2.1 gives
-a vendor route when every condition holds (a) and only the fal route when any single one is
-broken (b) — each breach is its own case.
+Every classification is checked on BOTH sides of its predicate: the fixed routes of §2 give
+``[sosana|kie, fal]`` when the vendor route can be built (a) and only the fal route when any
+single condition of §2.1 is broken (b) — each breach is its own case.
 """
 
 from __future__ import annotations
@@ -22,14 +22,12 @@ import pytest
 
 from app.config import Settings
 from app.media_generation.catalog import build_fal_input, find_model, resolve_values
-from app.media_generation.proxy_client import _first_id
+from app.media_generation.proxy_client import ProxyClient, _first_id, mask_secret_text
 from app.media_generation.routing import (
     KIE_CREATE_TASK,
     SOSANA_CREATE_IMAGE,
     candidate_routes,
     fal_route,
-    lookup_price,
-    merged_vendor_prices,
 )
 from app.media_generation.webhook import (
     OUTCOME_COMPLETED,
@@ -53,7 +51,8 @@ def _settings(**overrides: Any) -> Settings:
         "SERVICE_DOMAIN": "",
         "FAL_API_KEY": "",
         "MEDIA_RESULT_HOST_SUFFIXES": "",
-        "MEDIA_VENDOR_PRICES": "{}",
+        "KIE_API_KEY": "",
+        "SOSANA_API_KEY": "",
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
@@ -92,24 +91,11 @@ def test_proxy_defaults_are_the_normative_ones() -> None:
     assert fields["proxy_api_key"].default == ""
     assert fields["proxy_webhook_secret"].default == ""
     assert fields["media_result_host_suffixes_raw"].default == ""
-    assert fields["media_vendor_prices_raw"].default == "{}"
-    assert _settings().media_vendor_prices() == {}
+    assert fields["kie_api_key"].default == ""
+    assert fields["sosana_api_key"].default == ""
+    # ADR-108 §2: routing is fixed — no vendor price table.
+    assert "media_vendor_prices_raw" not in fields
     assert _settings().media_result_host_suffixes() == ()
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ('{"nano-banana-2:2K:fal": 0.01}', {"nano-banana-2:2K:fal": 0.01}),
-        ('{"a:b:fal": -1, "c:d:fal": "x", "e:f:fal": true, "g:h:fal": 2}', {"g:h:fal": 2.0}),
-        ("not json", {}),
-        ("[1, 2]", {}),
-    ],
-)
-def test_vendor_price_override_keeps_only_non_negative_numbers(
-    raw: str, expected: dict[str, float]
-) -> None:
-    assert _settings(MEDIA_VENDOR_PRICES=raw).media_vendor_prices() == expected
 
 
 # ============================ §2 / §2.1 — routing ============================
@@ -128,72 +114,184 @@ def _run(
     return model, variant, values, payload
 
 
-def _routes(model_id: str, *, hosts: bool = True, prices: Any = None, **params: Any) -> list[Any]:
-    model, variant, values, payload = _run(model_id, **params)
-    return candidate_routes(
-        model=model,
-        variant=variant,
-        values=values,
-        fal_payload=payload,
-        prices=merged_vendor_prices(prices),
-        result_hosts_configured=hosts,
-    )
+def _routes(model_id: str, *, with_image: bool = False, **params: Any) -> list[Any]:
+    model, variant, values, payload = _run(model_id, with_image=with_image, **params)
+    return candidate_routes(model=model, variant=variant, values=values, fal_payload=payload)
 
 
 @pytest.mark.parametrize("model_id", ["nano-banana-2", "nano-banana-pro"])
 @pytest.mark.parametrize("resolution", ["1K", "2K", "4K"])
-def test_eligible_banana_run_is_routed_sosana_kie_fal(model_id: str, resolution: str) -> None:
-    """(a) every §2.1 condition holds → sosana, kie, fal — cheapest first (default table)."""
-    routes = _routes(model_id, resolution=resolution, aspectRatio="16:9")
-    assert [r.service for r in routes] == ["sosana", "kie", "fal"]
+@pytest.mark.parametrize(
+    ("extra", "aspect"),
+    [
+        ({"aspectRatio": "16:9"}, "16:9"),
+        ({"aspectRatio": "1:1", "seed": 7}, "1:1"),
+        ({"aspectRatio": "9:16", "outputFormat": "webp"}, "9:16"),
+        ({"outputFormat": "png"}, "auto"),
+        ({}, "auto"),
+    ],
+    ids=["16:9", "seed", "webp", "png-no-aspect", "no-aspect"],
+)
+def test_eligible_banana_run_is_routed_sosana_then_fal(
+    model_id: str, resolution: str, extra: dict[str, Any], aspect: str
+) -> None:
+    """(a) §2.1: seed/outputFormat are dropped on sosana, no aspectRatio → the vendor's ``auto``."""
+    routes = _routes(model_id, resolution=resolution, **extra)
+    assert [r.service for r in routes] == ["sosana", "fal"]
     assert routes[0].endpoint == SOSANA_CREATE_IMAGE
-    assert routes[1].endpoint == KIE_CREATE_TASK
-    assert [r.unit_price for r in routes] == sorted(r.unit_price for r in routes)
+    assert routes[0].payload == {
+        "prompt": "a cat",
+        "model": f"{model_id}-{resolution.lower()}",
+        "aspect_ratio": aspect,
+        "prompt_optimization": False,
+    }
+
+
+def test_sosana_edit_run_carries_the_reference_images() -> None:
+    routes = _routes("nano-banana-2", with_image=True, resolution="2K")
+    assert [r.service for r in routes] == ["sosana", "fal"]
+    assert routes[0].payload["image_urls"] == ["https://example.com/a.png"]
 
 
 @pytest.mark.parametrize(
-    ("case", "hosts", "params"),
+    ("case", "params"),
     [
-        ("result hosts empty", False, {"resolution": "2K", "aspectRatio": "16:9"}),
-        ("numImages=2", True, {"resolution": "2K", "aspectRatio": "16:9", "numImages": 2}),
-        ("0.5K", True, {"resolution": "0.5K", "aspectRatio": "16:9"}),
-        ("seed", True, {"resolution": "2K", "aspectRatio": "16:9", "seed": 7}),
-        (
-            "outputFormat=webp",
-            True,
-            {"resolution": "2K", "aspectRatio": "16:9", "outputFormat": "webp"},
-        ),
-        ("panoramic 8:1", True, {"resolution": "2K", "aspectRatio": "8:1"}),
-        ("aspectRatio omitted", True, {"resolution": "2K"}),
+        ("numImages=2", {"resolution": "2K", "aspectRatio": "16:9", "numImages": 2}),
+        ("0.5K", {"resolution": "0.5K", "aspectRatio": "16:9"}),
+        ("panoramic 8:1", {"resolution": "2K", "aspectRatio": "8:1"}),
     ],
 )
 def test_any_single_breach_of_the_condition_leaves_only_fal(
-    case: str, hosts: bool, params: dict[str, Any]
+    case: str, params: dict[str, Any]
 ) -> None:
     """(b) one condition of §2.1 broken → the run has the single fal route."""
-    routes = _routes("nano-banana-2", hosts=hosts, **params)
+    routes = _routes("nano-banana-2", **params)
     assert [r.service for r in routes] == ["fal"], case
 
 
-@pytest.mark.parametrize("fmt", ["png", "jpeg"])
-def test_output_format_png_or_jpeg_keeps_kie_but_drops_sosana(fmt: str) -> None:
-    """§2.1 п.4 per service: sosana takes no outputFormat, kie reproduces png/jpeg (jpeg → jpg)."""
-    routes = _routes("nano-banana-2", resolution="2K", aspectRatio="1:1", outputFormat=fmt)
-    assert [r.service for r in routes] == ["kie", "fal"]
-    assert routes[0].payload["input"]["output_format"] == ("jpg" if fmt == "jpeg" else "png")
+_I2V = "https://example.com/a.png"
 
 
 @pytest.mark.parametrize(
-    ("model_id", "params"),
+    ("model_id", "with_image", "params", "expected"),
     [
-        ("kling-video", {}),
-        ("kling-video-v3", {}),
-        ("veo-3.1", {}),
+        (
+            "kling-video",
+            False,
+            {"negativePrompt": "blur", "cfgScale": 0.4},
+            {
+                "model": "kling/v2-5-turbo-text-to-video-pro",
+                "input": {
+                    "prompt": "a cat",
+                    "duration": "5",
+                    "cfg_scale": 0.4,
+                    "negative_prompt": "blur",
+                },
+            },
+        ),
+        (
+            "kling-video",
+            True,
+            {"duration": "10"},
+            {
+                "model": "kling/v2-5-turbo-image-to-video-pro",
+                "input": {"prompt": "a cat", "duration": "10", "image_url": _I2V},
+            },
+        ),
+        (
+            "kling-video-v3",
+            False,
+            {},
+            {
+                "model": "kling-3.0/video",
+                "input": {
+                    "prompt": "a cat",
+                    "mode": "pro",
+                    "sound": False,
+                    "multi_shots": False,
+                    "multi_prompt": [],
+                    "duration": "5",
+                },
+            },
+        ),
+        (
+            "kling-video-v3",
+            True,
+            {"generateAudio": True, "duration": "7"},
+            {
+                "model": "kling-3.0/video",
+                "input": {
+                    "prompt": "a cat",
+                    "mode": "pro",
+                    "sound": True,
+                    "multi_shots": False,
+                    "multi_prompt": [],
+                    "duration": "7",
+                    "image_urls": [_I2V],
+                },
+            },
+        ),
+        (
+            "veo-3.1",
+            False,
+            {},
+            {
+                "model": "veo-3-1",
+                "input": {
+                    "prompt": "a cat",
+                    "generation_type": "TEXT_2_VIDEO",
+                    "resolution": "720p",
+                    "duration": 8,
+                },
+            },
+        ),
+        (
+            "veo-3.1",
+            True,
+            {"aspectRatio": "auto"},
+            {
+                "model": "veo-3-1",
+                "input": {
+                    "prompt": "a cat",
+                    "image_urls": [_I2V],
+                    "generation_type": "FIRST_AND_LAST_FRAMES_2_VIDEO",
+                    "aspect_ratio": "Auto",
+                    "resolution": "720p",
+                    "duration": 8,
+                },
+            },
+        ),
     ],
+    ids=["kling25-t2v", "kling25-i2v", "kling3-t2v", "kling3-i2v", "veo-t2v", "veo-i2v"],
 )
-def test_video_models_route_only_to_fal(model_id: str, params: dict[str, Any]) -> None:
-    routes = _routes(model_id, **params)
-    assert [r.service for r in routes] == ["fal"]
+def test_video_run_is_routed_kie_then_fal_with_the_builder_payload(
+    model_id: str, with_image: bool, params: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    routes = _routes(model_id, with_image=with_image, **params)
+    assert [r.service for r in routes] == ["kie", "fal"]
+    assert routes[0].endpoint == KIE_CREATE_TASK
+    assert routes[0].payload == expected
+
+
+def test_kling25_i2v_negative_prompt_is_clipped_to_500() -> None:
+    long_text = ("no blur here. " * 200)[:2000]
+    routes = _routes("kling-video", with_image=True, negativePrompt=long_text)
+    kie = routes[0].payload["input"]["negative_prompt"]
+    assert 0 < len(kie) <= 500
+    assert long_text.startswith(kie)
+    # fal keeps the full value (its limit is its own).
+    assert routes[1].payload["negative_prompt"] == long_text
+    # text-to-video keeps up to the vendor's own 2500.
+    t2v = _routes("kling-video", negativePrompt=long_text)
+    assert t2v[0].payload["input"]["negative_prompt"] == long_text
+
+
+def test_image_variant_without_a_start_frame_has_only_the_fal_route() -> None:
+    from app.media_generation.routing import _kie_route
+
+    model, variant, values, payload = _run("kling-video", with_image=True)
+    payload.pop(model.image_field)
+    assert _kie_route(model=model, variant=variant, fal_payload=payload) is None
 
 
 @pytest.mark.parametrize(
@@ -211,64 +309,89 @@ def test_video_models_route_only_to_fal(model_id: str, params: dict[str, Any]) -
         ("veo-3.1", True, {"aspectRatio": "auto"}),
     ],
 )
-def test_fal_route_carries_exactly_the_direct_fal_payload(
+def test_fal_route_is_last_and_carries_exactly_the_direct_fal_payload(
     model_id: str, with_image: bool, params: dict[str, Any]
 ) -> None:
     """§2: the fal route = ``https://queue.fal.run/<variant endpoint>`` + the direct payload."""
     model, variant, values, payload = _run(model_id, with_image=with_image, **params)
-    routes = candidate_routes(
-        model=model,
-        variant=variant,
-        values=values,
-        fal_payload=payload,
-        prices=merged_vendor_prices(),
-        result_hosts_configured=True,
-    )
-    fal = [r for r in routes if r.service == "fal"]
-    assert len(fal) == 1
-    assert fal[0].endpoint == f"https://queue.fal.run/{variant.endpoint}"
-    assert fal[0].payload == payload
-    assert fal[0].catalog_endpoint == variant.endpoint
+    routes = candidate_routes(model=model, variant=variant, values=values, fal_payload=payload)
+    fal = routes[-1]
+    assert [r.service for r in routes].count("fal") == 1
+    assert fal.service == "fal"
+    assert fal.endpoint == f"https://queue.fal.run/{variant.endpoint}"
+    assert fal.payload == payload
+    assert fal.catalog_endpoint == variant.endpoint
 
 
-def test_override_making_fal_cheapest_puts_fal_first() -> None:
-    routes = _routes(
-        "nano-banana-2",
-        resolution="2K",
-        aspectRatio="16:9",
-        prices={"nano-banana-2:2K:fal": 0.001},
-    )
-    assert [r.service for r in routes] == ["fal", "sosana", "kie"]
-
-
-def test_equal_prices_tie_break_sosana_kie_fal() -> None:
-    routes = _routes(
-        "nano-banana-2",
-        resolution="1K",
-        aspectRatio="16:9",
-        prices={
-            "nano-banana-2:1K:sosana": 0.5,
-            "nano-banana-2:1K:kie": 0.5,
-            "nano-banana-2:1K:fal": 0.5,
-        },
-    )
-    assert [r.service for r in routes] == ["sosana", "kie", "fal"]
-
-
-def test_price_lookup_falls_back_to_wildcards_and_ignores_negatives() -> None:
-    prices = merged_vendor_prices({"*:*:fal": 2.0, "veo-3.1:*:fal": -1.0})
-    assert lookup_price(prices, model_id="veo-3.1", tier="*", service="fal") == 2.0
-    assert lookup_price(prices, model_id="nano-banana-2", tier="2K", service="fal") == 0.12
-    # A feature endpoint (not in the table) still has its fal route.
-    route = fal_route(
-        model_id="feature",
-        tier="*",
-        endpoint="fal-ai/imageutils/rembg",
-        payload={"image_url": "x"},
-        prices=prices,
-    )
+def test_feature_endpoint_has_the_fal_route() -> None:
+    route = fal_route(endpoint="fal-ai/imageutils/rembg", payload={"image_url": "x"})
     assert route.service == "fal"
     assert route.endpoint == "https://queue.fal.run/fal-ai/imageutils/rembg"
+    assert route.catalog_endpoint == "fal-ai/imageutils/rembg"
+
+
+# ============================ §3.2 — provider key, §10 — masking ============================
+
+
+class _CapturingProxy(ProxyClient):
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings)
+        self.bodies: list[dict[str, Any]] = []
+
+    async def _request(self, body: dict[str, Any], *, endpoint: str) -> Any:  # type: ignore[override]
+        self.bodies.append(body)
+        return {"request_id": "r1"}
+
+
+@pytest.mark.parametrize(
+    ("service", "kie", "sosana", "expected"),
+    [
+        ("kie", " kie-k ", "sos-k", "kie-k"),
+        ("sosana", "kie-k", "\tsos-k ", "sos-k"),
+        ("fal", "kie-k", "sos-k", None),
+        ("kie", "   ", "sos-k", None),
+        ("sosana", "kie-k", "", None),
+    ],
+)
+async def test_api_key_only_for_kie_and_sosana_and_only_when_non_empty(
+    service: str, kie: str, sosana: str, expected: str | None
+) -> None:
+    client = _CapturingProxy(_settings(KIE_API_KEY=kie, SOSANA_API_KEY=sosana))
+    await client.submit(
+        service=service,
+        endpoint="https://x.test/e",
+        payload={"prompt": "p"},
+        callback_url="https://cb.test/x",
+        catalog_endpoint="fal-ai/x",
+    )
+    body = client.bodies[0]
+    if expected is None:
+        assert "apiKey" not in body
+    else:
+        assert body["apiKey"] == expected
+
+
+def test_mask_secret_text_hides_live_keys_and_key_shaped_fragments() -> None:
+    cfg = _settings(
+        KIE_API_KEY="kie-live-123", SOSANA_API_KEY="sos-live-456", PROXY_API_KEY="px-live-789"
+    )
+    text = (
+        "kie said kie-live-123; sosana sos-live-456; proxy px-live-789; "
+        "Authorization: Bearer abc.def; sk_test_ZZZ; https://x?key=k1&token=t2&secret=s3 ok"
+    )
+    masked = mask_secret_text(text, settings=cfg)
+    for secret in ("kie-live-123", "sos-live-456", "px-live-789", "abc.def", "sk_test_ZZZ"):
+        assert secret not in masked
+    for fragment in ("k1", "t2", "s3"):
+        assert f"={fragment}" not in masked
+    assert "Bearer ***" in masked
+    assert "key=***" in masked
+    assert masked.endswith(" ok")
+
+
+def test_mask_secret_text_keeps_plain_text_and_ignores_blank_keys() -> None:
+    cfg = _settings(KIE_API_KEY="  ", SOSANA_API_KEY="")
+    assert mask_secret_text("prompt is too long", settings=cfg) == "prompt is too long"
 
 
 # ============================ §3.3 — the proxy task id ============================
@@ -403,7 +526,7 @@ def test_default_allowlist_is_fal_union_result_hosts_and_fal_client_stays_fal_on
         assert fal_asset_host_allowed(vendor_url) is True
         assert fal_asset_host_allowed(fal_url) is True
         assert fal_asset_host_allowed("http://cdn.sosana.test/out.png") is False
-        # The fal-only list stays where it is passed explicitly (uploads / rehost / download).
+        # The fal-only list stays where it is passed explicitly (upload only).
         client = FalClient(get_settings())
         assert client._upload_host_allowed(vendor_url) is False
         assert client._upload_host_allowed(fal_url) is True

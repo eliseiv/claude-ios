@@ -143,7 +143,8 @@ def _set_env(
     domain: str = _DOMAIN,
     secret: str = _WEBHOOK_SECRET,
     result_hosts: str = "",
-    vendor_prices: str = "{}",
+    kie_key: str = "",
+    sosana_key: str = "",
 ) -> None:
     monkeypatch.setenv("PROXY_API_KEY", proxy_key)
     monkeypatch.setenv("PROXY_BASE", _PROXY_BASE)
@@ -151,7 +152,8 @@ def _set_env(
     monkeypatch.setenv("SERVICE_DOMAIN", domain)
     monkeypatch.setenv("PREVIEW_URL_SECRET", _PREVIEW_SECRET)
     monkeypatch.setenv("MEDIA_RESULT_HOST_SUFFIXES", result_hosts)
-    monkeypatch.setenv("MEDIA_VENDOR_PRICES", vendor_prices)
+    monkeypatch.setenv("KIE_API_KEY", kie_key)
+    monkeypatch.setenv("SOSANA_API_KEY", sosana_key)
     monkeypatch.delenv("MEDIA_JOB_DEADLINE_SECONDS", raising=False)
     get_settings.cache_clear()
 
@@ -415,7 +417,8 @@ def _outcomes(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 async def _post_image(client: AsyncClient, uid: uuid.UUID, **params: Any) -> _httpx.Response:
-    body = {"model": "nano-banana-2", "prompt": "a cat", **params}
+    """Default ``0.5K`` — no sosana route (§2.1), the run has the single fal route."""
+    body = {"model": "nano-banana-2", "prompt": "a cat", "resolution": "0.5K", **params}
     return await client.post(_IMAGES_URL, json=body, headers=auth_headers(uid))
 
 
@@ -431,7 +434,7 @@ async def test_proxy_submit_sends_the_proxy_contract_and_never_calls_fal(
     uid = await _user(db_sessionmaker)
     proxy.answer(_ok(request_id="px-abc"))
 
-    resp = await _post_image(media, uid, resolution="2K")
+    resp = await _post_image(media, uid)
 
     assert resp.status_code == 202, resp.text
     job_id = resp.json()["jobId"]
@@ -575,21 +578,31 @@ async def test_upload_needs_the_fal_key_even_behind_the_proxy(
 # ============================ §2 — payload and price do not depend on the transport ============
 
 
+# (route, model, params, vendor route of the run or None)
 _PAYLOAD_CASES = [
-    ("images", "nano-banana-2", {"resolution": "2K", "aspectRatio": "16:9", "seed": 5}),
-    ("images", "nano-banana-2", {"imageUrls": ["https://example.com/a.png"]}),
-    ("images", "nano-banana-pro", {"numImages": 2, "outputFormat": "png"}),
-    ("images", "nano-banana-pro", {"imageUrls": ["https://example.com/a.png"], "resolution": "4K"}),
-    ("videos", "kling-video", {"duration": "10"}),
-    ("videos", "kling-video", {"imageUrl": "https://example.com/a.png"}),
-    ("videos", "kling-video-v3", {"generateAudio": True, "duration": "7"}),
-    ("videos", "kling-video-v3", {"imageUrl": "https://example.com/a.png"}),
-    ("videos", "veo-3.1", {"resolution": "4k", "generateAudio": True}),
-    ("videos", "veo-3.1", {"imageUrl": "https://example.com/a.png", "aspectRatio": "auto"}),
+    ("images", "nano-banana-2", {"resolution": "2K", "aspectRatio": "16:9", "seed": 5}, "sosana"),
+    ("images", "nano-banana-2", {"imageUrls": ["https://example.com/a.png"]}, "sosana"),
+    ("images", "nano-banana-pro", {"numImages": 2, "outputFormat": "png"}, None),
+    (
+        "images",
+        "nano-banana-pro",
+        {"imageUrls": ["https://example.com/a.png"], "resolution": "4K"},
+        "sosana",
+    ),
+    ("videos", "kling-video", {"duration": "10"}, "kie"),
+    ("videos", "kling-video", {"imageUrl": "https://example.com/a.png"}, "kie"),
+    ("videos", "kling-video-v3", {"generateAudio": True, "duration": "7"}, "kie"),
+    ("videos", "kling-video-v3", {"imageUrl": "https://example.com/a.png"}, "kie"),
+    ("videos", "veo-3.1", {"resolution": "4k", "generateAudio": True}, "kie"),
+    ("videos", "veo-3.1", {"imageUrl": "https://example.com/a.png", "aspectRatio": "auto"}, "kie"),
 ]
 
 
-@pytest.mark.parametrize(("route", "model_id", "params"), _PAYLOAD_CASES)
+@pytest.mark.parametrize(
+    ("route", "model_id", "params", "vendor"),
+    _PAYLOAD_CASES,
+    ids=[f"{case[1]}-{i}" for i, case in enumerate(_PAYLOAD_CASES)],
+)
 async def test_fal_route_payload_and_price_equal_the_direct_submit(
     monkeypatch: pytest.MonkeyPatch,
     db_sessionmaker: async_sessionmaker[AsyncSession],
@@ -598,6 +611,7 @@ async def test_fal_route_payload_and_price_equal_the_direct_submit(
     route: str,
     model_id: str,
     params: dict[str, Any],
+    vendor: str | None,
 ) -> None:
     """Diff test: the SAME request once through direct fal, once through the proxy — the fal-route
     payload is byte-for-byte the direct one, and ``creditsCharged`` is the same."""
@@ -613,12 +627,14 @@ async def test_fal_route_payload_and_price_equal_the_direct_submit(
         direct_url = fal.submit_url
 
         _set_env(monkeypatch)
+        if vendor is not None:
+            proxy.answer(_err(503), _ok())
         via = await client.post(f"/v1/media/{route}", json=body, headers=auth_headers(uid))
     get_settings.cache_clear()
 
     assert via.status_code == 202, via.text
-    assert len(proxy.calls) == 1
-    sent = proxy.calls[0]["json"]
+    assert proxy.services == ([] if vendor is None else [vendor]) + ["fal"]
+    sent = proxy.calls[-1]["json"]
     assert json.dumps(sent["payload"], sort_keys=True) == json.dumps(direct_payload, sort_keys=True)
     assert sent["endpoint"] == direct_url
     assert via.json()["creditsCharged"] == direct.json()["creditsCharged"]
@@ -642,9 +658,11 @@ async def test_fal_route_payload_and_price_equal_the_direct_submit(
     assert len(amounts) == 2 and amounts[0] == amounts[1]
 
 
-@pytest.mark.parametrize("model_id", ["nano-banana-2", "nano-banana-pro"])
-@pytest.mark.parametrize("resolution", ["1K", "2K", "4K"])
-@pytest.mark.parametrize("fal_first", [False, True])
+@pytest.mark.parametrize(
+    ("model_id", "resolution"),
+    [("nano-banana-2", "0.5K")]
+    + [(m, r) for m in ("nano-banana-2", "nano-banana-pro") for r in ("1K", "2K", "4K")],
+)
 async def test_credits_do_not_depend_on_the_chosen_route(
     monkeypatch: pytest.MonkeyPatch,
     db_sessionmaker: async_sessionmaker[AsyncSession],
@@ -652,24 +670,23 @@ async def test_credits_do_not_depend_on_the_chosen_route(
     proxy: _Proxy,
     model_id: str,
     resolution: str,
-    fal_first: bool,
 ) -> None:
-    """The price is computed before the route is chosen (§3.1): sosana-first and fal-first (by
-    ``MEDIA_VENDOR_PRICES``) runs of the same request cost the same as the direct one."""
+    """The price is computed before the route is chosen (§3.1): sosana runs and fal-only runs
+    (``0.5K``) of the same request cost the same as the direct one."""
     from tests.integration.test_media_generation_adr060 import _submit_body
 
-    prices = json.dumps({f"{model_id}:{resolution}:fal": 0.0001}) if fal_first else "{}"
     body = {"model": model_id, "prompt": "a cat", "resolution": resolution, "aspectRatio": "1:1"}
     async with await _open(monkeypatch, db_sessionmaker, fal, proxy, proxy_key="") as client:
         uid = await _user(db_sessionmaker, balance=10_000)
         fal.on_submit(200, _submit_body("x"))
         direct = await client.post(_IMAGES_URL, json=body, headers=auth_headers(uid))
-        _set_env(monkeypatch, result_hosts=_VENDOR_HOSTS, vendor_prices=prices)
+        _set_env(monkeypatch, result_hosts=_VENDOR_HOSTS)
         via = await client.post(_IMAGES_URL, json=body, headers=auth_headers(uid))
     get_settings.cache_clear()
 
+    assert direct.status_code == 202, direct.text
     assert via.status_code == 202, via.text
-    assert proxy.services == ["fal" if fal_first else "sosana"]
+    assert proxy.services == ["fal" if resolution == "0.5K" else "sosana"]
     assert via.json()["creditsCharged"] == direct.json()["creditsCharged"]
     assert (await _row(db_sessionmaker, via.json()["jobId"]))["provider"] == proxy.services[0]
 
@@ -677,33 +694,21 @@ async def test_credits_do_not_depend_on_the_chosen_route(
 # ======================== §2.1 — routing, both sides of the predicate ========================
 
 
-async def test_eligible_run_goes_to_sosana_first(
-    vendor_media: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], proxy: _Proxy
-) -> None:
-    uid = await _user(db_sessionmaker)
-    resp = await _post_image(vendor_media, uid, resolution="2K", aspectRatio="16:9")
-    assert resp.status_code == 202, resp.text
-    assert proxy.services == ["sosana"]
-    assert proxy.calls[0]["json"]["endpoint"] == "https://api.sosana.art/api/image/create-async"
-
-
 @pytest.mark.parametrize(
-    ("case", "hosts", "params"),
+    ("case", "hosts", "params", "aspect"),
     [
-        ("MEDIA_RESULT_HOST_SUFFIXES empty", "", {"resolution": "2K", "aspectRatio": "16:9"}),
-        ("numImages=2", _VENDOR_HOSTS, {"resolution": "2K", "aspectRatio": "16:9", "numImages": 2}),
-        ("0.5K", _VENDOR_HOSTS, {"resolution": "0.5K", "aspectRatio": "16:9"}),
-        ("seed", _VENDOR_HOSTS, {"resolution": "2K", "aspectRatio": "16:9", "seed": 1}),
+        ("2K 16:9", _VENDOR_HOSTS, {"resolution": "2K", "aspectRatio": "16:9"}, "16:9"),
+        ("seed dropped", _VENDOR_HOSTS, {"resolution": "1K", "seed": 7}, "auto"),
         (
-            "outputFormat=webp",
+            "outputFormat dropped",
             _VENDOR_HOSTS,
-            {"resolution": "2K", "aspectRatio": "16:9", "outputFormat": "webp"},
+            {"resolution": "4K", "aspectRatio": "1:1", "outputFormat": "webp"},
+            "1:1",
         ),
-        ("aspectRatio=8:1", _VENDOR_HOSTS, {"resolution": "2K", "aspectRatio": "8:1"}),
-        ("aspectRatio omitted", _VENDOR_HOSTS, {"resolution": "2K"}),
+        ("png dropped, no result hosts", "", {"resolution": "2K", "outputFormat": "png"}, "auto"),
     ],
 )
-async def test_any_breach_of_the_route_condition_leaves_only_fal(
+async def test_eligible_image_run_goes_to_sosana_then_fal(
     monkeypatch: pytest.MonkeyPatch,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     fal: _Fal,
@@ -711,66 +716,82 @@ async def test_any_breach_of_the_route_condition_leaves_only_fal(
     case: str,
     hosts: str,
     params: dict[str, Any],
+    aspect: str,
 ) -> None:
-    """(b) the single route is fal: a fal 5xx exhausts the list after ONE call."""
+    """(a) §2.1: sosana first, fal kept untried; seed/outputFormat are not sent to sosana, no
+    aspectRatio → ``auto``; an empty MEDIA_RESULT_HOST_SUFFIXES does not change the choice."""
     async with await _open(monkeypatch, db_sessionmaker, fal, proxy, result_hosts=hosts) as client:
         uid = await _user(db_sessionmaker)
-        proxy.answer(_err(500))
         resp = await _post_image(client, uid, **params)
     get_settings.cache_clear()
+    assert resp.status_code == 202, (case, resp.text)
+    assert proxy.services == ["sosana"], case
+    sent = proxy.calls[0]["json"]
+    assert sent["endpoint"] == "https://api.sosana.art/api/image/create-async"
+    assert sent["payload"] == {
+        "prompt": "a cat",
+        "model": f"nano-banana-2-{params['resolution'].lower()}",
+        "aspect_ratio": aspect,
+        "prompt_optimization": False,
+    }, case
+    remaining = await _remaining(db_sessionmaker, resp.json()["jobId"])
+    assert [r["service"] for r in remaining] == ["fal"]
+
+
+@pytest.mark.parametrize(
+    ("case", "params"),
+    [
+        ("numImages=2", {"resolution": "2K", "aspectRatio": "16:9", "numImages": 2}),
+        ("0.5K", {"resolution": "0.5K", "aspectRatio": "16:9"}),
+        ("aspectRatio=8:1", {"resolution": "2K", "aspectRatio": "8:1"}),
+    ],
+)
+async def test_any_breach_of_the_route_condition_leaves_only_fal(
+    vendor_media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    case: str,
+    params: dict[str, Any],
+) -> None:
+    """(b) the single route is fal: a fal 5xx exhausts the list after ONE call."""
+    uid = await _user(db_sessionmaker)
+    proxy.answer(_err(500))
+    resp = await _post_image(vendor_media, uid, **params)
     assert resp.status_code == 502, (case, resp.text)
     assert proxy.services == ["fal"], case
 
 
-async def test_png_output_skips_sosana_and_goes_to_kie(
-    vendor_media: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], proxy: _Proxy
-) -> None:
-    uid = await _user(db_sessionmaker)
-    resp = await _post_image(
-        vendor_media, uid, resolution="2K", aspectRatio="16:9", outputFormat="png"
-    )
-    assert resp.status_code == 202, resp.text
-    assert proxy.services == ["kie"]
-
-
 @pytest.mark.parametrize("model_id", ["kling-video", "kling-video-v3", "veo-3.1"])
-async def test_video_models_have_only_the_fal_route(
+@pytest.mark.parametrize("with_image", [False, True], ids=["t2v", "i2v"])
+async def test_video_models_route_kie_then_fal(
     vendor_media: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     proxy: _Proxy,
     model_id: str,
+    with_image: bool,
 ) -> None:
     uid = await _user(db_sessionmaker, balance=10_000)
-    proxy.answer(_err(503))
-    resp = await vendor_media.post(
-        _VIDEOS_URL, json={"model": model_id, "prompt": "a city"}, headers=auth_headers(uid)
-    )
+    proxy.answer(_err(503), _err(503))
+    body: dict[str, Any] = {"model": model_id, "prompt": "a city"}
+    if with_image:
+        body["imageUrl"] = "https://example.com/a.png"
+    resp = await vendor_media.post(_VIDEOS_URL, json=body, headers=auth_headers(uid))
     assert resp.status_code == 502, resp.text
-    assert proxy.services == ["fal"]
+    assert proxy.services == ["kie", "fal"]
+    assert proxy.calls[0]["json"]["endpoint"] == "https://api.kie.ai/api/v1/jobs/createTask"
+    assert "model" in proxy.calls[0]["json"]["payload"]
 
 
-async def test_fal_first_by_override_and_its_422_stops_the_loop(
-    monkeypatch: pytest.MonkeyPatch,
-    db_sessionmaker: async_sessionmaker[AsyncSession],
-    fal: _Fal,
-    proxy: _Proxy,
+async def test_fal_only_run_422_stops_the_loop(
+    vendor_media: AsyncClient, db_sessionmaker: async_sessionmaker[AsyncSession], proxy: _Proxy
 ) -> None:
-    async with await _open(
-        monkeypatch,
-        db_sessionmaker,
-        fal,
-        proxy,
-        result_hosts=_VENDOR_HOSTS,
-        vendor_prices=json.dumps({"nano-banana-2:2K:fal": 0.0001}),
-    ) as client:
-        uid = await _user(db_sessionmaker)
-        proxy.answer(_FakeResponse(422, {"detail": "prompt: too long"}))
-        resp = await _post_image(client, uid, resolution="2K", aspectRatio="16:9")
-    get_settings.cache_clear()
+    uid = await _user(db_sessionmaker)
+    proxy.answer(_FakeResponse(422, {"detail": "prompt: too long"}), _ok())
+    resp = await _post_image(vendor_media, uid)
     assert resp.status_code == 422, resp.text
     assert resp.json()["error"]["code"] == "validation_error"
     assert "prompt: too long" in resp.json()["error"]["message"]
-    assert proxy.services == ["fal"], "sosana/kie are never tried after fal's validation verdict"
+    assert proxy.services == ["fal"]
     assert await _balance(db_sessionmaker, uid) == _START_BALANCE
 
 
@@ -796,13 +817,13 @@ async def test_retryable_answer_falls_through_to_the_next_route(
     first: _FakeResponse,
 ) -> None:
     uid = await _user(db_sessionmaker)
-    proxy.answer(first, _ok(taskId="kie-7"))
+    proxy.answer(first, _ok(request_id="fal-7"))
     resp = await _post_image(vendor_media, uid, resolution="2K", aspectRatio="16:9")
     assert resp.status_code == 202, (case, resp.text)
-    assert proxy.services == ["sosana", "kie"], case
+    assert proxy.services == ["sosana", "fal"], case
     row = await _row(db_sessionmaker, resp.json()["jobId"])
-    assert row["provider"] == "kie"
-    assert row["fal_request_id"] == "kie-7"
+    assert row["provider"] == "fal"
+    assert row["fal_request_id"] == "fal-7"
 
 
 @pytest.mark.parametrize(
@@ -831,20 +852,47 @@ async def test_proxy_timeout_or_connect_is_502_without_a_second_call(
 
 
 @pytest.mark.parametrize("status", [401, 403])
-async def test_rejected_instance_key_is_503_without_fallback(
+async def test_vendor_route_401_403_falls_through_to_fal(
     vendor_media: AsyncClient,
     db_sessionmaker: async_sessionmaker[AsyncSession],
     proxy: _Proxy,
     status: int,
 ) -> None:
+    """§3.3: on sosana/kie the rejected key may be the provider ``apiKey`` → next route."""
     uid = await _user(db_sessionmaker)
-    proxy.answer(_err(status), _ok())
+    proxy.answer(_err(status), _ok(request_id="fal-9"))
     resp = await _post_image(vendor_media, uid, resolution="2K", aspectRatio="16:9")
-    assert resp.status_code == 503, resp.text
+    assert resp.status_code == 202, resp.text
+    assert proxy.services == ["sosana", "fal"]
+    assert (await _row(db_sessionmaker, resp.json()["jobId"]))["provider"] == "fal"
+
+
+@pytest.mark.parametrize(
+    ("case", "params", "script", "services"),
+    [
+        ("fal 401", {}, [_err(401)], ["fal"]),
+        ("fal 403", {}, [_err(403)], ["fal"]),
+        ("sosana 403, fal 401", {"resolution": "2K"}, [_err(403), _err(401)], ["sosana", "fal"]),
+    ],
+)
+async def test_fal_route_401_403_is_503_without_fallback(
+    vendor_media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    case: str,
+    params: dict[str, Any],
+    script: list[_FakeResponse],
+    services: list[str],
+) -> None:
+    uid = await _user(db_sessionmaker)
+    proxy.answer(*script, _ok())
+    resp = await _post_image(vendor_media, uid, **params)
+    assert resp.status_code == 503, (case, resp.text)
     assert resp.json()["error"]["code"] == "media_generation_not_configured"
-    assert proxy.services == ["sosana"]
+    assert proxy.services == services, case
     assert await _balance(db_sessionmaker, uid) == _START_BALANCE
     assert await _jobs(db_sessionmaker, uid) == 0
+    assert await _gen_rows(db_sessionmaker, uid) == 0
 
 
 @pytest.mark.parametrize(
@@ -863,10 +911,10 @@ async def test_vendor_validation_refusal_falls_through_to_fal(
 ) -> None:
     """Only the fal route gives the final validity verdict (§3.3 — difference from the sample)."""
     uid = await _user(db_sessionmaker)
-    proxy.answer(first, first, _ok())
+    proxy.answer(first, _ok())
     resp = await _post_image(vendor_media, uid, resolution="2K", aspectRatio="16:9")
     assert resp.status_code == 202, (case, resp.text)
-    assert proxy.services == ["sosana", "kie", "fal"]
+    assert proxy.services == ["sosana", "fal"]
     assert (await _row(db_sessionmaker, resp.json()["jobId"]))["provider"] == "fal"
 
 
@@ -887,9 +935,9 @@ async def test_fal_route_422_is_422_with_the_text(
 @pytest.mark.parametrize(
     ("case", "script", "status", "code"),
     [
-        ("all 429", [_err(429), _err(429), _err(429)], 429, "rate_limited"),
-        ("all 5xx", [_err(500), _err(502), _err(503)], 502, "upstream_error"),
-        ("429 then 5xx", [_err(429), _err(429), _err(500)], 502, "upstream_error"),
+        ("all 429", [_err(429), _err(429)], 429, "rate_limited"),
+        ("all 5xx", [_err(500), _err(503)], 502, "upstream_error"),
+        ("429 then 5xx", [_err(429), _err(500)], 502, "upstream_error"),
     ],
 )
 async def test_exhausted_routes_answer_the_last_retryable_error(
@@ -906,7 +954,7 @@ async def test_exhausted_routes_answer_the_last_retryable_error(
     resp = await _post_image(vendor_media, uid, resolution="2K", aspectRatio="16:9")
     assert resp.status_code == status, (case, resp.text)
     assert resp.json()["error"]["code"] == code
-    assert proxy.services == ["sosana", "kie", "fal"]
+    assert proxy.services == ["sosana", "fal"]
     assert await _balance(db_sessionmaker, uid) == _START_BALANCE
     assert await _jobs(db_sessionmaker, uid) == 0
     assert await _gen_rows(db_sessionmaker, uid) == 0
@@ -1698,7 +1746,7 @@ def _tool_turn(fake_anthropic: Any, tag: str) -> None:
     fake_anthropic.responses = [
         fake_anthropic.tool_result(
             "media.generate_image",
-            {"model": "nano-banana-2", "prompt": "a cat", "resolution": "1K"},
+            {"model": "nano-banana-2", "prompt": "a cat", "resolution": "0.5K"},
             tool_id=f"toolu_adr108_{tag}",
         ),
         fake_anthropic.text_result("done"),
@@ -1887,13 +1935,15 @@ async def _route_callback(
     return await client.post(url, json=body)
 
 
-async def _submit_png_via_kie(
+async def _submit_video_via_kie(
     client: AsyncClient, maker: async_sessionmaker[AsyncSession], proxy: _Proxy
 ) -> tuple[uuid.UUID, str, int]:
-    """png ⇒ routes [kie, fal]; kie accepts. Returns (user, jobId, balance after the debit)."""
-    uid = await _user(maker)
+    """video ⇒ routes [kie, fal]; kie accepts. Returns (user, jobId, balance after the debit)."""
+    uid = await _user(maker, balance=10_000)
     proxy.answer(_ok(taskId="kie-1"))
-    resp = await _post_image(client, uid, resolution="2K", aspectRatio="16:9", outputFormat="png")
+    resp = await client.post(
+        _VIDEOS_URL, json={"model": "kling-video", "prompt": "a city"}, headers=auth_headers(uid)
+    )
     assert resp.status_code == 202, resp.text
     job_id = resp.json()["jobId"]
     assert (await _row(maker, job_id))["provider"] == "kie"
@@ -1908,7 +1958,7 @@ async def test_submit_keeps_the_untried_routes_in_order(
     assert resp.status_code == 202, resp.text
     assert proxy.services == ["sosana"]
     remaining = await _remaining(db_sessionmaker, resp.json()["jobId"])
-    assert [r["service"] for r in remaining] == ["kie", "fal"]
+    assert [r["service"] for r in remaining] == ["fal"]
     assert all({"endpoint", "payload", "catalogEndpoint"} <= r.keys() for r in remaining)
     assert proxy.calls[0]["json"]["callbackUrl"].endswith("&route=sosana")
 
@@ -1930,7 +1980,7 @@ async def test_failed_kie_callback_resubmits_to_fal_without_refund_or_second_deb
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO)
-    uid, job_id, balance = await _submit_png_via_kie(vendor_media, db_sessionmaker, proxy)
+    uid, job_id, balance = await _submit_video_via_kie(vendor_media, db_sessionmaker, proxy)
     proxy.answer(_ok(request_id="fal-2"))
 
     resp = await _route_callback(vendor_media, job_id, {"status": "failed", "error": "x"}, "kie")
@@ -2013,7 +2063,7 @@ async def test_resubmission_hitting_a_proxy_timeout_fails_the_job_with_a_refund(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO)
-    uid, job_id, balance = await _submit_png_via_kie(vendor_media, db_sessionmaker, proxy)
+    uid, job_id, balance = await _submit_video_via_kie(vendor_media, db_sessionmaker, proxy)
     charged = (await _row(db_sessionmaker, job_id))["credits_charged"]
     proxy.answer(_httpx.ReadTimeout("slow"))
 
@@ -2026,3 +2076,226 @@ async def test_resubmission_hitting_a_proxy_timeout_fails_the_job_with_a_refund(
     assert await _refunds(db_sessionmaker, job_id) == 1
     assert await _balance(db_sessionmaker, uid) == balance + charged
     assert _outcomes(caplog) == ["failed"]
+
+
+async def test_completed_kie_result_outside_the_allowlist_resubmits_to_fal(
+    vendor_media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """§4.3 п.2 / §4.4: an unusable vendor result fails only THIS attempt; the host is logged."""
+    caplog.set_level(logging.INFO)
+    uid, job_id, balance = await _submit_video_via_kie(vendor_media, db_sessionmaker, proxy)
+    proxy.answer(_ok(request_id="fal-3"))
+    body = {
+        "status": "success",
+        "data": {"resultUrls": ["https://tempfile.aiquickdraw.com/v/abc/out.mp4?sig=1"]},
+    }
+
+    resp = await _route_callback(vendor_media, job_id, body, "kie")
+
+    assert resp.status_code == 200, resp.text
+    assert proxy.services == ["kie", "fal"]
+    row = await _row(db_sessionmaker, job_id)
+    assert (row["status"], row["provider"], row["refunded"]) == ("running", "fal", False)
+    assert await _refunds(db_sessionmaker, job_id) == 0
+    assert await _balance(db_sessionmaker, uid) == balance
+    events = _events(caplog, _OUTCOME_EVENT)
+    assert [e["outcome"] for e in events] == ["resubmitted"]
+    assert events[0]["rejectedHosts"] == ["tempfile.aiquickdraw.com"]
+
+
+async def test_completed_fal_result_outside_the_allowlist_fails_with_rejected_hosts(
+    media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    uid = await _user(db_sessionmaker)
+    job_id = await _seed_job(db_sessionmaker, uid, provider="fal", kind="video")
+    body = {"status": "success", "resultUrls": ["https://tempfile.aiquickdraw.com/v/out.mp4"]}
+
+    resp = await _route_callback(media, job_id, body, "fal")
+
+    assert resp.status_code == 200
+    assert proxy.calls == []
+    row = await _row(db_sessionmaker, job_id)
+    assert (row["status"], row["refunded"]) == ("failed", True)
+    assert await _refunds(db_sessionmaker, job_id) == 1
+    events = _events(caplog, _OUTCOME_EVENT)
+    assert [e["outcome"] for e in events] == ["no_usable_asset"]
+    assert events[0]["rejectedHosts"] == ["tempfile.aiquickdraw.com"]
+
+
+async def test_kie_result_urls_without_extension_complete_the_job(
+    vendor_media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+) -> None:
+    """§4.3 п.1: ``resultUrls`` is read as is — no extension/host heuristic, only https."""
+    uid, job_id, _ = await _submit_video_via_kie(vendor_media, db_sessionmaker, proxy)
+    relay = f"https://relay2.kie.test/files/{uuid.uuid4()}"
+
+    resp = await _route_callback(
+        vendor_media, job_id, {"status": "success", "data": {"resultUrls": [relay]}}, "kie"
+    )
+
+    assert resp.status_code == 200, resp.text
+    got = await vendor_media.get(f"{_JOBS_URL}/{job_id}", headers=auth_headers(uid))
+    assert got.json()["status"] == "completed", got.text
+    assert len(got.json()["assets"]) == 1
+    assert proxy.services == ["kie"]
+
+
+# ============================ §3.2 — provider key (apiKey) ============================
+
+
+_KIE_KEY = "kie-instance-key-5d1e"  # noqa: S105 - test-only static secret
+_SOSANA_KEY = "sosana-instance-key-0b7c"  # noqa: S105 - test-only static secret
+
+
+@pytest.mark.parametrize(
+    ("case", "kie_key", "sosana_key", "expected"),
+    [
+        ("keys set", _KIE_KEY, f"  {_SOSANA_KEY} ", {"sosana": _SOSANA_KEY, "kie": _KIE_KEY}),
+        ("keys empty", "", "   ", {}),
+    ],
+)
+async def test_api_key_is_sent_only_to_kie_and_sosana_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fal: _Fal,
+    proxy: _Proxy,
+    case: str,
+    kie_key: str,
+    sosana_key: str,
+    expected: dict[str, str],
+) -> None:
+    async with await _open(
+        monkeypatch, db_sessionmaker, fal, proxy, kie_key=kie_key, sosana_key=sosana_key
+    ) as client:
+        uid = await _user(db_sessionmaker, balance=10_000)
+        # image: sosana refuses → fal; video: kie refuses → fal.
+        proxy.answer(_err(503), _ok(), _err(503), _ok())
+        image = await _post_image(client, uid, resolution="2K")
+        video = await client.post(
+            _VIDEOS_URL, json={"model": "veo-3.1", "prompt": "a city"}, headers=auth_headers(uid)
+        )
+    get_settings.cache_clear()
+    assert (image.status_code, video.status_code) == (202, 202), case
+    assert proxy.services == ["sosana", "fal", "kie", "fal"]
+    for call in proxy.calls:
+        service = call["json"]["service"]
+        if service in expected:
+            assert call["json"]["apiKey"] == expected[service], case
+            assert set(call["json"]) == {
+                "service",
+                "endpoint",
+                "method",
+                "payload",
+                "callbackUrl",
+                "apiKey",
+            }
+        else:
+            assert "apiKey" not in call["json"], (case, service)
+
+
+@pytest.fixture
+def crm_kie_key() -> Iterator[str]:
+    """``kie.api_key`` set in the CRM credentials overlay (ADR-116), env stays empty."""
+    import datetime
+
+    from app.instance_config.credentials import credential_fingerprint
+    from app.instance_config.snapshot import (
+        EMPTY_SNAPSHOT,
+        CredentialOverlay,
+        InstanceConfigSnapshot,
+        install_snapshot,
+    )
+
+    value = "kie-crm-key-77aa"
+    install_snapshot(
+        InstanceConfigSnapshot(
+            settings={},
+            credentials={
+                "kie.api_key": CredentialOverlay(
+                    credential_id="kie.api_key",
+                    value=value,
+                    fingerprint=credential_fingerprint(value),
+                    updated_at=datetime.datetime(2026, 10, 8, tzinfo=datetime.UTC),
+                )
+            },
+        )
+    )
+    try:
+        yield value
+    finally:
+        install_snapshot(EMPTY_SNAPSHOT)
+
+
+async def test_api_key_from_the_credentials_overlay_reaches_submit_and_resubmission(
+    vendor_media: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    proxy: _Proxy,
+    crm_kie_key: str,
+) -> None:
+    uid, job_id, _ = await _submit_video_via_kie(vendor_media, db_sessionmaker, proxy)
+    assert proxy.calls[0]["json"]["apiKey"] == crm_kie_key
+    proxy.answer(_ok(request_id="fal-4"))
+
+    resp = await _route_callback(vendor_media, job_id, {"status": "failed", "error": "x"}, "kie")
+
+    assert resp.status_code == 200
+    assert proxy.services == ["kie", "fal"]
+    assert "apiKey" not in proxy.calls[1]["json"]
+    remaining = await _remaining(db_sessionmaker, job_id)
+    row = await _row(db_sessionmaker, job_id)
+    assert crm_kie_key not in json.dumps(row, default=str)
+    assert crm_kie_key not in json.dumps(remaining)
+    assert uid
+
+
+async def test_vendor_echo_of_the_keys_is_masked_in_the_answer_the_row_and_the_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    fal: _Fal,
+    proxy: _Proxy,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """§10: a vendor text echoing ``apiKey`` never reaches the client, ``media_jobs`` or logs."""
+    caplog.set_level(logging.DEBUG)
+    async with await _open(
+        monkeypatch, db_sessionmaker, fal, proxy, sosana_key=_SOSANA_KEY, kie_key=_KIE_KEY
+    ) as client:
+        uid = await _user(db_sessionmaker)
+        proxy.answer(
+            _err(400, {"error": True, "message": f"Validation failed: apiKey {_SOSANA_KEY}"}),
+            _FakeResponse(422, {"detail": f"bad request apiKey={_SOSANA_KEY} key={_KIE_KEY}"}),
+        )
+        refused = await _post_image(client, uid, resolution="2K")
+
+        job_id = await _seed_job(db_sessionmaker, uid, provider="fal")
+        failed = await _route_callback(
+            client,
+            job_id,
+            {"status": "failed", "error": f"vendor echoed {_KIE_KEY} and Bearer {_PROXY_KEY}"},
+            "fal",
+        )
+        row = await _row(db_sessionmaker, job_id)
+    get_settings.cache_clear()
+
+    assert refused.status_code == 422, refused.text
+    assert proxy.services == ["sosana", "fal"]
+    assert failed.status_code == 200
+    assert row["status"] == "failed"
+    assert "***" in row["error"]
+    logged = "\n".join(f"{r.getMessage()} {getattr(r, 'extra_fields', {})}" for r in caplog.records)
+    # The capture sees the product loggers of this path (positive control).
+    assert _events(caplog, "media_generation_route_fallback")
+    assert _outcomes(caplog) == ["failed"]
+    for secret in (_SOSANA_KEY, _KIE_KEY, _PROXY_KEY):
+        assert secret not in refused.text, secret
+        assert secret not in row["error"], secret
+        assert secret not in logged, secret

@@ -88,7 +88,8 @@ os.environ["SERVICE_DOMAIN"] = ""
 os.environ["PROXY_API_KEY"] = ""
 os.environ["PROXY_WEBHOOK_SECRET"] = ""
 os.environ["MEDIA_RESULT_HOST_SUFFIXES"] = ""
-os.environ["MEDIA_VENDOR_PRICES"] = "{}"
+os.environ["KIE_API_KEY"] = ""
+os.environ["SOSANA_API_KEY"] = ""
 
 # JWT: tokens are signed below with an ephemeral RSA key (_PRIVATE_PEM); the service must
 # verify with the matching JWT_PUBLIC_KEY and the iss/aud baked into make_jwt(). Force a

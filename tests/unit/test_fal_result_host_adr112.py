@@ -194,13 +194,29 @@ async def test_upload_slot_on_relay_host_still_untrusted(
     assert _reasons(caplog) == ["untrusted_upload_url"]
 
 
-# ---- case 5: rehost_reference_image stays fal-only (inv: relay url returned untouched) ---------
+# ---- case 5: rehost_reference_image reads the union (ADR-108 §2.1: relay frame is rehosted) ---
 
 
-async def test_rehost_reference_image_relay_url_returned_unchanged_without_fetch(
+async def test_rehost_reference_image_relay_url_rehosted_onto_fal(
     fal: FalClient, net: _Net
 ) -> None:
-    assert await fal.rehost_reference_image(_RELAY_ASSET) == _RELAY_ASSET
+    net.slot = {
+        "upload_url": "https://v3.fal.media/upload/slot-adr112",
+        "file_url": "https://v3.fal.media/files/reference-adr112.jpg",
+    }
+    assert (
+        await fal.rehost_reference_image(_RELAY_ASSET)
+        == "https://v3.fal.media/files/reference-adr112.jpg"
+    )
+    assert [(r.method, str(r.url)) for r in net.requests][0] == ("GET", _RELAY_ASSET)
+    assert [r.method for r in net.requests] == ["GET", "POST", "PUT"]
+    assert str(net.requests[2].url) == "https://v3.fal.media/upload/slot-adr112"
+
+
+async def test_rehost_reference_image_foreign_url_returned_unchanged_without_fetch(
+    fal: FalClient, net: _Net
+) -> None:
+    assert await fal.rehost_reference_image(_FOREIGN_ASSET) == _FOREIGN_ASSET
     assert net.requests == []
 
 

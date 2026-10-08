@@ -71,11 +71,11 @@ async def app_client(
     get_settings.cache_clear()
 
 
-# Request parameters that make the FIRST route the named service (ADR-108 §2.1).
+# Request parameters that make the FIRST route the named service (ADR-108 §2, §2.1); kie is the
+# video route.
 _ROUTE = {
     "sosana": {"resolution": "2K", "aspectRatio": "16:9"},
-    "kie": {"resolution": "2K", "aspectRatio": "16:9", "outputFormat": "png"},
-    "fal": {"resolution": "2K"},  # no aspectRatio ⇒ the only route is fal
+    "fal": {"resolution": "0.5K"},  # 0.5K ⇒ the only route is fal
 }
 
 
@@ -102,7 +102,14 @@ async def _cost_row(maker: async_sessionmaker[AsyncSession], job_id: str) -> dic
 
 
 async def _submit(client: AsyncClient, uid: uuid.UUID, service: str) -> str:
-    resp = await _post_image(client, uid, **_ROUTE[service])
+    if service == "kie":
+        resp = await client.post(
+            "/v1/media/videos",
+            json={"model": "kling-video", "prompt": "a city"},
+            headers=auth_headers(uid),
+        )
+    else:
+        resp = await _post_image(client, uid, **_ROUTE[service])
     assert resp.status_code == 202, resp.text
     job_id = resp.json()["jobId"]
     return str(job_id)

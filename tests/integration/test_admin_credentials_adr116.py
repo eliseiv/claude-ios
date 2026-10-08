@@ -660,7 +660,7 @@ async def test_the_list_describes_source_fingerprint_and_configured_without_valu
     assert (await _patch_cred(client, "cloudpayments.api_token", "cp-crm")).status_code == 200
     items = await _items(client)
 
-    assert len(items) == 8
+    assert len(items) == 10
     assert (items["fal.api_key"]["source"], items["fal.api_key"]["fingerprint"]) == (
         "env",
         _fp("fal-env"),

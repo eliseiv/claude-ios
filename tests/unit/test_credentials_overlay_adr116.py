@@ -114,7 +114,7 @@ def test_a_row_moved_under_another_credential_id_does_not_decrypt() -> None:
         decrypt_credential(_KMS, "anthropic.api_key", encrypted_value, encrypted_dek)
 
 
-def test_the_registry_is_closed_at_eight_and_never_names_signing_material() -> None:
+def test_the_registry_is_closed_at_ten_and_never_names_signing_material() -> None:
     ids = {spec.credential_id for spec in declared_credentials()}
 
     assert ids == {
@@ -124,6 +124,8 @@ def test_the_registry_is_closed_at_eight_and_never_names_signing_material() -> N
         "anthropic.api_key_backup",
         "fal.api_key",
         "proxy.api_key",
+        "kie.api_key",
+        "sosana.api_key",
         "cloudpayments.api_token",
         "adapty.webhook_secret",
     }
