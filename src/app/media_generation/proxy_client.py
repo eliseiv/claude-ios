@@ -1,8 +1,10 @@
 """Outgoing client of the proxy service: ``POST {PROXY_BASE}/api/v1/tasks`` (ADR-108 §3).
 
-Vendor keys live in the proxy. We authenticate as the instance with
-``Authorization: Bearer <PROXY_API_KEY>`` and never send a vendor key; we only supply our
-``callbackUrl``. The key and the callback token are never logged.
+We authenticate as the instance with ``Authorization: Bearer <PROXY_API_KEY>`` and supply our
+``callbackUrl``. A kie / sosana task also carries the instance provider key as ``apiKey``
+(``KIE_API_KEY`` / ``SOSANA_API_KEY``, ADR-108 §3.2); an empty key is not sent and the proxy
+generates with its own. No key and no callback token is logged or stored, and a vendor text that
+reaches the client or ``media_jobs.error`` is masked first (``mask_secret_text``, §10).
 
 Error mapping (ADR-108 §3.3) is expressed through the exception CLASS, and the route loop of the
 service decides what to do with it:
@@ -13,7 +15,8 @@ service decides what to do with it:
 * malformed JSON / ``2xx`` with ``error: true`` / ``5xx`` / ``402`` / ``400`` without a validation
   marker → ``UpstreamError``: next route;
 * ``429`` → ``RateLimitedError``: next route;
-* ``401`` / ``403`` → ``MediaGenerationNotConfiguredError``: stop;
+* ``401`` / ``403`` → ``MediaGenerationNotConfiguredError``: stop on the fal route, next route on
+  sosana/kie;
 * ``422`` or ``400`` with a validation marker → ``ValidationFailedError``: stop on the fal route,
   next route on sosana/kie (the service decides by the route).
 """
@@ -21,6 +24,7 @@ service decides what to do with it:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,12 +38,31 @@ from app.errors import (
     ValidationFailedError,
 )
 from app.media_generation.fal_client import _validation_detail
+from app.media_generation.routing import SERVICE_KIE, SERVICE_SOSANA
 from app.observability.logging import log_event
 
 logger = logging.getLogger(__name__)  # == "app.media_generation.proxy_client"
 
 _ID_KEYS = ("request_id", "requestId", "id", "uid", "taskId")
 _REJECTED_FALLBACK = "generation provider rejected the request"
+_MASK = "***"
+# Credentials a vendor might echo back inside free text: bearer keys, sk_ keys, key=/token=/secret=.
+_SECRET_TEXT = re.compile(
+    r"(?i)(bearer\s+)[^\s\"',]+|\bsk_[A-Za-z0-9_-]+|((?:token|key|secret)=)[^&\s\"',]+"
+)
+
+
+def mask_secret_text(text: str, *, settings: Settings) -> str:
+    """Vendor text with our live keys and key-shaped fragments replaced by ``***`` (ADR-108 §10).
+
+    The vendor may echo the request back, ``apiKey`` included; the text then reaches the client,
+    ``media_jobs.error`` and the logs.
+    """
+    for secret in (settings.kie_api_key, settings.sosana_api_key, settings.proxy_api_key):
+        value = secret.strip()
+        if value:
+            text = text.replace(value, _MASK)
+    return _SECRET_TEXT.sub(lambda m: f"{m.group(1) or m.group(2) or ''}{_MASK}", text)
 
 
 class ProxyTransportError(UpstreamError):
@@ -73,6 +96,13 @@ class ProxyClient:
             "Content-Type": "application/json",
         }
 
+    def _vendor_api_key(self, service: str) -> str:
+        if service == SERVICE_KIE:
+            return self._settings.kie_api_key.strip()
+        if service == SERVICE_SOSANA:
+            return self._settings.sosana_api_key.strip()
+        return ""
+
     def _tasks_url(self) -> str:
         return f"{self._settings.proxy_base.rstrip('/')}/api/v1/tasks"
 
@@ -85,13 +115,16 @@ class ProxyClient:
         callback_url: str,
         catalog_endpoint: str,
     ) -> ProxySubmission:
-        body = {
+        body: dict[str, Any] = {
             "service": service,
             "endpoint": endpoint,
             "method": "POST",
             "payload": payload,
             "callbackUrl": callback_url,
         }
+        vendor_key = self._vendor_api_key(service)
+        if vendor_key:
+            body["apiKey"] = vendor_key
         response = await self._request(body, endpoint=catalog_endpoint)
         request_id = _first_id(response)
         log_event(
@@ -147,7 +180,7 @@ class ProxyClient:
             )
             raise MediaGenerationNotConfiguredError("media generation provider rejected the key")
         if code == 422:
-            detail = _validation_detail(response)
+            detail = mask_secret_text(_validation_detail(response), settings=self._settings)
             self._log_validation(endpoint=endpoint, code=code)
             raise ValidationFailedError(detail)
         if code == 429:
@@ -164,7 +197,7 @@ class ProxyClient:
         if code == 400:
             # The proxy wraps vendor rejections as 400 {error, message}; only a message that names
             # a validation problem is treated as one.
-            detail = _proxy_error_message(response)
+            detail = mask_secret_text(_proxy_error_message(response), settings=self._settings)
             if _looks_like_validation(detail):
                 self._log_validation(endpoint=endpoint, code=code)
                 raise ValidationFailedError(detail)

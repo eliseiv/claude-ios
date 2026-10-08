@@ -34,6 +34,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from app import instance_config
 from app.chat.attachments import (
@@ -46,6 +47,7 @@ from app.errors import (
     AppError,
     ContentPolicyViolationError,
     JobNotTerminalError,
+    MediaGenerationNotConfiguredError,
     ModerationInputRejectedError,
     NotFoundError,
     PayloadTooLargeError,
@@ -77,6 +79,7 @@ from app.media_generation.proxy_client import (
     ProxyClient,
     ProxySubmission,
     ProxyTransportError,
+    mask_secret_text,
 )
 from app.media_generation.repository import (
     STATUS_COMPLETED,
@@ -91,7 +94,6 @@ from app.media_generation.routing import (
     VendorRoute,
     candidate_routes,
     fal_route,
-    merged_vendor_prices,
 )
 from app.media_generation.signed_url import public_asset_url
 from app.media_generation.webhook import (
@@ -446,12 +448,7 @@ class MediaGenerationService:
             # rolls the debit back with the savepoint.
             if self._proxy_enabled():
                 routes = candidate_routes(
-                    model=model,
-                    variant=variant,
-                    values=values,
-                    fal_payload=payload,
-                    prices=merged_vendor_prices(self._settings.media_vendor_prices()),
-                    result_hosts_configured=bool(self._settings.media_result_host_suffixes()),
+                    model=model, variant=variant, values=values, fal_payload=payload
                 )
                 handle = await self._submit_via_proxy(
                     job_id=job_id, model_id=model.id, routes=routes
@@ -530,17 +527,12 @@ class MediaGenerationService:
                     meta={"source": "media_generation", "model": model_id, "kind": kind},
                 )
             if self._proxy_enabled():
-                # ADR-108 §2: features (rembg / lip-sync / makeup) have ONLY the fal route — the
-                # `*:*:fal` rule; the payload is the one the direct fal submit sends.
-                route = fal_route(
-                    model_id=model_id,
-                    tier="*",
-                    endpoint=endpoint,
-                    payload=payload,
-                    prices=merged_vendor_prices(self._settings.media_vendor_prices()),
-                )
+                # ADR-108 §2: features (rembg / lip-sync / makeup) have ONLY the fal route; the
+                # payload is the one the direct fal submit sends.
                 handle = await self._submit_via_proxy(
-                    job_id=job_id, model_id=model_id, routes=[route]
+                    job_id=job_id,
+                    model_id=model_id,
+                    routes=[fal_route(endpoint=endpoint, payload=payload)],
                 )
             else:
                 handle = await self._submit_direct(endpoint=endpoint, payload=payload)
@@ -597,11 +589,12 @@ class MediaGenerationService:
     async def _submit_via_proxy(
         self, *, job_id: uuid.UUID, model_id: str, routes: list[VendorRoute]
     ) -> _SubmitHandle:
-        """Try the routes cheapest first; the first accepting one owns the job (ADR-108 §3.3).
+        """Try the routes in order; the first accepting one owns the job (ADR-108 §3.3).
 
         * proxy timeout / connect → stop (``502``): the next route hits the same host, and the
           proxy may already have accepted the task — a fallback could pay for a second run;
-        * ``401``/``403`` → stop (``503 media_generation_not_configured``);
+        * ``401``/``403`` on the fal route → stop (``503 media_generation_not_configured``); on
+          sosana/kie → next route: the rejected key may be the provider ``apiKey``;
         * ``422`` on the fal route → stop (``422``); on sosana/kie → next route: only fal gives
           the final verdict about the validity of a request fal itself would accept;
         * ``429`` / other upstream failures → next route; exhausted → the last of them.
@@ -630,7 +623,9 @@ class MediaGenerationService:
         """
         if self._proxy is None:
             raise UpstreamError("generation provider unavailable")
-        last_retryable: RateLimitedError | UpstreamError | None = None
+        last_retryable: (
+            RateLimitedError | UpstreamError | MediaGenerationNotConfiguredError | None
+        ) = None
         for index, route in enumerate(routes):
             callback = callback_url(settings=self._settings, job_id=job_id, route=route.service)
             try:
@@ -646,6 +641,12 @@ class MediaGenerationService:
             except ValidationFailedError:
                 if route.service == SERVICE_FAL:
                     raise
+                self._log_route_fallback(job_id=job_id, model_id=model_id, route=route)
+                continue
+            except MediaGenerationNotConfiguredError as exc:
+                if route.service == SERVICE_FAL:
+                    raise
+                last_retryable = exc
                 self._log_route_fallback(job_id=job_id, model_id=model_id, route=route)
                 continue
             except (RateLimitedError, UpstreamError) as exc:
@@ -1061,18 +1062,24 @@ class MediaGenerationService:
         if job is None or not _is_proxy_job(job):
             log_webhook_outcome(job_id=str(job_id), proxy_service=None, outcome=WEBHOOK_UNKNOWN_JOB)
             raise NotFoundError("media job not found")
-        outcome = await self._apply_callback(job, body, route=route)
-        log_webhook_outcome(job_id=str(job.id), proxy_service=job.provider, outcome=outcome)
+        outcome, rejected_hosts = await self._apply_callback(job, body, route=route)
+        log_webhook_outcome(
+            job_id=str(job.id),
+            proxy_service=job.provider,
+            outcome=outcome,
+            rejected_hosts=rejected_hosts,
+        )
         return outcome
 
     async def _apply_callback(
         self, job: MediaJob, body: dict[str, Any], *, route: str | None = None
-    ) -> str:
+    ) -> tuple[str, list[str] | None]:
+        """§4.2 п.4–§4.4; returns the outcome and, when no asset was usable, the dropped hosts."""
         if job.status in TERMINAL_STATUSES:
-            return WEBHOOK_DUPLICATE_TERMINAL
+            return WEBHOOK_DUPLICATE_TERMINAL, None
         # §4.2 п.4а: no `route` — a job submitted before §4.4, the callback is the current attempt.
         if route is not None and route != job.provider:
-            return WEBHOOK_STALE_ATTEMPT
+            return WEBHOOK_STALE_ATTEMPT, None
         # ADR-108 §8: the vendor's price is recorded for EVERY outcome that carries it —
         # `completed`, `failed`, `no_usable_asset`, a repeated delivery — BEFORE branching: the
         # purchase at the vendor happened even when the user's credits are refunded. Same
@@ -1086,22 +1093,26 @@ class MediaGenerationService:
         if isinstance(pending, dict):
             # §4.3 step 0 — the result is already received: a new callback never replaces it.
             if classified == OUTCOME_COMPLETED:
-                return await self._complete_in_savepoint(job, pending)
-            return WEBHOOK_RESULT_ALREADY_RECEIVED
+                return await self._complete_in_savepoint(job, pending), None
+            return WEBHOOK_RESULT_ALREADY_RECEIVED, None
         if classified == OUTCOME_FAILED:
             if await self._resubmit_to_next_route(job):
-                return WEBHOOK_RESUBMITTED
-            await self._fail(job, error=webhook_error_message(body))
-            return WEBHOOK_FAILED
+                return WEBHOOK_RESUBMITTED, None
+            error = mask_secret_text(webhook_error_message(body), settings=self._settings)
+            await self._fail(job, error=error)
+            return WEBHOOK_FAILED, None
         if classified != OUTCOME_COMPLETED:
             await self._repo.mark_running(job)
-            return WEBHOOK_PENDING
-        result = _callback_result(body, kind=job.kind)
+            return WEBHOOK_PENDING, None
+        result, rejected_hosts = _callback_result(body, kind=job.kind)
         if not _assets_from_result(result):
+            # §4.3 п.2 / §4.4: a vendor result outside the allowlist fails THIS attempt only.
+            if await self._resubmit_to_next_route(job):
+                return WEBHOOK_RESUBMITTED, rejected_hosts
             await self._fail(job, error=NO_OUTPUT_ERROR)
-            return WEBHOOK_NO_USABLE_ASSET
+            return WEBHOOK_NO_USABLE_ASSET, rejected_hosts
         await self._repo.store_pending_result(job, pending_result=result)
-        return await self._complete_in_savepoint(job, result)
+        return await self._complete_in_savepoint(job, result), None
 
     async def _resubmit_to_next_route(self, job: MediaJob) -> bool:
         """ADR-108 §4.4: hand a failed sosana/kie attempt to the next untried route.
@@ -1440,13 +1451,11 @@ def _routes_from_json(raw: Any) -> list[VendorRoute]:
             and isinstance(catalog_endpoint, str)
         ):
             continue
-        # unit_price only orders routes at submit; the stored list is already in that order.
         routes.append(
             VendorRoute(
                 service=service,
                 endpoint=endpoint,
                 payload=payload,
-                unit_price=0.0,
                 catalog_endpoint=catalog_endpoint,
             )
         )
@@ -1508,7 +1517,7 @@ def _has_fal_shape(body: dict[str, Any], *, kind: str) -> bool:
     return False
 
 
-def _callback_result(body: dict[str, Any], *, kind: str) -> dict[str, Any]:
+def _callback_result(body: dict[str, Any], *, kind: str) -> tuple[dict[str, Any], list[str]]:
     """Normalized result of a ``completed`` proxy callback (ADR-108 §4.3 п.1–2).
 
     1. If the body (top level, or ``payload``/``data``/``result``) carries fal's output form, the
@@ -1518,6 +1527,9 @@ def _callback_result(body: dict[str, Any], *, kind: str) -> dict[str, Any]:
     2. An asset that is not ``https://`` or whose host is outside
        ``FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES`` is dropped BEFORE anything is
        stored — the server never follows a URL from a callback it did not allowlist (SSRF).
+
+    Also returns the unique hosts of the dropped URLs (no path, no query) — ``rejectedHosts`` of
+    ``media_webhook_outcome`` (ADR-108 §7, §10).
     """
     normalized: dict[str, Any] | None = None
     for candidate in fal_shaped_candidates(body):
@@ -1533,14 +1545,19 @@ def _callback_result(body: dict[str, Any], *, kind: str) -> dict[str, Any]:
                 {"url": url, "contentType": None, "fileName": None} for url in collect_urls(body)
             ]
         }
-    normalized["assets"] = [
-        asset
-        for asset in normalized["assets"]
-        if isinstance(asset, dict)
-        and isinstance(asset.get("url"), str)
-        and fal_asset_host_allowed(asset["url"])
-    ]
-    return normalized
+    kept: list[dict[str, Any]] = []
+    rejected_hosts: list[str] = []
+    for asset in normalized["assets"]:
+        if not isinstance(asset, dict) or not isinstance(asset.get("url"), str):
+            continue
+        if fal_asset_host_allowed(asset["url"]):
+            kept.append(asset)
+            continue
+        host = urlsplit(asset["url"]).hostname
+        if host and host not in rejected_hosts:
+            rejected_hosts.append(host)
+    normalized["assets"] = kept
+    return normalized, rejected_hosts
 
 
 def _asset_dict(item: Any) -> dict[str, Any] | None:

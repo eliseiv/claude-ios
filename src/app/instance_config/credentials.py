@@ -31,6 +31,8 @@ CREDENTIAL_ANTHROPIC_API_KEY = "anthropic.api_key"
 CREDENTIAL_ANTHROPIC_API_KEY_BACKUP = "anthropic.api_key_backup"
 CREDENTIAL_FAL_API_KEY = "fal.api_key"
 CREDENTIAL_PROXY_API_KEY = "proxy.api_key"
+CREDENTIAL_KIE_API_KEY = "kie.api_key"
+CREDENTIAL_SOSANA_API_KEY = "sosana.api_key"
 CREDENTIAL_CLOUDPAYMENTS_API_TOKEN = "cloudpayments.api_token"
 CREDENTIAL_ADAPTY_WEBHOOK_SECRET = "adapty.webhook_secret"
 
@@ -116,6 +118,26 @@ _SPECS: tuple[CredentialSpec, ...] = (
         label="Ключ прокси генерации",
         group="Генерация медиа",
         description=("Ключ прокси-сервиса генерации медиа." + _AFTER_WRITE_NOTE),
+    ),
+    CredentialSpec(
+        credential_id=CREDENTIAL_KIE_API_KEY,
+        settings_field="kie_api_key",
+        label="Ключ kie",
+        group="Генерация медиа",
+        description=(
+            "Ключ kie для задач видео через прокси. Пусто — прокси генерирует своим ключом."
+            + _AFTER_WRITE_NOTE
+        ),
+    ),
+    CredentialSpec(
+        credential_id=CREDENTIAL_SOSANA_API_KEY,
+        settings_field="sosana_api_key",
+        label="Ключ sosana",
+        group="Генерация медиа",
+        description=(
+            "Ключ sosana для задач изображений через прокси. Пусто — прокси генерирует своим "
+            "ключом." + _AFTER_WRITE_NOTE
+        ),
     ),
     CredentialSpec(
         credential_id=CREDENTIAL_CLOUDPAYMENTS_API_TOKEN,

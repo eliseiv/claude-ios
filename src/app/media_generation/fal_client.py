@@ -229,12 +229,15 @@ class FalClient:
         return file_url
 
     async def rehost_reference_image(self, url: str) -> str:
-        """Copy a fal result still onto fal-cdn-v3 at a size Kling can download.
+        """Copy a result still onto fal-cdn-v3 at a size Kling can download.
 
-        Only fetches hosts already on the upload allowlist (SSRF). Foreign https URLs (a user's
-        own CDN) are returned unchanged — Kling fetches those itself.
+        Fetches only hosts of the default result-host list
+        ``FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES`` (ADR-108 §2.1: a ``sourceJobId``
+        frame on the proxy relay host is rehosted too); the SSRF boundary is that of
+        ``download_asset``. Foreign https URLs (a user's own CDN) are returned unchanged — the
+        vendor fetches those itself. The write still goes to fal storage only (``upload``).
         """
-        if not self._upload_host_allowed(url):
+        if not fal_asset_host_allowed(url):
             return url
         content = await self._get_bytes(url)
         try:

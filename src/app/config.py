@@ -532,11 +532,13 @@ class Settings(BaseSettings):
     # SECRET: signs the webhook `callbackUrl` token (ADR-108 §4.1). Empty => PROXY_API_KEY is
     # used instead; on prod it is set explicitly, fresh per instance. Never logged.
     proxy_webhook_secret: str = Field(default="", alias="PROXY_WEBHOOK_SECRET")
-    # Override of the ROUTING price table `{"<model>:<tier>:<service>": usd}` (ADR-108 §2). This
-    # is our purchase price at the vendor; it never moves the credit price of a run.
-    media_vendor_prices_raw: str = Field(default="{}", alias="MEDIA_VENDOR_PRICES")
-    # CDN host suffixes of the proxy vendors (sosana/kie), comma-separated (ADR-108 §7). They
-    # extend the result-host allowlist; empty (default) switches the sosana/kie routes off.
+    # SECRET (credentials `kie.api_key` / `sosana.api_key`, ADR-116 §2.1): provider keys sent to
+    # the proxy as `apiKey` of a kie / sosana task (ADR-108 §3.2). Empty => the field is not sent
+    # and the proxy generates with its own key. Never logged, never stored on a job.
+    kie_api_key: str = Field(default="", alias="KIE_API_KEY")
+    sosana_api_key: str = Field(default="", alias="SOSANA_API_KEY")
+    # Result-host suffixes of the proxy (its relay host) and its vendors, comma-separated
+    # (ADR-108 §7). They extend the result-host allowlist only; routing does not read them.
     media_result_host_suffixes_raw: str = Field(default="", alias="MEDIA_RESULT_HOST_SUFFIXES")
 
     # --- Scheduled chat tasks (ADR-107) ---
@@ -1037,8 +1039,9 @@ class Settings(BaseSettings):
         """Default result-host allowlist: ``FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES``.
 
         ADR-108 §7: the download route, the client-facing signed URL and the webhook asset filter
-        read THIS union; so does ``FalClient.download_asset`` (task result read, ADR-112). The
-        fal-only list stays only where it is passed explicitly (``FalClient._upload_host_allowed``).
+        read THIS union; so do ``FalClient.download_asset`` (task result read, ADR-112) and
+        ``FalClient.rehost_reference_image`` (§2.1). The fal-only list stays only where it is
+        passed explicitly (``FalClient._upload_host_allowed``, i.e. ``upload``).
         With an empty ``MEDIA_RESULT_HOST_SUFFIXES`` the union equals the fal list, i.e. the
         behaviour before ADR-108.
         """
@@ -1047,33 +1050,6 @@ class Settings(BaseSettings):
             if suffix not in merged:
                 merged.append(suffix)
         return tuple(merged)
-
-    def media_vendor_prices(self) -> dict[str, float]:
-        """Parse MEDIA_VENDOR_PRICES (ADR-108 §2) — routing prices only, never credits.
-
-        A key survives only with a non-negative finite number (bool excluded); anything else is
-        ignored, and a malformed document degrades to "no overrides". Pure (no I/O).
-        """
-        import json
-        import math
-
-        try:
-            parsed = json.loads(self.media_vendor_prices_raw or "{}")
-        except (ValueError, json.JSONDecodeError):
-            return {}
-        if not isinstance(parsed, dict):
-            return {}
-        prices: dict[str, float] = {}
-        for key, value in parsed.items():
-            if not isinstance(key, str):
-                continue
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                continue
-            number = float(value)
-            if not math.isfinite(number) or number < 0:
-                continue
-            prices[key] = number
-        return prices
 
     # --- ADR-108 §1: THE predicate "generation is configured" and the submit transport. ---
     # Every decision "is media generation available on this instance" reads these methods, never

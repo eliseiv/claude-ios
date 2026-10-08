@@ -45,10 +45,10 @@ WEBHOOK_FAILED = "failed"  # §4.3 — callback classified failed → _fail (ref
 WEBHOOK_COMPLETED = "completed"  # §5 ran and the job IS `completed` (assets handed out)
 WEBHOOK_COMPLETION_FAILED = "completion_failed"  # §5 ran and the job IS `failed` (blocked / 422)
 WEBHOOK_COMPLETION_DEFERRED = "completion_deferred"  # pending_result kept, §5 hit a transient fault
-WEBHOOK_NO_USABLE_ASSET = "no_usable_asset"  # §4.3 п.2 dropped every asset → failed
+WEBHOOK_NO_USABLE_ASSET = "no_usable_asset"  # §4.3 п.2 dropped every asset, no resubmission
 WEBHOOK_RESULT_ALREADY_RECEIVED = "result_already_received"  # §4.3 step 0 ignored failed/pending
 WEBHOOK_STALE_ATTEMPT = "stale_attempt"  # §4.2 п.4а — callback of a previous route attempt
-WEBHOOK_RESUBMITTED = "resubmitted"  # §4.4 — failed callback, the job moved to the next route
+WEBHOOK_RESUBMITTED = "resubmitted"  # §4.4 — failed / no usable asset, moved to the next route
 
 _WARNING_OUTCOMES = frozenset({WEBHOOK_BAD_TOKEN, WEBHOOK_UNKNOWN_JOB, WEBHOOK_NO_USABLE_ASSET})
 
@@ -99,17 +99,27 @@ def callback_url(*, settings: Settings, job_id: uuid.UUID, route: str) -> str:
     return f"https://{host}{WEBHOOK_PATH_PREFIX}/{job_id}?token={token}&route={route_param}"
 
 
-def log_webhook_outcome(*, job_id: str | None, proxy_service: str | None, outcome: str) -> None:
-    """``media_webhook_outcome`` (ADR-108 §10). No token, no body, no URL."""
+def log_webhook_outcome(
+    *,
+    job_id: str | None,
+    proxy_service: str | None,
+    outcome: str,
+    rejected_hosts: list[str] | None = None,
+) -> None:
+    """``media_webhook_outcome`` (ADR-108 §10). No token, no body, no URL.
+
+    ``rejected_hosts`` — hosts (no path, no query) of the result URLs dropped by the allowlist
+    when none was usable (§7): the operator extends ``MEDIA_RESULT_HOST_SUFFIXES`` from them.
+    """
     level = logging.WARNING if outcome in _WARNING_OUTCOMES else logging.INFO
-    log_event(
-        logger,
-        level,
-        "media_webhook_outcome",
-        jobId=job_id,
-        proxyService=proxy_service or None,
-        outcome=outcome,
-    )
+    fields: dict[str, Any] = {
+        "jobId": job_id,
+        "proxyService": proxy_service or None,
+        "outcome": outcome,
+    }
+    if rejected_hosts:
+        fields["rejectedHosts"] = rejected_hosts
+    log_event(logger, level, "media_webhook_outcome", **fields)
 
 
 def webhook_outcome(body: dict[str, Any]) -> str:
@@ -199,7 +209,14 @@ def collect_urls(body: Any, *, _depth: int = 0) -> list[str]:
         value = body.get(key)
         if isinstance(value, str) and value.startswith("https://"):
             found.append(value)
-    for key in ("resultUrls", "output_urls", "image_urls", "images", "videos", "assets"):
+    # Kie lists its outputs here; a video link need not carry a recognisable extension or host
+    # (§4.3 п.1) — only `https://` is required, the allowlist decides later.
+    result_urls = body.get("resultUrls")
+    if isinstance(result_urls, list):
+        found.extend(
+            url for url in result_urls if isinstance(url, str) and url.startswith("https://")
+        )
+    for key in ("output_urls", "image_urls", "images", "videos", "assets"):
         found.extend(collect_urls(body.get(key), _depth=_depth + 1))
     for key in ("data", "payload", "result", "video", "image", "info", "resultJson"):
         found.extend(collect_urls(body.get(key), _depth=_depth + 1))
