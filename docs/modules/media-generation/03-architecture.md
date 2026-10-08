@@ -16,7 +16,7 @@
 | `migrations/versions/20260804_0018_media_jobs.py` | миграция таблицы |
 | `migrations/versions/20260805_0019_media_jobs_edit_chain.py` | цепочка правок: `parent_job_id`, `input_image_urls` |
 
-**[ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) (реализовано) добавляет:** исходящий клиент прокси (`POST {PROXY_BASE}/api/v1/tasks`), модуль маршрутизации (публичная модель → `fal`/`kie`/`sosana` + endpoint вендора, цены маршрутов), подпись и разбор колбэка, отдельный роутер `POST /v1/media/webhooks/proxy/{jobId}` (вне гейта, вне OpenAPI), метод репозитория «строка по id под `FOR UPDATE`» и миграцию `provider`/`vendor_price`/`pending_result`. Имена модулей образца: `proxy_client.py`, `routing.py`, `webhook.py`, `routers/media_webhooks.py` (ai-media-upscaler). Порядок шагов — [§Транспорт через прокси](#транспорт-через-прокси-adr-108).
+**[ADR-108](../../adr/ADR-108-media-generation-via-proxy.md) (реализовано) добавляет:** исходящий клиент прокси (`POST {PROXY_BASE}/api/v1/tasks`), модуль маршрутизации (публичная модель → фиксированный список `[sosana|kie, fal]` или `[fal]` + endpoint и payload вендора, [ADR-108 §2/§2.1](../../adr/ADR-108-media-generation-via-proxy.md)), подпись и разбор колбэка, отдельный роутер `POST /v1/media/webhooks/proxy/{jobId}` (вне гейта, вне OpenAPI), метод репозитория «строка по id под `FOR UPDATE`» и миграцию `provider`/`vendor_price`/`pending_result`. Имена модулей образца: `proxy_client.py`, `routing.py`, `webhook.py`, `routers/media_webhooks.py` (ai-media-upscaler). Порядок шагов — [§Транспорт через прокси](#транспорт-через-прокси-adr-108).
 
 **[ADR-109](../../adr/ADR-109-media-asset-local-storage-30d.md) (код в `main` (`f90d871`), выкачен (CI `36015691825` на `48f9018`, джоб `ssh deploy` — `success`)) добавит:** фоновый цикл хранилища ассетов (сохранение + очистка) рядом с согласователем, ветку «своя копия» в download-роуте и колонки состояния копии в `media_jobs` — [§Своё хранение результатов](#своё-хранение-результатов-adr-109). Имена модулей выбирает `backend`.
 
@@ -201,15 +201,15 @@ POST /v1/media/images|videos | submit_custom | chat-tool media.generate_*
   ├─ … все шаги §Поток постановки задачи до wallet.consume — БЕЗ изменений
   ├─ SAVEPOINT { wallet.consume → маршруты → INSERT } — отказ внутри откатывает списание
   │     на ЛЮБОМ вызывающем, в том числе в tool-loop чата (ADR-108 §3.1)
-  ├─ routes = маршруты ADR-108 §2 по возрастанию цены (fal есть всегда; последний на дефолтах,
-  │          первый — если MEDIA_VENDOR_PRICES сделал его дешевле; sosana/kie — только по §2.1)
+  ├─ routes = ADR-108 §2: Nano Banana → [sosana, fal]; видео → [kie, fal]; иначе / features → [fal]
+  │          (payload вендора — §2.1; apiKey kie/sosana добавляет ProxyClient.submit, §3.2)
   ├─ callbackUrl = https://{SERVICE_DOMAIN}/v1/media/webhooks/proxy/{jobId}?token=HMAC(jobId)&route={service}
   ├─ для route in routes: ProxyClient.submit(service, endpoint, payload, callbackUrl)
   │     ├─ таймаут / connect к прокси → 502, без отката на следующий маршрут
   │     ├─ 429 / 5xx / 402 / 400 без валидации → следующий маршрут
-  │     ├─ 422 (или 400 с валидацией) у sosana/kie → следующий маршрут
-  │     ├─ 422 у fal → 422 validation_error            ┐
-  │     └─ 401/403 → 503 media_generation_not_configured ┘ стоп, списание откатывается
+  │     ├─ 422 (или 400 с валидацией), 401/403 у sosana/kie → следующий маршрут
+  │     ├─ 422 у fal → 422 validation_error                     ┐
+  │     └─ 401/403 у fal → 503 media_generation_not_configured  ┘ стоп, списание откатывается
   │     (маршруты исчерпаны → последний 429 | 502, списание откатывается)
   └─ INSERT media_jobs(provider, fal_endpoint=<endpoint варианта>, fal_request_id=<id прокси>,
                       remaining_routes=<маршруты после принятого | NULL>,
@@ -240,7 +240,8 @@ POST /v1/media/images|videos | submit_custom | chat-tool media.generate_*
   └─ outcome = completed              (pending_result пуст)
         ├─ нормализация (форма fal → действующий _normalize_result; иначе сбор URL)
         ├─ URL не https / хост вне FAL_UPLOAD_HOST_SUFFIXES ∪ MEDIA_RESULT_HOST_SUFFIXES → отброшен
-        │     └─ ассетов нет → _fail("generation produced no output") → 200
+        │     └─ ассетов нет → как outcome = failed: переотправка §4.4, если допустима (rejectedHosts в лог),
+        │                       иначе _fail("generation produced no output") → 200
         ├─ UPDATE pending_result, vendor_price
         └─ SAVEPOINT: ОБЩИЙ ПУТЬ ЗАВЕРШЕНИЯ
               пост-модерация (image) → blocked? _blocked_by_moderation

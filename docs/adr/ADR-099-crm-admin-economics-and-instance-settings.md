@@ -1034,7 +1034,7 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
 
 Команда та же, что названа ниже; сверка — поимённо, а не по числу.
 
-**Касание волной [ADR-108](ADR-108-media-generation-via-proxy.md) (2026-09-23, рабочее дерево).** Шесть новых алиасов `Settings` — `PROXY_API_KEY`, `PROXY_BASE`, `PROXY_TIMEOUT_SECONDS`, `PROXY_WEBHOOK_SECRET`, `MEDIA_VENDOR_PRICES`, `MEDIA_RESULT_HOST_SUFFIXES` (`src/app/config.py:504-517`) — внесены в перечень ниже с классами из ADR-108 «Классы новых переменных»: два **(а)**, четыре **(б)**. Общее число алиасов этим касанием **не пересчитывалось** — при следующей пересъёмке оно сверяется поимённо.
+**Касание волной [ADR-108](ADR-108-media-generation-via-proxy.md) (2026-09-23, рабочее дерево).** Алиасы `Settings` волны — `PROXY_API_KEY`, `PROXY_BASE`, `PROXY_TIMEOUT_SECONDS`, `PROXY_WEBHOOK_SECRET`, `MEDIA_RESULT_HOST_SUFFIXES`, `KIE_API_KEY`, `SOSANA_API_KEY` (последние два и снятие `MEDIA_VENDOR_PRICES` — редакция ADR-108 §2 от 2026-10-08, спроектировано) — внесены в перечень ниже с классами из ADR-108 «Классы новых переменных»: четыре **(а)**, три **(б)**. Общее число алиасов этим касанием **не пересчитывалось** — при следующей пересъёмке оно сверяется поимённо.
 
 ⚠️ **Замер обязан пересниматься при каждом касании этого раздела, а не наследоваться.** Он протухал
 **трижды за сутки** (`176` → `184` → `186` → `187`), и каждый раз — от параллельной волны, включая
@@ -1051,7 +1051,7 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
 
 **(а) Credential — утечка значения даёт доступ к данным, деньгам или возможности действовать от
 чужого имени:** `ANTHROPIC_API_KEY`, `ANTHROPIC_API_KEY_BACKUP`, `OPENAI_API_KEY`,
-`OPENAI_API_KEY_BACKUP`, `FAL_API_KEY`, `PROXY_API_KEY`, `PROXY_WEBHOOK_SECRET` (оба — [ADR-108](ADR-108-media-generation-via-proxy.md)), `MODERATION_API_KEY`, `CLOUDPAYMENTS_API_TOKEN`,
+`OPENAI_API_KEY_BACKUP`, `FAL_API_KEY`, `PROXY_API_KEY`, `PROXY_WEBHOOK_SECRET`, `KIE_API_KEY`, `SOSANA_API_KEY` (все — [ADR-108](ADR-108-media-generation-via-proxy.md)), `MODERATION_API_KEY`, `CLOUDPAYMENTS_API_TOKEN`,
 `JWT_PRIVATE_KEY`/`JWT_PRIVATE_KEY_PATH` (материал подписи токенов), `KMS_LOCAL_MASTER_KEY`/
 `KMS_KEY_ID` (**мастер-ключ, которым шифруются BYOK-ключи пользователей в этой же БД**),
 `ADMIN_API_SECRET`/`ADMIN_API_SECRET_PREV`/`ADMIN_API_KEY`, `ADAPTY_WEBHOOK_SECRET`,
@@ -1077,7 +1077,7 @@ consumer-driven из этой сноски плюс `chat.advertised_generation_
 **(б) Адрес, параметр инфраструктуры или политика обращения к апстриму:** `DATABASE_URL`,
 `REDIS_URL`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`,
 `DB_POOL_RECYCLE`, `SERVICE_DOMAIN`, `TRUSTED_PROXY_IPS`, `TRUSTED_PROXY_HOP_COUNT`,
-`OTEL_EXPORTER_OTLP_ENDPOINT`, `FAL_QUEUE_BASE`, `FAL_REST_BASE`, `FAL_UPLOAD_HOST_SUFFIXES`, `PROXY_BASE`, `MEDIA_RESULT_HOST_SUFFIXES` (SSRF-allowlist, соседка `FAL_UPLOAD_HOST_SUFFIXES`), `MEDIA_VENDOR_PRICES` (выбор апстрима, цену в кредитах не задаёт; `PROXY_TIMEOUT_SECONDS` — по семейному правилу `*_TIMEOUT_SECONDS` ниже; все четыре — [ADR-108](ADR-108-media-generation-via-proxy.md))
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `FAL_QUEUE_BASE`, `FAL_REST_BASE`, `FAL_UPLOAD_HOST_SUFFIXES`, `PROXY_BASE`, `MEDIA_RESULT_HOST_SUFFIXES` (SSRF-allowlist, соседка `FAL_UPLOAD_HOST_SUFFIXES`; `PROXY_TIMEOUT_SECONDS` — по семейному правилу `*_TIMEOUT_SECONDS` ниже; все три — [ADR-108](ADR-108-media-generation-via-proxy.md))
 (SSRF-allowlist), `MODERATION_BASE_URL`, `CLOUDPAYMENTS_API_BASE`, `APPLE_JWKS_URL`,
 `APPLE_OIDC_ISSUER`, `JWT_JWKS_URL`, **любые** `*_TIMEOUT_SECONDS` и `*_MAX_RETRIES`,
 `MODERATION_FAIL_OPEN`, `MEDIA_RECONCILE_INTERVAL_SECONDS`/`MEDIA_RECONCILE_BATCH_SIZE`,

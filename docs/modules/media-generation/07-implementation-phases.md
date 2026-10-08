@@ -96,6 +96,19 @@
 7. **devops:** каталог `/opt/<инстанс>/media-assets` (`10001:10001`, `0750`) с маркером `.media-assets-root` на ОБОИХ серверах — в `provision.sh` (`new`, `adapt`) и разовым шагом для существующих; bind-mount `./media-assets:/data/media-assets` у `api` в `docker-compose.prod.yml`; сверка значения `MEDIA_ASSET_STORAGE_DIR` на основном и резерве в `verify.sh`; очистка каталога — шагом отката и шагом пересборки вернувшегося сервера ([ADR-109 §6](../../adr/ADR-109-media-asset-local-storage-30d.md)); маркер `.media-assets-root` со строкой `pg_system_identifier=<system_identifier базы>` в корне каталога — тем же шагом провижининга, значение сверяется на основном и резерве; правила алертов — только на Gauge §9, по `media_asset_missing` — только по росту, его уровень — в `verify.sh`.
 8. **Тесты:** [09-testing.md §Своё хранение результатов](09-testing.md#integration--своё-хранение-результатов-adr-109). Зона `qa`.
 
+## Phase 11 — Фиксированная маршрутизация с ключами провайдеров ([ADR-108 §2, §2.1, §3.2, §3.3, §4.4, §7, §10](../../adr/ADR-108-media-generation-via-proxy.md); спроектирована 2026-10-08, код не написан)
+
+Код безопасен к выкату без ключей (пустой ключ → `apiKey` не шлётся). Заменяет п.1 (`MEDIA_VENDOR_PRICES`) и п.3 (цены, условия §2.1) Phase 9.
+
+1. **Config + креденшлы** (`backend`): `Settings.kie_api_key` (`KIE_API_KEY`), `Settings.sosana_api_key` (`SOSANA_API_KEY`) в `src/app/config.py`; записи `kie.api_key`/`sosana.api_key` в `src/app/instance_config/credentials.py` (группа «Генерация медиа», подписи — как образец: «Ключ kie»/«Ключ sosana»); удалить `media_vendor_prices_raw`/`media_vendor_prices`.
+2. **Маршруты** (`backend`): `src/app/media_generation/routing.py` — `candidate_routes(model, variant, values, fal_payload)` фиксированного порядка; `_sosana_route`, `_kie_route` с билдерами Kling 2.5/v3/Veo и `clip_video_prompt`; удалить `unit_price`, `default_vendor_prices`, `merged_vendor_prices`, `lookup_price`, `_SERVICE_RANK`, `_vendor_eligible`, kie-маршрут изображений; вызовы в `service.py` (`submit`, `submit_custom`, `_routes_from_json`).
+3. **Клиент прокси** (`backend`): `ProxyClient._vendor_api_key` + `apiKey` в `submit`; `401`/`403` на маршруте `sosana`/`kie` → следующий маршрут (`_submit_first_accepting`); маскирование секретов в тексте вендора (§10).
+4. **Вебхук** (`backend`): `collect_urls` — `resultUrls` без `_looks_like_asset`; `_apply_callback` — ветка «нет пригодного ассета» через `_resubmit_to_next_route`; `rejectedHosts` в `log_webhook_outcome`.
+5. **Перехост кадра** (`backend`): `FalClient.rehost_reference_image` — проверка хоста дефолтным списком `fal_asset_host_allowed(url)`.
+6. **devops**: удалить `MEDIA_VENDOR_PRICES` из `.env.example`/`.env.prod.example`; `KIE_API_KEY`/`SOSANA_API_KEY` в шаблоны не вносятся (значения — из CRM оверлеем).
+7. **Тесты** (`qa`): [09-testing.md §Транспорт через прокси](09-testing.md#integration--транспорт-через-прокси-adr-108) — «Маршрутизация (§2, §2.1)», «Ключ провайдера (§3.2)», «Ошибки сабмита», «Переотправка»; существующие тесты цен маршрутизации и `MEDIA_VENDOR_PRICES` (`tests/unit/test_media_proxy_units_adr108.py`, `tests/integration/test_media_proxy_adr108.py`, `tests/conftest.py`) и реестра креденшлов (счёт 8 → 10) правит `qa`.
+8. **Выкат** — [ADR-108 §Порядок выката](../../adr/ADR-108-media-generation-via-proxy.md) п.5.
+
 ## Post-MVP (не в этой поставке)
 
 - ~~**Фоновая доводка «зависших» задач**~~ — **сделано:** фоновый согласователь ([ADR-067](../../adr/ADR-067-media-ready-push-and-reconciler.md), закрыл [Q-060-2](../../99-open-questions.md)); предел жизни задачи, на которую провайдер не даёт конечного ответа, — Phase 8 ([ADR-105 §B](../../adr/ADR-105-provider-failure-input-shape-and-media-deadline.md)).

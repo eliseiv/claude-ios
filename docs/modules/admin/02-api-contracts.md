@@ -566,7 +566,7 @@ Read-only. Сколько бизнес заплатил AI-провайдера�
 
 **Response (200):** `{"items": [...]}`, элемент: `credential_id` (str, ключ пути `PATCH`), `label` (str), `group` (str \| null), `description` (str \| null), `constraints` (`{max_length}`), `configured` (bool — действующее значение непусто), `source` (`overlay` \| `env` \| `unset`), `fingerprint` (str — первые 12 hex SHA-256 действующего значения \| null при `unset`), `updated_at` (ISO \| null).
 
-**Реестр — 8** (`credential_id`): `openai.api_key`, `openai.api_key_backup`, `anthropic.api_key`, `anthropic.api_key_backup`, `fal.api_key`, `proxy.api_key`, `cloudpayments.api_token`, `adapty.webhook_secret`. Соответствие переменным окружения и точки применения — [ADR-116 §2.1](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md).
+**Реестр — 10** (`credential_id`): `openai.api_key`, `openai.api_key_backup`, `anthropic.api_key`, `anthropic.api_key_backup`, `fal.api_key`, `proxy.api_key`, `kie.api_key`, `sosana.api_key` (последние два — [ADR-108 §3.2](../../adr/ADR-108-media-generation-via-proxy.md), спроектированы 2026-10-08, код не написан), `cloudpayments.api_token`, `adapty.webhook_secret`. Соответствие переменным окружения и точки применения — [ADR-116 §2.1](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md).
 
 ### PATCH /v1/admin/credentials/{credential_id} — [ADR-116](../../adr/ADR-116-credentials-and-infra-settings-in-db-overlay.md)
 

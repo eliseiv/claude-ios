@@ -39,7 +39,7 @@
 
 ### §2. Креденшлы: хранение, запись, чтение обратно
 
-#### §2.1. Перечень (8)
+#### §2.1. Перечень (10)
 
 | `credential_id` | Переменная (и алиасы, `src/app/config.py`) | Точки применения (снимок; перечень — не граница, свип по имени поля) |
 |---|---|---|
@@ -49,6 +49,8 @@
 | `anthropic.api_key_backup` | `ANTHROPIC_API_KEY_BACKUP` (алиас `ANTHROPIC_FALLBACK_API_KEY`) | [ADR-074](ADR-074-provider-key-failover.md) |
 | `fal.api_key` | `FAL_API_KEY` | `media_generation/fal_client.py`; гейт генерации [ADR-108 §1](ADR-108-media-generation-via-proxy.md) |
 | `proxy.api_key` | `PROXY_API_KEY` | `media_generation/proxy_client.py`, `media_generation/webhook.py`. ⚠️ При пустом `PROXY_WEBHOOK_SECRET` этот ключ служит **и ключом подписи** `callbackUrl` ([ADR-108](ADR-108-media-generation-via-proxy.md): «пусто → `PROXY_API_KEY`»), и его смена из CRM сломала бы колбэки задач в полёте. Поэтому `PATCH proxy.api_key` при пустом действующем `PROXY_WEBHOOK_SECRET` отвергается: `400`, `reason=environment_missing` (§4.3). На инстансах [ADR-115](ADR-115-crm-managed-instance-and-server-lifecycle.md) `PROXY_WEBHOOK_SECRET` генерируется всегда (E2) |
+| `kie.api_key` | `KIE_API_KEY` | `media_generation/proxy_client.py` — поле `apiKey` тела задачи маршрута `kie` ([ADR-108 §3.2](ADR-108-media-generation-via-proxy.md)); группа «Генерация медиа»; пусто — прокси генерирует своим ключом. **Спроектировано 2026-10-08, код не написан** |
+| `sosana.api_key` | `SOSANA_API_KEY` | то же для маршрута `sosana`; группа «Генерация медиа». **Спроектировано 2026-10-08, код не написан** |
 | `cloudpayments.api_token` | `CLOUDPAYMENTS_API_TOKEN` | `billing_cloudpayments/{checkout,verify,service,experiments}.py`, `api_gateway/routers/auth.py` |
 | `adapty.webhook_secret` | `ADAPTY_WEBHOOK_SECRET` | `billing_adapty/auth.py` |
 
