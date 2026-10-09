@@ -11,7 +11,17 @@ import re
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, Request
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+)
 
 from app.admin.crm_service import CrmAdminService
 from app.admin.economics_service import AdminEconomicsService
@@ -392,6 +402,29 @@ async def admin_patch_product(
     _enforce_admin_economics_write_guards(request)
     await _enforce_admin_economics_rate_limit(request)
     return await service.patch_product(product_id, body, actor_claim=x_admin_actor)
+
+
+@router.delete(
+    "/products/{product_id}",
+    status_code=204,
+    response_class=Response,
+    summary="CRM: удалить продукт",
+    description=(
+        "Удаляет продукт, созданный в панели. Продукт, заданный конфигурацией инстанса, "
+        "удалить нельзя — его можно только снять с витрины. После удаления тот же "
+        "идентификатор можно завести заново."
+    ),
+)
+async def admin_delete_product(
+    request: Request,
+    service: Annotated[AdminEconomicsService, Depends(get_admin_economics_service)],
+    product_id: Annotated[str, Path(max_length=128)],
+    x_admin_actor: AdminActor = None,
+) -> Response:
+    _enforce_admin_economics_write_guards(request)
+    await _enforce_admin_economics_rate_limit(request)
+    await service.delete_product(product_id, actor_claim=x_admin_actor)
+    return Response(status_code=204)
 
 
 @router.get(

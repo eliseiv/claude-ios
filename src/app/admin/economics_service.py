@@ -15,10 +15,10 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import CursorResult, delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from app.audit.service import (
     EVENT_ADMIN_CREDENTIAL_SET,
     EVENT_ADMIN_PRODUCT_ARCHIVED,
     EVENT_ADMIN_PRODUCT_CREATED,
+    EVENT_ADMIN_PRODUCT_DELETED,
     EVENT_ADMIN_PRODUCT_UPDATED,
     EVENT_ADMIN_SETTING_UPDATED,
     EVENT_ADMIN_TARIFF_UPDATED,
@@ -175,6 +176,7 @@ FEATURES = (
     "products.write_tokens",
     "products.write_archived",
     "products.create",
+    "products.delete",
     "pricing.read",
     "pricing.write_tokens",
     "settings.write",
@@ -531,6 +533,61 @@ class AdminEconomicsService:
             ).model_dump(),
             effective_after_seconds=self._effective_after(),
         )
+
+    async def delete_product(self, product_id: str, *, actor_claim: str | None) -> None:
+        """Удалить продукт, созданный оператором. Продукт из env-источника удалить нельзя.
+
+        Наличие строки решается по БД, а не по снимку — по той же причине, что и в
+        ``patch_product``: созданный в соседнем процессе продукт снимку ещё не виден.
+        """
+        row = product_catalog.find_product(product_id, settings=self._settings)
+        if row is not None and row.source != product_catalog.SOURCE_OPERATOR:
+            # Строка оверлея env-продукта — правка оператора, а не продукт: её удаление молча
+            # вернуло бы значения `.env`, а сам продукт остался бы в каталоге.
+            raise self._reject(
+                SCOPE_PRODUCTS,
+                REASON_CONFLICT,
+                400,
+                f"продукт «{product_id}» задан конфигурацией инстанса, удалить его нельзя",
+            )
+        overlay = await self._session.scalar(
+            select(AdminProduct).where(AdminProduct.product_id == product_id)
+        )
+        unknown_detail = f"продукт «{product_id}» на этом инстансе неизвестен"
+        if overlay is None:
+            # `400`, а не `404`: `404` в этом контракте означает «расширение не реализовано».
+            raise self._reject(SCOPE_PRODUCTS, REASON_UNKNOWN_ID, 400, unknown_detail)
+        previous = {
+            "name": overlay.name,
+            "purchase_kind": overlay.purchase_kind,
+            "tokens": overlay.tokens,
+            "archived": overlay.archived,
+        }
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                delete(AdminProduct).where(AdminProduct.product_id == product_id)
+            ),
+        )
+        if not result.rowcount:
+            # Строку между чтением и удалением удалил параллельный запрос: второго следа нет.
+            await self._session.rollback()
+            raise self._reject(SCOPE_PRODUCTS, REASON_UNKNOWN_ID, 400, unknown_detail)
+        await self._audit.record(
+            AuditEvent(
+                user_id=None,
+                event_type=EVENT_ADMIN_PRODUCT_DELETED,
+                payload={
+                    "scope": SCOPE_PRODUCTS,
+                    "id": product_id,
+                    "previous": _short(previous),
+                    "next": None,
+                    "actorClaim": actor_claim,
+                },
+            )
+        )
+        await self._commit_and_refresh()
+        self._log_applied(SCOPE_PRODUCTS, product_id, previous, None, actor_claim)
 
     async def patch_product(
         self, product_id: str, body: AdminProductPatchRequest, *, actor_claim: str | None

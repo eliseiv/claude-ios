@@ -56,7 +56,7 @@ _OVER_MAX_CREDITS = 2_000_000
 # Заведомо устаревшая отметка версии: любая существующая строка новее её.
 _STALE_STAMP = "2020-01-01T00:00:00Z"
 
-# Восемь путей поверхности. Перечень собран ОДИН раз и питает сразу три сводных кейса — сводку
+# Девять путей поверхности. Перечень собран ОДИН раз и питает сразу три сводных кейса — сводку
 # «ни один вход не даёт 404», позитивный лимит и проверку заголовков: список, переписанный в
 # каждый кейс отдельно, разошёлся бы с реализацией в том кейсе, который забыли поправить.
 _SURFACE: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
@@ -68,6 +68,7 @@ _SURFACE: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
         {"product_id": "x", "name": "x", "purchase_kind": "one_time", "tokens": 1},
     ),
     ("PATCH", "/v1/admin/products/no-such-product", {"tokens": 5}),
+    ("DELETE", "/v1/admin/products/no-such-product", None),
     ("GET", "/v1/admin/pricing", None),
     ("PATCH", "/v1/admin/pricing/no-such-tariff", {"tokens": 5}),
     ("GET", "/v1/admin/settings", None),
@@ -252,6 +253,7 @@ async def test_capabilities_declares_only_implemented_features(econ: Any) -> Non
         "products.write_tokens",
         "products.write_archived",
         "products.create",
+        "products.delete",
         "pricing.read",
         "pricing.write_tokens",
         "settings.write",
@@ -283,6 +285,7 @@ async def test_every_declared_feature_has_a_reachable_path(
             "/v1/admin/products",
             {"product_id": "probe.create", "name": "п", "purchase_kind": "one_time", "tokens": 1},
         ),
+        "products.delete": ("DELETE", "/v1/admin/products/probe.delete", None),
         "products.write_tokens": ("PATCH", f"/v1/admin/products/{_ONE_TIME_ID}", {"tokens": 101}),
         "products.write_archived": (
             "PATCH",
@@ -533,6 +536,107 @@ async def test_patch_of_an_unknown_product_is_400_and_creates_nothing(
         assert (
             int(await s.scalar(text("SELECT count(*) FROM admin_products")) or 0) == 0
         )  # `PATCH` НИКОГДА не создаёт
+
+
+@pytest.mark.asyncio
+async def test_delete_of_an_operator_product_is_204_and_frees_the_id(
+    econ: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Удалённый продукт пропадает из каталога, оставляет след в аудите, id заводится заново."""
+    client, _ = econ
+    payload = {
+        "product_id": "monthly.del",
+        "name": "Monthly",
+        "purchase_kind": "subscription",
+        "tokens": 10,
+    }
+    created = await client.post("/v1/admin/products", json=payload, headers=_H)
+    assert created.status_code == 201, created.text
+
+    deleted = await client.delete("/v1/admin/products/monthly.del", headers=_H)
+
+    assert deleted.status_code == 204, deleted.text
+    assert deleted.content == b""
+    items = (await client.get("/v1/admin/products", headers=_H)).json()["items"]
+    assert "monthly.del" not in {item["product_id"] for item in items}
+    async with db_sessionmaker() as s:
+        assert (
+            int(
+                await s.scalar(
+                    text("SELECT count(*) FROM admin_products WHERE product_id='monthly.del'")
+                )
+                or 0
+            )
+            == 0
+        )
+    rows = await _audit(db_sessionmaker, "admin_product_deleted")
+    assert len(rows) == 1
+    audit_payload = rows[0][0]
+    assert audit_payload["id"] == "monthly.del"
+    assert audit_payload["next"] is None
+    assert "Monthly" in audit_payload["previous"]
+    assert audit_payload["actorClaim"] == _H["X-Admin-Actor"]
+
+    recreated = await client.post(
+        "/v1/admin/products", json={**payload, "name": "Monthly 19.99"}, headers=_H
+    )
+    assert recreated.status_code == 201, recreated.text
+    assert recreated.json()["name"] == "Monthly 19.99"
+
+
+@pytest.mark.asyncio
+async def test_delete_of_an_unknown_product_is_400_not_404_and_leaves_no_trace(
+    econ: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """`404` в этом контракте означает «расширение не реализовано» — отдать его нельзя."""
+    client, _ = econ
+
+    response = await client.delete("/v1/admin/products/never.existed", headers=_H)
+    await client.post(
+        "/v1/admin/products",
+        json={"product_id": "twice.del", "name": "п", "purchase_kind": "one_time", "tokens": 1},
+        headers=_H,
+    )
+    await client.delete("/v1/admin/products/twice.del", headers=_H)
+    repeated_after_delete = await client.delete("/v1/admin/products/twice.del", headers=_H)
+
+    assert response.status_code == 400, response.text
+    assert "неизвестен" in response.json()["detail"]
+    assert repeated_after_delete.status_code == 400, repeated_after_delete.text
+    assert len(await _audit(db_sessionmaker, "admin_product_deleted")) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_of_an_env_product_is_400_and_keeps_its_overlay(
+    econ: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Продукт из конфигурации инстанса не удаляется, и его оверлей (правка оператора) цел."""
+    client, _ = econ
+    archived = await client.patch(
+        f"/v1/admin/products/{_ONE_TIME_ID}", json={"archived": True}, headers=_H
+    )
+    assert archived.status_code == 200, archived.text
+
+    response = await client.delete(f"/v1/admin/products/{_ONE_TIME_ID}", headers=_H)
+
+    assert response.status_code == 400, response.text
+    assert "конфигурацией инстанса" in response.json()["detail"]
+    async with db_sessionmaker() as s:
+        assert (
+            int(
+                await s.scalar(
+                    text(
+                        "SELECT count(*) FROM admin_products"
+                        f" WHERE product_id='{_ONE_TIME_ID}' AND archived"
+                    )
+                )
+                or 0
+            )
+            == 1
+        )
+    items = (await client.get("/v1/admin/products", headers=_H)).json()["items"]
+    assert _ONE_TIME_ID in {item["product_id"] for item in items}
+    assert await _audit(db_sessionmaker, "admin_product_deleted") == []
 
 
 @pytest.mark.asyncio
